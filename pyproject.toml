@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "university-learning-system"
+version = "1.2.0"
+description = "University Learning System (ULS) — model-agnostic, MCP-centered, local-primary academic retrieval system"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "Syllva" }]
+keywords = ["mcp", "retrieval", "notion", "google-drive", "learning-system"]
+
+# Runtime dependencies are intentionally minimal for v1.2. Provider SDKs live
+# behind adapter boundaries (see src/uls/adapters/*) and may be optional extras.
+dependencies = [
+    "pydantic>=2.6",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+drive = ["google-api-python-client>=2.0", "google-auth>=2.0"]
+notion = ["notion-client>=2.0"]
+github = ["PyGithub>=2.0"]
+mcp = ["mcp>=1.0"]
+pdf = ["pypdf>=4.0"]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",
+    "mypy>=1.9",
+]
+
+[project.scripts]
+uls = "uls.cli.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/uls"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "unit: fast isolated unit tests",
+    "contract: model-independent contract tests (release blockers)",
+    "integration: adapter/integration tests using fakes",
+    "e2e: client end-to-end tests (external runtime, usually manual)",
+    "live: optional live smoke tests against real providers",
+]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["uls"]
+mypy_path = "src"
+strict = true

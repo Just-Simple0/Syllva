@@ -1,0 +1,61 @@
+# University Learning System — example configuration (spec §5)
+# Copy to config.yaml. Secrets stay in .env, never here.
+
+system:
+  timezone: Asia/Seoul
+  workspace_dir: ~/.uls
+  state_backend: sqlite
+  ephemeral_backend: memory
+
+worker:
+  enabled: true
+  poll_interval_minutes: 10
+
+storage:
+  normalized_derivatives: google_drive
+
+google_drive:
+  university_root_id: "..."
+  inbox_root_id: "..."
+
+notion:
+  courses_db_id: "..."
+  sessions_db_id: "..."
+  materials_db_id: "..."
+  material_usage_db_id: "..."
+  activities_db_id: "..."
+  exams_db_id: "..."
+  automation_queue_db_id: "..."
+
+normalization:
+  schema_version: v1
+  processor_version: "1.2.0"
+  goodnotes_visual_fallback: true
+
+retrieval:
+  concept_mode: bounded_lexical
+  max_candidate_entities: 20
+  max_candidate_chunks: 12
+  context_ttl_seconds: 900
+  resolution_ttl_seconds: 900
+  allow_bounded_llm_rerank: false  # opt-in; deterministic lexical/index retrieval is default
+
+mcp:
+  mode: local
+  read_only: true
+
+remote_mcp:
+  enabled: false
+  auth_mode: oauth_or_bearer
+  public_unauthenticated: false
+
+behavior_contract:
+  version: 1
+  path: contracts/study-behavior.md
+
+courses:
+  - course_key: "2026-1_COMP319-002"
+    name: "알고리즘1"
+    code: "COMP319"
+    section: "002"
+    semester: "2026-1"
