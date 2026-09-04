@@ -36,12 +36,13 @@ def next_backoff(
     cap: float = DEFAULT_BACKOFF_CAP_SECONDS,
     retry_after: float | None = None,
 ) -> float:
-    """Return a bounded exponential delay with additive jitter.
+    """Return an exponential delay with additive jitter.
 
     ``attempt`` is one-based (the delay after attempt 1 uses ``base``).  A
-    provider-supplied ``Retry-After`` wins over the exponential calculation,
-    while still respecting the configured cap.  This function never sleeps;
-    callers decide how to schedule the returned delay.
+    provider-supplied ``Retry-After`` wins over the exponential calculation
+    and is not reduced by ``cap``.  Negative values are clamped to zero and
+    non-finite values are rejected.  This function never sleeps; callers
+    decide how to schedule the returned delay.
     """
 
     if isinstance(attempt, bool) or not isinstance(attempt, int):
@@ -58,9 +59,11 @@ def next_backoff(
         pass
 
     if retry_after is not None:
-        if not math.isfinite(retry_after):
+        if isinstance(retry_after, bool) or not isinstance(retry_after, (int, float)):
+            raise TypeError("retry_after must be a number")
+        if not math.isfinite(float(retry_after)):
             raise ValueError("retry_after must be finite")
-        return min(cap, max(0.0, float(retry_after)))
+        return max(0.0, float(retry_after))
 
     exponential = min(cap, float(base) * (2 ** (attempt - 1)))
     # A small positive additive jitter preserves a useful lower bound for

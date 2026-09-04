@@ -33,7 +33,7 @@ class FakeNotionAdapter:
         return self.entities.get((target_db, entity_id))
 
     def create_entity(self, target_db: str, properties, *, actor):
-        enforce_write_policy(actor, target_db, properties)
+        enforce_write_policy(actor, target_db, properties, is_create=True)
         self.create_calls += 1
         item = dict(properties)
         self.queue[str(item["Proposal ID"])] = item
@@ -56,6 +56,7 @@ def _proposal(proposal_id: str, *, decision: str = "Pending", state: str = "PEND
         "Target Entity ID": "MU-01",
         "Source Hash": "hash-a",
         "Source Version": 1,
+        "Decision By": "human-reviewer",
         "Proposed Action": {
             "Verified": True,
             "Session ID": "S-01",
@@ -138,4 +139,3 @@ def test_applied_replay_is_idempotent() -> None:
     result = HumanApprovalApplier(fake).apply(proposal)
     assert result.mutated is False
     assert fake.target_mutations == 0
-

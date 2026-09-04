@@ -16,7 +16,7 @@ def test_backoff_is_bounded_and_retry_after_wins(monkeypatch) -> None:
     assert next_backoff(2, base=1.0, cap=5.0) == 2.0
     assert next_backoff(10, base=1.0, cap=5.0) == 5.0
     assert next_backoff(1, base=1.0, cap=5.0, retry_after=3.5) == 3.5
-    assert next_backoff(1, base=1.0, cap=5.0, retry_after=50.0) == 5.0
+    assert next_backoff(1, base=1.0, cap=5.0, retry_after=50.0) == 50.0
 
 
 def test_retry_classes_are_finite_and_non_retryable_classes_stop() -> None:

@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import threading
 import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -21,6 +23,12 @@ from uls.domain.enums import JobStatus, to_processing_status
 from uls.domain.ids import parse_course_key, parse_entity_id
 
 from uls.orchestration.locks import LocalWorkerLock
+from uls.orchestration.retry import (
+    DEFAULT_MAX_ATTEMPTS,
+    coerce_error_class,
+    should_retry,
+)
+from uls.orchestration.jobs import derive_job_key
 
 from .models import (
     Checkpoint,
@@ -45,12 +53,14 @@ _COMPLETION_STATUSES = {
 }
 _ALLOWED_TRANSITIONS: dict[JobStatus, frozenset[JobStatus]] = {
     JobStatus.PENDING: frozenset({JobStatus.PROCESSING}),
-    JobStatus.PROCESSING: frozenset(_TERMINAL_STATUSES),
+    JobStatus.PROCESSING: frozenset(_TERMINAL_STATUSES | {JobStatus.PENDING}),
     JobStatus.READY: frozenset(),
     JobStatus.PARTIAL: frozenset(),
     JobStatus.NEEDS_REVIEW: frozenset(),
-    JobStatus.FAILED: frozenset(),
+    JobStatus.FAILED: frozenset({JobStatus.FAILED, JobStatus.PENDING}),
 }
+
+_JOB_KEY_PATTERN = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
 
 
 class SQLiteStateStore:
@@ -149,6 +159,7 @@ class SQLiteStateStore:
         created_at: str | None = None,
         updated_at: str | None = None,
         completed_at: str | None = None,
+        processor_version: str | None = None,
         job: Job | None = None,
     ) -> Job:
         """Create or return the row for a deterministic ``job_key``.
@@ -178,13 +189,41 @@ class SQLiteStateStore:
             created_at = supplied.created_at or created_at
             updated_at = supplied.updated_at or updated_at
             completed_at = supplied.completed_at
+            processor_version = getattr(supplied, "processor_version", processor_version)
 
-        _require_text(job_key, "job_key")
-        _require_text(operation, "operation")
+        operation = _canonical_operation(operation)
         _require_text(stage, "stage")
         normalized_status = to_processing_status(status)
         if isinstance(attempt_count, bool) or not isinstance(attempt_count, int) or attempt_count < 0:
             raise ValueError("attempt_count must be a non-negative integer")
+        source_identity_values = (source_file_id, source_hash, processor_version)
+        is_source_processing = any(value is not None for value in source_identity_values)
+        if is_source_processing:
+            for value, name in (
+                (source_file_id, "source_file_id"),
+                (source_hash, "source_hash"),
+                (processor_version, "processor_version"),
+            ):
+                _require_text(value, name)
+            derived_key = derive_job_key(
+                source_file_id,  # type: ignore[arg-type]
+                source_hash,  # type: ignore[arg-type]
+                operation,
+                processor_version,  # type: ignore[arg-type]
+            )
+            if job_key is None:
+                job_key = derived_key
+            else:
+                _validate_job_key(job_key)
+                if job_key != derived_key:
+                    raise ValueError("job_key does not match the canonical source identity")
+        else:
+            if job_key is None:
+                raise ValueError(
+                    "non-source jobs require an explicit deterministic job_key identity"
+                )
+        _validate_job_key(job_key)
+
         created = created_at if created_at is not None else _utc_now()
         updated = updated_at if updated_at is not None else created
         identifier = job_id or _new_id("job_")
@@ -281,9 +320,42 @@ class SQLiteStateStore:
                     row = connection.execute(
                         "SELECT id FROM jobs WHERE job_key = ?", (job_id,)
                     ).fetchone()
-                if row is None:
-                    return None
-                selected_id = row["id"]
+            if row is None:
+                return None
+            selected_id = row["id"]
+            selected = connection.execute(
+                "SELECT attempt_count FROM jobs WHERE id = ?", (selected_id,)
+            ).fetchone()
+            if selected is None:
+                return None
+            if int(selected["attempt_count"]) >= DEFAULT_MAX_ATTEMPTS:
+                connection.execute(
+                    """
+                    UPDATE jobs
+                    SET status = ?, error_class = COALESCE(error_class, ?),
+                        last_error = COALESCE(last_error, ?), updated_at = ?,
+                        completed_at = COALESCE(completed_at, ?)
+                    WHERE id = ? AND status = ?
+                    """,
+                    (
+                        JobStatus.FAILED.value,
+                        "TRANSIENT",
+                        "maximum retry attempts exceeded",
+                        now,
+                        now,
+                        selected_id,
+                        JobStatus.PENDING.value,
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE processing_records
+                    SET status = ?, finished_at = COALESCE(finished_at, ?)
+                    WHERE job_id = ?
+                    """,
+                    (JobStatus.FAILED.value, now, selected_id),
+                )
+                return None
             cursor = connection.execute(
                 """
                 UPDATE jobs
@@ -299,6 +371,14 @@ class SQLiteStateStore:
             )
             if cursor.rowcount != 1:
                 return None
+            connection.execute(
+                """
+                UPDATE processing_records
+                SET status = ?, finished_at = NULL
+                WHERE job_id = ?
+                """,
+                (JobStatus.PROCESSING.value, selected_id),
+            )
             return _job_from_row(
                 connection.execute("SELECT * FROM jobs WHERE id = ?", (selected_id,)).fetchone()
             )
@@ -311,10 +391,16 @@ class SQLiteStateStore:
         error_class: str | None = None,
         last_error: str | None = None,
         completed_at: str | None = None,
+        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     ) -> Job:
         """Perform one legal job-state transition and return the new row."""
 
         desired = to_processing_status(status)
+        _validate_max_attempts(max_attempts)
+        normalized_error_class = None
+        if error_class is not None:
+            normalized_error_class = _stored_error_class(error_class)
+            coerce_error_class(normalized_error_class)
         with self._transaction(immediate=True) as connection:
             row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
             if row is None:
@@ -329,6 +415,28 @@ class SQLiteStateStore:
                 return _job_from_row(row)
             if desired not in _ALLOWED_TRANSITIONS[current]:
                 raise ValueError(f"invalid job transition: {current.value} -> {desired.value}")
+
+            effective_error_class = (
+                normalized_error_class
+                if normalized_error_class is not None
+                else row["error_class"]
+            )
+            if desired is JobStatus.PENDING and current in {
+                JobStatus.PROCESSING,
+                JobStatus.FAILED,
+            }:
+                retry_allowed = False
+                if effective_error_class is not None:
+                    retry_allowed = should_retry(
+                        effective_error_class,
+                        int(row["attempt_count"]),
+                        max_attempts,
+                    )
+                if not retry_allowed:
+                    # Once the retry budget is exhausted, or when the error is
+                    # permanent/policy-denied/ambiguous, PENDING is not a legal
+                    # destination.  Keep/close the row as FAILED.
+                    desired = JobStatus.FAILED
 
             finished = completed_at
             if desired in _TERMINAL_STATUSES and finished is None:
@@ -348,7 +456,9 @@ class SQLiteStateStore:
                 (
                     desired.value,
                     attempts,
-                    error_class if error_class is not None else row["error_class"],
+                    normalized_error_class
+                    if normalized_error_class is not None
+                    else row["error_class"],
                     last_error if last_error is not None else row["last_error"],
                     _utc_now(),
                     finished,
@@ -356,6 +466,15 @@ class SQLiteStateStore:
                 ),
             )
             if desired is JobStatus.PROCESSING:
+                connection.execute(
+                    """
+                    UPDATE processing_records
+                    SET status = ?, finished_at = NULL
+                    WHERE job_id = ?
+                    """,
+                    (desired.value, job_id),
+                )
+            elif desired is JobStatus.PENDING:
                 connection.execute(
                     """
                     UPDATE processing_records
@@ -393,6 +512,33 @@ class SQLiteStateStore:
             desired,
             error_class=error_class,
             last_error=last_error,
+        )
+
+    def requeue_job(
+        self,
+        job_id: str,
+        error_class: str,
+        *,
+        last_error: str | None = None,
+        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    ) -> Job:
+        """Conditionally return a failed/processing job to ``PENDING``.
+
+        Only retryable error classes may requeue.  ``attempt_count`` is the
+        number of attempts already started (incremented by ``claim_job``), so
+        the bounded retry check prevents an infinite loop while retaining the
+        first three attempts by default.
+        """
+
+        normalized_error = _stored_error_class(error_class)
+        # Validate the class before touching the row, including spelling.
+        coerce_error_class(normalized_error)
+        return self.transition_job(
+            job_id,
+            JobStatus.PENDING,
+            error_class=normalized_error,
+            last_error=last_error,
+            max_attempts=max_attempts,
         )
 
     def fail_job(
@@ -588,6 +734,15 @@ class SQLiteStateStore:
             ).fetchone()
             if source_row is None:
                 raise KeyError(f"unknown source file: {source_file_id}")
+            stored_canonical = source_row["canonical_entity_id"]
+            if (
+                stored_canonical is not None
+                and canonical_entity_id is not None
+                and canonical_entity_id != stored_canonical
+            ):
+                raise ValueError(
+                    "canonical_entity_id does not match the source file's canonical entity"
+                )
             existing = connection.execute(
                 """
                 SELECT * FROM source_versions
@@ -596,9 +751,29 @@ class SQLiteStateStore:
                 (source_file_id, source_hash),
             ).fetchone()
             if existing is not None:
+                existing_canonical = existing["canonical_entity_id"]
+                if stored_canonical is not None and existing_canonical != stored_canonical:
+                    raise ValueError(
+                        "existing source version does not match the source file's canonical entity"
+                    )
+                if stored_canonical is None:
+                    if (
+                        canonical_entity_id is not None
+                        and canonical_entity_id != existing_canonical
+                    ):
+                        raise ValueError(
+                            "canonical_entity_id does not match the existing source version"
+                        )
+                    connection.execute(
+                        "UPDATE source_files SET canonical_entity_id = ? WHERE source_file_id = ?",
+                        (existing_canonical, source_file_id),
+                    )
+                    _seed_entity_allocation(
+                        connection, source_row["course_key"], existing_canonical
+                    )
                 return _source_version_from_row(existing)
             if canonical_entity_id is None:
-                canonical_entity_id = source_row["canonical_entity_id"]
+                canonical_entity_id = stored_canonical
             _require_text(canonical_entity_id, "canonical_entity_id")
             if version is None:
                 latest = connection.execute(
@@ -643,6 +818,12 @@ class SQLiteStateStore:
                 "UPDATE source_files SET current_hash = ?, last_seen_at = ? WHERE source_file_id = ?",
                 (source_hash, first_seen, source_file_id),
             )
+            if stored_canonical is None:
+                connection.execute(
+                    "UPDATE source_files SET canonical_entity_id = ? WHERE source_file_id = ?",
+                    (canonical_entity_id, source_file_id),
+                )
+                _seed_entity_allocation(connection, source_row["course_key"], canonical_entity_id)
             return _source_version_from_row(
                 connection.execute("SELECT * FROM source_versions WHERE id = ?", (identifier,)).fetchone()
             )
@@ -912,6 +1093,33 @@ def _utc_now() -> str:
 
 def _new_id(prefix: str) -> str:
     return prefix + uuid.uuid4().hex
+
+
+def _canonical_operation(value: Any) -> str:
+    if isinstance(value, Enum):
+        value = value.value
+    _require_text(value, "operation")
+    if value != value.strip():
+        raise ValueError("operation must use its canonical spelling")
+    return value
+
+
+def _validate_job_key(value: Any) -> None:
+    if not isinstance(value, str) or _JOB_KEY_PATTERN.fullmatch(value) is None:
+        raise ValueError("job_key must match sha256:<64 lowercase hexadecimal characters>")
+
+
+def _stored_error_class(value: Any) -> str:
+    if isinstance(value, Enum):
+        value = value.value
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("error_class must be a non-empty string")
+    return value.strip().upper()
+
+
+def _validate_max_attempts(value: Any) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("max_attempts must be a positive integer")
 
 
 def _require_text(value: Any, name: str) -> None:

@@ -8,10 +8,12 @@ separately when they need a presentation timestamp.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from uls.domain.models import PageLocator, TimeLocator, parse_locator, serialize_locator
+from uls.domain.source_ref import SourceFingerprint
 
 
 @dataclass(frozen=True)
@@ -62,22 +64,53 @@ class ResolvedEntity:
 
 
 @dataclass(frozen=True)
+class AllowedLocator:
+    """One parsed locator range bound to the source version that authorized it."""
+
+    locator: PageLocator | TimeLocator | str
+    source_hash: str
+    source_version: int
+
+    def __post_init__(self) -> None:
+        parsed = parse_locator(self.locator) if isinstance(self.locator, str) else self.locator
+        if not isinstance(parsed, (PageLocator, TimeLocator)):
+            raise TypeError("locator must be a PageLocator or TimeLocator")
+        if not isinstance(self.source_hash, str) or not self.source_hash.strip():
+            raise ValueError("source_hash must be a non-empty string")
+        if (
+            isinstance(self.source_version, bool)
+            or not isinstance(self.source_version, int)
+            or self.source_version < 1
+        ):
+            raise ValueError("source_version must be a positive integer")
+        object.__setattr__(self, "locator", parsed)
+        object.__setattr__(self, "source_hash", self.source_hash.strip())
+
+    @property
+    def source_fingerprint(self) -> SourceFingerprint:
+        return SourceFingerprint(self.source_version, self.source_hash)
+
+
+@dataclass(frozen=True)
 class ContextCapability:
     """A bounded, caller-scoped set of locator ranges."""
 
     context_id: str
-    allowed_locators: tuple[PageLocator | TimeLocator, ...] = field(default_factory=tuple)
+    allowed_locators: tuple[AllowedLocator, ...] = field(default_factory=tuple)
     caller_scope: str | None = None
     expires_at: float = 0.0
 
     def __post_init__(self) -> None:
-        normalized: list[PageLocator | TimeLocator] = []
+        normalized: list[AllowedLocator] = []
         seen: set[str] = set()
         for locator in self.allowed_locators:
-            parsed = parse_locator(locator) if isinstance(locator, str) else locator
-            canonical = serialize_locator(parsed)
+            allowed = _coerce_allowed_locator(locator)
+            canonical = (
+                f"{serialize_locator(allowed.locator)}\x1f"
+                f"{allowed.source_hash}\x1f{allowed.source_version}"
+            )
             if canonical not in seen:
-                normalized.append(parsed)
+                normalized.append(allowed)
                 seen.add(canonical)
         object.__setattr__(self, "allowed_locators", tuple(normalized))
 
@@ -93,7 +126,24 @@ def _coerce_candidate(candidate: ResolutionCandidate | dict[str, Any]) -> Resolu
     raise TypeError("candidates must contain ResolutionCandidate values or mappings")
 
 
+def _coerce_allowed_locator(value: Any) -> AllowedLocator:
+    if isinstance(value, AllowedLocator):
+        return value
+    if isinstance(value, Mapping):
+        locator = value.get("locator", value.get("locator_range"))
+        source_hash = value.get("source_hash")
+        source_version = value.get("source_version")
+        return AllowedLocator(locator, source_hash, source_version)
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)) and len(value) == 3:
+        return AllowedLocator(value[0], value[1], value[2])
+    raise TypeError(
+        "allowed_locators must contain AllowedLocator values or "
+        "(locator, source_hash, source_version) mappings"
+    )
+
+
 __all__ = [
+    "AllowedLocator",
     "ContextCapability",
     "ResolutionCandidate",
     "ResolutionHandle",

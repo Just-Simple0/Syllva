@@ -27,6 +27,8 @@ htmlcov/
 
 # Tooling / agent runtime state
 .omc/
+.insane-review/
+.review/
 
 # Workspace / local state
 ~/.uls/

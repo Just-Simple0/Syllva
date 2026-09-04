@@ -24,6 +24,8 @@ from .schema import (
     UlsConfig,
     WorkerCfg,
 )
+from .errors import ConfigurationError
+from .validation import validate_config
 
 
 SECRET_KEYS = (
@@ -40,7 +42,17 @@ _CfgT = TypeVar("_CfgT")
 
 
 def load_config(path: str | os.PathLike[str]) -> UlsConfig:
-    """Load a v1.2 YAML config into the typed dataclass hierarchy."""
+    """Load and validate a v1.2 YAML config fail-closed."""
+
+    config = load_config_unvalidated(path)
+    problems = validate_config(config)
+    if problems:
+        raise ConfigurationError(problems)
+    return config
+
+
+def load_config_unvalidated(path: str | os.PathLike[str]) -> UlsConfig:
+    """Parse config without safety validation for diagnostics/tests only."""
 
     config_path = Path(path)
     with config_path.open("r", encoding="utf-8") as handle:
@@ -136,4 +148,10 @@ def _read_dotenv(path: Path) -> dict[str, str]:
     return values
 
 
-__all__ = ["SECRET_KEYS", "load_config", "load_secrets"]
+__all__ = [
+    "ConfigurationError",
+    "SECRET_KEYS",
+    "load_config",
+    "load_config_unvalidated",
+    "load_secrets",
+]

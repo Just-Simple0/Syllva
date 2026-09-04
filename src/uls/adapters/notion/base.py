@@ -141,6 +141,7 @@ class NotionAdapter(Protocol):
         patch: Mapping[str, Any],
         *,
         actor: AutomationActor = AutomationActor.AUTOMATION,
+        system_transition: bool = False,
     ) -> Any:
         ...
 
@@ -172,9 +173,83 @@ def _wire_value(value: Any) -> Any:
     return value.value if isinstance(value, Enum) else value
 
 
-def _is_automation_queue(target_db: str) -> bool:
+_PATCH_MISSING = object()
+
+
+def _patch_field(patch: Mapping[str, Any], name: str, default: Any = _PATCH_MISSING) -> Any:
+    """Read a policy field while tolerating provider spelling variants."""
+
+    wanted = "".join(character for character in name.casefold() if character.isalnum())
+    for key, value in patch.items():
+        if isinstance(key, str):
+            normalized = "".join(character for character in key.casefold() if character.isalnum())
+            if normalized == wanted:
+                return value
+    return default
+
+
+def _is_truthy_set(value: Any) -> bool:
+    """Return whether a wire value attempts to set a boolean field true.
+
+    Notion/provider serializers sometimes turn checkboxes into integers or
+    strings.  Human-only guards must not rely on ``value is True`` because
+    that would make ``1`` and ``"true"`` policy bypasses.
+    """
+
+    if isinstance(value, str):
+        return value.strip().casefold() in {"true", "1", "yes", "y", "on", "t"}
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value != 0
+    return value is True or bool(value)
+
+
+def _normalize_queue_ids(automation_queue_ids: set[str] | None) -> frozenset[str] | None:
+    if automation_queue_ids is None:
+        return None
+    if isinstance(automation_queue_ids, str):
+        value = automation_queue_ids.strip()
+        values = {value} if value else set()
+    else:
+        values = {
+            value.strip()
+            for value in automation_queue_ids
+            if isinstance(value, str) and value.strip()
+        }
+    return frozenset(values)
+
+
+def _queue_target(
+    automation_queue_id: str | None = None,
+    automation_queue_ids: set[str] | None = None,
+) -> tuple[str, frozenset[str] | None]:
+    """Choose the configured queue target and the complete identification set."""
+
+    identifiers = set(_normalize_queue_ids(automation_queue_ids) or ())
+    if automation_queue_id is not None:
+        if not isinstance(automation_queue_id, str) or not automation_queue_id.strip():
+            raise PolicyViolation("automation queue identifier must be a non-empty string")
+        automation_queue_id = automation_queue_id.strip()
+        identifiers.add(automation_queue_id)
+    if automation_queue_id is not None:
+        target = automation_queue_id
+    elif len(identifiers) == 1:
+        target = next(iter(identifiers))
+    else:
+        target = AUTOMATION_QUEUE
+    return target, (frozenset(identifiers) if identifiers else None)
+
+
+def _is_automation_queue(
+    target_db: str,
+    automation_queue_ids: set[str] | None = None,
+) -> bool:
+    """Identify the queue by configured IDs, with a legacy name fallback."""
+
     if not isinstance(target_db, str):
         return False
+    configured_ids = _normalize_queue_ids(automation_queue_ids)
+    if configured_ids is not None and target_db in configured_ids:
+        return True
     normalized = "".join(character for character in target_db.casefold() if character.isalnum())
     return normalized == "automationqueue"
 
@@ -193,65 +268,102 @@ def enforce_write_policy(
     actor: AutomationActor,
     target_db: str,
     patch: Mapping[str, Any],
+    *,
+    automation_queue_ids: set[str] | None = None,
+    is_create: bool = False,
+    system_transition: bool = False,
 ) -> None:
     """Enforce the v1.2 human-gate policy at the write boundary.
 
     The function is intentionally small and side-effect free so concrete
     adapters can call it immediately before making a provider mutation.
-    ``AUTOMATION`` can create/update proposal metadata and system-owned queue
-    states, but cannot manufacture a human decision or an approval state.
+    ``AUTOMATION`` can create/update proposal metadata, and may write
+    ``SUPERSEDED``/``FAILED`` only through the explicit internal system
+    transition path.  It cannot manufacture a human decision or an approval
+    state.
     """
 
     actor = _coerce_actor(actor)
+    if type(system_transition) is not bool:
+        raise PolicyViolation("system_transition must be a boolean")
+    if system_transition and actor is not AutomationActor.AUTOMATION:
+        raise PolicyViolation("system_transition is reserved for the automation system path")
     if not isinstance(patch, Mapping):
         raise PolicyViolation("write patch must be a mapping")
 
-    if patch.get("Verified") is True and actor is not AutomationActor.HUMAN_APPROVAL_APPLIER:
+    verified = _patch_field(patch, "Verified")
+    if verified is not _PATCH_MISSING and _is_truthy_set(verified) and actor is not AutomationActor.HUMAN_APPROVAL_APPLIER:
         raise PolicyViolation("Material Usage.Verified=true is human-only")
 
-    if patch.get("Scope Confirmed") is True and actor is not AutomationActor.HUMAN_APPROVAL_APPLIER:
+    scope_confirmed = _patch_field(patch, "Scope Confirmed")
+    if (
+        scope_confirmed is not _PATCH_MISSING
+        and _is_truthy_set(scope_confirmed)
+        and actor is not AutomationActor.HUMAN_APPROVAL_APPLIER
+    ):
         raise PolicyViolation("Exam.Scope Confirmed=true is human-only")
 
     # Decision is human-owned for every internal capability.  The applier
     # records Decision By/At but never changes Decision itself; ApprovalReader
     # may only read it and derive State.
-    if "Decision" in patch and actor is not AutomationActor.AUTOMATION:
+    decision = _patch_field(patch, "Decision")
+    state = _patch_field(patch, "State")
+    if decision is not _PATCH_MISSING and actor is not AutomationActor.AUTOMATION:
         raise PolicyViolation("Decision is human-owned and cannot be changed by this capability")
 
-    if not _is_automation_queue(target_db):
+    is_queue = _is_automation_queue(target_db, automation_queue_ids)
+    if not is_queue:
+        # A UUID/name mismatch must fail closed.  Otherwise a queue UUID would
+        # look like an ordinary database and permit Decision/State writes.
+        if decision is not _PATCH_MISSING or state is not _PATCH_MISSING:
+            raise PolicyViolation(
+                "Automation Queue identity is required for Decision/State writes"
+            )
         return
 
-    state = _wire_value(patch.get("State"))
+    decision = _wire_value(decision) if decision is not _PATCH_MISSING else _PATCH_MISSING
+    state = _wire_value(state) if state is not _PATCH_MISSING else _PATCH_MISSING
     if actor is AutomationActor.AUTOMATION:
-        if "Decision" in patch and _wire_value(patch["Decision"]) != Decision.Pending.value:
-            raise PolicyViolation("Automation Queue Decision is human-owned")
-        if state in {
-            QueueState.APPROVED.value,
-            QueueState.REJECTED.value,
-            QueueState.APPLIED.value,
-        }:
-            raise PolicyViolation("Automation cannot promote approval state")
-
-        # These are the only queue states an ordinary automation write may
-        # name.  SUPERSEDED and FAILED are system-owned terminal paths; they
-        # do not grant human authority and are therefore safe to pass through
-        # this guard.  The concrete invalidation/failure helpers below are the
-        # intended callers.
-        if "State" in patch and state not in {
-            QueueState.PENDING_REVIEW.value,
-            QueueState.SUPERSEDED.value,
-            QueueState.FAILED.value,
-        }:
-            raise PolicyViolation(f"Automation Queue state is not automation-writable: {state!r}")
+        if is_create:
+            if system_transition:
+                raise PolicyViolation("system transitions are update-only")
+            if decision is not _PATCH_MISSING and decision != Decision.Pending.value:
+                raise PolicyViolation("Automation Queue Decision is human-owned")
+            if state is not _PATCH_MISSING and state != QueueState.PENDING_REVIEW.value:
+                raise PolicyViolation(f"Automation Queue state is not creatable: {state!r}")
+        else:
+            # A retry/upsert must never write even Pending back into an
+            # existing row: Decision is immutable to automation on update.
+            if decision is not _PATCH_MISSING:
+                raise PolicyViolation("Automation Queue Decision cannot be written on update")
+            if system_transition:
+                if state not in {
+                    QueueState.SUPERSEDED.value,
+                    QueueState.FAILED.value,
+                }:
+                    raise PolicyViolation(
+                        "Automation system transitions may only set SUPERSEDED or FAILED"
+                    )
+                last_error = _patch_field(patch, "Last Error")
+                if last_error is _PATCH_MISSING or not isinstance(last_error, str) or not last_error.strip():
+                    raise PolicyViolation(
+                        "Automation system transitions require a non-empty Last Error"
+                    )
+            elif state is not _PATCH_MISSING:
+                raise PolicyViolation("Automation Queue State can only be set on creation or by an internal path")
     elif actor is AutomationActor.APPROVAL_READER:
-        if "State" in patch and state not in {
+        if state is not _PATCH_MISSING and state not in {
             QueueState.PENDING_REVIEW.value,
             QueueState.APPROVED.value,
             QueueState.REJECTED.value,
         }:
             raise PolicyViolation("ApprovalReader may only derive review state")
     elif actor is AutomationActor.HUMAN_APPROVAL_APPLIER:
-        if state in {QueueState.APPROVED.value, QueueState.REJECTED.value}:
+        if state is not _PATCH_MISSING and state not in {
+            QueueState.APPLIED.value,
+            QueueState.SUPERSEDED.value,
+            QueueState.FAILED.value,
+        }:
             raise PolicyViolation("HumanApprovalApplier cannot manufacture review state")
 
 
@@ -664,19 +776,35 @@ def _call_with_supported_signature(
         if parameter.kind
         in {parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD}
     ]
+    used_positional_names = {
+        parameter.name for parameter in positional_parameters[: len(positional)]
+    }
+    supported_keyword_values = {
+        name: value
+        for name, value in keyword_values.items()
+        if name in parameter_names and name not in used_positional_names
+    }
     if actor_parameter is not None and actor_parameter.kind is actor_parameter.KEYWORD_ONLY:
-        return method(*positional[: len(positional_parameters)], actor=keyword_values["actor"])
+        return method(
+            *positional[: len(positional_parameters)],
+            **supported_keyword_values,
+        )
 
     # Keyword-only provider arguments with canonical names can be filled from
     # the values we do know, even if a non-canonical optional name is present.
-    named_values = {
-        name: value for name, value in keyword_values.items() if name in parameter_names
-    }
+    named_values = supported_keyword_values
     if named_values and len(positional_parameters) == 0:
         return method(**named_values)
 
     if len(positional_parameters) >= len(positional):
+        if supported_keyword_values:
+            return method(*positional, **supported_keyword_values)
         return method(*positional)
+    if supported_keyword_values:
+        return method(
+            *positional[: len(positional_parameters)],
+            **supported_keyword_values,
+        )
     return method(*positional[: len(positional_parameters)])
 
 
@@ -686,20 +814,37 @@ def _guarded_update(
     target_db: str,
     entity_id: str,
     patch: Mapping[str, Any],
+    *,
+    automation_queue_ids: set[str] | None = None,
+    is_create: bool = False,
+    system_transition: bool = False,
 ) -> Any:
-    enforce_write_policy(actor, target_db, patch)
+    enforce_write_policy(
+        actor,
+        target_db,
+        patch,
+        automation_queue_ids=automation_queue_ids,
+        is_create=is_create,
+        system_transition=system_transition,
+    )
     method = getattr(adapter, "update_properties", None)
     if method is None:
         raise PolicyViolation("Notion adapter has no update_properties write boundary")
+    keyword_values: dict[str, Any] = {
+        "target_db": target_db,
+        "entity_id": entity_id,
+        "patch": dict(patch),
+        "actor": actor,
+    }
+    if system_transition:
+        # This keyword is deliberately added only by the internal helper that
+        # requested the system transition.  It is not part of ordinary
+        # caller/provider request data.
+        keyword_values["system_transition"] = True
     return _call_with_supported_signature(
         method,
         (target_db, entity_id, dict(patch), actor),
-        {
-            "target_db": target_db,
-            "entity_id": entity_id,
-            "patch": dict(patch),
-            "actor": actor,
-        },
+        keyword_values,
     )
 
 
@@ -708,8 +853,16 @@ def _guarded_create(
     actor: AutomationActor,
     target_db: str,
     properties: Mapping[str, Any],
+    *,
+    automation_queue_ids: set[str] | None = None,
 ) -> Any:
-    enforce_write_policy(actor, target_db, properties)
+    enforce_write_policy(
+        actor,
+        target_db,
+        properties,
+        automation_queue_ids=automation_queue_ids,
+        is_create=True,
+    )
     method = getattr(adapter, "create_entity", None)
     if method is None:
         raise PolicyViolation("Notion adapter has no create_entity write boundary")
@@ -756,15 +909,22 @@ def _call_lookup(method: Callable[..., Any], target_db: str, entity_id: str) -> 
     return method(entity_id)
 
 
-def _read_approval(adapter: NotionAdapter | None, proposal_id: str) -> Any | None:
+def _read_approval(
+    adapter: NotionAdapter | None,
+    proposal_id: str,
+    *,
+    automation_queue_id: str | None = None,
+    automation_queue_ids: set[str] | None = None,
+) -> Any | None:
+    queue_target, _ = _queue_target(automation_queue_id, automation_queue_ids)
     method = getattr(adapter, "read_approval", None)
     if method is not None:
-        result = _call_lookup(method, AUTOMATION_QUEUE, proposal_id)
+        result = _call_lookup(method, queue_target, proposal_id)
         if result is not None:
             return result
     finder = getattr(adapter, "find_entity_by_id", None)
     if finder is not None:
-        return _call_lookup(finder, AUTOMATION_QUEUE, proposal_id)
+        return _call_lookup(finder, queue_target, proposal_id)
     return None
 
 
@@ -915,15 +1075,36 @@ def _action_value(action: Mapping[str, Any], *names: str, default: Any = None) -
 
 
 def _action_relation(action: Mapping[str, Any], relation: str) -> Any:
-    return _action_value(
+    direct = _action_value(
         action,
         f"{relation} ID",
         f"{relation} Id",
         relation,
         relation.casefold(),
         f"{relation.casefold()}_id",
+        default=_PATCH_MISSING,
+    )
+    if direct is not _PATCH_MISSING:
+        return direct
+    snapshot = _action_value(
+        action,
+        "Relation Snapshot",
+        "relation_snapshot",
+        "Relations",
+        "relations",
         default=None,
     )
+    if snapshot is not None:
+        return _action_value(
+            _as_mapping(snapshot) or {},
+            f"{relation} ID",
+            f"{relation} Id",
+            relation,
+            relation.casefold(),
+            f"{relation.casefold()}_id",
+            default=None,
+        )
+    return None
 
 
 def _relation_ids(value: Any) -> set[str]:
@@ -947,11 +1128,36 @@ def _relation_ids(value: Any) -> set[str]:
     return {str(value).strip()} if str(value).strip() else set()
 
 
+def _scope_ids(value: Any) -> set[str]:
+    """Extract session IDs from a flat or structured scope snapshot."""
+
+    if isinstance(value, Mapping):
+        nested = _action_value(
+            value,
+            "Included Sessions",
+            "Session IDs",
+            "Scope",
+            "included_sessions",
+            "scope",
+            default=_PATCH_MISSING,
+        )
+        if nested is not _PATCH_MISSING and nested is not value:
+            return _scope_ids(nested)
+    return _relation_ids(value)
+
+
 def _validate_relation_action(action: Mapping[str, Any], target: Any) -> None:
     for relation in ("Session", "Material"):
         requested = _action_relation(action, relation)
         if requested is None:
-            continue
+            raise PolicyViolation(
+                f"Approved MATERIAL_USAGE action must include the {relation} relation snapshot"
+            )
+        requested_ids = _relation_ids(requested)
+        if not requested_ids:
+            raise PolicyViolation(
+                f"Approved MATERIAL_USAGE action must include a non-empty {relation} relation snapshot"
+            )
         current = _get_field(
             target,
             relation,
@@ -961,24 +1167,60 @@ def _validate_relation_action(action: Mapping[str, Any], target: Any) -> None:
         )
         if current is None:
             raise _StaleApproval(f"Approved {relation} relation is not present on the target")
-        requested_ids = _relation_ids(requested)
         current_ids = _relation_ids(current)
-        if current is not None and requested_ids != current_ids:
+        if requested_ids != current_ids:
             raise _StaleApproval(f"Approved {relation} relation no longer matches the target")
 
 
 def _validate_scope_action(action: Mapping[str, Any], target: Any) -> None:
+    snapshot_names = (
+        "Included Sessions",
+        "Session IDs",
+        "Scope",
+        "included_sessions",
+        "Scope Snapshot",
+        "scope_snapshot",
+    )
+    requested = _PATCH_MISSING
+    requested_name: str | None = None
+    for name in snapshot_names:
+        value = _action_value(action, name, default=_PATCH_MISSING)
+        if value is not _PATCH_MISSING:
+            requested = value
+            requested_name = name
+            break
+    if requested is _PATCH_MISSING or requested is None:
+        raise PolicyViolation("Approved EXAM_SCOPE action must include a scope snapshot")
+
+    if requested_name in {"Scope Snapshot", "scope_snapshot"}:
+        nested = _as_mapping(requested)
+        if nested is None:
+            raise PolicyViolation("Approved EXAM_SCOPE scope snapshot must be structured")
+        requested = _action_value(
+            nested,
+            "Included Sessions",
+            "Session IDs",
+            "Scope",
+            "included_sessions",
+            default=_PATCH_MISSING,
+        )
+        if requested is _PATCH_MISSING:
+            raise PolicyViolation("Approved EXAM_SCOPE action must include a scope snapshot")
+
+    current = _PATCH_MISSING
     for name in ("Included Sessions", "Session IDs", "Scope", "included_sessions"):
-        requested = _action_value(action, name, default=None)
-        if requested is None:
-            continue
-        current = _get_field(target, name, default=None)
-        if current is None:
-            raise _StaleApproval("Approved exam scope is not present on the target")
-        requested_ids = _relation_ids(requested)
-        current_ids = _relation_ids(current)
-        if current is not None and requested_ids != current_ids:
-            raise _StaleApproval("Approved exam scope no longer matches the target")
+        value = _get_field(target, name, default=_PATCH_MISSING)
+        if value is not _PATCH_MISSING:
+            current = value
+            break
+    if current is _PATCH_MISSING or current is None:
+        raise _StaleApproval("Approved exam scope is not present on the target")
+    requested_ids = _scope_ids(requested)
+    if not requested_ids:
+        raise PolicyViolation("Approved EXAM_SCOPE action must include a non-empty scope snapshot")
+    current_ids = _scope_ids(current)
+    if requested_ids != current_ids:
+        raise _StaleApproval("Approved exam scope no longer matches the target")
 
 
 def _fingerprint_part(record: Any, part: str) -> Any:
@@ -1074,8 +1316,12 @@ def _revalidate_fingerprint(
     target_db: str,
     target_id: str,
     target: Any,
+    *,
+    required: bool = False,
 ) -> tuple[bool, str | None]:
     expected_hash, expected_version = _proposal_fingerprint(proposal)
+    if required and (expected_hash is None or expected_version is None):
+        return False, "source fingerprint is required for this proposal"
     if expected_hash is None and expected_version is None:
         return True, None
 
@@ -1143,6 +1389,107 @@ def _target_snapshot_matches(proposal: Any, target: Any) -> tuple[bool, str | No
 
 def _stale_error_patch(reason: str, state: QueueState = QueueState.SUPERSEDED) -> dict[str, Any]:
     return {"State": state.value, "Last Error": reason}
+
+
+def _mark_proposal_terminal(
+    adapter: NotionAdapter,
+    proposal_id: str,
+    state: QueueState,
+    reason: str,
+    *,
+    automation_queue_id: str | None = None,
+    automation_queue_db_id: str | None = None,
+    automation_queue_ids: set[str] | None = None,
+) -> Any:
+    """Write one system-owned terminal state through the internal path."""
+
+    if state not in {QueueState.SUPERSEDED, QueueState.FAILED}:
+        raise PolicyViolation("only SUPERSEDED or FAILED are system terminal states")
+    proposal_id = _valid_proposal_id(proposal_id)
+    if not isinstance(reason, str) or not reason.strip():
+        raise PolicyViolation("system terminal transitions require a non-empty reason")
+    if automation_queue_id is not None and automation_queue_db_id is not None:
+        raise TypeError("pass either automation_queue_id or automation_queue_db_id, not both")
+    if automation_queue_id is None:
+        automation_queue_id = automation_queue_db_id
+    queue_db_id, queue_ids = _queue_target(automation_queue_id, automation_queue_ids)
+    return _guarded_update(
+        adapter,
+        AutomationActor.AUTOMATION,
+        queue_db_id,
+        proposal_id,
+        _stale_error_patch(reason.strip(), state),
+        automation_queue_ids=set(queue_ids or ()),
+        system_transition=True,
+    )
+
+
+def mark_proposal_superseded(
+    adapter: NotionAdapter,
+    proposal_id: str,
+    reason: str,
+    *,
+    automation_queue_id: str | None = None,
+    automation_queue_db_id: str | None = None,
+    automation_queue_ids: set[str] | None = None,
+) -> Any:
+    """Record source invalidation for a proposal via the internal path."""
+
+    return _mark_proposal_terminal(
+        adapter,
+        proposal_id,
+        QueueState.SUPERSEDED,
+        reason,
+        automation_queue_id=automation_queue_id,
+        automation_queue_db_id=automation_queue_db_id,
+        automation_queue_ids=automation_queue_ids,
+    )
+
+
+def mark_proposal_failed(
+    adapter: NotionAdapter,
+    proposal_id: str,
+    reason: str,
+    *,
+    automation_queue_id: str | None = None,
+    automation_queue_db_id: str | None = None,
+    automation_queue_ids: set[str] | None = None,
+) -> Any:
+    """Record a defined system/application failure for a proposal."""
+
+    return _mark_proposal_terminal(
+        adapter,
+        proposal_id,
+        QueueState.FAILED,
+        reason,
+        automation_queue_id=automation_queue_id,
+        automation_queue_db_id=automation_queue_db_id,
+        automation_queue_ids=automation_queue_ids,
+    )
+
+
+_NON_HUMAN_DECISION_IDENTIFIERS = frozenset(
+    {
+        "automation",
+        "approvalreader",
+        "humanapprovalapplier",
+        "system",
+        "systemautomation",
+    }
+)
+
+
+def _is_human_decision_by(value: Any) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    normalized = "".join(character for character in value.casefold() if character.isalnum())
+    if not normalized or normalized in _NON_HUMAN_DECISION_IDENTIFIERS:
+        return False
+    if normalized.startswith(("automation", "approvalreader", "humanapprovalapplier")):
+        return False
+    if normalized.endswith(("bot", "worker", "service")):
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -1213,7 +1560,21 @@ class ApprovalReader:
 
     _actor = AutomationActor.APPROVAL_READER
 
-    def __init__(self, adapter: NotionAdapter | None = None) -> None:
+    def __init__(
+        self,
+        adapter: NotionAdapter | None = None,
+        *,
+        automation_queue_id: str | None = None,
+        automation_queue_db_id: str | None = None,
+        automation_queue_ids: set[str] | None = None,
+    ) -> None:
+        if automation_queue_id is not None and automation_queue_db_id is not None:
+            raise TypeError("pass either automation_queue_id or automation_queue_db_id, not both")
+        if automation_queue_id is None:
+            automation_queue_id = automation_queue_db_id
+        self._queue_db_id, self._queue_ids = _queue_target(
+            automation_queue_id, automation_queue_ids
+        )
         self._adapter = adapter
 
     @staticmethod
@@ -1224,7 +1585,12 @@ class ApprovalReader:
         """Read a current human decision and return its derived state."""
 
         proposal_id = _requested_proposal_id(proposal_id)
-        record = _read_approval(self._adapter, proposal_id)
+        record = _read_approval(
+            self._adapter,
+            proposal_id,
+            automation_queue_id=self._queue_db_id,
+            automation_queue_ids=set(self._queue_ids or ()),
+        )
         if record is None:
             raise PolicyViolation(f"Approval proposal not found: {proposal_id}")
         decision_value = _decision_field(record)
@@ -1238,7 +1604,12 @@ class ApprovalReader:
         if self._adapter is None:
             raise PolicyViolation("ApprovalReader requires a Notion adapter to sync State")
         proposal_id = _requested_proposal_id(proposal_id)
-        record = _read_approval(self._adapter, proposal_id)
+        record = _read_approval(
+            self._adapter,
+            proposal_id,
+            automation_queue_id=self._queue_db_id,
+            automation_queue_ids=set(self._queue_ids or ()),
+        )
         if record is None:
             raise PolicyViolation(f"Approval proposal not found: {proposal_id}")
         decision_value = _decision_field(record)
@@ -1270,9 +1641,10 @@ class ApprovalReader:
         _guarded_update(
             self._adapter,
             self._actor,
-            AUTOMATION_QUEUE,
+            self._queue_db_id,
             proposal_id,
             {"State": state.value},
+            automation_queue_ids=set(self._queue_ids or ()),
         )
         return state
 
@@ -1300,6 +1672,9 @@ class HumanApprovalApplier:
         decision_by: str | None = None,
         *,
         clock: Callable[[], datetime] | None = None,
+        automation_queue_id: str | None = None,
+        automation_queue_db_id: str | None = None,
+        automation_queue_ids: set[str] | None = None,
     ) -> None:
         if callable(decision_by) and clock is None:
             # A small convenience for tests that pass a clock as the second
@@ -1308,8 +1683,15 @@ class HumanApprovalApplier:
             decision_by = None
         self._adapter = adapter
         self._decision_by = decision_by.strip() if isinstance(decision_by, str) else decision_by
-        if self._decision_by == "":
-            raise PolicyViolation("decision_by must not be empty")
+        if self._decision_by is not None and not _is_human_decision_by(self._decision_by):
+            raise PolicyViolation("human decision_by required")
+        if automation_queue_id is not None and automation_queue_db_id is not None:
+            raise TypeError("pass either automation_queue_id or automation_queue_db_id, not both")
+        if automation_queue_id is None:
+            automation_queue_id = automation_queue_db_id
+        self._queue_db_id, self._queue_ids = _queue_target(
+            automation_queue_id, automation_queue_ids
+        )
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     def _timestamp(self) -> str:
@@ -1325,7 +1707,12 @@ class HumanApprovalApplier:
             proposal_id = _valid_proposal_id(supplied)
         else:
             proposal_id = _proposal_id(supplied)
-        current = _read_approval(self._adapter, proposal_id)
+        current = _read_approval(
+            self._adapter,
+            proposal_id,
+            automation_queue_id=self._queue_db_id,
+            automation_queue_ids=set(self._queue_ids or ()),
+        )
         if current is None:
             raise PolicyViolation(f"Current approval proposal not found: {proposal_id}")
         current_id = _proposal_id(current)
@@ -1341,7 +1728,14 @@ class HumanApprovalApplier:
         reason: str,
     ) -> ApprovalApplyResult:
         patch = _stale_error_patch(reason, state)
-        _guarded_update(self._adapter, self._actor, AUTOMATION_QUEUE, proposal_id, patch)
+        _guarded_update(
+            self._adapter,
+            self._actor,
+            self._queue_db_id,
+            proposal_id,
+            patch,
+            automation_queue_ids=set(self._queue_ids or ()),
+        )
         return ApprovalApplyResult(proposal_id, state, False, reason)
 
     def _validate_material_usage_action(
@@ -1452,6 +1846,12 @@ class HumanApprovalApplier:
         state = coerce_queue_state(state_value)
         decision = coerce_decision(decision_value)
 
+        decision_by = _get_field(current, "Decision By", "decision_by", default=None)
+        if not _is_human_decision_by(decision_by):
+            raise PolicyViolation("human decision_by required")
+        if self._decision_by is not None and not _is_human_decision_by(self._decision_by):
+            raise PolicyViolation("human decision_by required")
+
         # APPLIED is a terminal idempotent replay.  Do this before target
         # lookup so replay cannot duplicate a provider mutation.
         if state is QueueState.APPLIED:
@@ -1482,6 +1882,12 @@ class HumanApprovalApplier:
             target_db,
             target_id,
             target,
+            required=proposal_type
+            in {
+                ProposalType.MATERIAL_USAGE,
+                ProposalType.EXAM_SCOPE,
+                ProposalType.MATERIAL_REVISION,
+            },
         )
         if not fresh:
             assert reason is not None
@@ -1501,8 +1907,18 @@ class HumanApprovalApplier:
         # The only target mutation is the exact, type-specific patch returned
         # by _validate_action.  No caller-supplied actor or arbitrary patch is
         # accepted here.
+        target_current = {
+            key: _get_field(target, key, default=_PATCH_MISSING) for key in patch
+        }
+        target_already_matches = all(
+            value is not _PATCH_MISSING and _same_stored_value(value, patch[key])
+            for key, value in target_current.items()
+        )
+        mutated = False
         try:
-            _guarded_update(self._adapter, self._actor, target_db, target_id, patch)
+            if not target_already_matches:
+                _guarded_update(self._adapter, self._actor, target_db, target_id, patch)
+                mutated = True
         except Exception as exc:
             return self._mark_terminal(
                 proposal_id,
@@ -1511,9 +1927,6 @@ class HumanApprovalApplier:
             )
 
         now = self._timestamp()
-        decision_by = _get_field(current, "Decision By", "decision_by", default=None)
-        if decision_by is None:
-            decision_by = self._decision_by or "HUMAN_APPROVAL_APPLIER"
         decision_at = _get_field(current, "Decision At", "decision_at", default=None) or now
         queue_patch = {
             "Decision By": decision_by,
@@ -1522,19 +1935,34 @@ class HumanApprovalApplier:
             "State": QueueState.APPLIED.value,
         }
         try:
-            _guarded_update(self._adapter, self._actor, AUTOMATION_QUEUE, proposal_id, queue_patch)
-        except Exception as exc:
-            return self._mark_terminal(
+            _guarded_update(
+                self._adapter,
+                self._actor,
+                self._queue_db_id,
                 proposal_id,
-                QueueState.FAILED,
-                f"approval audit update failed: {type(exc).__name__}: {exc}",
+                queue_patch,
+                automation_queue_ids=set(self._queue_ids or ()),
             )
-        return ApprovalApplyResult(proposal_id, QueueState.APPLIED, True, None)
+        except Exception as exc:
+            # The target mutation may already have committed.  Keep the
+            # proposal APPROVED so a later reconciliation/replay can write the
+            # missing APPLIED audit without applying the target twice.
+            return ApprovalApplyResult(
+                proposal_id,
+                QueueState.APPROVED,
+                mutated,
+                f"approval audit update pending: {type(exc).__name__}: {exc}",
+            )
+        return ApprovalApplyResult(proposal_id, QueueState.APPLIED, mutated, None)
 
 
 def upsert_proposal(
     adapter: NotionAdapter,
     properties: Mapping[str, Any] | Proposal,
+    *,
+    automation_queue_id: str | None = None,
+    automation_queue_db_id: str | None = None,
+    automation_queue_ids: set[str] | None = None,
 ) -> Any:
     """Create or update one automation proposal without touching human fields.
 
@@ -1551,24 +1979,40 @@ def upsert_proposal(
         proposal_properties = properties
     else:
         raise PolicyViolation("proposal properties must be a mapping")
+    if automation_queue_id is not None and automation_queue_db_id is not None:
+        raise TypeError("pass either automation_queue_id or automation_queue_db_id, not both")
+    if automation_queue_id is None:
+        automation_queue_id = automation_queue_db_id
+    queue_db_id, queue_ids = _queue_target(automation_queue_id, automation_queue_ids)
+
     proposal_id = _proposal_id(proposal_properties)
     patch = dict(proposal_properties)
     patch.setdefault("Decision", Decision.Pending.value)
     patch.setdefault("State", QueueState.PENDING_REVIEW.value)
-    # This guard rejects Approve/Reject and approval states before any lookup
-    # or provider call, which is the self-approval invariant at the boundary.
-    enforce_write_policy(AutomationActor.AUTOMATION, AUTOMATION_QUEUE, patch)
+    # Validate the creation form before lookup.  In particular, a malicious
+    # retry cannot turn an existing item into an approval by supplying
+    # Decision=Approve or an approval State.
+    enforce_write_policy(
+        AutomationActor.AUTOMATION,
+        queue_db_id,
+        patch,
+        automation_queue_ids=set(queue_ids or ()),
+        is_create=True,
+    )
     if _wire_value(patch["Decision"]) != Decision.Pending.value:
         raise PolicyViolation("A new/upserted automation proposal must have Decision=Pending")
     if _wire_value(patch["State"]) != QueueState.PENDING_REVIEW.value:
         raise PolicyViolation("A new/upserted automation proposal must have State=PENDING_REVIEW")
 
-    existing = _read_approval(adapter, proposal_id)
+    existing = _read_approval(
+        adapter,
+        proposal_id,
+        automation_queue_id=queue_db_id,
+        automation_queue_ids=set(queue_ids or ()),
+    )
     if existing is not None:
-        # Never write human-owned decision or decision audit fields during a
-        # retry.  State=Pending is harmless only when the item is still in its
-        # initial state; otherwise it is omitted rather than regressed.
-        current_state_value = _get_field(existing, "State", "state", default=None)
+        # Never write human-owned decision/state or decision audit fields
+        # during a retry.  The existing state is intentionally left untouched.
         metadata = {
             key: value
             for key, value in patch.items()
@@ -1581,25 +2025,24 @@ def upsert_proposal(
                 _normal_key("Applied At"),
             }
         }
-        is_pending = (
-            current_state_value is None
-            or coerce_queue_state(current_state_value) is QueueState.PENDING_REVIEW
-        )
-        if is_pending:
-            metadata["State"] = QueueState.PENDING_REVIEW.value
-        if _decision_field(existing) is None:
-            metadata["Decision"] = Decision.Pending.value
         if metadata:
             _guarded_update(
                 adapter,
                 AutomationActor.AUTOMATION,
-                AUTOMATION_QUEUE,
+                queue_db_id,
                 proposal_id,
                 metadata,
+                automation_queue_ids=set(queue_ids or ()),
             )
         return existing
 
-    return _guarded_create(adapter, AutomationActor.AUTOMATION, AUTOMATION_QUEUE, patch)
+    return _guarded_create(
+        adapter,
+        AutomationActor.AUTOMATION,
+        queue_db_id,
+        patch,
+        automation_queue_ids=set(queue_ids or ()),
+    )
 
 
 create_or_update_proposal = upsert_proposal
@@ -1630,6 +2073,8 @@ __all__ = [
     "derive_state_from_decision",
     "enforce_write_policy",
     "find_alias_matches",
+    "mark_proposal_failed",
+    "mark_proposal_superseded",
     "normalize_alias",
     "parse_aliases",
     "transition_queue_state",

@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any, Protocol, TypeAlias, runtime_checkable
 
 from .models import ContextPackage, PageLocator, TimeLocator
-from .source_ref import SourceRef
+from .source_ref import SourceFingerprint, SourceRef
 
 
 Locator: TypeAlias = PageLocator | TimeLocator
@@ -75,7 +75,18 @@ class StateStore(Protocol):
 class EphemeralStore(Protocol):
     """Minimal process-local capability/resolution store surface."""
 
-    def create_context_capability(self, *args: Any, **kwargs: Any) -> Any:
+    def create_context_capability(
+        self,
+        allowed_locators: Any,
+        caller_scope: str | None = None,
+        ttl_seconds: int = 900,
+        source_hash: str | None = None,
+        source_version: int | None = None,
+        *,
+        source_fingerprint: Any = None,
+        fingerprints: Any = None,
+    ) -> Any:
+        """Create a capability bound to the supplied source fingerprint(s)."""
         ...
 
     def get_context_capability(self, *args: Any, **kwargs: Any) -> Any:
@@ -95,7 +106,16 @@ class EphemeralStore(Protocol):
         context_id: str,
         locator: Locator | str,
         caller_scope: str | None = None,
+        *,
+        current_fingerprint: SourceFingerprint | None = None,
     ) -> bool:
+        """Authorize only when the current source fingerprint is fresh.
+
+        Omitting ``current_fingerprint`` cannot produce an authorization
+        success (fail-closed). A mismatched fingerprint must be surfaced as
+        ``LOCATOR_STALE``; an expired or missing context must be surfaced as
+        ``CONTEXT_EXPIRED``.
+        """
         ...
 
     def purge_expired(self) -> int:

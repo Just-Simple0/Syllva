@@ -13,7 +13,9 @@ def test_new_memory_store_invalidates_resolution_and_context_ids() -> None:
     resolution = first.create_resolution(
         [ResolutionCandidate("input", "session", "COMP319-S05", "05")], ttl_seconds=30
     )
-    context = first.create_context_capability(["COMP319-M03:p1"], None, ttl_seconds=30)
+    context = first.create_context_capability(
+        ["COMP319-M03:p1"], None, ttl_seconds=30, source_hash="hash-v1", source_version=1
+    )
 
     restarted = MemoryEphemeralStore()
     assert restarted.get_resolution(resolution.resolution_id) is None

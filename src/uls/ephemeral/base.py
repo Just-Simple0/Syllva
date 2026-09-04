@@ -39,10 +39,17 @@ class EphemeralStore(Protocol):
         allowed_locators: list[str],
         caller_scope: str | None,
         ttl_seconds: int,
+        source_hash: str,
+        source_version: int,
     ) -> Any: ...
     def get_context_capability(self, context_id: str) -> Any | None: ...
     def authorize_locator(
-        self, context_id: str, locator: str, caller_scope: str | None
+        self,
+        context_id: str,
+        locator: str,
+        caller_scope: str | None,
+        *,
+        current_fingerprint: Any | None = None,
     ) -> bool: ...
 
     # --- Maintenance (spec §9.4) ---
