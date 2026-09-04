@@ -19,6 +19,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from uls.domain.enums import AutomationActor
 from uls.domain.errors import PolicyViolation
+from uls.enrichment.schemas import EnrichmentRecord
 
 
 AUTOMATION_QUEUE = "Automation Queue"
@@ -166,6 +167,43 @@ class NotionAdapter(Protocol):
         ...
 
     def read_approval(self, proposal_id: str) -> Any | None:
+        ...
+
+
+@runtime_checkable
+class NotionReader(Protocol):
+    """Narrow read-only graph surface used by ``RetrievalEngine``.
+
+    This protocol intentionally does not inherit from ``NotionAdapter``.  The
+    latter is the worker/write contract and includes guarded mutation methods;
+    retrieval is typed against this smaller surface so write capabilities are
+    not part of its dependency boundary.
+    """
+
+    def get_session(self, entity_id: str) -> Any | None:
+        ...
+
+    def find_sessions_by_alias(self, course: Any, alias_norm: str) -> list[Any]:
+        ...
+
+    def list_course_sessions(self, course: Any) -> list[Any]:
+        ...
+
+    def get_material_usage(self, session_id: str) -> list[Any]:
+        ...
+
+    def get_session_enrichment(self, entity_id: str) -> EnrichmentRecord | None:
+        ...
+
+    def get_course_by_alias(self, alias_norm: str) -> Any | None:
+        ...
+
+    def get_material(self, material_id: str) -> Any | None:
+        """Return one normalized Material record by its canonical ID."""
+        ...
+
+    def get_session_user_annotations(self, session_id: str) -> list[Any]:
+        """Return metadata for USER annotations related to one Session."""
         ...
 
 
@@ -2061,6 +2099,7 @@ __all__ = [
     "Decision",
     "HumanApprovalApplier",
     "NotionAdapter",
+    "NotionReader",
     "PolicyViolation",
     "Proposal",
     "ProposalType",

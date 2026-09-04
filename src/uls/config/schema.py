@@ -58,6 +58,12 @@ class RetrievalCfg:
     context_ttl_seconds: int = 900
     resolution_ttl_seconds: int = 900
     allow_bounded_llm_rerank: bool = False
+    # Phase 2 context budgets.  A capability describes exactly the evidence
+    # returned by a context call, so these limits are applied before issuance.
+    max_evidence_items: int = 12
+    max_chars_per_item: int = 4000
+    max_total_chars: int = 24000
+    max_followup_chunks: int = 8
 
 
 @dataclass

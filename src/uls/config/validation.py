@@ -112,6 +112,26 @@ def validate_config(cfg: UlsConfig) -> list[str]:
         "retrieval.max_candidate_chunks",
         problems,
     )
+    _validate_positive_number(
+        cfg.retrieval.max_evidence_items,
+        "retrieval.max_evidence_items",
+        problems,
+    )
+    _validate_positive_number(
+        cfg.retrieval.max_chars_per_item,
+        "retrieval.max_chars_per_item",
+        problems,
+    )
+    _validate_positive_number(
+        cfg.retrieval.max_total_chars,
+        "retrieval.max_total_chars",
+        problems,
+    )
+    _validate_positive_number(
+        cfg.retrieval.max_followup_chunks,
+        "retrieval.max_followup_chunks",
+        problems,
+    )
     if (
         isinstance(cfg.behavior_contract.version, bool)
         or not isinstance(cfg.behavior_contract.version, int)

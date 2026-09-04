@@ -39,6 +39,10 @@ retrieval:
   context_ttl_seconds: 900
   resolution_ttl_seconds: 900
   allow_bounded_llm_rerank: false  # opt-in; deterministic lexical/index retrieval is default
+  max_evidence_items: 12
+  max_chars_per_item: 4000
+  max_total_chars: 24000
+  max_followup_chunks: 8
 
 mcp:
   mode: local
