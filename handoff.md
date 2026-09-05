@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-09-05
 **Repo:** https://github.com/Just-Simple0/Syllva (`main`)
-**Latest commit:** `6572feb` — Phase 2 Transcript Vertical Slice (dual-review GO)
+**Latest commit:** `f4ab8b0` — Phase 3 Enrichment & Freshness (producer, dual-review GO)
 
 이 문서는 다음 담당자/세션이 바로 이어서 작업할 수 있도록 현재 상태·계약·다음 단계를 정리한 인수인계 문서입니다.
 
@@ -50,7 +50,8 @@ Phase 1/2 내내 반복적으로 잡았다. **단일 리뷰어는 불충분** �
 | 저장소 스캐폴드(§3 레이아웃), CLAUDE.md, 계약/클라이언트 프로젝션 | ✅ `5bb9d34` |
 | Phase 1 Core Hardening (state/ephemeral/orchestration/config/human-gate) | ✅ `ab3c9a1`+`63cb951` |
 | Phase 2 Transcript Vertical Slice (normalization/ingest/retrieval get_session_context) | ✅ `6572feb` |
-| 테스트 | **148 passing** (모델 독립 contract/unit) |
+| Phase 3 Enrichment & Freshness (producer: LLM adapter/enrichment schemas·generators/writer) | ✅ `f4ab8b0` |
+| 테스트 | **238 passing** (모델 독립 contract/unit/integration) |
 
 검증 도구 환경: `codex` CLI(`gpt-5.6-luna`), `agy` CLI(`gemini-3.8-flash-high`), `insane-review` 플러그인(GPT-5.6 Sol),
 pytest+pyyaml 설치됨(인터프리터: `/Library/Frameworks/.../python3.14`).
@@ -79,9 +80,12 @@ pytest+pyyaml 설치됨(인터프리터: `/Library/Frameworks/.../python3.14`).
 
 구현 순서(§41): `Spike C0 → Spike M0 → VS0 → VS0-B → Spike G`, Phase 1~8(§42~§49).
 
-- **Phase 3 — Enrichment & Freshness (§44)**: Session Summary/Topics/Content Index/Professor Emphasis·Examples/
-  Exam Signals/Likely Confusions **생성**(현재는 소비만 함), source fingerprint 메타. explicit/inferred 분리, evidence locator, stale 제외.
-- **Phase 4 — Material Usage & Human Gate (§45)**: Material Usage/page-range proposal, 승인 경로, Verified 상태,
+- **Phase 3 — Enrichment & Freshness (§44)** ✅ **완료 (`f4ab8b0`)**: producer 구현 — `enrichment/{schemas,_common,session,material,exam,writer}.py`,
+  `adapters/llm/{base,structured}.py`, `domain/enums.py(Explicitness)`, `NotionReader.get_material_enrichment`.
+  explicit/inferred 분리·evidence locator 재해석·stale 제외·source fingerprint 전부 fail-closed. 소비자(RetrievalEngine)는 미변경.
+  계획서 `docs/plans/phase3-enrichment.md` rev3, §7 에 **문서화된 결정론적 한계**(cross-store 가시성 창, 부정어 가드 밖 의미 판정) 명시.
+  교훈: 구현 리뷰에서 Sol(GPT-5.6)이 AGY GO 를 여러 번 뒤집으며 실 fail-open(증거 상속, empty-READY, TOCTOU, §17 순서, 부정어 위조)을 잡음 — 5라운드 재수정 후 둘 다 GO.
+- **다음 단계 → Phase 4 — Material Usage & Human Gate (§45)**: Material Usage/page-range proposal, 승인 경로, Verified 상태,
   multi-material Session 검색, unverified 정책. (Phase 2에서 read-only 소비만 했고 mutation/proposal은 여기로 미룸.)
 - **Phase 5~8**: Exam/Activity(§46), GitHub 정확 ref 검색(§47), 클라이언트 패키징(§48), 데스크톱 자동화+remote MCP(§49).
 - **MCP 트랙(별도)**: Spike C0(ChatGPT remote 연결)/M0(로컬 MCP로 get_material_context)/VS0 — 엔진은 이미 MCP 없이
