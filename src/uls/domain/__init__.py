@@ -6,6 +6,7 @@ This layer must not depend on client SDKs, OS schedulers, or MCP transport.
 from .enums import (
     AutomationActor,
     DerivativeStatus,
+    Explicitness,
     FreshnessStatus,
     JobStatus,
     OwnershipZone,
@@ -37,6 +38,7 @@ __all__ = [
     "DerivativeStatus",
     "EntityId",
     "EvidenceItem",
+    "Explicitness",
     "FreshnessInfo",
     "FreshnessStatus",
     "GitHubRef",

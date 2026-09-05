@@ -17,6 +17,7 @@ from uls.adapters.notion.base import (
     find_alias_matches,
     normalize_alias,
 )
+from uls.enrichment.schemas import EnrichmentRecord, coerce_enrichment
 
 
 COURSE_KEY = "2026-1_COMP319-002"
@@ -69,7 +70,9 @@ def _session(
         "Aliases": aliases or f"{number}강 | {number}번째 강의 | CPU Scheduling",
         "Course": COURSE_KEY,
         "Session No": number,
-        "Normalized Transcript": transcript_ref or entity_id,
+        # Enrichment validation treats this graph field as the independent
+        # source identity.  The default fixture's transcript is transcript-05.
+        "Normalized Transcript": transcript_ref or "transcript-05",
         "Recording Status": "Ready",
     }
 
@@ -98,6 +101,7 @@ class FakeNotionReader:
         materials: Iterable[Mapping[str, Any]] | None = None,
         material_usage: Mapping[str, Iterable[Mapping[str, Any]]] | None = None,
         enrichments: Mapping[str, Any] | None = None,
+        material_enrichments: Mapping[str, Any] | None = None,
         annotations: Mapping[str, Iterable[Mapping[str, Any]]] | None = None,
     ) -> None:
         course_values = list(courses or [_course()])
@@ -111,6 +115,7 @@ class FakeNotionReader:
             for key, values in (material_usage or {}).items()
         }
         self.enrichments = dict(enrichments or {})
+        self.material_enrichments = dict(material_enrichments or {})
         self.annotations = {
             key: [deepcopy(dict(item)) for item in values]
             for key, values in (annotations or {}).items()
@@ -139,6 +144,9 @@ class FakeNotionReader:
     def get_material(self, material_id: str) -> Mapping[str, Any] | None:
         return self.materials.get(material_id)
 
+    def get_material_enrichment(self, material_id: str) -> Any | None:
+        return self.material_enrichments.get(material_id)
+
     def get_session_user_annotations(self, session_id: str) -> list[Mapping[str, Any]]:
         return list(self.annotations.get(session_id, ()))
 
@@ -149,6 +157,7 @@ class FakeNotionWriter:
     def __init__(self, reader: FakeNotionReader, *, events: list[Any] | None = None) -> None:
         self.reader = reader
         self.events = events if events is not None else []
+        self.ai_region_writes: list[dict[str, Any]] = []
 
     def update_session_metadata(self, entity_id: str, patch: Mapping[str, Any]) -> Mapping[str, Any]:
         unknown = set(patch).difference(SESSION_PROPERTIES)
@@ -163,6 +172,76 @@ class FakeNotionWriter:
         self.reader.sessions[entity_id].update(dict(patch))
         self.events.append(("notion", entity_id, dict(patch)))
         return self.reader.sessions[entity_id]
+
+    def write_ai_region(
+        self,
+        target_db: str,
+        entity_id: str,
+        patch: Mapping[str, Any],
+        *,
+        actor: AutomationActor = AutomationActor.AUTOMATION,
+    ) -> Mapping[str, Any]:
+        """Capture the only enrichment write surface used by Phase 3."""
+
+        if not isinstance(actor, AutomationActor):
+            raise ValueError("AI-region actor must be an AutomationActor")
+        enforce_write_policy(actor, target_db, patch)
+        if set(patch).difference({"enrichment", "ownership"}):
+            raise ValueError("AI-region patch contains non-AI fields")
+        if patch.get("ownership") != "AI":
+            raise ValueError("AI-region ownership is fixed to AI")
+        raw_record = patch.get("enrichment")
+        if raw_record is None:
+            raise ValueError("AI-region patch requires an enrichment record")
+        record = coerce_enrichment(raw_record)
+        normalized_db = target_db.casefold()
+        if normalized_db == "sessions":
+            if entity_id not in self.reader.sessions:
+                raise KeyError(entity_id)
+            self.reader.enrichments[entity_id] = deepcopy(record)
+        elif normalized_db == "materials":
+            if entity_id not in self.reader.materials:
+                raise KeyError(entity_id)
+            self.reader.material_enrichments[entity_id] = deepcopy(record)
+        else:
+            raise ValueError(f"unsupported AI-region database: {target_db!r}")
+        captured = {
+            "target_db": target_db,
+            "entity_id": entity_id,
+            "patch": deepcopy(dict(patch)),
+            "actor": actor,
+        }
+        self.ai_region_writes.append(captured)
+        self.events.append(("ai_region", target_db, entity_id, deepcopy(dict(patch))))
+        return captured
+
+    def restore_ai_region(
+        self,
+        target_db: str,
+        entity_id: str,
+        previous: Any | None,
+        *,
+        actor: AutomationActor = AutomationActor.AUTOMATION,
+    ) -> None:
+        """Compensate a failed publication without touching human fields."""
+
+        if not isinstance(actor, AutomationActor):
+            raise ValueError("AI-region actor must be an AutomationActor")
+        enforce_write_policy(actor, target_db, {"ownership": "AI"})
+        store = (
+            self.reader.enrichments
+            if target_db.casefold() == "sessions"
+            else self.reader.material_enrichments
+            if target_db.casefold() == "materials"
+            else None
+        )
+        if store is None:
+            raise ValueError(f"unsupported AI-region database: {target_db!r}")
+        if previous is None:
+            store.pop(entity_id, None)
+        else:
+            store[entity_id] = deepcopy(coerce_enrichment(previous))
+        self.events.append(("ai_region_rollback", target_db, entity_id))
 
 
 FakeNotion = FakeNotionReader

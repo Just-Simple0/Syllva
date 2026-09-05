@@ -1,9 +1,9 @@
-"""Structured LLM enrichment/rerank adapter.
+"""Structured LLM enrichment value objects.
 
-Spec reference: spec §35.
-Implementation delegated to Codex (dev/impl role); this is a scaffold stub.
+The implementation lives in :mod:`uls.adapters.llm.base`; this module is a
+convenient stable import surface for structured adapters and test fakes.
 """
 
-from __future__ import annotations
+from .base import LLMAdapter, LLMEnrichmentResult
 
-# TODO(codex): implement per spec §35.
+__all__ = ["LLMAdapter", "LLMEnrichmentResult"]

@@ -147,6 +147,18 @@ class OwnershipZone(_ValueEnum):
     USER = "USER"
 
 
+class Explicitness(_ValueEnum):
+    """Whether an AI enrichment signal is explicitly stated in its source.
+
+    This is deliberately separate from the LLM adapter's ``proposal`` /
+    ``fact`` classification.  Enrichment remains an AI proposal even when a
+    source-backed quote proves that the underlying point is explicit.
+    """
+
+    EXPLICIT = "EXPLICIT"
+    INFERRED = "INFERRED"
+
+
 class RetrievalIntent(_ValueEnum):
     """Primary retrieval modes defined by the v1.2 retrieval contract."""
 
@@ -283,6 +295,7 @@ __all__ = [
     "AUTHORITY_RANK",
     "AutomationActor",
     "DerivativeStatus",
+    "Explicitness",
     "Freshness",
     "FreshnessStatus",
     "JobStatus",

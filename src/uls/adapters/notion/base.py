@@ -202,9 +202,37 @@ class NotionReader(Protocol):
         """Return one normalized Material record by its canonical ID."""
         ...
 
+    def get_material_enrichment(self, material_id: str) -> EnrichmentRecord | None:
+        """Return the fingerprint-bound AI enrichment for one Material."""
+        ...
+
     def get_session_user_annotations(self, session_id: str) -> list[Any]:
         """Return metadata for USER annotations related to one Session."""
         ...
+
+
+@runtime_checkable
+class MaterialEnrichmentReader(Protocol):
+    """Optional Phase 3 read capability for fingerprinted Material enrichment.
+
+    ``NotionReader`` remains runtime-compatible with the exact Phase 2 reader
+    surface, whose contract tests intentionally use a minimal proxy.  Worker
+    and Phase 3 readers that expose Material enrichment additionally satisfy
+    this extension protocol; RetrievalEngine discovers the method
+    capability-wise just as it does other optional annotation reads.
+    """
+
+    def get_material_enrichment(self, material_id: str) -> EnrichmentRecord | None:
+        ...
+
+
+# ``get_material_enrichment`` is a source-level extension on NotionReader, but
+# it is optional for old read-only proxies.  Excluding only this member from
+# the runtime structural check preserves the Phase 2 exact-reader guarantee
+# while keeping the typed method visible to static callers and new adapters.
+NotionReader.__protocol_attrs__ = frozenset(
+    attr for attr in NotionReader.__protocol_attrs__ if attr != "get_material_enrichment"
+)
 
 
 def _wire_value(value: Any) -> Any:
@@ -2098,6 +2126,7 @@ __all__ = [
     "AutomationQueueProposal",
     "Decision",
     "HumanApprovalApplier",
+    "MaterialEnrichmentReader",
     "NotionAdapter",
     "NotionReader",
     "PolicyViolation",
