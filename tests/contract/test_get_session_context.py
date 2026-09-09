@@ -8,6 +8,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures")
 
 from fake_drive import FakeDriveReader
 from fake_notion import COURSE_KEY, FakeNotionReader
+from uls.adapters.drive.binding import ValidatedSourceBindingResolver
 from uls.adapters.notion.base import NotionReader
 from uls.config.schema import RetrievalCfg, UlsConfig
 from uls.domain.errors import (
@@ -63,12 +64,14 @@ More material
 
 
 def _engine(*, notion=None, drive=None, retrieval=None) -> RetrievalEngine:
+    drive = drive or FakeDriveReader()
     return RetrievalEngine(
         notion or FakeNotionReader(),
-        drive or FakeDriveReader(),
+        drive,
         None,
         MemoryEphemeralStore(),
         UlsConfig(retrieval=retrieval or RetrievalCfg()),
+        source_binding_resolver=ValidatedSourceBindingResolver(drive),
     )
 
 
@@ -85,6 +88,7 @@ def _ready_engine(*, enrichment=None, material_verified=True, drive_hash="transc
         "ID": "USAGE-03",
         "Session": "COMP319-S05",
         "Material ID": "COMP319-M03",
+        "Role": "Primary",
         "Verified": material_verified,
         "Start Page": 1,
         "End Page": 2,
@@ -162,6 +166,7 @@ class _ProtocolExactReader:
                         "ID": "USAGE-03",
                         "Session": "COMP319-S05",
                         "Material ID": "COMP319-M03",
+                        "Role": "Primary",
                         "Verified": True,
                         "Start Page": 1,
                         "End Page": 2,
@@ -188,6 +193,9 @@ class _ProtocolExactReader:
 
     def get_course_by_alias(self, alias_norm):
         return self._reader.get_course_by_alias(alias_norm)
+
+    def get_course_by_relation_id(self, relation_page_id):
+        return self._reader.get_course_by_relation_id(relation_page_id)
 
     def get_material(self, material_id):
         return self._reader.get_material(material_id)

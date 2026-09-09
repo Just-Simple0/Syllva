@@ -8,8 +8,8 @@ from enum import Enum
 from typing import Any, Literal
 
 from uls.domain.models import ContextPackage, EvidenceItem
+from uls.domain.page_range import PageRange
 from uls.ephemeral.models import ResolutionCandidate, ResolvedEntity
-
 
 ResolutionStatus = Literal["resolved", "ambiguous"]
 
@@ -108,6 +108,13 @@ class CapabilityBinding:
     relation_required: bool = False
     provisional: bool = False
     usage_id: str | None = None
+    # Phase4 identity is appended so the existing positional construction
+    # order remains source compatible for earlier retrieval callers.
+    usage_role: str | None = None
+    material_type: str | None = None
+    course_relation_page_id: str | None = None
+    course_key: str | None = None
+    usage_range: PageRange | None = None
 
     @property
     def locator_range(self) -> Any:

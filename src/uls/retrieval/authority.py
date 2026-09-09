@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Iterable
 
 from uls.domain.enums import RetrievalIntent, SourceAuthority, authority_rank
-
 
 SOURCE_CLASS_TO_AUTHORITY: dict[str, SourceAuthority] = {
     "professor_material": SourceAuthority.PROFESSOR_MATERIAL,
@@ -26,6 +25,25 @@ SOURCE_CLASS_TO_AUTHORITY: dict[str, SourceAuthority] = {
     "ai_enrichment": SourceAuthority.AI_ENRICHMENT,
     "external": SourceAuthority.EXTERNAL,
 }
+
+SUPPORTED_MATERIAL_SOURCE_CLASSES = frozenset(
+    {"professor_material", "supplemental_reference"}
+)
+
+
+def material_source_class(
+    material_type: object,
+    mapping: Mapping[str, str] | None = None,
+) -> str | None:
+    """Derive a Material source class from trusted graph ``Type`` only."""
+
+    if not isinstance(material_type, str) or not material_type:
+        return None
+    values = mapping if mapping is not None else {}
+    source_class = values.get(material_type)
+    if source_class not in SUPPORTED_MATERIAL_SOURCE_CLASSES:
+        return None
+    return source_class
 
 
 @dataclass(frozen=True)
@@ -123,9 +141,11 @@ def sort_by_authority(items: Iterable[object], source_class_getter) -> list[obje
 
 
 __all__ = [
-    "AuthorityPolicy",
     "SOURCE_CLASS_TO_AUTHORITY",
+    "SUPPORTED_MATERIAL_SOURCE_CLASSES",
+    "AuthorityPolicy",
     "authority_for",
+    "material_source_class",
     "policy_for_activity",
     "policy_for_concept",
     "policy_for_exam",

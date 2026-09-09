@@ -108,6 +108,7 @@ class EphemeralStore(Protocol):
         caller_scope: str | None = None,
         *,
         current_fingerprint: SourceFingerprint | None = None,
+        issued_entry: Any = None,
     ) -> bool:
         """Authorize only when the current source fingerprint is fresh.
 

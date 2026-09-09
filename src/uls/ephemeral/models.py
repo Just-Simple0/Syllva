@@ -90,6 +90,10 @@ class AllowedLocator:
     def source_fingerprint(self) -> SourceFingerprint:
         return SourceFingerprint(self.source_version, self.source_hash)
 
+    @property
+    def canonical_key(self) -> tuple[str, str, int]:
+        return (serialize_locator(self.locator), self.source_hash, self.source_version)
+
 
 @dataclass(frozen=True)
 class ContextCapability:

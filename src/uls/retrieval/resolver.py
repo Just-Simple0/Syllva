@@ -8,22 +8,24 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from uls.adapters.notion.base import NotionReader, normalize_alias
-from uls.domain.errors import EntityNotFoundError, SourceUnavailableError
-from uls.domain.ids import parse_course_key
+from uls.domain.course_identity import resolve_course_relation, validate_course_record
+from uls.domain.errors import CourseKeyParseError, EntityNotFoundError, SourceUnavailableError
+from uls.domain.ids import parse_course_key, strict_entity_id
 from uls.ephemeral.models import ResolutionCandidate, ResolvedEntity
 
 from ._compat import (
     exact_alias_match,
     field,
     normal_key,
+    raw_field,
     record_aliases,
     record_id,
     record_label,
-    relation_id,
+    strict_text,
     text,
 )
 from .schemas import ResolutionResult
-
+from .scope import usage_app_id
 
 _INTENT_KEYWORDS = frozenset(
     {
@@ -200,7 +202,7 @@ class SessionResolver:
             ResolutionCandidate(
                 candidate_id="",
                 entity_type="session",
-                entity_id=record_id(record) or "",
+                entity_id=_session_logical_id(record) or "",
                 label=record_label(record),
                 reason=reason,
             )
@@ -235,7 +237,7 @@ class SessionResolver:
         return self.ephemeral.consume_resolution_choice(resolution_id, candidate_id)
 
     def _resolved(self, record: Any, *, reason: str | None = None) -> ResolutionResult:
-        entity_id = record_id(record)
+        entity_id = _session_logical_id(record)
         if not entity_id:
             raise EntityNotFoundError("Session record has no canonical entity ID")
         entity = ResolvedEntity(
@@ -248,8 +250,7 @@ class SessionResolver:
 
     @staticmethod
     def _is_session_record(record: Any) -> bool:
-        entity_id = record_id(record)
-        return bool(entity_id and re.fullmatch(r"[A-Z][A-Z0-9]*-S[0-9]{2}", entity_id))
+        return _session_logical_id(record) is not None
 
     @staticmethod
     def _session_number(record: Any) -> int | None:
@@ -262,61 +263,79 @@ class SessionResolver:
             return int(value)
         if isinstance(value, str) and value.strip().isdigit():
             return int(value.strip())
-        entity_id = record_id(record)
+        entity_id = _session_logical_id(record)
         if entity_id and re.search(r"-S([0-9]{2})\Z", entity_id):
             return int(re.search(r"-S([0-9]{2})\Z", entity_id).group(1))  # type: ignore[union-attr]
         return None
 
     @staticmethod
     def _course_value(record: Any) -> Any:
-        return field(record, "Course", "course", "Course Key", "course_key", default=None)
+        return raw_field(record, "Course", "course", "Course Key", "course_key", default=None)
 
     def _course_matches(self, record: Any, course: Any | None) -> bool:
         if course is None:
             return True
-        wanted_id = text(field(course, "ID", "Course Key", "course_key"), default=None)
-        wanted_id = wanted_id or record_id(course)
-        wanted_code = text(field(course, "Code", "code"), default=None)
-        if isinstance(course, str):
-            wanted_id = wanted_id or course
-            if re.fullmatch(r"[A-Za-z][A-Za-z0-9]*", course.strip()):
-                wanted_code = wanted_code or course.strip()
-        if wanted_code is None and wanted_id is not None:
-            try:
-                wanted_code = parse_course_key(wanted_id).code
-            except Exception:
-                pass
+        wanted_relation_id, wanted_key, wanted_code = self._requested_course_identity(course)
         actual = self._course_value(record)
-        if isinstance(actual, list) and actual:
-            actual = actual[0]
-        actual_text = text(actual, default=None)
-        if actual_text and wanted_id and normalize_alias(actual_text) == normalize_alias(wanted_id):
-            return True
-        # Relation fields often contain only a page ID while a fake may store
-        # the full course object; compare stable ID/key values when present.
-        actual_id = text(field(actual, "ID", "Course Key", "course_key", "Code", "code"), default=None)
-        if actual_id and wanted_id and normalize_alias(actual_id) == normalize_alias(wanted_id):
-            return True
-        actual_relation_id = relation_id(actual)
-        wanted_relation_id = record_id(course)
-        if (
-            actual_relation_id
-            and wanted_relation_id
-            and normalize_alias(actual_relation_id) == normalize_alias(wanted_relation_id)
-        ):
-            return True
-        actual_code = text(field(actual, "Code", "code"), default=None)
-        actual_key = actual_id or actual_text
-        if actual_code and wanted_code and normalize_alias(actual_code) == normalize_alias(wanted_code):
-            return True
-        if actual_key and wanted_code:
+        actual_relation_id = resolve_course_relation(actual)
+        if actual_relation_id is None:
+            # A relation-shaped field with zero/multiple/malformed entries is
+            # invalid.  Do not let a first relation or a generic relation_id
+            # helper widen it into a valid Course match.
+            if _looks_like_relation_value(actual):
+                return False
+            # Keep a narrow legacy path for older provider fakes that expose a
+            # canonical Course Key directly, but still validate its grammar.
+            actual_text = strict_text(actual, default=None)
+            if actual_text is None or wanted_key is None:
+                return False
             try:
-                parsed = parse_course_key(actual_key)
-            except Exception:
-                parsed = None
-            if parsed is not None and normalize_alias(parsed.code) == normalize_alias(wanted_code):
-                return True
-        return False
+                return parse_course_key(actual_text).course_code == parse_course_key(wanted_key).course_code and actual_text == wanted_key
+            except CourseKeyParseError:
+                return False
+
+        getter = getattr(self.notion_reader, "get_course_by_relation_id", None)
+        if not callable(getter):
+            return False
+        try:
+            related_course = getter(actual_relation_id)
+        except _MISSING_PROVIDER_ERRORS:
+            return False
+        except Exception as exc:
+            raise SourceUnavailableError("Notion Course relation lookup is unavailable") from exc
+        actual_identity = validate_course_record(related_course, actual_relation_id)
+        if actual_identity is None:
+            return False
+        if wanted_relation_id is not None:
+            return actual_relation_id == wanted_relation_id
+        if wanted_key is not None:
+            return actual_identity.course_key == wanted_key
+        return wanted_code is not None and actual_identity.parsed.code == wanted_code
+
+    def _requested_course_identity(self, course: Any) -> tuple[str | None, str | None, str | None]:
+        """Return exact requested relation/key/code without fuzzy widening."""
+
+        if isinstance(course, str):
+            try:
+                parsed = parse_course_key(course)
+            except CourseKeyParseError:
+                return None, None, course if re.fullmatch(r"[A-Za-z][A-Za-z0-9]*", course) else None
+            return None, str(parsed), parsed.code
+
+        relation_id = record_id(course)
+        if relation_id:
+            identity = validate_course_record(course, relation_id)
+            if identity is not None:
+                return identity.relation_page_id, identity.course_key, identity.parsed.code
+        key = strict_text(field(course, "Course Key", "course_key", default=None), default=None)
+        if key:
+            try:
+                parsed = parse_course_key(key)
+            except CourseKeyParseError:
+                return None, None, None
+            return None, str(parsed), parsed.code
+        code = strict_text(field(course, "Code", "code", default=None), default=None)
+        return None, None, code
 
     def _resolve_course_context(self, query: str, hint: Any | None) -> tuple[Any | None, str]:
         if hint is not None:
@@ -401,6 +420,9 @@ class SessionResolver:
         method = getattr(self.notion_reader, "get_session", None)
         if method is None:
             return None
+        expected_id = strict_entity_id(entity_id, "S")
+        if expected_id is None:
+            return None
         for value in (entity_id, entity_id.upper()):
             try:
                 result = method(value)
@@ -409,6 +431,8 @@ class SessionResolver:
             except Exception as exc:
                 raise SourceUnavailableError("Notion Session lookup is unavailable") from exc
             if result is not None:
+                if _session_logical_id(result) != expected_id:
+                    return None
                 return result
         return None
 
@@ -491,7 +515,7 @@ class SessionResolver:
         result: list[Any] = []
         seen: set[str] = set()
         for record in records:
-            key = record_id(record) or repr(record)
+            key = _session_logical_id(record) or repr(record)
             if key not in seen:
                 result.append(record)
                 seen.add(key)
@@ -501,12 +525,18 @@ class SessionResolver:
         result: list[tuple[Any, str]] = []
         seen: set[str] = set()
         for record, reason in candidates:
-            entity_id = record_id(record)
+            entity_id = _session_logical_id(record)
             if not entity_id or entity_id in seen:
                 continue
             seen.add(entity_id)
             result.append((record, reason))
-        result.sort(key=lambda pair: (self._session_number(pair[0]) or 10**9, record_label(pair[0]), record_id(pair[0]) or ""))
+        result.sort(
+            key=lambda pair: (
+                self._session_number(pair[0]) or 10**9,
+                record_label(pair[0]),
+                _session_logical_id(pair[0]) or "",
+            )
+        )
         return result
 
     @staticmethod
@@ -517,6 +547,18 @@ class SessionResolver:
 
 
 _MISSING_PROVIDER_ERRORS = (KeyError, LookupError, FileNotFoundError)
+
+
+def _session_logical_id(record: Any) -> str | None:
+    """Return a strictly valid Session logical ID from the exact ID property."""
+
+    return strict_entity_id(usage_app_id(record), "S")
+
+
+def _looks_like_relation_value(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        return any(key in value for key in ("relation", "relations", "results"))
+    return isinstance(value, (list, tuple))
 
 
 def resolve_entity(

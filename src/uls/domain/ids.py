@@ -7,7 +7,6 @@ from dataclasses import dataclass
 
 from .errors import CourseKeyParseError, EntityIdParseError
 
-
 # The frozen identifiers are deliberately strict and canonical.  In
 # particular, IDs are upper-case and the entity sequence is exactly two
 # digits.  Allocation policy may choose the first sequence, but the parser
@@ -110,4 +109,29 @@ def parse_entity_id(text: str) -> EntityId:
     )
 
 
-__all__ = ["CourseKey", "EntityId", "parse_course_key", "parse_entity_id"]
+def strict_entity_id(value: object, expected_type: str | None = None) -> str | None:
+    """Return a canonical logical ID, or ``None`` for any invalid value.
+
+    This helper deliberately does not trim, coerce, or inspect provider
+    records. Callers choose the exact logical property for their provider
+    shape, then use this domain check to bind it to the expected entity type.
+    """
+
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = parse_entity_id(value)
+    except EntityIdParseError:
+        return None
+    if expected_type is not None and parsed.entity_type != expected_type:
+        return None
+    return value
+
+
+__all__ = [
+    "CourseKey",
+    "EntityId",
+    "parse_course_key",
+    "parse_entity_id",
+    "strict_entity_id",
+]

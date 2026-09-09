@@ -36,11 +36,14 @@ class EphemeralStore(Protocol):
     # --- Context capabilities (spec §20, §25) ---
     def create_context_capability(
         self,
-        allowed_locators: list[str],
+        allowed_locators: list[Any],
         caller_scope: str | None,
         ttl_seconds: int,
-        source_hash: str,
-        source_version: int,
+        source_hash: str | None = None,
+        source_version: int | None = None,
+        *,
+        source_fingerprint: Any = None,
+        fingerprints: Any = None,
     ) -> Any: ...
     def get_context_capability(self, context_id: str) -> Any | None: ...
     def authorize_locator(
@@ -50,6 +53,7 @@ class EphemeralStore(Protocol):
         caller_scope: str | None,
         *,
         current_fingerprint: Any | None = None,
+        issued_entry: Any | None = None,
     ) -> bool: ...
 
     # --- Maintenance (spec §9.4) ---

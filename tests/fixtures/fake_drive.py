@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from uls.adapters.drive.binding import InMemorySourceBindingBackend, SourceBindingRecord
+from uls.domain.errors import SourceUnavailableError
 from uls.domain.source_ref import SourceFingerprint, SourceRef
 
 
@@ -15,6 +17,7 @@ class FakeDriveReader:
         source: Mapping[str, Any] | None = None,
         derived: Mapping[str, Any] | None = None,
         fingerprints: Mapping[str, SourceFingerprint | Mapping[str, Any]] | None = None,
+        bindings: Sequence[SourceBindingRecord | Mapping[str, Any]] | None = None,
         events: list[Any] | None = None,
     ) -> None:
         self.source = dict(source or {})
@@ -23,10 +26,32 @@ class FakeDriveReader:
             key: _fingerprint(value) for key, value in (fingerprints or {}).items()
         }
         self.events = events if events is not None else []
+        if bindings is None:
+            # This is explicit fixture setup, kept separate from graph
+            # records/front matter.  Production code never infers this table.
+            inferred: list[SourceBindingRecord] = []
+            for key in self.derived:
+                entity_id = _default_entity_for_derivative(key)
+                if entity_id is None:
+                    continue
+                ref = SourceRef("google_drive", key)
+                inferred.append(SourceBindingRecord(entity_id, key, ref, ref))
+            bindings = inferred
+        self.source_bindings = InMemorySourceBindingBackend(bindings)
 
     def read_derived(self, source_ref: SourceRef | str | Any) -> Any:
         key = _key(source_ref)
         self.events.append(("read_derived", key))
+        if isinstance(source_ref, SourceRef):
+            matches = [
+                record for record in self.source_bindings.records
+                if record.source_ref.identity == source_ref.identity
+            ]
+            derivative_ids = {record.derivative_ref.identity for record in matches}
+            if len(derivative_ids) > 1:
+                raise SourceUnavailableError("origin has ambiguous registered derivatives")
+            if matches:
+                key = matches[0].derivative_ref.file_id
         if key not in self.derived:
             raise KeyError(key)
         return self.derived[key]
@@ -50,6 +75,12 @@ class FakeDriveReader:
         if isinstance(entity_id_or_source_ref, SourceRef):
             return self.fingerprints.get(entity_id_or_source_ref.file_id)
         return None
+
+    def lookup_source_binding(self, entity_id: str, normalized_source_url: str) -> list[SourceBindingRecord]:
+        return self.source_bindings.lookup_source_binding(entity_id, normalized_source_url)
+
+    def register_source_binding(self, record: SourceBindingRecord | Mapping[str, Any]) -> None:
+        self.source_bindings.register(record)
 
 
 
@@ -98,6 +129,15 @@ def _fingerprint(value: SourceFingerprint | Mapping[str, Any] | Sequence[Any]) -
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)) and len(value) == 2:
         return SourceFingerprint(int(value[0]), str(value[1]))
     return SourceFingerprint(int(value["source_version"]), str(value["source_hash"]))
+
+
+def _default_entity_for_derivative(key: str) -> str | None:
+    lowered = key.casefold()
+    if lowered == "transcript-05":
+        return "COMP319-S05"
+    if lowered == "material-m03":
+        return "COMP319-M03"
+    return None
 
 
 __all__ = [

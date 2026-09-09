@@ -58,6 +58,21 @@ class RetrievalCfg:
     context_ttl_seconds: int = 900
     resolution_ttl_seconds: int = 900
     allow_bounded_llm_rerank: bool = False
+    # Enabled preserves the frozen Session contract: callers still need the
+    # explicit include_provisional=True request opt-in.
+    allow_provisional_material_usage: bool = True
+    # Deployment-configured Material Select -> source authority mapping.  It
+    # is never inferred from Usage.Role or derivative front matter.
+    material_type_source_class: dict[str, str] = field(
+        default_factory=lambda: {
+            "Lecture Slides": "professor_material",
+            "Professor Notes": "professor_material",
+            "Syllabus": "professor_material",
+            "Textbook": "supplemental_reference",
+            "Reference": "supplemental_reference",
+            "Supplementary": "supplemental_reference",
+        }
+    )
     # Phase 2 context budgets.  A capability describes exactly the evidence
     # returned by a context call, so these limits are applied before issuance.
     max_evidence_items: int = 12
