@@ -1,23 +1,60 @@
 # Syllva (ULS v1.2) — Handoff
 
 **Last updated:** 2026-09-09
-**Repo:** https://github.com/Just-Simple0/Syllva (`codex/phase4-8`, local; no push)
-**Starting HEAD:** `bfc592b` — Phase 3 인수인계 갱신. **Latest implementation:** `3f190fc` — Phase4 Material Usage proposals & guarded approvals (rev10, dual-review GO)
 
-이 문서는 다음 담당자/세션이 바로 이어서 작업할 수 있도록 현재 상태·계약·다음 단계를 정리한 인수인계 문서입니다.
+**Repo / branch:** https://github.com/Just-Simple0/Syllva · `codex/phase4-8` (local, push 없음)
 
-## 최신 인수인계 — Phase4 rev10 구현 완료, native 웹 + Gemini GO (2026-09-09)
+**Phase4 구현 커밋:** `3f190fc`
 
-**이 절이 모든 이전 진행 기록보다 우선한다. Phase4 구현 완료: 현재 rev10에 Codex native insane-review GO + Gemini3.8Flashhigh GO + root 검증/수용 완료. Phase5–8은 시작하지 않으며 push하지 않는다. Sonnet 리뷰는 일회성 요청이었으므로 앞으로 리뷰용 호출 금지.**
+**Phase4 완료·검증·리뷰 정책 기록 커밋:** `d9fe77e`
 
-- 두 rev9 웹 차단 결함 수정: 모든 bounded page 존재 증명과 effect_observed 저장 후 full strict target/source 재검증. 인간 복원/의존성 변화면 표식 보존·조정 대기, target 재쓰기/완료 감사 없음. 정상 처리와 감사 복구는 그대로 성공.
-- 전체 **866 passed × Python3.11.16/3.14.7**. 새30회귀는 수정 전16expected failures/14passes, 수정 후30pass. Root 일반 흐름 및 p39–40/p40 producer→승인→검색→재적용→철회, 두 결함 before/after, compile/projection/diff 통과. Ruff188/mypy74는 비정상 종료하는 기존 정적 부채이며 clean으로 보고하지 않는다. 새 normalized mypy 오류 없음.
-- 고정126파일/251페이지. 원본 copy와 실제416,632token 첨부를 각각 복원해731tests 통과, 라인 누락/변조 없음. 최종 작업 트리126hash 일치, 승인계획rev6/동결명세2개hash불변. `.review/phase4-rev10-final-acceptance.json`.
-- **웹 GO:** native insane-review-codex0.6.8, verified Latest/매우 높음,1254초 정상회수/exit0. 같은 리뷰 대화에서123동일파일 hash확인 후 과거 전체읽기 재사용, 변경base.py4512줄과 새테스트2개 전체읽기 및 관련 경로 재검토. 독립731pytest/compile/projection과 과거두반례/partialaudit/비정상sibling조합 재현. `.review/phase4-rev10-insane-review-final.md`; https://chatgpt.com/c/6aa13845-5fdc-83e9-a3e9-b3e32c1e9bdb . 강제조기답변/중복전송없음. optional회귀제안은 비차단이며 구현오류 아님.
-- **Gemini GO:** Descartes `01a085ef-7f18-7b41-9c12-6678da68018b` 종료.251전체출력/5인용대조, 독립731pytest/projection확인. 보고서 줄번호·격리mypy68/전체74·재현import·lint설명 정정/qualification은 `.review/phase4-rev10-gemini-{final.md,addendum.md,audit.json}`. Root수용. 모든서브에이전트종료, 웹session86490종료.
-- 승인 plan `docs/plans/phase4-material-usage.md`는rev6로불변; 구현rev10과구분. `docs/plans/phase4-verification.md`에 완료근거/명세§45대응/한계, `docs/plans/phase4-8-execution.md`에범위기록. 구Claude0.6.2임시wrapper는 ignored `.review/legacy-review-gpt6-pro-claude062.py`에보관; 현재 Codex native사용.
-- 한계: provider-neutral/fake 테스트이며 live SDK/MCP배포/client 검증을완료한것아님. §41선행live검증은기존deferred기록유지. Single-active-worker와최종read→audit사이 non-CAS가시성한계유지.
-- **로컬 구현 커밋 `3f190fc` 완료.** 이 인수인계와 승인계획/검증/역할지침은 별도 완료기록 커밋으로 보존한다. Push없음. 다음 작업은 사용자 지시를 기다린다.
+**작업 시작 기준:** `bfc592b` (Phase3 인수인계)
+
+## 최신 인수인계 — Phase4 완료
+
+**Phase4 구현 rev10은 Codex native insane-review GO, Gemini GO 및 총괄 검증·수용을 모두 통과했다. 구현과 완료 기록의 로컬 커밋까지 끝났다.** 진행 중인 서브에이전트나 웹 리뷰 수집 작업은 없다. 이번 문서 갱신 전 작업 트리는 깨끗했으며, 원격 푸시는 하지 않았다.
+
+### 다음 담당자가 지킬 범위와 역할
+
+- 현재 승인된 작업 범위는 **Phase4까지**다. Phase5–8은 새 사용자 지시 없이 시작하지 않고, push도 하지 않는다. 다음 작업 지시를 기다린다.
+- **Sonnet 리뷰는 일회성 요청이었다. 앞으로 리뷰용 Sonnet 호출 금지.** 이후 독립 리뷰는 Codex native insane-review와 Gemini 3.8 Flash high를 사용한다. Sonnet의 기존 계획 초안 역할과는 구분한다.
+- 개발 역할은 Luna max, 총괄 역할은 통합·명세 판단·직접 검증이다. 설치된 Codex `insane-review-codex` 플러그인을 사용하며, 이전 Claude 플러그인용 임시 실행기는 기본 경로가 아니다.
+- Pro 불가 시 사용자가 승인한 Latest / 매우 높음 설정을 실제 UI에서 검증한다. 숫자 모델 버전은 임의로 기록하지 않는다. 조기 답변을 강제하지 않으며, 전송 후 timeout은 같은 대화에서 native harvest로 회수한다.
+- 승인 계획은 **rev6**, 완료 구현은 **rev10**이다. 계획의 과거 UNAPPROVED 헤더는 후속 이중 GO로 승인됐으므로 수정하지 않는다. 승인 계획과 두 frozen 명세의 해시는 그대로 유지했다.
+
+### 완료한 동작과 검증
+
+Material Usage 제안 생성, 정규화된 승인 Queue, 사람 승인에 따른 MATERIAL_USAGE/PAGE_RANGE 적용, 불확실한 쓰기 결과의 보수적 복구, 다중 자료 검색과 후속 권한 철회를 구현했다. 마지막 웹 지적 두 건도 수정했다.
+
+1. 유한 페이지 범위는 일부 페이지만 발견돼서는 승인되지 않는다. 현재 검증된 자료에 요청한 모든 페이지가 있어야 한다.
+2. `effect_observed` 표식 저장 후 대상과 전체 근거를 다시 검증한다. 그 사이 인간 복원이나 의존성 변경이 있으면 표식을 유지하고 조정을 기다리며, 대상을 다시 쓰거나 완료 감사를 남기지 않는다. 정상 처리와 유효한 감사 재시도는 성공한다.
+
+| 검증 | 최종 결과 |
+| --- | --- |
+| 전체 테스트, Python 3.11.16 | **866 passed** |
+| 전체 테스트, Python 3.14.7 | **866 passed** |
+| 새 rev10 회귀 테스트 | 두 환경 각각 **30 passed**; 수정 전 코드에서는 16 expected failures / 14 passes |
+| 고정 소스 복사본 및 실제 웹 첨부 복원 | 각각 **731 passed**, 126파일 누락·내용 불일치 없음 |
+| 컴파일·Behavior projection·diff check | 통과 |
+| 제안→승인→검색→재적용→철회, p39–40/p40, 두 결함 before/after | 통과 |
+| Ruff / mypy | **188 findings / 74 errors** — 정적 검사는 clean이 아님; 새 정규화 mypy 오류 없음 |
+
+리뷰한 126파일은 최종 구현과 해시가 일치한다. 세부 완료 근거와 명세 §45 대응은 [Phase4 검증 기록](docs/plans/phase4-verification.md), 범위와 과거 진행 기록은 [실행 기록](docs/plans/phase4-8-execution.md), 승인된 불변 계획은 [Phase4 계획](docs/plans/phase4-material-usage.md)에 있다.
+
+### 독립 리뷰와 근거 위치
+
+- **웹 GO:** Codex native insane-review-codex 0.6.8, UI 검증된 Latest / 매우 높음. 1,254초 후 정상 회수(exit0). 이전과 동일한 123파일의 내용 동일성을 확인한 뒤 이전 전체 읽기를 재사용했고, 변경된 어댑터 4,512줄과 새 테스트 두 파일은 전체 재검토했다. 복원한 현재 코드로 731테스트·컴파일·projection을 실행하고 두 기존 결함 및 추가 복구·sibling 조합을 독립 재현했다. 최종 보고서 `.review/phase4-rev10-insane-review-final.md`, [웹 리뷰 대화](https://chatgpt.com/c/6aa13845-5fdc-83e9-a3e9-b3e32c1e9bdb). 선택적 회귀 테스트 제안은 비차단이며 미해결 구현 결함이 아니다.
+- **Gemini GO:** Gemini 3.8 Flash high, Descartes `01a085ef-7f18-7b41-9c12-6678da68018b` 종료. 251페이지 전체 출력과 인용 5개를 총괄이 원본 대조했고, 독립 731테스트·projection 실행을 확인했다. 줄 번호, 격리 mypy 68건과 전체 74건의 구분, 재현 스크립트 import 경로 및 lint 설명의 정정은 `.review/phase4-rev10-gemini-{final.md,addendum.md,audit.json}`에 보존했다.
+- 총괄 최종 수용: `.review/phase4-rev10-final-acceptance.json`. 전체 검증 로그: `.review/phase4-root-rev10-results.json`. 고정 파일 해시: `.review/phase4-integrated-review-hashes-rev10.json`.
+- `.review/`와 `.insane-review/`는 Git에서 제외된 **이 작업 환경의 로컬 증거**다. 다른 checkout에는 자동으로 전달되지 않는다. 커밋된 검증 문서와 웹 대화 링크를 먼저 참조하고, 원본 증거가 필요하면 현재 작업 환경에서 확인한다. 구 Claude 0.6.2 임시 실행기는 `.review/legacy-review-gpt6-pro-claude062.py`에 보관했다.
+
+### 남아 있는 한계
+
+Provider-neutral/fake 테스트를 통과한 것이며 live SDK, MCP 배포 또는 실제 클라이언트 검증 완료를 의미하지 않는다. 명세 §41 선행 live 검증은 기존 deferred 상태다. Single-active-worker 전제와 최종 확인부터 Queue 감사 쓰기 사이의 non-CAS 가시성 한계도 유지한다.
+
+---
+
+**아래는 과거 진행 이력이다.** “현재”, “대기”, “미완료”, “커밋 없음” 등의 표현은 당시 상태이며, 위 최신 인수인계보다 우선하지 않는다. 완료된 리뷰를 다시 시작하거나 과거 Sonnet 리뷰 호출을 반복하지 않는다.
 
 ## 이전 인수인계 — Phase4 rev10 검증 완료, native 웹 + Gemini 재검토 (2026-09-09)
 
