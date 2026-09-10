@@ -1,26 +1,28 @@
 # Syllva (ULS v1.2) — Handoff
 
-**Last updated:** 2026-09-09
+**Last updated:** 2026-09-10
 
-**Repo / branch:** https://github.com/Just-Simple0/Syllva · `codex/phase4-8` (local, push 없음)
+**Repo / merged main:** https://github.com/Just-Simple0/Syllva · Phase4는 PR1로 `main`에 `e55705f`로 병합됨 (2026-09-10 09:32:55 KST)
 
-**Phase4 구현 커밋:** `3f190fc`
+**정책 후속 work branch:** `codex/syllva-project-agents` · Phase4 병합 이후 정책 문서 작업용, 이 정책 후속 변경은 원격 `main`에 미반영(push 없음)
 
-**Phase4 완료·검증·리뷰 정책 기록 커밋:** `d9fe77e`
+**Phase4 구현 커밋:** `3f190fc`  ·  **Phase4 완료·검증 기록:** `d9fe77e`  ·  **정책 채택 기록:** `f974c7f`
 
-**작업 시작 기준:** `bfc592b` (Phase3 인수인계)
+**Phase4 당시 시작 기준:** `bfc592b` (Phase3 인수인계)
 
-## 최신 인수인계 — Phase4 완료
+## 최신 인수인계 — Phase4 완료 및 정책 정렬 후속
 
-**Phase4 구현 rev10은 Codex native insane-review GO, Gemini GO 및 총괄 검증·수용을 모두 통과했다. 구현과 완료 기록의 로컬 커밋까지 끝났다.** 진행 중인 서브에이전트나 웹 리뷰 수집 작업은 없다. 이번 문서 갱신 전 작업 트리는 깨끗했으며, 원격 푸시는 하지 않았다.
+**Phase4 구현 rev10은 독립 리뷰 GO와 총괄 검증·수용을 통과했고 PR1로 `main`에 병합됐다.** 아래 Phase4 완료 근거와 역사 기록은 보존한다. 현재 후속 작업은 정책 문서 정렬만 다루며 Phase5–8 구현이나 push를 포함하지 않는다.
 
-### 다음 담당자가 지킬 범위와 역할
+### 현재 지침과 경계
 
-- 현재 승인된 작업 범위는 **Phase4까지**다. Phase5–8은 새 사용자 지시 없이 시작하지 않고, push도 하지 않는다. 다음 작업 지시를 기다린다.
-- **Sonnet 리뷰는 일회성 요청이었다. 앞으로 리뷰용 Sonnet 호출 금지.** 이후 독립 리뷰는 Codex native insane-review와 Gemini 3.8 Flash high를 사용한다. Sonnet의 기존 계획 초안 역할과는 구분한다.
-- 개발 역할은 Luna max, 총괄 역할은 통합·명세 판단·직접 검증이다. 설치된 Codex `insane-review-codex` 플러그인을 사용하며, 이전 Claude 플러그인용 임시 실행기는 기본 경로가 아니다.
-- Pro 불가 시 사용자가 승인한 Latest / 매우 높음 설정을 실제 UI에서 검증한다. 숫자 모델 버전은 임의로 기록하지 않는다. 조기 답변을 강제하지 않으며, 전송 후 timeout은 같은 대화에서 native harvest로 회수한다.
-- 승인 계획은 **rev6**, 완료 구현은 **rev10**이다. 계획의 과거 UNAPPROVED 헤더는 후속 이중 GO로 승인됐으므로 수정하지 않는다. 승인 계획과 두 frozen 명세의 해시는 그대로 유지했다.
+- 모델/effort 선택, orchestration, review, safety는 적용 가능한 global Codex `AGENTS.md`와 프로젝트 `AGENTS.md`를 따른다. 이 handoff는 전역 정책을 복제하지 않는다. `CLAUDE.md`는 Claude 전용이다.
+- 제품의 `Single-active-worker`는 ULS runtime 제약이며 Codex subagent 동시성을 정하지 않는다.
+- **MCP search surface (MCP 검색 표면)**는 v1.2에서 read-only인 계약/스캐폴드 경계다. 현재 MCP 배포나 실제 클라이언트 검증 완료를 주장하지 않는다.
+- 승인·확인은 human-owned다. AI와 일반 자동화는 독립적으로 승인·승격할 수 없다. 자동 적용에서는 지정된 `HumanApprovalApplier`만 정책·freshness·identity 검사를 모두 통과한, 현재 유효하고 human attribution이 있는 승인 변경을 적용할 수 있으며 human approval 자체를 만들 수 없다.
+- 현재 승인된 제품 범위는 **Phase4까지**다. Phase5–8은 새 사용자 지시 없이 시작하지 않고, push도 하지 않는다.
+- 승인 계획은 **rev6**, 완료 구현은 **rev10**이다. 계획의 과거 UNAPPROVED 헤더는 후속 리뷰 기록으로 승인됐으므로 수정하지 않는다. 승인 계획과 두 frozen 명세의 해시는 그대로 유지했다.
+- 정책 정렬·호환성 감사와 검증 근거는 [Codex 정책 채택 기록](docs/codex-policy-adoption.md)에 보존한다. 전역 Codex 지침은 일반적으로 `~/.codex/AGENTS.md`, 프로젝트 지침은 [AGENTS.md](AGENTS.md)를 따른다.
 
 ### 완료한 동작과 검증
 
@@ -28,6 +30,8 @@ Material Usage 제안 생성, 정규화된 승인 Queue, 사람 승인에 따른
 
 1. 유한 페이지 범위는 일부 페이지만 발견돼서는 승인되지 않는다. 현재 검증된 자료에 요청한 모든 페이지가 있어야 한다.
 2. `effect_observed` 표식 저장 후 대상과 전체 근거를 다시 검증한다. 그 사이 인간 복원이나 의존성 변경이 있으면 표식을 유지하고 조정을 기다리며, 대상을 다시 쓰거나 완료 감사를 남기지 않는다. 정상 처리와 유효한 감사 재시도는 성공한다.
+
+**2026-09-09 Phase4 검증 기록이며 이번 문서 변경에서 재실행하지 않음.**
 
 | 검증 | 최종 결과 |
 | --- | --- |
