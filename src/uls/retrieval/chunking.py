@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import Any
 
 from uls.domain.models import PageLocator, TimeLocator, is_contained
@@ -20,6 +21,27 @@ class DerivativeChunk:
     start_offset: int = 0
     end_offset: int = 0
     symbolic_hint: str | None = None
+
+
+@dataclass(frozen=True)
+class PageMarkerIndex:
+    """A validated, contiguous page marker index for one derivative body."""
+
+    markers: tuple[tuple[int, int], ...]
+    last_page: int
+
+    @property
+    def pages(self) -> tuple[int, ...]:
+        return tuple(page for _, page in self.markers)
+
+    def contains_range(self, start_page: int, end_page: int) -> bool:
+        return (
+            start_page >= 1
+            and end_page >= start_page
+            and start_page in self.pages
+            and end_page in self.pages
+            and end_page - start_page == len(range(start_page, end_page + 1)) - 1
+        )
 
 
 def derivative_parts(derivative: Any) -> tuple[str | None, str, tuple[TimestampMark, ...], dict[str, Any]]:
@@ -152,11 +174,15 @@ def timestamp_chunks(
     return chunks[:max_chunks] if max_chunks is not None else chunks
 
 
-_PAGE_MARKER_RE = re.compile(
-    r"(?im)(?:^|\n)\s*(?:(?:#{1,6})\s*)?(?:page|페이지)\s*[:#-]?\s*([1-9][0-9]*)\b"
-    r"|(?:\[\[\s*page\s*[:=]\s*([1-9][0-9]*)\s*\]\])"
-    r"|(?:<!--\s*page\s*[:=]\s*([1-9][0-9]*)\s*-->)"
+# The value is captured as a complete token and validated below.  Matching a
+# positive-integer prefix (for example the ``1`` in ``1.5``) would silently
+# create page evidence for malformed declarations.
+_PAGE_DECLARATION_RE = re.compile(
+    r"(?im)(?:^|\n)\s*(?:(?:#{1,6})\s*)?(?:page|페이지)\s*[:#-]?\s*([^\s]+)"
+    r"|(?:\[\[\s*page\s*[:=]\s*([^\]\s]+)\s*\]\])"
+    r"|(?:<!--\s*page\s*[:=]\s*([^\s>]+)\s*-->)"
 )
+_POSITIVE_PAGE_TOKEN_RE = re.compile(r"[1-9][0-9]*\Z")
 
 
 def page_chunks(
@@ -167,50 +193,83 @@ def page_chunks(
     end_page: int | None = None,
     max_chunks: int | None = None,
 ) -> list[DerivativeChunk]:
-    """Split a material derivative using explicit page markers when present."""
+    """Split a material derivative using a validated explicit page index.
+
+    An unmarked body is not assigned page 1 (or any caller-requested range).
+    This is intentionally the same index path used by stale-locator
+    revalidation.
+    """
 
     _, body, _, _ = derivative_parts(derivative)
-    markers: list[tuple[int, int]] = []
-    for match in _PAGE_MARKER_RE.finditer(body):
-        page_text = next((value for value in match.groups() if value is not None), None)
-        if page_text is not None:
-            markers.append((match.start(), int(page_text)))
-    allowed_start = start_page if start_page is not None else 1
-    allowed_end = end_page if end_page is not None else 10**9
-    result: list[DerivativeChunk] = []
-    if not markers:
-        if body and allowed_start <= allowed_end:
-            result.append(
-                DerivativeChunk(
-                    entity_id,
-                    PageLocator(entity_id, allowed_start, allowed_end if end_page is not None else allowed_start),
-                    body,
-                    0,
-                    len(body),
-                )
-            )
-        return result[:max_chunks] if max_chunks is not None else result
+    index = validated_page_index(body)
+    if index is None:
+        return []
+    if (start_page is None) != (end_page is None):
+        return []
+    allowed_start = start_page if start_page is not None else index.markers[0][1]
+    allowed_end = end_page if end_page is not None else index.last_page
+    if not index.contains_range(allowed_start, allowed_end):
+        return []
 
-    if markers[0][0] > 0 and allowed_start <= 1 <= allowed_end:
-        result.append(DerivativeChunk(entity_id, PageLocator(entity_id, 1, 1), body[: markers[0][0]], 0, markers[0][0]))
-    for index, (offset, page) in enumerate(markers):
-        end_offset = markers[index + 1][0] if index + 1 < len(markers) else len(body)
-        next_page = markers[index + 1][1] if index + 1 < len(markers) else None
-        page_end = next_page - 1 if next_page is not None and next_page > page else page
-        if end_page is not None and next_page is None:
-            page_end = end_page
-        page_end = max(page, min(page_end, allowed_end))
-        if allowed_start <= page <= allowed_end and end_offset > offset:
-            result.append(
-                DerivativeChunk(
-                    entity_id,
-                    PageLocator(entity_id, page, page_end),
-                    body[offset:end_offset],
-                    offset,
-                    end_offset,
-                )
+    result: list[DerivativeChunk] = []
+    markers = index.markers
+    for marker_index, (offset, page) in enumerate(markers):
+        next_offset = markers[marker_index + 1][0] if marker_index + 1 < len(markers) else len(body)
+        if page < allowed_start or page > allowed_end or next_offset <= offset:
+            continue
+        content_start = 0 if marker_index == 0 else offset
+        # A pre-marker preamble is part of page one rather than a second
+        # duplicate page chunk.  It is justified only because page 1 is an
+        # explicit marker in the validated index.
+        if marker_index == 0 and offset > 0:
+            content_start = 0
+        result.append(
+            DerivativeChunk(
+                entity_id,
+                PageLocator(entity_id, page, page),
+                body[content_start:next_offset],
+                content_start,
+                next_offset,
             )
+        )
     return result[:max_chunks] if max_chunks is not None else result
+
+
+def page_marker_index(body_or_derivative: Any) -> PageMarkerIndex | None:
+    """Return a strict page index or ``None`` when markers are unsafe."""
+
+    if isinstance(body_or_derivative, str):
+        body = _lf(body_or_derivative)
+    else:
+        try:
+            _, body, _, _ = derivative_parts(body_or_derivative)
+        except (TypeError, ValueError):
+            return None
+    return validated_page_index(body)
+
+
+def validated_page_index(body: str) -> PageMarkerIndex | None:
+    """Validate unique, ordered, contiguous ``Page``/``페이지`` markers.
+
+    The index must begin at page 1 and every subsequent marker must advance
+    exactly one page.  Duplicate, decreasing, contradictory, gapped, or
+    unmarked bodies return ``None`` and cannot establish page evidence.
+    """
+
+    if not isinstance(body, str):
+        return None
+    markers: list[tuple[int, int]] = []
+    for match in _PAGE_DECLARATION_RE.finditer(_lf(body)):
+        page_text = next((value for value in match.groups() if value is not None), None)
+        if page_text is None or _POSITIVE_PAGE_TOKEN_RE.fullmatch(page_text) is None:
+            return None
+        markers.append((match.start(), int(page_text)))
+    if not markers or markers[0][1] != 1:
+        return None
+    pages = [page for _, page in markers]
+    if any(right != left + 1 for left, right in pairwise(pages)):
+        return None
+    return PageMarkerIndex(tuple(markers), pages[-1])
 
 
 def select_chunks(
@@ -251,9 +310,12 @@ def _marks(body: str) -> tuple[TimestampMark, ...]:
 
 __all__ = [
     "DerivativeChunk",
+    "PageMarkerIndex",
     "derivative_parts",
     "find_chunk_containing",
     "page_chunks",
+    "page_marker_index",
     "select_chunks",
     "timestamp_chunks",
+    "validated_page_index",
 ]

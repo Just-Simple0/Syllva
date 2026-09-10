@@ -39,6 +39,14 @@ retrieval:
   context_ttl_seconds: 900
   resolution_ttl_seconds: 900
   allow_bounded_llm_rerank: false  # opt-in; deterministic lexical/index retrieval is default
+  allow_provisional_material_usage: true  # caller must still opt in per request
+  material_type_source_class:
+    "Lecture Slides": professor_material
+    "Professor Notes": professor_material
+    "Syllabus": professor_material
+    "Textbook": supplemental_reference
+    "Reference": supplemental_reference
+    "Supplementary": supplemental_reference
   max_evidence_items: 12
   max_chars_per_item: 4000
   max_total_chars: 24000

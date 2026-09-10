@@ -68,40 +68,40 @@ def test_public_retrieval_authorization_requires_current_role_validation() -> No
         store,
         [
             CapabilityBinding(
-                entity_id="COMP319-M03",
-                locator="COMP319-M03:p13-p27",
+                entity_id="COMP319-X01",
+                locator="COMP319-X01:p13-p27",
                 source_hash="hash-v1",
                 source_version=1,
-                source_class="professor_material",
+                source_class="external",
             )
         ],
     )
     current = SourceFingerprint(1, "hash-v1")
 
     with pytest.raises(LocatorNotAllowedError):
-        authorize_locator(store, capability.context_id, "COMP319-M03:p18", None, current)
+        authorize_locator(store, capability.context_id, "COMP319-X01:p18", None, current)
     with pytest.raises(LocatorNotAllowedError):
         authorize_locator(
             store,
             capability.context_id,
-            "COMP319-M03:p18",
+            "COMP319-X01:p18",
             None,
             current,
             role_validator=lambda binding: False,
         )
 
 
-def test_public_retrieval_authorization_allows_valid_role_and_source_class() -> None:
+def test_public_retrieval_authorization_allows_valid_generic_role_and_source_class() -> None:
     store = MemoryEphemeralStore()
     capability = issue_context_capability(
         store,
         [
             CapabilityBinding(
-                entity_id="COMP319-M03",
-                locator="COMP319-M03:p13-p27",
+                entity_id="COMP319-X01",
+                locator="COMP319-X01:p13-p27",
                 source_hash="hash-v1",
                 source_version=1,
-                source_class="professor_material",
+                source_class="external",
             )
         ],
     )
@@ -110,14 +110,14 @@ def test_public_retrieval_authorization_allows_valid_role_and_source_class() -> 
 
     def validate_role(binding: CapabilityBinding) -> bool:
         seen.append(binding.source_class)
-        return binding.source_class == "professor_material"
+        return binding.source_class == "external"
 
     assert authorize_locator(
         store,
         capability.context_id,
-        "COMP319-M03:p18",
+        "COMP319-X01:p18",
         None,
         current,
         role_validator=validate_role,
     ) is True
-    assert seen == ["professor_material"]
+    assert seen == ["external"]

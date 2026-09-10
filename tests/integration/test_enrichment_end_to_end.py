@@ -9,6 +9,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures")
 from fake_drive import FakeDriveReader
 from fake_llm import FakeLLMAdapter, material_result, session_result
 from fake_notion import COURSE_KEY, FakeNotionReader, FakeNotionWriter
+from uls.adapters.drive.binding import ValidatedSourceBindingResolver
 from uls.config.schema import UlsConfig
 from uls.domain.enums import ProcessingStatus
 from uls.domain.source_ref import SourceFingerprint, SourceRef
@@ -72,6 +73,7 @@ def _setup():
         "ID": "USAGE-03",
         "Session": "COMP319-S05",
         "Material ID": "COMP319-M03",
+        "Role": "Primary",
         "Verified": True,
         "Start Page": 1,
         "End Page": 2,
@@ -101,6 +103,7 @@ def _engine(reader, drive):
         None,
         MemoryEphemeralStore(),
         UlsConfig(),
+        source_binding_resolver=ValidatedSourceBindingResolver(drive),
     )
 
 

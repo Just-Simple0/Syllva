@@ -8,6 +8,7 @@ from .schemas import (
     ResolutionResult,
     RetrievalBudget,
 )
+from .scope import usage_app_id
 
 __all__ = [
     "CapabilityBinding",
@@ -16,4 +17,5 @@ __all__ = [
     "ResolutionResult",
     "RetrievalBudget",
     "RetrievalEngine",
+    "usage_app_id",
 ]

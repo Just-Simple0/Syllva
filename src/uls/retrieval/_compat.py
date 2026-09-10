@@ -111,6 +111,21 @@ def text(value: Any, default: str | None = None) -> str | None:
     return default
 
 
+def strict_text(value: Any, default: str | None = None) -> str | None:
+    """Unwrap provider text without normalizing its identity value.
+
+    Retrieval authorization compares Usage.Role and Material.Type exactly.
+    The general ``text`` helper remains intentionally user-friendly for
+    labels and aliases; this helper preserves surrounding whitespace so a raw
+    graph edit cannot be normalized back into the issued value.
+    """
+
+    value = unwrap(value)
+    if isinstance(value, str) and value and value.strip():
+        return value
+    return default
+
+
 def record_id(record: Any) -> str | None:
     value = text(field(record, "ID", "Entity ID", "id", "entity_id"))
     if value:
@@ -311,8 +326,8 @@ __all__ = [
     "coerce_source_ref",
     "exact_alias_match",
     "field",
-    "is_truthy",
     "is_strict_true",
+    "is_truthy",
     "normal_key",
     "properties",
     "raw_field",
@@ -322,6 +337,7 @@ __all__ = [
     "record_label",
     "relation_id",
     "relation_records",
+    "strict_text",
     "text",
     "unwrap",
 ]

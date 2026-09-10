@@ -201,6 +201,7 @@ class MemoryEphemeralStore:
         caller_scope: str | None = None,
         *,
         current_fingerprint: SourceFingerprint | None = None,
+        issued_entry: AllowedLocator | None = None,
     ) -> bool:
         with self._lock:
             capability = self._contexts.get(context_id)
@@ -221,14 +222,34 @@ class MemoryEphemeralStore:
                 # below remain structured policy errors.
                 return False
             try:
-                matches = [
-                    allowed
-                    for allowed in capability.allowed_locators
-                    if is_contained(parsed_locator, allowed.locator)
-                ]
+                if issued_entry is not None:
+                    if not isinstance(issued_entry, AllowedLocator):
+                        return False
+                    # The selector is a complete immutable tuple, never an
+                    # arbitrary list index supplied by a caller.  Compare it
+                    # against the capability's canonical entries while the
+                    # lock is held, then perform all checks against that one
+                    # entry only.
+                    matches = [
+                        allowed
+                        for allowed in capability.allowed_locators
+                        if allowed.canonical_key == issued_entry.canonical_key
+                    ]
+                    if len(matches) != 1:
+                        return False
+                    allowed_entry = matches[0]
+                    if not is_contained(parsed_locator, allowed_entry.locator):
+                        return False
+                else:
+                    matches = [
+                        allowed
+                        for allowed in capability.allowed_locators
+                        if is_contained(parsed_locator, allowed.locator)
+                    ]
+                    if not matches:
+                        return False
+                    allowed_entry = None
             except LocatorParseError:
-                return False
-            if not matches:
                 return False
             if current_fingerprint is None:
                 # Every allowed locator is source-version bound.  Without a
@@ -237,7 +258,14 @@ class MemoryEphemeralStore:
                 return False
             if not isinstance(current_fingerprint, SourceFingerprint):
                 raise TypeError("current_fingerprint must be a SourceFingerprint or None")
-            if all(
+            if issued_entry is not None:
+                assert allowed_entry is not None
+                if (
+                    allowed_entry.source_hash == current_fingerprint.source_hash
+                    and allowed_entry.source_version == current_fingerprint.source_version
+                ):
+                    return True
+            elif all(
                 allowed.source_hash == current_fingerprint.source_hash
                 and allowed.source_version == current_fingerprint.source_version
                 for allowed in matches

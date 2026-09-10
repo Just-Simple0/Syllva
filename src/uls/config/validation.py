@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import math
 import types
+from collections.abc import Mapping
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
 from uls.domain.errors import UlsError
 from uls.domain.ids import parse_course_key
+from uls.retrieval.authority import SUPPORTED_MATERIAL_SOURCE_CLASSES
 
 from .errors import ConfigurationError
 from .schema import UlsConfig
-
 
 MAX_CONFIG_TTL_SECONDS = 24 * 60 * 60
 
@@ -132,6 +133,23 @@ def validate_config(cfg: UlsConfig) -> list[str]:
         "retrieval.max_followup_chunks",
         problems,
     )
+    mapping = cfg.retrieval.material_type_source_class
+    if not isinstance(mapping, Mapping):
+        problems.append("retrieval.material_type_source_class must be a mapping")
+    else:
+        for material_type, source_class in mapping.items():
+            if not isinstance(material_type, str) or not material_type.strip():
+                problems.append(
+                    "retrieval.material_type_source_class keys must be non-empty strings"
+                )
+            if (
+                not isinstance(source_class, str)
+                or source_class not in SUPPORTED_MATERIAL_SOURCE_CLASSES
+            ):
+                problems.append(
+                    "retrieval.material_type_source_class values must be one of: "
+                    + ", ".join(sorted(SUPPORTED_MATERIAL_SOURCE_CLASSES))
+                )
     if (
         isinstance(cfg.behavior_contract.version, bool)
         or not isinstance(cfg.behavior_contract.version, int)
@@ -220,4 +238,4 @@ def _validate_positive_number(value: object, name: str, problems: list[str]) -> 
         problems.append(f"{name} must be positive")
 
 
-__all__ = ["ConfigurationError", "MAX_CONFIG_TTL_SECONDS", "validate_config"]
+__all__ = ["MAX_CONFIG_TTL_SECONDS", "ConfigurationError", "validate_config"]

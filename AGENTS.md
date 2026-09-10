@@ -24,7 +24,8 @@ Model/effort selection, orchestration, reviews, and safety follow the applicable
 - The **MCP search surface (MCP 검색 표면)** is **read-only** in v1.2.
 - Preserve the `SOURCE` / `AI` / `USER` ownership distinction. AI output must not be relabeled as `SOURCE`, and USER content must not be automatically overwritten.
 - Normalization is not summarization. `Partial` must never silently become `Ready`.
-- `Material Usage.Verified = true` and `Exam.Scope Confirmed = true` are human-only; AI and automation cannot promote them.
+- Approval and confirmation are human-owned. AI and ordinary automation must not independently approve or promote `Material Usage.Verified = true` or `Exam.Scope Confirmed = true`.
+- For automated application, only the specified `HumanApprovalApplier` may apply the exact currently valid, attributable human-approved change after all required policy, freshness, and identity checks; it cannot create human approval or promote a value autonomously.
 - The engine performs freshness validation. Stale enrichment is excluded from factual evidence.
 - `get_source_chunk` accepts only locators in the allowlist of a pre-issued context capability.
 - Do not use public (`anyone-with-link`) sharing for search convenience.
