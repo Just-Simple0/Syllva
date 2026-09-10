@@ -295,6 +295,42 @@ class SQLiteStateStore:
                     ).fetchone()
             return None if row is None else _job_from_row(row)
 
+    def list_jobs(self, *, limit: int = 100, entity_id: str | None = None) -> list[Job]:
+        if type(limit) is not int or not 1 <= limit <= 1000:
+            raise ValueError("job listing limit must be 1–1000")
+        with self._lock:
+            if entity_id is None:
+                rows = self._connection.execute(
+                    "SELECT * FROM jobs ORDER BY created_at DESC, rowid DESC LIMIT ?", (limit,)
+                )
+            else:
+                rows = self._connection.execute(
+                    "SELECT * FROM jobs WHERE target_entity_id=? ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                    (entity_id, limit),
+                )
+            return [_job_from_row(row) for row in rows]
+
+    def request_reprocess(self, job_id: str) -> Job:
+        """Explicit local operator reprocessing; preserve prior attempt records.
+
+        Caller must hold the local worker lock. This is deliberately distinct
+        from automatic retry policy and cannot restart an active job.
+        """
+        with self._transaction(immediate=True) as connection:
+            row = connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None or row["status"] not in {"READY", "PARTIAL", "NEEDS_REVIEW", "FAILED"}:
+                raise ValueError("reprocess requires an existing terminal job")
+            source = connection.execute(
+                "SELECT current_hash FROM source_files WHERE source_file_id=?", (row["source_file_id"],)
+            ).fetchone()
+            if source is not None and source["current_hash"] != row["source_hash"]:
+                raise ValueError("reprocess requires the current source version; run sync first")
+            connection.execute(
+                """UPDATE jobs SET status='PENDING', attempt_count=0, error_class=NULL,
+                last_error=NULL, completed_at=NULL, updated_at=? WHERE id=?""", (_utc_now(), job_id)
+            )
+            return _job_from_row(connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
+
     def claim_job(self, job_id: str | None = None, *, worker_id: str | None = None) -> Job | None:
         """Atomically claim a pending job and increment its attempt count."""
 
@@ -351,7 +387,7 @@ class SQLiteStateStore:
                     """
                     UPDATE processing_records
                     SET status = ?, finished_at = COALESCE(finished_at, ?)
-                    WHERE job_id = ?
+                    WHERE job_id = ? AND finished_at IS NULL
                     """,
                     (JobStatus.FAILED.value, now, selected_id),
                 )
@@ -375,7 +411,7 @@ class SQLiteStateStore:
                 """
                 UPDATE processing_records
                 SET status = ?, finished_at = NULL
-                WHERE job_id = ?
+                WHERE job_id = ? AND finished_at IS NULL
                 """,
                 (JobStatus.PROCESSING.value, selected_id),
             )
@@ -470,7 +506,7 @@ class SQLiteStateStore:
                     """
                     UPDATE processing_records
                     SET status = ?, finished_at = NULL
-                    WHERE job_id = ?
+                    WHERE job_id = ? AND finished_at IS NULL
                     """,
                     (desired.value, job_id),
                 )
@@ -479,7 +515,7 @@ class SQLiteStateStore:
                     """
                     UPDATE processing_records
                     SET status = ?, finished_at = NULL
-                    WHERE job_id = ?
+                    WHERE job_id = ? AND finished_at IS NULL
                     """,
                     (desired.value, job_id),
                 )
@@ -488,7 +524,7 @@ class SQLiteStateStore:
                     """
                     UPDATE processing_records
                     SET status = ?, finished_at = COALESCE(finished_at, ?)
-                    WHERE job_id = ?
+                    WHERE job_id = ? AND finished_at IS NULL
                     """,
                     (desired.value, finished, job_id),
                 )

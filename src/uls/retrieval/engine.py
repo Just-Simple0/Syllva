@@ -8,6 +8,7 @@ from typing import Any
 
 from uls.adapters.drive.base import DriveReader
 from uls.adapters.drive.binding import ActivityInstructionBinding, SourceBindingResolver
+from uls.adapters.github.base import GitHubReader
 from uls.adapters.notion.base import NotionReader
 from uls.domain.academic import ActivityConstraintMetadata, ActivityRecord, ExamRecord
 from uls.domain.course_identity import (
@@ -25,6 +26,7 @@ from uls.domain.errors import (
     PolicyDeniedError,
     SourcePartialError,
     SourceUnavailableError,
+    UlsError,
 )
 from uls.domain.ids import strict_entity_id
 from uls.domain.models import EvidenceItem, PageLocator, TimeLocator, parse_locator
@@ -101,6 +103,7 @@ class RetrievalEngine:
         config: Any,
         *,
         source_binding_resolver: SourceBindingResolver | None = None,
+        github_reader: GitHubReader | None = None,
     ) -> None:
         self.notion_reader = notion_reader
         self.drive_reader = drive_reader
@@ -112,6 +115,7 @@ class RetrievalEngine:
         # method.  Never manufacture one from the reader: callers must inject
         # the independently validated resolver explicitly.
         self.source_binding_resolver = source_binding_resolver
+        self.github_reader = github_reader
         self.budget = budget_from_config(config)
         self.resolver = SessionResolver(
             notion_reader,
@@ -131,7 +135,32 @@ class RetrievalEngine:
         course_hint: Any | None = None,
         entity_type: str = "session",
     ) -> ResolutionResult:
-        return self.resolver.resolve_entity(query, course_hint, entity_type)
+        if entity_type.casefold() == "session":
+            return self.resolver.resolve_entity(query, course_hint, entity_type)
+        from .additional import resolve_academic_entity
+
+        return resolve_academic_entity(self, query, course_hint, entity_type)
+
+    def search_concept(self, course_key: str, concept: str, *,
+                       include_textbook: bool = False,
+                       caller_scope: str | None = None) -> ContextPackage:
+        from .additional import search_concept
+
+        return search_concept(self, course_key, concept,
+                              include_textbook=include_textbook, caller_scope=caller_scope)
+
+    def verify_claim(self, course_key: str, claim: str, *, entity_hint: str | None = None,
+                     caller_scope: str | None = None) -> ContextPackage:
+        from .additional import verify_claim
+
+        return verify_claim(self, course_key, claim, entity_hint=entity_hint,
+                            caller_scope=caller_scope)
+
+    def get_user_context(self, entity_id: str, query: str, *,
+                         caller_scope: str | None = None) -> ContextPackage:
+        from .additional import get_user_context
+
+        return get_user_context(self, entity_id, query, caller_scope=caller_scope)
 
     def select_resolution(self, resolution_id: str, candidate_id: str) -> Any:
         return self.resolver.select_resolution(resolution_id, candidate_id)
@@ -755,6 +784,33 @@ class RetrievalEngine:
             if item.source_class == "official_activity" else item
             for item in final_evidence
         )
+        from .github import activity_code_context
+
+        try:
+            result_context = activity_code_context(
+                activity, self.github_reader, query=query,
+                max_files=self.budget.max_evidence_items,
+                max_chars_per_file=self.budget.max_chars_per_item,
+                max_total_chars=max(0, self.budget.max_total_chars - sum(
+                    len(item.content) for item in final_evidence
+                )),
+            )
+        except UlsError as exc:
+            # Missing/invalid submission evidence must be visible without
+            # suppressing the independently validated official instructions.
+            result_context = {"provider": "github", "status": "unavailable", "error": exc.code}
+            warnings.append(_warning(exc.code, "GitHub submission evidence is unavailable"))
+        # GitHub reads are external calls. Revalidate the Activity snapshot and
+        # all page/time capabilities after them, before exposing either result.
+        current_activity = self._get_activity_record(activity.entity_id)
+        if current_activity != activity:
+            raise SourceUnavailableError("Activity changed during result retrieval")
+        final_items, final_refs = self._retain_current_evidence(
+            list(final_evidence), list(final_bindings), warnings
+        )
+        if len(final_items) != len(final_evidence):
+            raise SourceUnavailableError("Activity source changed during result retrieval")
+        final_evidence, final_bindings = tuple(final_items), tuple(final_refs)
         capability = self.capabilities.issue(final_bindings, caller_scope=caller_scope)
         return assemble_context_package(
             entity={
@@ -769,6 +825,7 @@ class RetrievalEngine:
                 "official_constraint": constraint,
                 "instruction_coverage": coverage,
                 "constraint_conflict_rule": "official_activity instructions govern conflicting recommendations",
+                "result_source": result_context,
             },
             sources=final_evidence,
             warnings=warnings,

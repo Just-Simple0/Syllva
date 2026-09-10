@@ -92,6 +92,11 @@ class RemoteMcpCfg:
     enabled: bool = False
     auth_mode: str = "oauth_or_bearer"
     public_unauthenticated: bool = False
+    public_url: str = ""
+    host: str = "127.0.0.1"
+    port: int = 8765
+    tls_certfile: str = ""
+    tls_keyfile: str = ""
 
 
 @dataclass

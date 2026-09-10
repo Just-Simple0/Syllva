@@ -2,7 +2,59 @@
 
 **Last updated:** 2026-09-10
 
-## 최신 인수인계 — Phase5 구현·검증 완료 (2026-09-10)
+## 최신 인수인계 — Phase6–8 저장소 구현·로컬 검증 완료 (2026-09-10)
+
+사용자의 최신 지시 **“오케스트레이션 무시하고 너가 phase 8까지 구현 완료”**에 따라
+현재 assistant가 단독으로 설계·구현·검증했다. 이번 작업에서는 위임과 독립 웹/Gemini
+리뷰 단계를 실행하지 않았다. 제품의 frozen 계약, 읽기 전용 MCP와 사람 승인 경계는
+유지했다. 기준은 Phase5 병합 커밋 `f4c321e`, 작업 브랜치는 `codex/phase6-8-direct`다.
+
+### 구현한 동작
+
+- **Phase6:** GitHub 저장소·정확한 commit/tag 검증, 고정 tree/blob 조회와 checksum,
+  Activity 결과의 Repository Path/Submission Ref 연결. 잘못된 ref는 명시적 오류가 되며
+  현재 branch로 대체하지 않는다. 공식 지침과 제출 코드의 출처·권한을 구분한다.
+- **Phase7:** Behavior Contract v2와 여섯 projection의 해시 검증, 11파일 client zip,
+  설치 안내·support matrix·실제 client E2E 체크리스트. ChatGPT 연결은
+  `DEPLOYMENT_DEFERRED`이며 실사용 지원 검증을 완료했다고 표시하지 않는다.
+- **Phase8:** 같은 `uls run`을 실행하는 launchd/Task Scheduler, 실제 SDK stdio/HTTP
+  MCP와 11개 읽기 전용 도구, 분리된 RO provider 조합, TLS·짧은 bearer 인증,
+  status/doctor/health, 작업 잠금·재시도·재처리와 백업·복원·offline 안내.
+- Native transcript 흐름은 등록 원본 → 정규화 업로드/readback → Notion SOURCE
+  메타데이터 → durable provenance → 읽기 전용 검색까지 연결했다. 재처리 중 과거
+  처리 기록을 보존하고 USER가 바꾼 포인터를 덮어쓰지 않는다. AI 보강 결과가 원본
+  binding이나 재처리 대상으로 섞이지 않도록 회귀 검증했다.
+
+### 검증과 전달
+
+- Python **3.14.7·3.11.16 각각 전체 1,051개 통과**. 3.11에서는 독립 환경에 설치한
+  wheel의 실제 MCP SDK 프로세스도 검증했다. 추가 회귀는 총 56개다.
+- Canonical projection/hash lint, client zip, wheel 설치·CLI·SQLite 백업, compileall,
+  diff check, macOS plist lint와 Windows XML 검증 통과.
+- Ruff **183개**, mypy **74개** 기존 지적은 남는다. Phase5 감사와 비교한 새 정규화
+  지적은 0개다. 외부 Starlette/AnyIO deprecation warning 1개가 남는다.
+- macOS/Windows × Python3.11/3.14 GitHub Actions 정의를 추가했다. 원격 CI 실행,
+  push/merge, scheduler 설치와 외부 서비스 변경은 수행하지 않았다.
+- 세부 수용·검증·한계: [Phase6–8 검증 기록](docs/plans/phase6-8-verification.md).
+  작업 기록: [직접 실행 기록](docs/plans/phase6-8-direct.md).
+  운영 시작점: [설치·운영 안내](deployment/README.md).
+
+### 여전히 필요한 live 검증
+
+이번 완료 범위는 명세 §47–49의 저장소 구현과 로컬 검증이다. **전체 v1.2 live Done
+(§56) 완료는 아니다.** 이전 §41 C0/M0/VS0/VS0-B/Goodnotes live gates, 실제
+Notion/Drive/Claude/ChatGPT 계정 E2E, Windows host 실행, 배포와 권한·TLS 경로 확인은
+미검증 상태다. Native scheduler 입력은 현재 transcript만 지원하며 다른 원본 종류는
+거부한다. 기존 provider-neutral PDF/enrichment/approval 코드를 모두 live worker에
+연결했다고 주장하지 않는다. 내장 remote는 개발용 bearer profile이며 OAuth/OIDC와
+상시 모바일 연결은 제공하지 않는다. Primary PC가 켜져 있고 online이어야 한다.
+
+---
+
+**아래는 이전 인수인계다. 당시 범위·완료·승인·미구현 표현은 역사 기록이며 위 최신
+인수인계와 현재 사용자 지시가 우선한다.**
+
+## 이전 인수인계 — Phase5 구현·검증 완료 (2026-09-10)
 
 **Phase5 fix3와 테스트 보강분은 필수 웹·Gemini GO 및 Astra 최종 수용을 통과했다.** 구현 커밋은 `354a2606b2e2e60049babc257e0e883dfb09b2a5`이며, 시작 기준은 `9ba41a5`, 작업 브랜치는 `codex/phase5-8-completion`이다. 사용자 지시에 따라 이번 범위는 Phase5에서 끝난다.
 

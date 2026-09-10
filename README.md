@@ -1,6 +1,6 @@
 # University Learning System (ULS) — v1.2
 
-**Status:** Frozen for v1.2 implementation
+**Status:** Phase 6–8 repository implementation and local validation complete; live release validation deferred
 **Architecture style:** Model-agnostic · MCP-centered · Local-primary · Single-active-worker · Cross-platform
 **Primary desktop platforms:** macOS, Windows
 **Core language:** Python 3
@@ -47,14 +47,22 @@ tests/            unit / contract / integration / e2e / fixtures
 ```bash
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"
-
-cp .env.example .env             # fill in credentials (never commit)
-cp config.example.yaml config.yaml
-
+pip install -e ".[dev,mcp,drive,notion]"
 uls init
 uls doctor
 ```
+
+Edit the generated config and metadata-only `sources.json`, and provide separate
+worker/MCP credentials through the process environment. The runtime does not
+automatically load `.env` files. `doctor` reports missing configuration until
+provider IDs and credentials are configured.
+
+See [desktop/remote setup](deployment/README.md), [client packaging](clients/README.md)
+and [implementation verification](docs/plans/phase6-8-verification.md). The native
+scheduled worker currently handles transcript registrations. Real client E2E,
+Windows-host operation and the earlier live source-validation gates are still
+unrecorded; the built-in authenticated remote profile uses development bearer
+credentials, not OAuth.
 
 ## CLI
 

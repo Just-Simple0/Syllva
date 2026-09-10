@@ -1,5 +1,6 @@
 # University Learning System — example configuration (spec §5)
-# Copy to config.yaml. Secrets stay in .env, never here.
+# Copy to config.yaml. Secrets come from the process environment, never here.
+# The CLI does not automatically load .env files.
 
 system:
   timezone: Asia/Seoul
@@ -62,7 +63,7 @@ remote_mcp:
   public_unauthenticated: false
 
 behavior_contract:
-  version: 1
+  version: 2
   path: contracts/study-behavior.md
 
 courses:

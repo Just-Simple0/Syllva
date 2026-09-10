@@ -36,6 +36,7 @@ SECRET_KEYS = (
     "GITHUB_READ_TOKEN",
     "LLM_API_KEY",
     "REMOTE_MCP_SECRET",
+    "REMOTE_MCP_EXPIRES_AT",
 )
 
 _CfgT = TypeVar("_CfgT")

@@ -21,9 +21,9 @@ dependencies = [
 
 [project.optional-dependencies]
 drive = ["google-api-python-client>=2.0", "google-auth>=2.0"]
-notion = ["notion-client>=2.0"]
+notion = ["notion-client>=3.1,<4"]
 github = ["PyGithub>=2.0"]
-mcp = ["mcp>=1.0"]
+mcp = ["mcp>=2.2,<3", "uvicorn>=0.30,<1"]
 pdf = ["pypdf>=4.0"]
 dev = [
     "pytest>=8.0",
@@ -37,6 +37,11 @@ uls = "uls.cli.main:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/uls"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"contracts" = "uls/data/contracts"
+"clients" = "uls/data/clients"
+"config.example.yaml" = "uls/data/config.example.yaml"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

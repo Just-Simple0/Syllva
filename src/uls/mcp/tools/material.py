@@ -1,9 +1,6 @@
-"""MCP tool: uls.material (read-only).
+"""Direct tool entry points sharing transport validation and safe errors."""
+from functools import partial
 
-Spec reference: spec §24.
-Implementation delegated to Codex (dev/impl role); this is a scaffold stub.
-"""
+from . import invoke_read_only
 
-from __future__ import annotations
-
-# TODO(codex): implement per spec §24.
+get_material_context = partial(invoke_read_only, 'uls.get_material_context')
