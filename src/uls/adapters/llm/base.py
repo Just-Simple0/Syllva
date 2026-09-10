@@ -138,4 +138,17 @@ class LLMAdapter(Protocol):
         ...
 
 
-__all__ = ["LLMAdapter", "LLMEnrichmentResult"]
+@runtime_checkable
+class MaterialUsageProposer(Protocol):
+    """Separate worker capability for proposing graph Usage changes.
+
+    This is intentionally not part of :class:`LLMAdapter`: enrichment and
+    human-gated graph proposal generation have different input/output and
+    authority contracts.
+    """
+
+    def propose_material_usage(self, **kwargs: Any) -> Any:
+        ...
+
+
+__all__ = ["LLMAdapter", "LLMEnrichmentResult", "MaterialUsageProposer"]

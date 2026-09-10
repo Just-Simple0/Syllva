@@ -1,56 +1,29 @@
-import sys, pathlib; sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures"))
 
 from datetime import datetime, timezone
 
 import pytest
 
+from fake_notion import FakeNotionAdapter
+from phase4 import phase4_applier_kwargs, phase4_proposal, ready_phase4
 from uls.adapters.notion.base import (
     AUTOMATION_QUEUE,
     ApprovalReader,
     Decision,
     HumanApprovalApplier,
-    QueueState,
     ProposalType,
+    QueueState,
     enforce_write_policy,
     mark_proposal_failed,
     mark_proposal_superseded,
+    upsert_proposal,
 )
 from uls.domain.enums import AutomationActor
 from uls.domain.errors import PolicyViolation
-
-
-class FakeNotionAdapter:
-    def __init__(self) -> None:
-        self.queue: dict[str, dict[str, object]] = {}
-        self.entities: dict[tuple[str, str], dict[str, object]] = {}
-        self.writes: list[tuple[str, str, dict[str, object], AutomationActor]] = []
-
-    def read_approval(self, proposal_id: str):
-        return self.queue.get(proposal_id)
-
-    def find_entity_by_id(self, target_db: str, entity_id: str):
-        return self.entities.get((target_db, entity_id))
-
-    def update_properties(
-        self,
-        target_db: str,
-        entity_id: str,
-        patch,
-        *,
-        actor,
-        system_transition: bool = False,
-    ):
-        enforce_write_policy(
-            actor,
-            target_db,
-            patch,
-            system_transition=system_transition,
-        )
-        self.writes.append((target_db, entity_id, dict(patch), actor))
-        if target_db == AUTOMATION_QUEUE:
-            self.queue[entity_id].update(patch)
-        else:
-            self.entities[(target_db, entity_id)].update(patch)
 
 
 def test_automation_human_only_fields_and_queue_states_are_denied() -> None:
@@ -58,6 +31,7 @@ def test_automation_human_only_fields_and_queue_states_are_denied() -> None:
         ("Material Usage", {"Verified": True}),
         ("Material Usage", {"Verified": 1}),
         ("Material Usage", {"Verified": "true"}),
+        ("Material Usage", {"Role": "Reference"}),
         ("Exams", {"Scope Confirmed": True}),
         (AUTOMATION_QUEUE, {"Decision": Decision.Pending}),
         (AUTOMATION_QUEUE, {"Decision": "Approve"}),
@@ -103,7 +77,6 @@ def test_automation_system_transition_is_the_only_update_path_for_terminal_state
                 {"State": state, "Last Error": "not an allowed system state"},
                 system_transition=True,
             )
-
     with pytest.raises(PolicyViolation):
         enforce_write_policy(
             AutomationActor.AUTOMATION,
@@ -188,70 +161,52 @@ def test_approval_reader_derives_state_without_decision_mutation() -> None:
         )
 
 
-def _approved_usage_proposal() -> dict[str, object]:
-    return {
-        "Proposal ID": "p-usage",
-        "Proposal Type": ProposalType.MATERIAL_USAGE.value,
-        "State": QueueState.APPROVED.value,
-        "Decision": Decision.Approve.value,
-        "Decision By": "human-reviewer",
-        "Source Hash": "hash-a",
-        "Source Version": 1,
-        "Target Entity ID": "MU-01",
-        "Proposed Action": {
-            "Verified": True,
-            "Session ID": "S-01",
-            "Material ID": "M-01",
-        },
-    }
-
-
-def test_applier_requires_exact_current_proposal_and_allows_exact_mutation() -> None:
-    fake = FakeNotionAdapter()
-    proposal = _approved_usage_proposal()
-    fake.queue["p-usage"] = dict(proposal)
-    fake.entities[("Material Usage", "MU-01")] = {
-        "ID": "MU-01",
-        "Session": "S-01",
-        "Material": "M-01",
-        "Source Hash": "hash-a",
-        "Source Version": 1,
-        "Verified": False,
-    }
-    applier = HumanApprovalApplier(
-        fake,
+def test_applier_requires_exact_current_phase4_proposal_and_allows_exact_mutation() -> None:
+    reader, writer, drive, resolver = ready_phase4()
+    proposal = phase4_proposal(reader)
+    upsert_proposal(writer, proposal)
+    writer.queue[proposal["Proposal ID"]]["Decision"] = Decision.Approve.value
+    writer.queue[proposal["Proposal ID"]]["State"] = QueueState.APPROVED.value
+    result = HumanApprovalApplier(
+        writer,
         decision_by="human-reviewer",
         clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc),
-    )
-    result = applier.apply(proposal)
+        **phase4_applier_kwargs(reader, drive, resolver),
+    ).apply(proposal)
     assert result.state is QueueState.APPLIED
-    assert fake.entities[("Material Usage", "MU-01")]["Verified"] is True
-    assert fake.queue["p-usage"]["State"] == QueueState.APPLIED.value
-    assert fake.queue["p-usage"]["Decision By"] == "human-reviewer"
-    assert "Decision At" in fake.queue["p-usage"]
-    assert "Applied At" in fake.queue["p-usage"]
+    assert reader.get_material_usage("COMP319-S05")[0]["Verified"] is True
+    assert writer.queue[proposal["Proposal ID"]]["State"] == QueueState.APPLIED.value
+    assert writer.queue[proposal["Proposal ID"]]["Decision By"] == "human-reviewer"
+    assert "Decision At" in writer.queue[proposal["Proposal ID"]]
+    assert "Applied At" in writer.queue[proposal["Proposal ID"]]
 
 
 def test_applier_without_current_approved_proposal_is_denied() -> None:
-    fake = FakeNotionAdapter()
+    reader, writer, drive, resolver = ready_phase4()
+    proposal = phase4_proposal(reader)
     with pytest.raises(PolicyViolation):
-        HumanApprovalApplier(fake).apply(_approved_usage_proposal())
+        HumanApprovalApplier(
+            writer,
+            decision_by="human-reviewer",
+            **phase4_applier_kwargs(reader, drive, resolver),
+        ).apply(proposal)
 
 
-def test_applier_rejects_a_different_target_or_action_under_same_proposal_id() -> None:
-    fake = FakeNotionAdapter()
-    current = _approved_usage_proposal()
-    fake.queue["p-usage"] = dict(current)
-    fake.entities[("Material Usage", "MU-01")] = {
-        "ID": "MU-01",
-        "Session": "S-01",
-        "Material": "M-01",
-        "Verified": False,
-    }
+def test_applier_rejects_a_different_target_under_same_proposal_id() -> None:
+    reader, writer, drive, resolver = ready_phase4()
+    current = phase4_proposal(reader)
+    upsert_proposal(writer, current)
+    writer.queue[current["Proposal ID"]]["Decision"] = Decision.Approve.value
+    writer.queue[current["Proposal ID"]]["State"] = QueueState.APPROVED.value
     wrong = dict(current)
-    wrong["Target Entity ID"] = "MU-02"
+    wrong["Target Entity ID"] = "MU:other"
     with pytest.raises(PolicyViolation):
-        HumanApprovalApplier(fake).apply(wrong)
+        HumanApprovalApplier(
+            writer,
+            decision_by="human-reviewer",
+            **phase4_applier_kwargs(reader, drive, resolver),
+        ).apply(wrong)
+    assert writer.target_mutations == 0
 
 
 def test_applier_allows_exact_exam_scope_mutation() -> None:

@@ -26,4 +26,12 @@ class DriveReader(Protocol):
         ...
 
 
-__all__ = ["DriveReader"]
+@runtime_checkable
+class SourceBindingReader(Protocol):
+    """Optional read-only trusted graph/derivative association surface."""
+
+    def lookup_source_binding(self, entity_id: str, normalized_source_url: str) -> Any:
+        ...
+
+
+__all__ = ["DriveReader", "SourceBindingReader"]

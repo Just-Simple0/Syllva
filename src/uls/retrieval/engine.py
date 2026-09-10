@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 from uls.adapters.drive.base import DriveReader
+from uls.adapters.drive.binding import SourceBindingResolver
 from uls.adapters.notion.base import NotionReader
+from uls.domain.course_identity import (
+    CourseIdentity,
+    resolve_course_relation,
+    validate_course_record,
+)
 from uls.domain.enums import DerivativeStatus, FreshnessStatus, RetrievalIntent
 from uls.domain.errors import (
     ContextExpiredError,
@@ -14,21 +21,23 @@ from uls.domain.errors import (
     LocatorNotAllowedError,
     LocatorParseError,
     LocatorStaleError,
+    PolicyDeniedError,
     SourcePartialError,
     SourceUnavailableError,
 )
+from uls.domain.ids import strict_entity_id
 from uls.domain.models import EvidenceItem, PageLocator, TimeLocator, parse_locator
 from uls.domain.source_ref import SourceFingerprint, SourceRef
 from uls.enrichment.schemas import coerce_enrichment
+
 from ._compat import (
     coerce_fingerprint,
-    coerce_source_ref,
     field,
-    record_id,
+    raw_field,
     record_label,
-    relation_id,
-    text,
+    strict_text,
 )
+from .authority import SUPPORTED_MATERIAL_SOURCE_CLASSES, material_source_class
 from .capabilities import CapabilityManager
 from .chunking import (
     derivative_parts,
@@ -36,12 +45,21 @@ from .chunking import (
     page_chunks,
     timestamp_chunks,
 )
-from .context import assemble_context_package, bounded_evidence, budget_from_config, make_evidence_item
+from .context import (
+    assemble_context_package,
+    budget_from_config,
+    make_evidence_item,
+)
 from .freshness import revalidate_locator
 from .provenance import make_provenance
 from .resolver import SessionResolver
 from .schemas import CapabilityBinding, ContextPackage, ResolutionResult
-from .scope import allowed_material_usages, relation_is_currently_allowed, user_reference
+from .scope import (
+    material_usage_identity_counts,
+    material_usage_scope_result,
+    usage_app_id,
+    user_reference,
+)
 
 
 class RetrievalEngine:
@@ -59,12 +77,19 @@ class RetrievalEngine:
         state_store: Any,
         ephemeral: Any,
         config: Any,
+        *,
+        source_binding_resolver: SourceBindingResolver | None = None,
     ) -> None:
         self.notion_reader = notion_reader
         self.drive_reader = drive_reader
         self.state_store = state_store
         self.ephemeral = ephemeral
         self.config = config
+        self.source_binding_resolver: SourceBindingResolver | None
+        # Source binding is an authority dependency, not a Drive convenience
+        # method.  Never manufacture one from the reader: callers must inject
+        # the independently validated resolver explicitly.
+        self.source_binding_resolver = source_binding_resolver
         self.budget = budget_from_config(config)
         self.resolver = SessionResolver(
             notion_reader,
@@ -115,7 +140,10 @@ class RetrievalEngine:
                 f"Material not found: {material_id}",
                 details={"material_id": material_id},
             )
-        source_ref = self._source_ref_for_record(
+        course = self._course_for_record(material, material_id)
+        source_class = self._material_source_class(material)
+        material_type = self._material_type(material)
+        source_ref = self._resolve_source_ref(
             material,
             "Normalized Source",
             "normalized_source",
@@ -123,13 +151,14 @@ class RetrievalEngine:
             "normalized_source_ref",
             "Source Ref",
             "source_ref",
-            default_entity_id=material_id,
+            entity_id=material_id,
         )
         derivative_result = self._read_current_derivative(
             material_id,
             source_ref,
             material,
             expected_schema="uls.material.v1",
+            expected_course_key=course.course_key,
         )
         if derivative_result is None:
             raise SourceUnavailableError("material derivative is unavailable")
@@ -138,6 +167,11 @@ class RetrievalEngine:
         if str(front["status"]).casefold() == DerivativeStatus.PARTIAL.value:
             warnings.append(_warning("SOURCE_PARTIAL", "material derivative is partial"))
         chunks = page_chunks(derivative, entity_id=material_id)
+        if not chunks:
+            raise SourceUnavailableError(
+                "material derivative has no validated page markers",
+                details={"material_id": material_id},
+            )
         if query:
             from .chunking import select_chunks
 
@@ -147,7 +181,7 @@ class RetrievalEngine:
         for chunk in chunks:
             item = self._evidence_from_chunk(
                 chunk,
-                source_class="professor_material",
+                source_class=source_class,
                 fingerprint=fingerprint,
                 front_matter=front,
                 source_ref=source_ref,
@@ -159,8 +193,12 @@ class RetrievalEngine:
                     locator=item.locator,
                     source_hash=fingerprint.source_hash,
                     source_version=fingerprint.source_version,
-                    source_class="professor_material",
+                    source_class=source_class,
                     source_ref=source_ref,
+                    material_id=material_id,
+                    material_type=material_type,
+                    course_relation_page_id=course.relation_page_id,
+                    course_key=course.course_key,
                 )
             )
         user_context: tuple[Mapping[str, Any], ...] = ()
@@ -181,13 +219,8 @@ class RetrievalEngine:
                         "Notion material annotation lookup is unavailable"
                     ) from exc
                 break
-        final_sources = bounded_evidence(sources, self.budget)
-        final_keys = {(str(item.locator), item.entity_id, item.source_class) for item in final_sources}
-        final_bindings = tuple(
-            binding
-            for binding in bindings
-            if (str(binding.locator), binding.entity_id, binding.source_class) in final_keys
-        )
+        sources, bindings = self._retain_current_evidence(sources, bindings, warnings)
+        final_sources, final_bindings = self._budget_evidence_bindings(sources, bindings)
         capability = self.capabilities.issue(final_bindings, caller_scope=caller_scope)
         return assemble_context_package(
             entity={"type": "material", "id": material_id, "title": record_label(material) or material_id},
@@ -209,13 +242,20 @@ class RetrievalEngine:
     ) -> ContextPackage:
         """Return bounded context for an already-resolved Session ID."""
 
+        if type(include_provisional) is not bool:
+            raise PolicyDeniedError("include_provisional must be a boolean")
+        config_allows_provisional = self._config_bool(
+            "allow_provisional_material_usage", True
+        )
+        effective_include_provisional = include_provisional and config_allows_provisional
         session = self._get_session(session_id)
         if session is None:
             raise EntityNotFoundError(
                 f"Session not found: {session_id}",
                 details={"session_id": session_id},
             )
-        canonical_id = record_id(session) or session_id
+        canonical_id = session_id
+        session_course = self._course_for_record(session, canonical_id)
         warnings: list[Any] = []
         evidence: list[EvidenceItem] = []
         bindings: list[CapabilityBinding] = []
@@ -224,7 +264,7 @@ class RetrievalEngine:
         transcript_loaded = False
         provisional_included = False
 
-        transcript_source = self._source_ref_for_record(
+        transcript_source = self._resolve_source_ref(
             session,
             "Normalized Transcript",
             "normalized_transcript",
@@ -232,7 +272,7 @@ class RetrievalEngine:
             "transcript_source_ref",
             "Transcript Source",
             "Source Ref",
-            default_entity_id=canonical_id,
+            entity_id=canonical_id,
         )
         try:
             transcript_result = self._read_current_derivative(
@@ -240,6 +280,7 @@ class RetrievalEngine:
                 transcript_source,
                 session,
                 expected_schema="uls.transcript.v1",
+                expected_course_key=session_course.course_key,
             )
             if transcript_result is not None:
                 transcript_derivative, transcript_fingerprint, transcript_front = transcript_result
@@ -274,6 +315,8 @@ class RetrievalEngine:
                             source_ref=transcript_source,
                             session_id=canonical_id,
                             relation_required=False,
+                            course_relation_page_id=session_course.relation_page_id,
+                            course_key=session_course.course_key,
                         )
                     )
         except SourcePartialError as exc:
@@ -282,27 +325,59 @@ class RetrievalEngine:
             warnings.append(_warning("SOURCE_UNAVAILABLE", exc.message))
 
         usages = self._material_usages(canonical_id)
-        for usage_scope in allowed_material_usages(
+        usage_scopes = self._safe_usage_scopes(
             usages,
-            include_provisional=include_provisional,
-        ):
+            session_id=canonical_id,
+            course=session_course,
+            warnings=warnings,
+        )
+        eligible_usage_scopes = [
+            scope
+            for scope in usage_scopes
+            if scope.verified or effective_include_provisional
+        ]
+        for usage_scope in eligible_usage_scopes:
             material = self._material_for_usage(usage_scope.usage, usage_scope.material_id)
-            material_source = self._source_ref_for_record(
-                material,
-                "Normalized Source",
-                "normalized_source",
-                "Normalized Source Ref",
-                "normalized_source_ref",
-                "Source Ref",
-                "source_ref",
-                default_entity_id=usage_scope.material_id,
-            )
             try:
+                material_course = self._course_for_record(material, usage_scope.material_id)
+                if material_course != session_course:
+                    raise SourceUnavailableError(
+                        "material and session do not share the exact Course identity"
+                    )
+                material_type = self._material_type(material)
+                material_class = self._material_source_class(material)
+                # Session retrieval deliberately retains its established
+                # professor-material source set.  Supplemental materials are
+                # valid for direct Material retrieval but are not silently
+                # promoted into Session context.
+                if material_class != "professor_material":
+                    warnings.append(
+                        _warning(
+                            "SOURCE_UNAVAILABLE",
+                            f"material {usage_scope.material_id} is not an allowed Session source class",
+                        )
+                    )
+                    continue
+            except SourceUnavailableError as exc:
+                warnings.append(_warning("SOURCE_UNAVAILABLE", exc.message))
+                continue
+            try:
+                material_source = self._resolve_source_ref(
+                    material,
+                    "Normalized Source",
+                    "normalized_source",
+                    "Normalized Source Ref",
+                    "normalized_source_ref",
+                    "Source Ref",
+                    "source_ref",
+                    entity_id=usage_scope.material_id,
+                )
                 material_result = self._read_current_derivative(
                     usage_scope.material_id,
                     material_source,
                     material,
                     expected_schema="uls.material.v1",
+                    expected_course_key=session_course.course_key,
                 )
                 if material_result is None:
                     continue
@@ -320,6 +395,14 @@ class RetrievalEngine:
                     start_page=usage_scope.start_page,
                     end_page=usage_scope.end_page,
                 )
+                if not chunks:
+                    warnings.append(
+                        _warning(
+                            "SOURCE_PARTIAL",
+                            f"Material Usage {usage_scope.usage_id} has no justified page evidence in the current derivative",
+                        )
+                    )
+                    continue
                 if query:
                     from .chunking import select_chunks
 
@@ -327,7 +410,7 @@ class RetrievalEngine:
                 for chunk in chunks:
                     item = self._evidence_from_chunk(
                         chunk,
-                        source_class="professor_material",
+                        source_class=material_class,
                         fingerprint=fingerprint,
                         front_matter=front,
                         source_ref=material_source,
@@ -347,14 +430,11 @@ class RetrievalEngine:
                             relation_required=True,
                             provisional=usage_scope.provisional,
                             usage_id=usage_scope.usage_id,
-                        )
-                    )
-                if usage_scope.provisional:
-                    provisional_included = True
-                    warnings.append(
-                        _warning(
-                            "PROVISIONAL_SOURCE",
-                            f"Material Usage {usage_scope.material_id} is unverified",
+                            usage_role=usage_scope.role,
+                            material_type=material_type,
+                            course_relation_page_id=session_course.relation_page_id,
+                            course_key=session_course.course_key,
+                            usage_range=usage_scope.range,
                         )
                     )
             except SourcePartialError as exc:
@@ -370,13 +450,31 @@ class RetrievalEngine:
             warnings,
         )
 
-        final_evidence = bounded_evidence(evidence, self.budget)
-        final_keys = {(str(item.locator), item.entity_id, item.source_class) for item in final_evidence}
-        final_bindings = tuple(
-            binding
-            for binding in bindings
-            if (str(binding.locator), binding.entity_id, binding.source_class) in final_keys
-        )
+        evidence, bindings = self._retain_current_evidence(evidence, bindings, warnings)
+        final_evidence, final_bindings = self._budget_evidence_bindings(evidence, bindings)
+        # Budgeting may replace a truncated EvidenceItem, and
+        # multiple independent Usage bases may intentionally produce the same
+        # locator.  Provisional reporting therefore follows the retained
+        # authorization bases, not the identity of a pre-budget item.
+        provisional_usage_ids: set[str] = set()
+        for binding in final_bindings:
+            if not binding.provisional:
+                continue
+            usage_id = binding.usage_id or f"{binding.entity_id}:{binding.locator}"
+            if usage_id in provisional_usage_ids:
+                continue
+            provisional_usage_ids.add(usage_id)
+            warnings.append(
+                _warning(
+                    "PROVISIONAL_SOURCE",
+                    (
+                        f"Material Usage {binding.usage_id} is unverified"
+                        if binding.usage_id
+                        else f"Material source {binding.entity_id} is provisional"
+                    ),
+                )
+            )
+        provisional_included = bool(provisional_usage_ids)
         capability = self.capabilities.issue(final_bindings, caller_scope=caller_scope)
         package = assemble_context_package(
             entity={
@@ -388,7 +486,7 @@ class RetrievalEngine:
                 "intent": RetrievalIntent.SESSION.value,
                 "status": "session",
                 "hard_boundary": False,
-                "include_provisional": include_provisional,
+                "include_provisional": effective_include_provisional,
                 "provisional": provisional_included,
             },
             sources=final_evidence,
@@ -456,37 +554,57 @@ class RetrievalEngine:
                 "requested locator is malformed",
                 details={"context_id": context_id},
             )
-        binding = next(
-            (candidate for candidate in bindings if _contains(parsed_locator, candidate.locator)),
-            None,
-        )
-        if binding is None:
+        if source_class is not None and role is not None and (
+            not isinstance(source_class, str)
+            or not isinstance(role, str)
+            or source_class.casefold() != role.casefold()
+        ):
             raise LocatorNotAllowedError(
-                "requested locator is outside the returned chunk ranges",
-                details={"context_id": context_id, "locator": str(parsed_locator)},
+                "conflicting source_class and role aliases",
+                details={"context_id": context_id},
             )
         requested_role = source_class if source_class is not None else role
-        if requested_role is not None and requested_role.casefold() != binding.source_class.casefold():
+
+        def validate_candidate(candidate: CapabilityBinding) -> SourceFingerprint | None:
+            if requested_role is not None and (
+                not isinstance(requested_role, str)
+                or requested_role.casefold() != candidate.source_class.casefold()
+            ):
+                return None
+            return self._current_fingerprint_for_binding(candidate)
+
+        # CapabilityManager performs candidate-aware selection and returns the
+        # exact binding used below.  The engine never independently chooses a
+        # first containing range.
+        binding = self.capabilities.authorize(
+            context_id,
+            parsed_locator,
+            caller_scope=caller_scope,
+            candidate_validator=validate_candidate,
+        )
+        try:
+            current = self._current_fingerprint_for_binding(binding)
+        except LocatorStaleError:
+            raise
+        except Exception as exc:
             raise LocatorNotAllowedError(
-                "requested source role is not allowed by the capability",
-                details={"context_id": context_id, "source_class": requested_role},
-            )
-        current = self._current_fingerprint(binding.entity_id, binding.source_ref)
+                "current source authorization is unavailable",
+                details={"entity_id": binding.entity_id},
+            ) from exc
         if current is None:
             raise LocatorNotAllowedError(
                 "current source fingerprint is unavailable",
                 details={"entity_id": binding.entity_id},
             )
-        self.capabilities.authorize(
-            context_id,
-            parsed_locator,
-            caller_scope=caller_scope,
-            current_fingerprint=current,
-            role_validator=lambda value: self._binding_role_is_current(value),
-        )
+        issued = SourceFingerprint(binding.source_version, binding.source_hash)
+        if current != issued:
+            raise LocatorStaleError(
+                "current source fingerprint no longer matches the issued capability",
+                details={"entity_id": binding.entity_id, "locator": str(parsed_locator)},
+            )
         derivative = self._read_derived(binding.source_ref, binding.entity_id)
         try:
-            derived_entity, body, _, front = derivative_parts(derivative)
+            derived_entity, _body, _, front = derivative_parts(derivative)
         except Exception as exc:
             raise SourceUnavailableError(
                 "normalized derivative could not be parsed",
@@ -511,11 +629,17 @@ class RetrievalEngine:
                 "current derivative does not match the capability source fingerprint",
                 details={"entity_id": binding.entity_id, "locator": str(parsed_locator)},
             )
+        if (binding.session_id is not None or binding.material_id is not None) and not binding.course_key:
+            raise SourceUnavailableError(
+                "graph-bound capability has no validated Course Key",
+                details={"entity_id": binding.entity_id},
+            )
         _validate_read_front_matter(
             front,
             expected_schema=expected_schema,
             entity_id=binding.entity_id,
             source_ref=binding.source_ref,
+            expected_course_key=binding.course_key,
         )
         if isinstance(parsed_locator, TimeLocator):
             chunks = timestamp_chunks(derivative, entity_id=binding.entity_id)
@@ -527,6 +651,19 @@ class RetrievalEngine:
                 "locator was authorized but no current chunk contains it",
                 details={"locator": str(parsed_locator)},
             )
+        try:
+            post_read = self._current_fingerprint_for_binding(binding)
+        except LocatorStaleError:
+            raise
+        except Exception as exc:
+            raise LocatorNotAllowedError(
+                "source authorization changed during derivative read",
+                details={"entity_id": binding.entity_id},
+            ) from exc
+        if post_read is None:
+            raise LocatorNotAllowedError("source authorization changed during derivative read")
+        if post_read != issued or post_read != derivative_fp:
+            raise LocatorStaleError("source fingerprint changed during derivative read")
         item = self._evidence_from_chunk(
             chunk,
             source_class=binding.source_class,
@@ -542,6 +679,9 @@ class RetrievalEngine:
         method = getattr(self.notion_reader, "get_session", None)
         if method is None:
             raise SourceUnavailableError("NotionReader has no get_session method")
+        expected_id = strict_entity_id(session_id, "S")
+        if expected_id is None:
+            raise SourceUnavailableError("requested Session logical ID is malformed")
         for value in (session_id, session_id.upper()):
             try:
                 result = method(value)
@@ -550,6 +690,11 @@ class RetrievalEngine:
             except Exception as exc:
                 raise SourceUnavailableError("Notion session lookup is unavailable") from exc
             if result is not None:
+                if _graph_logical_id(result, "S") != expected_id:
+                    raise SourceUnavailableError(
+                        "Notion Session logical ID is missing or mismatched",
+                        details={"session_id": expected_id},
+                    )
                 return result
         return None
 
@@ -572,26 +717,31 @@ class RetrievalEngine:
         return list(values)
 
     def _material_for_usage(self, usage: Any, material_id: str) -> Any:
-        inline = field(usage, "Material", "material", default=None)
-        if inline is not None and not isinstance(inline, str):
-            inline_id = relation_id(inline)
-            if inline_id == material_id or isinstance(inline, Mapping):
-                return inline
-        result = self._lookup_material(material_id)
-        if result is not None:
-            return result
-        return {"ID": material_id, "Name": material_id}
+        # Usage.Material is a relation identity only.  Expanded relation
+        # snapshots are caller/provider payloads and may be stale; every
+        # retrieval and follow-up must use the current authoritative Material
+        # page by ID.
+        return self._lookup_material(material_id)
 
     def _lookup_material(self, material_id: str) -> Any | None:
         method = getattr(self.notion_reader, "get_material", None)
         if method is None:
             raise SourceUnavailableError("NotionReader has no get_material method")
+        expected_id = strict_entity_id(material_id, "M")
+        if expected_id is None:
+            raise SourceUnavailableError("requested Material logical ID is malformed")
         try:
-            return method(material_id)
+            result = method(material_id)
         except _MISSING_PROVIDER_ERRORS:
             return None
         except Exception as exc:
             raise SourceUnavailableError("Notion Material lookup is unavailable") from exc
+        if result is not None and _graph_logical_id(result, "M") != expected_id:
+            raise SourceUnavailableError(
+                "Notion Material logical ID is missing or mismatched",
+                details={"material_id": expected_id},
+            )
+        return result
 
     def _user_references(self, session_id: str) -> tuple[Mapping[str, Any], ...]:
         method = getattr(self.notion_reader, "get_session_user_annotations", None)
@@ -659,6 +809,7 @@ class RetrievalEngine:
         record: Any,
         *,
         expected_schema: str | None,
+        expected_course_key: str | None = None,
     ) -> tuple[Any, SourceFingerprint, dict[str, Any]] | None:
         derivative = self._read_derived(source_ref, entity_id)
         try:
@@ -688,6 +839,7 @@ class RetrievalEngine:
             expected_schema=expected_schema,
             entity_id=entity_id,
             source_ref=source_ref,
+            expected_course_key=expected_course_key,
         )
         if expected_schema == "uls.transcript.v1":
             # A hand-edited or damaged derivative may still claim ``ready``
@@ -706,36 +858,31 @@ class RetrievalEngine:
         method = getattr(self.drive_reader, "read_derived", None)
         if method is None:
             raise SourceUnavailableError("DriveReader has no read_derived method")
-        candidates: list[Any] = []
-        if source_ref is not None:
-            candidates.extend([source_ref, source_ref.file_id])
-        candidates.append(entity_id)
-        last_error: Exception | None = None
-        seen: set[str] = set()
-        for candidate in candidates:
-            key = repr(candidate)
-            if key in seen:
-                continue
-            seen.add(key)
-            try:
-                value = method(candidate)
-            except _MISSING_PROVIDER_ERRORS as exc:
-                last_error = exc
-                continue
-            except Exception as exc:
-                # A provider/network failure is not the same as a missing
-                # source.  Do not retry it through alternate aliases or turn
-                # it into an empty result.
-                raise SourceUnavailableError(
-                    f"derived transcript/material is unavailable for {entity_id}",
-                    details={"entity_id": entity_id},
-                ) from exc
-            if value is not None:
-                return value
+        if not isinstance(source_ref, SourceRef):
+            raise SourceUnavailableError(
+                "trusted originating SourceRef is unavailable",
+                details={"entity_id": entity_id},
+            )
+        try:
+            value = method(source_ref)
+        except _MISSING_PROVIDER_ERRORS as exc:
+            raise SourceUnavailableError(
+                f"derived transcript/material is unavailable for {entity_id}",
+                details={"entity_id": entity_id},
+            ) from exc
+        except Exception as exc:
+            # A provider/network failure is not the same as a missing source.
+            # Never retry through a graph URL, file-id coercion, or entity ID.
+            raise SourceUnavailableError(
+                f"derived transcript/material is unavailable for {entity_id}",
+                details={"entity_id": entity_id},
+            ) from exc
+        if value is not None:
+            return value
         raise SourceUnavailableError(
             f"derived transcript/material is unavailable for {entity_id}",
             details={"entity_id": entity_id},
-        ) from last_error
+        )
 
     def _current_fingerprint(
         self,
@@ -748,42 +895,348 @@ class RetrievalEngine:
                 "DriveReader has no get_current_fingerprint method",
                 details={"entity_id": entity_id},
             )
-        candidates: list[Any] = [entity_id]
-        if source_ref is not None:
-            candidates.extend([source_ref, source_ref.file_id])
-        for candidate in candidates:
-            try:
-                value = method(candidate)
-            except _MISSING_PROVIDER_ERRORS:
-                continue
-            except Exception as exc:
-                raise SourceUnavailableError(
-                    "current source fingerprint lookup is unavailable",
-                    details={"entity_id": entity_id},
-                ) from exc
-            result = coerce_fingerprint(value)
-            if result is not None:
-                return result
-        return None
+        if not isinstance(source_ref, SourceRef):
+            raise SourceUnavailableError(
+                "trusted originating SourceRef is unavailable",
+                details={"entity_id": entity_id},
+            )
+        try:
+            value = method(source_ref)
+        except _MISSING_PROVIDER_ERRORS:
+            return None
+        except Exception as exc:
+            raise SourceUnavailableError(
+                "current source fingerprint lookup is unavailable",
+                details={"entity_id": entity_id},
+            ) from exc
+        try:
+            return coerce_fingerprint(value)
+        except (TypeError, ValueError):
+            return None
 
-    def _source_ref_for_record(
+    def _resolve_source_ref(
         self,
         record: Any,
         *names: str,
-        default_entity_id: str,
-    ) -> SourceRef | None:
-        if record is None:
-            return SourceRef("google_drive", default_entity_id)
+        entity_id: str,
+    ) -> SourceRef:
+        """Resolve a graph pointer through trusted registered provenance."""
+
         value = field(record, *names, default=None)
-        result = coerce_source_ref(value)
-        if result is not None:
-            return result
-        # In simple fakes the normalized URL/file ID is stored as a string in
-        # one of the requested fields; coerce_source_ref intentionally treats
-        # it as a Drive file ID.
-        if isinstance(value, str) and value.strip():
-            return SourceRef("google_drive", value.strip())
-        return SourceRef("google_drive", default_entity_id)
+        if not isinstance(value, str) or not value.strip():
+            raise SourceUnavailableError(
+                "normalized source pointer is missing or malformed",
+                details={"entity_id": entity_id},
+            )
+        resolver = self.source_binding_resolver
+        if resolver is None:
+            raise SourceUnavailableError(
+                "trusted source binding resolver is unavailable",
+                details={"entity_id": entity_id},
+            )
+        try:
+            result = resolver.resolve_derivative_ref(entity_id, value.strip())
+        except SourceUnavailableError:
+            raise
+        except Exception as exc:
+            raise SourceUnavailableError(
+                "trusted source binding resolution is unavailable",
+                details={"entity_id": entity_id},
+            ) from exc
+        if not isinstance(result, SourceRef):
+            raise SourceUnavailableError("trusted source binding returned no SourceRef")
+        return result
+
+    def _course_for_record(self, record: Any, entity_id: str) -> CourseIdentity:
+        relation_value = raw_field(record, "Course", "course", default=None)
+        relation_page_id = resolve_course_relation(relation_value)
+        if relation_page_id is None:
+            raise SourceUnavailableError(
+                "record must have exactly one Course relation",
+                details={"entity_id": entity_id},
+            )
+        method = getattr(self.notion_reader, "get_course_by_relation_id", None)
+        if not callable(method):
+            raise SourceUnavailableError(
+                "NotionReader has no exact Course relation lookup",
+                details={"entity_id": entity_id, "course_relation_page_id": relation_page_id},
+            )
+        try:
+            course = method(relation_page_id)
+        except _MISSING_PROVIDER_ERRORS as exc:
+            raise SourceUnavailableError("Course relation target is unavailable") from exc
+        except Exception as exc:
+            raise SourceUnavailableError("Course relation lookup is unavailable") from exc
+        identity = validate_course_record(course, relation_page_id)
+        if identity is None:
+            raise SourceUnavailableError(
+                "Course record has an invalid Course Key identity",
+                details={"entity_id": entity_id, "course_relation_page_id": relation_page_id},
+            )
+        return identity
+
+    def _material_type(self, material: Any) -> str:
+        value = strict_text(raw_field(material, "Type", "material_type", default=None), default=None)
+        if value is None:
+            raise SourceUnavailableError("material Type is missing or invalid")
+        return value
+
+    def _material_source_class(self, material: Any) -> str:
+        value = self._material_type(material)
+        mapping = self._config_mapping("material_type_source_class", {})
+        if not isinstance(mapping, Mapping):
+            raise SourceUnavailableError("material type source mapping is unavailable")
+        result = material_source_class(value, mapping)
+        if result is None:
+            raise SourceUnavailableError(
+                "material type is not mapped to a source authority",
+                details={"material_type": value},
+            )
+        return result
+
+    def _safe_usage_scopes(
+        self,
+        usages: list[Any],
+        *,
+        session_id: str,
+        course: CourseIdentity,
+        warnings: list[Any],
+    ) -> list[Any]:
+        """Validate duplicate Usage identity and exact graph course bindings."""
+
+        # Count physical app-level IDs before schema/range/course filtering.
+        # A malformed sibling with the same ID is still an ambiguity and must
+        # not disappear before the duplicate check.
+        raw_id_counts: dict[str, int] = {}
+        for usage in usages:
+            raw_id = usage_app_id(usage)
+            if raw_id:
+                raw_id_counts[raw_id] = raw_id_counts.get(raw_id, 0) + 1
+        duplicate_ids = {key for key, count in raw_id_counts.items() if count > 1}
+
+        scopes: list[Any] = []
+        for usage in usages:
+            parsed = material_usage_scope_result(usage)
+            scope = parsed.scope
+            if scope is None:
+                warnings.append(
+                    _warning(
+                        "SOURCE_UNAVAILABLE",
+                        f"Material Usage {usage_app_id(usage) or '<unknown>'} excluded: {parsed.reason or 'invalid Usage row'}",
+                    )
+                )
+                continue
+            if scope.session_id != session_id:
+                warnings.append(
+                    _warning(
+                        "SOURCE_UNAVAILABLE",
+                        f"Material Usage {scope.usage_id} does not belong to Session {session_id}",
+                    )
+                )
+                continue
+            scopes.append(scope)
+        by_id: dict[str, list[Any]] = {}
+        raw_identity_counts = material_usage_identity_counts(
+            usages,
+            session_id=session_id,
+        )
+        duplicate_tuples = {
+            identity for identity, count in raw_identity_counts.items() if count > 1
+        }
+        accepted: list[Any] = []
+        for scope in scopes:
+            usage_id = scope.usage_id
+            if usage_id is None:
+                continue
+            by_id.setdefault(usage_id, []).append(scope)
+            try:
+                material = self._material_for_usage(scope.usage, scope.material_id)
+                material_course = self._course_for_record(material, scope.material_id)
+            except SourceUnavailableError as exc:
+                warnings.append(_warning("SOURCE_UNAVAILABLE", exc.message))
+                continue
+            if material_course != course:
+                warnings.append(
+                    _warning(
+                        "SOURCE_UNAVAILABLE",
+                        f"Material Usage {usage_id} crosses the Session Course identity",
+                    )
+                )
+                continue
+            accepted.append(scope)
+        duplicate_ids.update(key for key, values in by_id.items() if len(values) > 1)
+        ambiguous_scopes = [
+            scope
+            for scope in accepted
+            if scope.usage_id in duplicate_ids
+            or (session_id, scope.material_id, scope.role, scope.range) in duplicate_tuples
+        ]
+        for scope in ambiguous_scopes:
+            warnings.append(
+                _warning(
+                    "SOURCE_UNAVAILABLE",
+                    f"Material Usage {scope.usage_id} excluded: duplicate Material Usage identity is ambiguous",
+                )
+            )
+        return [
+            scope
+            for scope in accepted
+            if scope.usage_id not in duplicate_ids
+            and (session_id, scope.material_id, scope.role, scope.range) not in duplicate_tuples
+        ]
+
+    def _retain_current_evidence(
+        self,
+        evidence: list[EvidenceItem],
+        bindings: list[CapabilityBinding],
+        warnings: list[Any],
+    ) -> tuple[list[EvidenceItem], list[CapabilityBinding]]:
+        """Recheck each independent basis after provider reads, before issuance.
+
+        Evidence and capability bindings are created as ordered pairs.  A
+        count mismatch or a pair whose identity/provisional metadata disagrees
+        is unsafe to repair heuristically, so the mismatch is surfaced as a
+        structured source failure (or the individual pair is excluded).  Each
+        remaining pair is then revalidated independently; a revoked Usage
+        cannot veto a sibling with a separate valid basis.
+        """
+        if len(evidence) != len(bindings):
+            raise SourceUnavailableError(
+                "evidence and capability bindings are misaligned",
+                details={
+                    "evidence_count": len(evidence),
+                    "binding_count": len(bindings),
+                },
+            )
+        retained_evidence: list[EvidenceItem] = []
+        retained_bindings: list[CapabilityBinding] = []
+        for item, binding in zip(evidence, bindings):
+            if not self._evidence_matches_binding(item, binding):
+                warnings.append(
+                    _warning(
+                        "SOURCE_UNAVAILABLE",
+                        "evidence and capability binding identity is misaligned",
+                    )
+                )
+                continue
+            try:
+                current = self._current_fingerprint_for_binding(binding)
+            except SourceUnavailableError as exc:
+                warnings.append(_warning("SOURCE_UNAVAILABLE", exc.message))
+                continue
+            except Exception:  # noqa: BLE001 - isolate one candidate failure
+                # A provider or graph validation exception for one candidate
+                # must not authorize that candidate or discard an independently
+                # valid overlapping sibling.
+                warnings.append(
+                    _warning(
+                        "SOURCE_UNAVAILABLE",
+                        "source basis could not be revalidated",
+                    )
+                )
+                continue
+            issued = SourceFingerprint(binding.source_version, binding.source_hash)
+            if current is None or current != issued:
+                warnings.append(_warning("SOURCE_UNAVAILABLE", "source basis changed before context issuance"))
+                continue
+            retained_evidence.append(item)
+            retained_bindings.append(binding)
+        return retained_evidence, retained_bindings
+
+    @staticmethod
+    def _evidence_matches_binding(
+        item: EvidenceItem,
+        binding: CapabilityBinding,
+    ) -> bool:
+        """Check the immutable pair identity before any freshness lookup."""
+
+        if not isinstance(item, EvidenceItem) or not isinstance(binding, CapabilityBinding):
+            return False
+        if (
+            item.entity_id != binding.entity_id
+            or item.locator != binding.locator
+            or item.source_class != binding.source_class
+            or item.fingerprint
+            != SourceFingerprint(binding.source_version, binding.source_hash)
+            or bool(getattr(item, "provisional", False)) != binding.provisional
+        ):
+            return False
+        item_source_ref = getattr(item, "source_ref", None)
+        if binding.source_ref is None:
+            return item_source_ref is None
+        return (
+            isinstance(item_source_ref, SourceRef)
+            and isinstance(binding.source_ref, SourceRef)
+            and item_source_ref.identity == binding.source_ref.identity
+        )
+
+    def _budget_evidence_bindings(
+        self,
+        evidence: list[EvidenceItem],
+        bindings: list[CapabilityBinding],
+    ) -> tuple[tuple[EvidenceItem, ...], tuple[CapabilityBinding, ...]]:
+        """Apply evidence budgets while retaining exact evidence/binding pairs.
+
+        Locator/entity/source-class keys are intentionally not used for this
+        association: independent Usage rows may return the same chunk.  The
+        pair is selected before any truncation, so an omitted evidence item
+        cannot leave its capability binding behind.
+        """
+
+        if len(evidence) != len(bindings):
+            raise SourceUnavailableError(
+                "evidence and capability bindings are misaligned",
+                details={
+                    "evidence_count": len(evidence),
+                    "binding_count": len(bindings),
+                },
+            )
+        selected_evidence: list[EvidenceItem] = []
+        selected_bindings: list[CapabilityBinding] = []
+        total = 0
+        for item, binding in zip(evidence, bindings):
+            if not self._evidence_matches_binding(item, binding):
+                raise SourceUnavailableError(
+                    "evidence and capability binding identity is misaligned"
+                )
+            if len(selected_evidence) >= self.budget.max_evidence_items:
+                break
+            if total >= self.budget.max_total_chars:
+                break
+            if not isinstance(item.content, str):
+                raise SourceUnavailableError("evidence content is not text")
+            content = item.content[: self.budget.max_chars_per_item]
+            remaining = self.budget.max_total_chars - total
+            content = content[:remaining]
+            if not content:
+                continue
+            if content != item.content:
+                provisional = bool(getattr(item, "provisional", False))
+                source_ref = getattr(item, "source_ref", None)
+                item = replace(item, content=content)
+                if provisional:
+                    object.__setattr__(item, "provisional", True)
+                if source_ref is not None:
+                    object.__setattr__(item, "source_ref", source_ref)
+            selected_evidence.append(item)
+            selected_bindings.append(binding)
+            total += len(content)
+        return tuple(selected_evidence), tuple(selected_bindings)
+
+    def _current_fingerprint_for_binding(
+        self,
+        binding: CapabilityBinding,
+    ) -> SourceFingerprint | None:
+        """Candidate-aware follow-up validation used by CapabilityManager."""
+
+        # Any graph-bound candidate (transcript or Material Usage) must be
+        # revalidated before its fingerprint can authorize a follow-up.  The
+        # transcript branch used to check only the Drive fingerprint, which
+        # allowed a Course/source-pointer rewire to survive until after the
+        # provider read.
+        if (binding.session_id is not None or binding.material_id is not None) and not self._binding_role_is_current(binding):
+            return None
+        return self._current_fingerprint(binding.entity_id, binding.source_ref)
 
     def _evidence_from_chunk(
         self,
@@ -818,15 +1271,168 @@ class RetrievalEngine:
         return item
 
     def _binding_role_is_current(self, binding: CapabilityBinding) -> bool:
-        if not binding.relation_required or not binding.session_id or not binding.material_id:
-            return True
-        return relation_is_currently_allowed(
-            self._material_usages(binding.session_id),
-            binding.material_id,
-            include_provisional=binding.provisional,
-            usage_id=binding.usage_id,
-            locator=binding.locator,
+        if binding.provisional and not self._config_bool(
+            "allow_provisional_material_usage", True
+        ):
+            return False
+        if not binding.relation_required and binding.session_id and binding.material_id is None:
+            session = self._get_session(binding.session_id)
+            if session is None:
+                return False
+            try:
+                course = self._course_for_record(session, binding.session_id)
+                current_ref = self._resolve_source_ref(
+                    session,
+                    "Normalized Transcript",
+                    "normalized_transcript",
+                    "Transcript Source Ref",
+                    "transcript_source_ref",
+                    "Transcript Source",
+                    "Source Ref",
+                    "source_ref",
+                    entity_id=binding.session_id,
+                )
+            except SourceUnavailableError:
+                return False
+            return (
+                binding.source_ref is not None
+                and current_ref.identity == binding.source_ref.identity
+                and (
+                    binding.course_relation_page_id is None
+                    or binding.course_relation_page_id == course.relation_page_id
+                )
+                and (binding.course_key is None or binding.course_key == course.course_key)
+            )
+        if binding.relation_required:
+            if not binding.session_id or not binding.material_id or not binding.usage_id:
+                return False
+            current_session = self._get_session(binding.session_id)
+            if current_session is None:
+                return False
+            try:
+                session_course = self._course_for_record(current_session, binding.session_id)
+            except SourceUnavailableError:
+                return False
+            if (
+                binding.course_relation_page_id is None
+                or binding.course_key is None
+                or session_course.relation_page_id != binding.course_relation_page_id
+                or session_course.course_key != binding.course_key
+            ):
+                return False
+            usages = self._material_usages(binding.session_id)
+            scopes = [
+                scope
+                for scope in self._valid_current_usage_scopes(usages)
+                if scope.usage_id == binding.usage_id
+                and scope.session_id == binding.session_id
+                and scope.material_id == binding.material_id
+                and scope.role == binding.usage_role
+                and scope.range == binding.usage_range
+                and (scope.verified or binding.provisional)
+            ]
+            if len(scopes) != 1:
+                return False
+            material = self._material_for_usage(scopes[0].usage, binding.material_id)
+        else:
+            if binding.material_id is None:
+                return True
+            material = self._lookup_material(binding.material_id)
+            if material is None:
+                return False
+
+        try:
+            course = self._course_for_record(material, binding.material_id or binding.entity_id)
+            current_type = self._material_type(material)
+            current_class = self._material_source_class(material)
+        except SourceUnavailableError:
+            return False
+        if (
+            binding.course_relation_page_id is not None
+            and course.relation_page_id != binding.course_relation_page_id
+        ):
+            return False
+        if binding.course_key is not None and course.course_key != binding.course_key:
+            return False
+        if binding.material_type is not None and current_type != binding.material_type:
+            return False
+        if current_class != binding.source_class:
+            return False
+        try:
+            current_ref = self._resolve_source_ref(
+                material,
+                "Normalized Source",
+                "normalized_source",
+                "Normalized Source Ref",
+                "normalized_source_ref",
+                "Source Ref",
+                "source_ref",
+                entity_id=binding.material_id or binding.entity_id,
+            )
+        except SourceUnavailableError:
+            return False
+        return (
+            binding.source_ref is not None
+            and current_ref.identity == binding.source_ref.identity
         )
+
+    def _direct_material_binding_is_current(self, binding: CapabilityBinding) -> bool:
+        return self._binding_role_is_current(binding)
+
+    def _valid_current_usage_scopes(self, usages: list[Any]) -> list[Any]:
+        raw_id_counts: dict[str, int] = {}
+        for usage in usages:
+            raw_id = usage_app_id(usage)
+            if raw_id:
+                raw_id_counts[raw_id] = raw_id_counts.get(raw_id, 0) + 1
+        scopes = [
+            result.scope
+            for usage in usages
+            for result in (material_usage_scope_result(usage),)
+            if result.scope is not None
+        ]
+        ids: dict[str, int] = {}
+        raw_identity_counts = material_usage_identity_counts(usages)
+        for scope in scopes:
+            if scope.usage_id:
+                ids[scope.usage_id] = ids.get(scope.usage_id, 0) + 1
+        return [
+            scope
+            for scope in scopes
+            if scope.usage_id
+            and scope.session_id is not None
+            and scope.role is not None
+            and raw_id_counts.get(scope.usage_id, 0) == 1
+            and ids.get(scope.usage_id, 0) == 1
+            and raw_identity_counts.get(
+                (scope.session_id, scope.material_id, scope.role, scope.range),
+                0,
+            )
+            == 1
+        ]
+
+    def _config_bool(self, name: str, default: bool) -> bool:
+        missing = object()
+        section = (
+            self.config.get("retrieval", self.config)
+            if isinstance(self.config, Mapping)
+            else getattr(self.config, "retrieval", self.config)
+        )
+        value = (
+            section.get(name, missing)
+            if isinstance(section, Mapping)
+            else getattr(section, name, missing)
+        )
+        if value is missing:
+            return default
+        if type(value) is not bool:
+            raise PolicyDeniedError(f"retrieval.{name} must be a boolean")
+        return value
+
+    def _config_mapping(self, name: str, default: Mapping[str, Any]) -> Any:
+        section = self.config.get("retrieval", self.config) if isinstance(self.config, Mapping) else getattr(self.config, "retrieval", self.config)
+        value = section.get(name, default) if isinstance(section, Mapping) else getattr(section, name, default)
+        return value
 
 
 class _DerivativeBehindSource(SourcePartialError):
@@ -837,7 +1443,17 @@ class _InvalidDerivative(SourcePartialError):
     """Internal marker for a derivative that cannot be factual evidence."""
 
 
+class _InadmissibleDerivative(SourceUnavailableError):
+    """A well-shaped derivative whose lifecycle state is not readable evidence."""
+
+
 _MISSING_PROVIDER_ERRORS = (KeyError, LookupError, FileNotFoundError)
+
+
+def _graph_logical_id(record: Any, expected_type: str) -> str | None:
+    """Read and strictly validate the graph record's logical ``ID``."""
+
+    return strict_entity_id(usage_app_id(record), expected_type)
 
 
 def _config_int(config: Any, name: str, default: int) -> int:
@@ -883,6 +1499,7 @@ def _validate_read_front_matter(
     expected_schema: str | None,
     entity_id: str,
     source_ref: SourceRef | None,
+    expected_course_key: str | None = None,
 ) -> None:
     """Validate every provenance field before a derivative becomes factual.
 
@@ -916,6 +1533,10 @@ def _validate_read_front_matter(
             raise _InvalidDerivative(
                 f"normalized derivative front matter has an invalid {name}"
             )
+    if expected_course_key is not None and front["course_key"] != expected_course_key:
+        raise _InvalidDerivative(
+            "normalized derivative front matter course_key does not match the graph Course"
+        )
 
     source_hash = front["source_hash"]
     if not isinstance(source_hash, str) or not source_hash.strip():
@@ -932,7 +1553,7 @@ def _validate_read_front_matter(
             "normalized derivative front matter has an invalid source_version"
         )
 
-    front_source_ref = coerce_source_ref(front["source_ref"])
+    front_source_ref = _strict_front_source_ref(front["source_ref"])
     if (
         front_source_ref is None
         or not isinstance(front_source_ref.provider, str)
@@ -957,12 +1578,40 @@ def _validate_read_front_matter(
         raise _InvalidDerivative(
             "normalized derivative front matter has an invalid status"
         )
+    if status not in {
+        DerivativeStatus.READY.value,
+        DerivativeStatus.PARTIAL.value,
+    }:
+        raise _InadmissibleDerivative(
+            "normalized derivative status is not admissible for factual retrieval"
+        )
 
 
 def _schema_for_source_class(source_class: str) -> str:
-    if source_class.casefold() in {"professor_material", "material"}:
+    if source_class in SUPPORTED_MATERIAL_SOURCE_CLASSES:
         return "uls.material.v1"
-    return "uls.transcript.v1"
+    if source_class == "professor_transcript":
+        return "uls.transcript.v1"
+    raise SourceUnavailableError(f"unsupported source class: {source_class}")
+
+
+def _strict_front_source_ref(value: Any) -> SourceRef | None:
+    if isinstance(value, SourceRef):
+        return value if value.provider.strip() and value.file_id.strip() else None
+    if not isinstance(value, Mapping):
+        return None
+    provider = value.get("provider")
+    file_id = value.get("file_id")
+    web_url = value.get("web_url")
+    if not isinstance(provider, str) or not isinstance(file_id, str):
+        return None
+    if not provider.strip() or not file_id.strip():
+        return None
+    return SourceRef(
+        provider.strip(),
+        file_id.strip(),
+        web_url.strip() if isinstance(web_url, str) and web_url.strip() else None,
+    )
 
 
 def _contains(requested: Any, allowed: Any) -> bool:

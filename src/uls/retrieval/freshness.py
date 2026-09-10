@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -11,8 +10,13 @@ from uls.domain.enums import FreshnessStatus
 from uls.domain.models import PageLocator, TimeLocator, parse_locator
 from uls.domain.source_ref import SourceFingerprint
 from uls.enrichment.schemas import EnrichmentRecord, coerce_enrichment
-from uls.normalization.schemas import NormalizedTranscript, TimestampMark, TRANSCRIPT_SCHEMA
-from uls.normalization.validators import ParsedDerivative, parse_derivative, parse_transcript_derivative
+from uls.normalization.schemas import TRANSCRIPT_SCHEMA, NormalizedTranscript, TimestampMark
+from uls.normalization.validators import (
+    ParsedDerivative,
+    parse_derivative,
+)
+
+from .chunking import page_marker_index
 
 
 @dataclass(frozen=True)
@@ -95,8 +99,10 @@ def _derivative_view(
             _, marks_tuple = _marks_from_body(body)
             marks = list(marks_tuple)
         entity = front.get("entity_id", value.get("entity_id"))
-        is_transcript = _is_transcript_front(front) or (
-            "marks" in value or "timestamp_marks" in value
+        is_transcript = (
+            _is_transcript_front(front)
+            if "schema" in front
+            else ("marks" in value or "timestamp_marks" in value)
         )
         return (
             entity if isinstance(entity, str) else None,
@@ -127,8 +133,10 @@ def _derivative_view(
         if not marks:
             marks = list(_marks_from_body(body)[1])
         entity = front.get("entity_id", getattr(value, "entity_id", None))
-        is_transcript = _is_transcript_front(front) or any(
-            hasattr(value, name) for name in ("marks", "timestamp_marks")
+        is_transcript = (
+            _is_transcript_front(front)
+            if "schema" in front
+            else any(hasattr(value, name) for name in ("marks", "timestamp_marks"))
         )
         return (
             entity if isinstance(entity, str) else None,
@@ -179,17 +187,19 @@ def revalidate_locator(
         return None
     body_fold = body.casefold()
     position: int | None = None
-    matched_term: str | None = None
     for term in terms:
         candidate = term.casefold()
         found = body_fold.find(candidate)
         if found >= 0 and (position is None or found < position):
             position = found
-            matched_term = term
     if position is None:
         return None
 
-    if marks:
+    # Derivative class determines locator semantics.  A material body may
+    # contain timestamp-looking text, but it is still page-addressed and must
+    # prove a valid page-marker index before stale revalidation can return a
+    # locator.
+    if is_transcript and marks:
         preceding = [mark for mark in marks if mark.char_offset <= position]
         if preceding:
             mark = preceding[-1]
@@ -215,19 +225,17 @@ def revalidate_locator(
         # revalidation and capability containment use the same subtype/range.
         return TimeLocator(entity_id, 0, 0)
 
-    # Page-bearing derivatives commonly use an explicit Page/페이지 heading or
-    # marker.  Return the page containing the symbolic term.
-    line_start = body.rfind("\n", 0, position) + 1
-    line_end = body.find("\n", position)
-    if line_end < 0:
-        line_end = len(body)
-    window_start = max(0, line_start - 500)
-    window = body[window_start:line_end]
-    page_matches = list(re.finditer(r"(?i)(?:page|페이지)\s*[:#-]?\s*([1-9][0-9]*)", window))
-    if page_matches:
-        page = int(page_matches[-1].group(1))
-        return PageLocator(entity_id, page, page)
-    return PageLocator(entity_id, 1, 1)
+    # Page-bearing derivatives must have the same strict marker index as
+    # ordinary page chunking.  In particular, never manufacture p1 when the
+    # body has no justified page marker.
+    index = page_marker_index(body)
+    if index is None:
+        return None
+    preceding_pages = [item for item in index.markers if item[0] <= position]
+    if not preceding_pages:
+        return None
+    page = preceding_pages[-1][1]
+    return PageLocator(entity_id, page, page)
 
 
 def _hint_value(value: Any, *names: str) -> Any:

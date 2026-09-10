@@ -103,6 +103,16 @@ class ProviderUnavailableError(UlsError):
     code = "PROVIDER_UNAVAILABLE"
 
 
+class ProviderWriteNotAppliedError(ProviderUnavailableError):
+    """Trusted adapter guarantee that this write did not apply any mutation.
+
+    Emit only when the adapter can prove non-application (for example, failure
+    before dispatch). Timeouts, retryability, error text, and a later snapshot
+    are not such proof. This internal distinction retains the existing wire
+    error code; callers must not reconstruct it from provider error payloads.
+    """
+
+
 # Short aliases mirror the taxonomy names while the *Error forms remain the
 # explicit exception names used by most Python callers.
 ParsingError = ParseError
@@ -159,6 +169,7 @@ __all__ = [
     "ProviderRateLimitedError",
     "ProviderUnavailable",
     "ProviderUnavailableError",
+    "ProviderWriteNotAppliedError",
     "ResolutionExpired",
     "ResolutionExpiredError",
     "SourcePartial",
