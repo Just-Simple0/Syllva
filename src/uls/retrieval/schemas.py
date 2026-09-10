@@ -115,6 +115,44 @@ class CapabilityBinding:
     course_relation_page_id: str | None = None
     course_key: str | None = None
     usage_range: PageRange | None = None
+    # Phase 5 parent snapshot is additive to the Phase4 leaf basis.  ``None``
+    # means no parent context; an empty tuple means an explicitly empty
+    # relation and is therefore meaningful.
+    parent_entity_id: str | None = None
+    parent_entity_type: str | None = None
+    parent_course_relation_page_id: str | None = None
+    parent_course_key: str | None = None
+    parent_scope_confirmed: bool | None = None
+    parent_included_session_ids: tuple[str, ...] | None = None
+    parent_related_session_ids: tuple[str, ...] | None = None
+    parent_related_material_ids: tuple[str, ...] | None = None
+    parent_path_leaf: str | None = None
+    activity_instructions_source_url: str | None = None
+    activity_normalized_instructions_url: str | None = None
+    activity_binding_identity: tuple[str, str] | None = None
+
+    def __post_init__(self) -> None:
+        for name in (
+            "parent_included_session_ids",
+            "parent_related_session_ids",
+            "parent_related_material_ids",
+        ):
+            values = getattr(self, name)
+            if values is not None:
+                normalized = tuple(values)
+                if any(not isinstance(value, str) or not value.strip() for value in normalized):
+                    raise ValueError(f"{name} must contain non-empty strings")
+                if len(set(normalized)) != len(normalized):
+                    raise ValueError(f"{name} contains duplicate IDs")
+                object.__setattr__(self, name, normalized)
+        if self.parent_scope_confirmed is not None and type(self.parent_scope_confirmed) is not bool:
+            raise TypeError("parent_scope_confirmed must be a boolean or None")
+        if self.activity_binding_identity is not None and (
+            not isinstance(self.activity_binding_identity, tuple)
+            or len(self.activity_binding_identity) != 2
+            or any(not isinstance(value, str) or not value.strip() for value in self.activity_binding_identity)
+        ):
+            raise ValueError("activity_binding_identity must be a provider/file pair")
 
     @property
     def locator_range(self) -> Any:
@@ -136,7 +174,7 @@ def _value(value: Any) -> Any:
 
 
 def evidence_item_to_dict(item: EvidenceItem) -> dict[str, Any]:
-    return {
+    result = {
         "source_class": item.source_class,
         "entity_id": item.entity_id,
         "locator": str(item.locator),
@@ -150,6 +188,10 @@ def evidence_item_to_dict(item: EvidenceItem) -> dict[str, Any]:
         "freshness": _value(item.freshness),
         **({"provisional": True} if getattr(item, "provisional", False) else {}),
     }
+    constraint = getattr(item, "constraint_metadata", None)
+    if constraint is not None:
+        result["constraint_metadata"] = _value(constraint)
+    return result
 
 
 def context_package_to_dict(package: ContextPackage) -> dict[str, Any]:

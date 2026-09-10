@@ -5,7 +5,11 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from uls.adapters.drive.binding import InMemorySourceBindingBackend, SourceBindingRecord
+from uls.adapters.drive.binding import (
+    ActivityInstructionBinding,
+    InMemorySourceBindingBackend,
+    SourceBindingRecord,
+)
 from uls.domain.errors import SourceUnavailableError
 from uls.domain.source_ref import SourceFingerprint, SourceRef
 
@@ -17,7 +21,7 @@ class FakeDriveReader:
         source: Mapping[str, Any] | None = None,
         derived: Mapping[str, Any] | None = None,
         fingerprints: Mapping[str, SourceFingerprint | Mapping[str, Any]] | None = None,
-        bindings: Sequence[SourceBindingRecord | Mapping[str, Any]] | None = None,
+        bindings: Sequence[SourceBindingRecord | ActivityInstructionBinding | Mapping[str, Any]] | None = None,
         events: list[Any] | None = None,
     ) -> None:
         self.source = dict(source or {})
@@ -47,11 +51,19 @@ class FakeDriveReader:
                 record for record in self.source_bindings.records
                 if record.source_ref.identity == source_ref.identity
             ]
-            derivative_ids = {record.derivative_ref.identity for record in matches}
+            activity_matches = [
+                record for record in self.source_bindings.activity_records
+                if record.source_ref.identity == source_ref.identity
+            ]
+            derivative_ids = {
+                record.derivative_ref.identity for record in matches
+            } | {
+                record.derivative_ref.identity for record in activity_matches
+            }
             if len(derivative_ids) > 1:
                 raise SourceUnavailableError("origin has ambiguous registered derivatives")
-            if matches:
-                key = matches[0].derivative_ref.file_id
+            if derivative_ids:
+                key = next(iter(derivative_ids))[1]
         if key not in self.derived:
             raise KeyError(key)
         return self.derived[key]
@@ -79,7 +91,26 @@ class FakeDriveReader:
     def lookup_source_binding(self, entity_id: str, normalized_source_url: str) -> list[SourceBindingRecord]:
         return self.source_bindings.lookup_source_binding(entity_id, normalized_source_url)
 
-    def register_source_binding(self, record: SourceBindingRecord | Mapping[str, Any]) -> None:
+    def register_source_binding(
+        self,
+        record: SourceBindingRecord | ActivityInstructionBinding | Mapping[str, Any],
+    ) -> None:
+        self.source_bindings.register(record)
+
+    def lookup_activity_instruction_binding(
+        self,
+        activity_id: str,
+        instructions_source_url: str,
+        normalized_instructions_url: str,
+    ) -> list[ActivityInstructionBinding]:
+        return self.source_bindings.lookup_activity_instruction_binding(
+            activity_id, instructions_source_url, normalized_instructions_url
+        )
+
+    def register_activity_instruction_binding(
+        self,
+        record: ActivityInstructionBinding | Mapping[str, Any],
+    ) -> None:
         self.source_bindings.register(record)
 
 
@@ -137,6 +168,10 @@ def _default_entity_for_derivative(key: str) -> str | None:
         return "COMP319-S05"
     if lowered == "material-m03":
         return "COMP319-M03"
+    if lowered.startswith("activity-"):
+        suffix = lowered.removeprefix("activity-")
+        if suffix.isdigit() and len(suffix) == 2:
+            return f"COMP319-A{suffix}"
     return None
 
 

@@ -97,10 +97,28 @@ _SCHEMAS: dict[str, frozenset[str]] = {
         {
             "Name",
             "ID",
+            "Course",
             "Included Sessions",
             "Source Hash",
             "Source Version",
             "Scope Confirmed",
+        }
+    ),
+    "activities": frozenset(
+        {
+            "Name",
+            "ID",
+            "Course",
+            "Instructions Source",
+            "Normalized Instructions",
+            "Related Sessions",
+            "Related Materials",
+            "Result Type",
+            "Submission Ref",
+            "Repository Ref",
+            "Pull Request Ref",
+            "Due",
+            "Status",
         }
     ),
     "automationqueue": frozenset(
@@ -429,7 +447,7 @@ __all__ = ["GuardedNotionAdapter", "GuardedNotionWriter"]
 
 
 _USAGE_ROLES = frozenset({"Primary", "Supporting", "Reference"})
-_QUEUE_TYPES = frozenset({"MATERIAL_USAGE", "PAGE_RANGE"})
+_QUEUE_TYPES = frozenset({"MATERIAL_USAGE", "PAGE_RANGE", "EXAM_SCOPE"})
 _QUEUE_STATES = frozenset({"PENDING_REVIEW", "APPROVED", "REJECTED", "APPLIED", "FAILED", "SUPERSEDED"})
 _QUEUE_DECISIONS = frozenset({"Pending", "Approve", "Reject"})
 _TEXT_FIELDS = {
@@ -550,11 +568,30 @@ def _validate_typed_properties(
 
     # The non-Phase4 graph tables still get scalar/cardinality checks at this
     # boundary so the wrapper cannot be used as an untyped provider tunnel.
-    if logical in {"courses", "sessions", "materials", "exams"}:
+    if logical in {"courses", "sessions", "materials", "exams", "activities"}:
         if "Course" in properties and _one_relation(properties["Course"]) is None:
             raise PolicyViolation(f"{logical}.Course must contain exactly one relation")
-        if "Included Sessions" in properties and not _relation_ids(properties["Included Sessions"]):
-            raise PolicyViolation(f"{logical}.Included Sessions must contain at least one relation")
+        if "Included Sessions" in properties and not _valid_relation_list(
+            properties["Included Sessions"], expected_type="S", allow_empty=True
+        ):
+            raise PolicyViolation(f"{logical}.Included Sessions must be a valid Session relation")
+        if "Related Sessions" in properties and not _valid_relation_list(
+            properties["Related Sessions"], expected_type="S", allow_empty=True
+        ):
+            raise PolicyViolation(f"{logical}.Related Sessions must be a valid Session relation")
+        if "Related Materials" in properties and not _valid_relation_list(
+            properties["Related Materials"], expected_type="M", allow_empty=True
+        ):
+            raise PolicyViolation(f"{logical}.Related Materials must be a valid Material relation")
+        if "Scope Confirmed" in properties and type(properties["Scope Confirmed"]) is not bool:
+            raise PolicyViolation(f"{logical}.Scope Confirmed must be a boolean")
+        if "ID" in properties:
+            expected_type = "E" if logical == "exams" else "A" if logical == "activities" else None
+            if expected_type is not None:
+                from uls.domain.ids import strict_entity_id
+
+                if strict_entity_id(properties["ID"], expected_type) is None:
+                    raise PolicyViolation(f"{logical}.ID is not a canonical {expected_type} ID")
         for key in ("Current Source Version", "Page Count", "Session No"):
             if key in properties:
                 value = properties[key]
@@ -575,6 +612,28 @@ def _relation_ids(value: Any) -> tuple[str, ...]:
     from uls.domain.course_identity import relation_page_ids
 
     return relation_page_ids(value)
+
+
+def _valid_relation_list(value: Any, *, expected_type: str, allow_empty: bool) -> bool:
+    """Validate relation shape while preserving an explicit empty list."""
+
+    if isinstance(value, Mapping):
+        for key in ("relation", "relations", "results"):
+            if key in value:
+                return _valid_relation_list(
+                    value[key], expected_type=expected_type, allow_empty=allow_empty
+                )
+        return False
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return False
+    if not value:
+        return allow_empty
+    ids = _relation_ids(value)
+    if len(ids) != len(value):
+        return False
+    from uls.domain.ids import strict_entity_id
+
+    return all(strict_entity_id(item, expected_type) is not None for item in ids)
 
 
 def _select_value(value: Any, name: str) -> str:

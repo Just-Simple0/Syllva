@@ -22,6 +22,7 @@ from .course_identity import (
     course_key_of,
     relation_page_ids,
     resolve_course_relation,
+    strict_single_relation_page_id,
     validate_course_record,
 )
 from .errors import LocatorParseError, PolicyViolation, UlsError
@@ -87,5 +88,6 @@ __all__ = [
     "relation_page_ids",
     "require_page_range",
     "resolve_course_relation",
+    "strict_single_relation_page_id",
     "validate_course_record",
 ]

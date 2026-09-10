@@ -144,7 +144,7 @@ def test_exam_promotion_requires_scope_snapshot() -> None:
         "Source Version": 1,
         "Scope Confirmed": False,
     }
-    with pytest.raises(PolicyViolation, match="scope snapshot"):
+    with pytest.raises(PolicyViolation, match="stored strict Queue action is malformed"):
         HumanApprovalApplier(fake).apply(proposal)
     assert fake.target_mutations == 0
 

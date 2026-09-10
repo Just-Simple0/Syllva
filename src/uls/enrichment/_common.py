@@ -74,7 +74,7 @@ class DerivativeContext:
     marks: tuple[TimestampMark, ...]
     chunks: tuple[DerivativeChunk, ...]
     fingerprint: SourceFingerprint
-    kind: Literal["session", "material"]
+    kind: Literal["session", "material", "activity"]
 
 
 @dataclass(frozen=True)
@@ -159,7 +159,7 @@ def prepare_derivative(
     *,
     expected_entity_id: str | None,
     current_fingerprint: SourceFingerprint,
-    kind: Literal["session", "material"],
+    kind: Literal["session", "material", "activity"],
     expected_source_ref: SourceRef | Mapping[str, Any] | str | None = None,
     max_chunks: int | None = None,
 ) -> DerivativeContext:
@@ -204,7 +204,13 @@ def prepare_derivative(
         raise EnrichmentInputError(
             f"normalized derivative entity_id does not match {expected_entity_id!r}"
         )
-    expected_schema = "uls.transcript.v1" if kind == "session" else "uls.material.v1"
+    expected_schema = (
+        "uls.transcript.v1"
+        if kind == "session"
+        else "uls.activity.v1"
+        if kind == "activity"
+        else "uls.material.v1"
+    )
     if front.get("schema") != expected_schema:
         raise EnrichmentInputError(f"normalized derivative schema must be {expected_schema}")
 

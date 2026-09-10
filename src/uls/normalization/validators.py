@@ -12,6 +12,7 @@ from uls.domain.enums import DerivativeStatus
 from uls.domain.errors import SourcePartialError
 from uls.domain.source_ref import SourceFingerprint
 
+from .activity import ActivityFrontMatter, NormalizedActivity
 from .schemas import NormalizedTranscript, TimestampMark, TranscriptFrontMatter
 
 
@@ -69,8 +70,10 @@ def split_front_matter(markdown: str) -> tuple[dict[str, Any], str]:
     return dict(parsed), markdown[end + len("\n---\n") :]
 
 
-def parse_derivative(markdown: str | NormalizedTranscript) -> ParsedDerivative:
+def parse_derivative(markdown: str | NormalizedTranscript | NormalizedActivity) -> ParsedDerivative:
     if isinstance(markdown, NormalizedTranscript):
+        return ParsedDerivative(markdown.as_front_matter(), markdown.body)
+    if isinstance(markdown, NormalizedActivity):
         return ParsedDerivative(markdown.as_front_matter(), markdown.body)
     front, body = split_front_matter(markdown)
     return ParsedDerivative(front, body)
@@ -104,6 +107,42 @@ def parse_transcript_derivative(
             status=DerivativeStatus.PARTIAL,
         )
     return NormalizedTranscript(front, parsed.body, marks)
+
+
+def parse_activity_derivative(
+    markdown: str | NormalizedActivity,
+) -> NormalizedActivity:
+    """Parse a canonical Activity derivative without assigning page markers."""
+
+    if isinstance(markdown, NormalizedActivity):
+        validate_normalized_activity(markdown)
+        return markdown
+    parsed = parse_derivative(markdown)
+    front = ActivityFrontMatter.from_mapping(parsed.front_matter)
+    return NormalizedActivity(front, parsed.body)
+
+
+def validate_normalized_activity(
+    activity: NormalizedActivity | str,
+    *,
+    current_fingerprint: SourceFingerprint | None = None,
+    require_ready: bool = False,
+) -> bool:
+    if isinstance(activity, str):
+        activity = parse_activity_derivative(activity)
+    if not isinstance(activity, NormalizedActivity):
+        raise TypeError("expected NormalizedActivity or derivative Markdown")
+    if current_fingerprint is not None and activity.fingerprint != current_fingerprint:
+        raise SourcePartialError(
+            "activity derivative fingerprint does not match the current canonical source",
+            details={"derivative": activity.fingerprint, "current": current_fingerprint},
+        )
+    if require_ready and activity.status is DerivativeStatus.PARTIAL:
+        raise SourcePartialError(
+            "partial activity derivative cannot pass a ready-only validation gate",
+            details={"status": activity.status.value},
+        )
+    return True
 
 
 def validate_front_matter(front_matter: TranscriptFrontMatter | Mapping[str, Any]) -> bool:
@@ -184,11 +223,13 @@ def validate_derivative_fingerprint(
 
 __all__ = [
     "ParsedDerivative",
+    "parse_activity_derivative",
     "parse_derivative",
     "parse_transcript_derivative",
     "split_front_matter",
     "validate_derivative",
     "validate_derivative_fingerprint",
     "validate_front_matter",
+    "validate_normalized_activity",
     "validate_normalized_transcript",
 ]

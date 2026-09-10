@@ -209,7 +209,7 @@ def test_applier_rejects_a_different_target_under_same_proposal_id() -> None:
     assert writer.target_mutations == 0
 
 
-def test_applier_allows_exact_exam_scope_mutation() -> None:
+def test_schema_less_exam_scope_action_is_denied_without_target_mutation() -> None:
     fake = FakeNotionAdapter()
     proposal = {
         "Proposal ID": "p-exam",
@@ -230,6 +230,7 @@ def test_applier_allows_exact_exam_scope_mutation() -> None:
         "Source Version": 1,
         "Scope Confirmed": False,
     }
-    result = HumanApprovalApplier(fake).apply(proposal)
-    assert result.state is QueueState.APPLIED
-    assert fake.entities[("Exams", "E-01")]["Scope Confirmed"] is True
+    with pytest.raises(PolicyViolation, match="stored strict Queue action is malformed"):
+        HumanApprovalApplier(fake).apply(proposal)
+    assert fake.target_mutations == 0
+    assert fake.entities[("Exams", "E-01")]["Scope Confirmed"] is False

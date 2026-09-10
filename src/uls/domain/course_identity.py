@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .errors import CourseKeyParseError
-from .ids import CourseKey, parse_course_key
+from .ids import CourseKey, parse_course_key, strict_entity_id
 
 
 @dataclass(frozen=True)
@@ -38,6 +38,120 @@ def relation_page_ids(relation_value: Any) -> tuple[str, ...]:
     # ``[{"id": "course-a"}, {}]`` must not look like a valid one-relation
     # value merely because the malformed member contributes no ID.
     return values if valid else ()
+
+
+def strict_relation_page_ids(
+    relation_value: Any,
+    *,
+    expected_type: str,
+) -> tuple[str, ...] | None:
+    """Parse a provider relation while preserving absence and explicit empty.
+
+    Notion relation property values carry a type-specific ``relation`` list
+    and may carry ``has_more``.  A truncated list cannot authorize a complete
+    graph scope, so ``has_more`` must be explicitly false when supplied.
+    """
+
+    if relation_value is None:
+        return None
+    if not isinstance(expected_type, str) or len(expected_type) != 1:
+        raise ValueError("expected relation entity type is invalid")
+    if isinstance(relation_value, Mapping):
+        allowed = {"id", "type", "relation", "relations", "results", "has_more"}
+        if any(key not in allowed for key in relation_value):
+            raise ValueError("relation property contains unsupported fields")
+        if "has_more" in relation_value:
+            has_more = relation_value["has_more"]
+            if type(has_more) is not bool or has_more:
+                raise ValueError("relation property is truncated or has invalid has_more")
+        type_value = relation_value.get("type")
+        if type_value is not None and (
+            not isinstance(type_value, str) or type_value.casefold() != "relation"
+        ):
+            raise ValueError("relation property has an invalid type")
+        relation_keys = [
+            key for key in ("relation", "relations", "results") if key in relation_value
+        ]
+        if len(relation_keys) != 1:
+            raise ValueError("relation property must contain exactly one relation list")
+        values = relation_value[relation_keys[0]]
+    elif isinstance(relation_value, Sequence) and not isinstance(
+        relation_value, (str, bytes, bytearray)
+    ):
+        values = relation_value
+    else:
+        raise TypeError("relation value is malformed")
+
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes, bytearray)):
+        raise TypeError("relation value must contain a list")
+    result: list[str] = []
+    for value in values:
+        if isinstance(value, Mapping):
+            if set(value) != {"id"}:
+                raise ValueError("relation member is malformed")
+            entity_id = value["id"]
+        else:
+            entity_id = value
+        if not isinstance(entity_id, str) or strict_entity_id(entity_id, expected_type) is None:
+            raise ValueError("relation member has an invalid logical ID")
+        if entity_id in result:
+            raise ValueError("relation contains duplicate logical IDs")
+        result.append(entity_id)
+    return tuple(result)
+
+
+def strict_single_relation_page_id(relation_value: Any) -> str | None:
+    """Parse one authoritative opaque Course relation without truncation.
+
+    Course page IDs are provider opaque identifiers, so they cannot use the
+    logical ``strict_entity_id`` type check used for Session and Material
+    relations.  This boundary still requires the documented relation shape,
+    exactly one physical member, and an explicit non-truncated result.
+    """
+
+    if relation_value is None:
+        return None
+    if not isinstance(relation_value, Mapping):
+        raise TypeError("Course relation value is malformed")
+    allowed = {"id", "type", "relation", "relations", "results", "has_more"}
+    if any(key not in allowed for key in relation_value):
+        raise ValueError("Course relation contains unsupported fields")
+    if "id" in relation_value:
+        property_id = relation_value["id"]
+        if (
+            not isinstance(property_id, str)
+            or not property_id
+            or property_id != property_id.strip()
+        ):
+            raise ValueError("Course relation has an invalid property ID")
+    if "has_more" in relation_value:
+        has_more = relation_value["has_more"]
+        if type(has_more) is not bool or has_more:
+            raise ValueError("Course relation is truncated or has invalid has_more")
+    type_value = relation_value.get("type")
+    if type_value is not None and (
+        not isinstance(type_value, str) or type_value.casefold() != "relation"
+    ):
+        raise ValueError("Course relation has an invalid type")
+    relation_keys = [
+        key for key in ("relation", "relations", "results") if key in relation_value
+    ]
+    if len(relation_keys) != 1:
+        raise ValueError("Course relation must contain exactly one relation list")
+    values = relation_value[relation_keys[0]]
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes, bytearray)):
+        raise TypeError("Course relation must contain a list")
+    if len(values) == 0:
+        return None
+    if len(values) != 1:
+        raise ValueError("Course relation must contain exactly one page")
+    member = values[0]
+    if not isinstance(member, Mapping) or set(member) != {"id"}:
+        raise ValueError("Course relation member is malformed")
+    page_id = member["id"]
+    if not isinstance(page_id, str) or not page_id or page_id != page_id.strip():
+        raise ValueError("Course relation member has an invalid opaque page ID")
+    return page_id
 
 
 def resolve_course_relation(relation_value: Any) -> str | None:
@@ -186,7 +300,10 @@ def _normal(value: str) -> str:
 __all__ = [
     "CourseIdentity",
     "course_key_of",
+    "parse_course_key",
     "relation_page_ids",
     "resolve_course_relation",
+    "strict_relation_page_ids",
+    "strict_single_relation_page_id",
     "validate_course_record",
 ]

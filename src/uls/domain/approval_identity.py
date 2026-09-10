@@ -14,11 +14,14 @@ from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from .ids import strict_entity_id
 from .page_range import PageRange, parse_page_range
 from .source_ref import SourceRef
 
 APPROVAL_ACTION_SCHEMA = "uls.material_usage.approval.v1"
 MATERIAL_USAGE_TARGET_DB = "Material Usage"
+EXAM_SCOPE_APPROVAL_ACTION_SCHEMA = "uls.exam_scope.approval.v1"
+EXAM_SCOPE_TARGET_DB = "Exams"
 VALID_USAGE_ROLES = frozenset({"Primary", "Supporting", "Reference"})
 SUPPORTED_MATERIAL_SOURCE_CLASSES = frozenset(
     {"professor_material", "supplemental_reference"}
@@ -49,6 +52,22 @@ _ACTION_KEYS = (
     "processor_version",
 )
 _REQUIRED_ACTION_KEYS = frozenset(_ACTION_KEYS)
+
+_EXAM_ACTION_KEYS = (
+    "schema",
+    "operation",
+    "target_db",
+    "target_entity_id",
+    "course",
+    "old_snapshot",
+    "desired_snapshot",
+    "session_dependencies",
+    "source_dependencies",
+    "evidence",
+    "review_reason",
+    "processor_version",
+)
+_REQUIRED_EXAM_ACTION_KEYS = frozenset(_EXAM_ACTION_KEYS)
 
 
 def derive_usage_id(
@@ -108,6 +127,38 @@ def build_material_usage_semantics(
     return _canonical_semantics(action, proposal_type="MATERIAL_USAGE" if operation == "create_usage" else "PAGE_RANGE")
 
 
+def build_exam_scope_semantics(
+    *,
+    operation: str,
+    target_entity_id: str,
+    course: Mapping[str, Any] | Any,
+    old_snapshot: Mapping[str, Any],
+    desired_snapshot: Mapping[str, Any],
+    session_dependencies: Sequence[Mapping[str, Any]] = (),
+    source_dependencies: Sequence[Mapping[str, Any]] | None = None,
+    evidence: Any = None,
+    review_reason: str | None = None,
+    processor_version: str = "1.2.0",
+) -> OrderedDict[str, Any]:
+    """Build the complete, typed identity payload for an EXAM_SCOPE action."""
+
+    action = {
+        "schema": EXAM_SCOPE_APPROVAL_ACTION_SCHEMA,
+        "operation": operation,
+        "target_db": EXAM_SCOPE_TARGET_DB,
+        "target_entity_id": target_entity_id,
+        "course": dict(course) if isinstance(course, Mapping) else course,
+        "old_snapshot": dict(old_snapshot),
+        "desired_snapshot": dict(desired_snapshot),
+        "session_dependencies": list(session_dependencies),
+        "source_dependencies": None if source_dependencies is None else list(source_dependencies),
+        "evidence": evidence,
+        "review_reason": review_reason,
+        "processor_version": processor_version,
+    }
+    return _canonical_exam_semantics(action)
+
+
 def canonical_semantics_from_queue(record: Any) -> OrderedDict[str, Any]:
     """Extract the canonical semantics from a Queue row's own action.
 
@@ -129,9 +180,19 @@ def canonical_semantics_from_queue(record: Any) -> OrderedDict[str, Any]:
         semantics = _canonical_semantics(action, proposal_type=proposal_type)
         _validate_mirrors(record, semantics, proposal_type)
         return semantics
+    if proposal_type == "EXAM_SCOPE":
+        semantics = _canonical_exam_semantics(action)
+        _validate_exam_mirrors(record, semantics)
+        return semantics
     # The generic path is intentionally not used to authorize Material Usage;
     # it keeps unrelated old approval tools deterministic during migration.
     return _generic_semantics(action)
+
+
+def canonical_exam_scope_semantics(action: Mapping[str, Any]) -> OrderedDict[str, Any]:
+    """Canonicalize an EXAM_SCOPE action independently of Queue mirrors."""
+
+    return _canonical_exam_semantics(action)
 
 
 def derive_proposal_id(proposal_type: Any, semantics: Mapping[str, Any]) -> str:
@@ -172,7 +233,7 @@ def parse_action_json(value: Any) -> Mapping[str, Any]:
 
     parsed = json.loads(value, object_pairs_hook=pairs)
     if not isinstance(parsed, Mapping):
-        raise ValueError("Proposed Action must be a JSON object")
+        raise TypeError("Proposed Action must be a JSON object")
     return dict(parsed)
 
 
@@ -253,6 +314,241 @@ def _canonical_semantics(action: Mapping[str, Any], *, proposal_type: str) -> Or
             value = _require_text(value, key)
         ordered[key] = value
     return ordered
+
+
+def _canonical_exam_semantics(action: Mapping[str, Any]) -> OrderedDict[str, Any]:
+    normalized = _normalise_exam_action_aliases(action)
+    unknown = set(normalized).difference(_REQUIRED_EXAM_ACTION_KEYS)
+    if unknown:
+        raise ValueError("unknown EXAM_SCOPE action fields: " + ", ".join(sorted(unknown)))
+    missing = _REQUIRED_EXAM_ACTION_KEYS.difference(normalized)
+    if missing:
+        raise ValueError(
+            "EXAM_SCOPE action is missing required fields: " + ", ".join(sorted(missing))
+        )
+    _require_text(normalized["schema"], "schema", exact=EXAM_SCOPE_APPROVAL_ACTION_SCHEMA)
+    operation = _require_text(normalized["operation"], "operation")
+    if operation not in {"confirm_scope", "confirm_empty_scope"}:
+        raise ValueError("EXAM_SCOPE operation is unsupported")
+    _require_text(normalized["target_db"], "target_db", exact=EXAM_SCOPE_TARGET_DB)
+    target_id = _require_entity_text(normalized["target_entity_id"], "target_entity_id", "E")
+    course = _canonical_exam_course(normalized["course"])
+    old = _canonical_exam_snapshot(normalized["old_snapshot"], "old_snapshot", desired=False)
+    desired = _canonical_exam_snapshot(normalized["desired_snapshot"], "desired_snapshot", desired=True)
+    desired_ids = desired["included_session_ids"]
+    if operation == "confirm_empty_scope":
+        if desired_ids != []:
+            raise ValueError("confirm_empty_scope requires an explicit empty desired scope")
+    elif not desired_ids:
+        raise ValueError("an empty desired scope requires confirm_empty_scope")
+    sessions = _canonical_session_dependencies(normalized["session_dependencies"])
+    if {item["session_id"] for item in sessions} != set(desired_ids):
+        raise ValueError("session_dependencies must exactly cover desired session IDs")
+    for dependency in sessions:
+        if (
+            dependency["course_relation_page_id"] != course["relation_page_id"]
+            or dependency["course_key"] != course["course_key"]
+        ):
+            raise ValueError("session dependency Course must match canonical Exam Course")
+    sources = _canonical_source_dependencies(normalized["source_dependencies"])
+    evidence = _canonical_json_value(normalized["evidence"], "evidence")
+    reason = normalized["review_reason"]
+    if reason is not None and (not isinstance(reason, str) or not reason.strip()):
+        raise ValueError("review_reason must be a non-empty string or null")
+    processor = _require_text(normalized["processor_version"], "processor_version")
+    return OrderedDict(
+        (
+            ("schema", EXAM_SCOPE_APPROVAL_ACTION_SCHEMA),
+            ("operation", operation),
+            ("target_db", EXAM_SCOPE_TARGET_DB),
+            ("target_entity_id", target_id),
+            ("course", course),
+            ("old_snapshot", old),
+            ("desired_snapshot", desired),
+            ("session_dependencies", sessions),
+            ("source_dependencies", sources),
+            ("evidence", evidence),
+            ("review_reason", reason),
+            ("processor_version", processor),
+        )
+    )
+
+
+def _normalise_exam_action_aliases(action: Mapping[str, Any]) -> dict[str, Any]:
+    aliases = {
+        "schema": {"schema"},
+        "operation": {"operation", "op"},
+        "target_db": {"target_db", "targetdatabase", "database", "db"},
+        "target_entity_id": {"target_entity_id", "targetentityid", "target_id", "exam_id"},
+        "course": {"course", "course_identity"},
+        "old_snapshot": {"old_snapshot", "oldsnapshot", "old"},
+        "desired_snapshot": {"desired_snapshot", "desiredsnapshot", "desired", "scope"},
+        "session_dependencies": {"session_dependencies", "sessiondependencies", "dependencies"},
+        "source_dependencies": {"source_dependencies", "sourcedependencies", "sources"},
+        "evidence": {"evidence"},
+        "review_reason": {"review_reason", "reviewreason", "reason"},
+        "processor_version": {"processor_version", "processorversion"},
+    }
+    result: dict[str, Any] = {}
+    for raw_key, value in action.items():
+        if not isinstance(raw_key, str):
+            raise TypeError("EXAM_SCOPE action keys must be strings")
+        normalized_key = _normal(raw_key)
+        matches = [canonical for canonical, names in aliases.items() if normalized_key in {_normal(name) for name in names}]
+        if len(matches) != 1:
+            raise ValueError(f"unknown or ambiguous EXAM_SCOPE action field: {raw_key!r}")
+        canonical = matches[0]
+        if canonical in result:
+            raise ValueError(f"conflicting EXAM_SCOPE action field: {canonical}")
+        result[canonical] = value
+    return result
+
+
+def _require_entity_text(value: Any, name: str, expected_type: str) -> str:
+    result = _require_text(value, name)
+    if _entity_type(result) != expected_type:
+        raise ValueError(f"{name} must be a canonical {expected_type} entity ID")
+    return result
+
+
+def _entity_type(value: str) -> str | None:
+    # Keep identity validation local to this pure module; importing the parser
+    # here avoids adding a domain-cycle to older callers.
+    from .ids import strict_entity_id
+
+    for expected in ("E", "S", "M", "A"):
+        if strict_entity_id(value, expected) is not None:
+            return expected
+    return None
+
+
+def _canonical_exam_course(value: Any) -> OrderedDict[str, str]:
+    mapping = _mapping_required(value, "course")
+    normalized = _alias_mapping(
+        mapping,
+        {
+            "relation_page_id": ("relation_page_id", "relationpageid", "course_page_id", "course_relation_page_id"),
+            "course_key": ("course_key", "coursekey"),
+        },
+        "course",
+    )
+    if set(normalized) != {"relation_page_id", "course_key"}:
+        raise ValueError("course must contain relation_page_id and course_key")
+    relation = _require_text(normalized["relation_page_id"], "course.relation_page_id")
+    key = _require_text(normalized["course_key"], "course.course_key")
+    from .ids import parse_course_key
+
+    try:
+        parse_course_key(key)
+    except Exception as exc:
+        raise ValueError("course.course_key is invalid") from exc
+    return OrderedDict((("relation_page_id", relation), ("course_key", key)))
+
+
+def _canonical_exam_snapshot(value: Any, name: str, *, desired: bool) -> OrderedDict[str, Any]:
+    mapping = _mapping_required(value, name)
+    normalized = _alias_mapping(
+        mapping,
+        {
+            "included_session_ids": ("included_session_ids", "included_sessions", "session_ids", "sessions"),
+            "scope_confirmed": ("scope_confirmed", "scope_confirmed_value", "confirmed"),
+        },
+        name,
+    )
+    if set(normalized) != {"included_session_ids", "scope_confirmed"}:
+        raise ValueError(f"{name} must contain included_session_ids and scope_confirmed")
+    ids = _canonical_id_list(
+        normalized["included_session_ids"],
+        f"{name}.included_session_ids",
+        "S",
+        allow_none=not desired,
+    )
+    confirmed = normalized["scope_confirmed"]
+    if type(confirmed) is not bool:
+        raise ValueError(f"{name}.scope_confirmed must be a boolean")
+    if desired and not confirmed:
+        raise ValueError("desired_snapshot.scope_confirmed must be true")
+    return OrderedDict((("included_session_ids", ids), ("scope_confirmed", confirmed)))
+
+
+def _canonical_id_list(value: Any, name: str, expected_type: str, *, allow_none: bool = False) -> list[str] | None:
+    if value is None and allow_none:
+        return None
+    if not isinstance(value, (list, tuple)):
+        raise TypeError(f"{name} must be an explicit list")
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or strict_entity_id(item, expected_type) is None:
+            raise ValueError(f"{name} contains an invalid {expected_type} ID")
+        if item in result:
+            raise ValueError(f"{name} contains duplicate IDs")
+        result.append(item)
+    return sorted(result)
+
+
+def _canonical_session_dependencies(value: Any) -> list[OrderedDict[str, Any]]:
+    if not isinstance(value, (list, tuple)):
+        raise TypeError("session_dependencies must be an explicit list")
+    result: list[OrderedDict[str, Any]] = []
+    seen: set[str] = set()
+    for item in value:
+        mapping = _mapping_required(item, "session dependency")
+        normalized = _alias_mapping(
+            mapping,
+            {
+                "session_id": ("session_id", "sessionid", "session"),
+                "course_relation_page_id": ("course_relation_page_id", "coursepageid", "course_page_id"),
+                "course_key": ("course_key", "coursekey"),
+                "source_ref": ("source_ref", "sourceref", "transcript_ref"),
+                "source_hash": ("source_hash", "sourcehash", "hash"),
+                "source_version": ("source_version", "sourceversion", "version"),
+            },
+            "session dependency",
+        )
+        required = {"session_id", "course_relation_page_id", "course_key", "source_ref", "source_hash", "source_version"}
+        if set(normalized) != required:
+            raise ValueError("session dependency must contain its complete identity and fingerprint")
+        session_id = _require_entity_text(normalized["session_id"], "session_dependency.session_id", "S")
+        if session_id in seen:
+            raise ValueError("session_dependencies contains duplicate IDs")
+        seen.add(session_id)
+        relation = _require_text(normalized["course_relation_page_id"], "session_dependency.course_relation_page_id")
+        course_key = _require_text(normalized["course_key"], "session_dependency.course_key")
+        ref, source_hash, source_version = _canonical_optional_dependency(
+            normalized["source_ref"], normalized["source_hash"], normalized["source_version"], "session_dependency"
+        )
+        result.append(
+            OrderedDict(
+                (
+                    ("session_id", session_id),
+                    ("course_relation_page_id", relation),
+                    ("course_key", course_key),
+                    ("source_ref", ref),
+                    ("source_hash", source_hash),
+                    ("source_version", source_version),
+                )
+            )
+        )
+    return sorted(result, key=lambda item: item["session_id"])
+
+
+def _canonical_source_dependencies(value: Any) -> list[OrderedDict[str, Any]] | None:
+    if value is None:
+        return None
+    raise ValueError(
+        "EXAM_SCOPE source_dependencies is unsupported; use explicit null"
+    )
+
+
+def _canonical_optional_dependency(ref_value: Any, hash_value: Any, version_value: Any, name: str) -> tuple[dict[str, str] | None, str | None, int | None]:
+    if ref_value is None and hash_value is None and version_value is None:
+        return None, None, None
+    ref = _strict_ref(ref_value, f"{name}.source_ref")
+    source_hash = _require_text(hash_value, f"{name}.source_hash")
+    if isinstance(version_value, bool) or not isinstance(version_value, int) or version_value < 1:
+        raise ValueError(f"{name}.source_version must be a positive integer")
+    return {"provider": ref.provider, "file_id": ref.file_id}, source_hash, version_value
+
 
 
 def _normalise_action_aliases(action: Mapping[str, Any]) -> dict[str, Any]:
@@ -408,6 +704,41 @@ def _validate_mirrors(record: Any, semantics: Mapping[str, Any], proposal_type: 
     # Target DB and Target Fingerprint are deliberately not Queue schema
     # properties.  Their presence is caught by the guarded property validator
     # before this function is used for persisted rows.
+
+
+def _validate_exam_mirrors(record: Any, semantics: Mapping[str, Any]) -> None:
+    from .course_identity import strict_single_relation_page_id
+
+    if _wire(_field(record, "Proposal Type", "proposal_type", default=None)) != "EXAM_SCOPE":
+        raise ValueError("Proposal Type mirror does not match EXAM_SCOPE action")
+    target_id = _field(record, "Target Entity ID", "target_entity_id", "target_id", default=_MISSING)
+    if target_id is _MISSING or not isinstance(target_id, str) or target_id.strip() != semantics["target_entity_id"]:
+        raise ValueError("Target Entity ID mirror does not match EXAM_SCOPE action")
+    for name, alias in (
+        ("Source Ref", "source_ref"),
+        ("Source Hash", "source_hash"),
+        ("Source Version", "source_version"),
+    ):
+        if _field(record, name, alias, default=_MISSING) is not _MISSING:
+            raise ValueError(f"{name} mirrors are unsupported for EXAM_SCOPE")
+    course = _field(record, "Course", "course", default=_MISSING)
+    if course is not _MISSING:
+        relation = _field(
+            course,
+            "relation_page_id",
+            "course_relation_page_id",
+            default=_MISSING,
+        )
+        if relation is _MISSING:
+            relation = strict_single_relation_page_id(course)
+        if relation != semantics["course"]["relation_page_id"]:
+            raise ValueError("Course mirror does not match EXAM_SCOPE action")
+    evidence = _field(record, "Evidence", "evidence", default=_MISSING)
+    if evidence is not _MISSING and _json_value(_parse_mirror_json(evidence)) != semantics["evidence"]:
+        raise ValueError("Evidence mirror does not match EXAM_SCOPE action")
+    review_reason = _field(record, "Review Reason", "review_reason", default=_MISSING)
+    if review_reason is not _MISSING and review_reason != semantics["review_reason"]:
+        raise ValueError("Review Reason mirror does not match EXAM_SCOPE action")
 
 
 def _generic_semantics(action: Mapping[str, Any]) -> OrderedDict[str, Any]:
@@ -573,11 +904,15 @@ def _sha256(value: Any) -> str:
 
 __all__ = [
     "APPROVAL_ACTION_SCHEMA",
+    "EXAM_SCOPE_APPROVAL_ACTION_SCHEMA",
+    "EXAM_SCOPE_TARGET_DB",
     "MATERIAL_USAGE_TARGET_DB",
     "SUPPORTED_MATERIAL_SOURCE_CLASSES",
     "VALID_USAGE_ROLES",
+    "build_exam_scope_semantics",
     "build_material_usage_semantics",
     "canonical_action_json",
+    "canonical_exam_scope_semantics",
     "canonical_semantics_from_queue",
     "derive_proposal_id",
     "derive_usage_id",

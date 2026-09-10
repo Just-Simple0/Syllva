@@ -28,6 +28,9 @@ from uls.domain.errors import (
 from uls.domain.ids import strict_entity_id
 from uls.enrichment.schemas import EnrichmentRecord
 
+if TYPE_CHECKING:
+    from uls.domain.academic import ActivityRecord, ExamRecord
+
 AUTOMATION_QUEUE = "Automation Queue"
 """The canonical Notion database name for human-review proposals."""
 
@@ -223,6 +226,19 @@ class NotionReader(Protocol):
 
 
 @runtime_checkable
+class AcademicNotionReader(Protocol):
+    """Read-only academic record extension for Exam and Activity retrieval."""
+
+    def get_exam(self, exam_id: str) -> ExamRecord | None:
+        """Return one normalized Exam record by its canonical ID."""
+        ...
+
+    def get_activity(self, activity_id: str) -> ActivityRecord | None:
+        """Return one normalized Activity record by its canonical ID."""
+        ...
+
+
+@runtime_checkable
 class ApprovalGraphReader(Protocol):
     """Read-only graph dependency used by the Phase4 approval applier."""
 
@@ -233,6 +249,9 @@ class ApprovalGraphReader(Protocol):
         ...
 
     def get_material(self, material_id: str) -> Any | None:
+        ...
+
+    def get_exam(self, exam_id: str) -> ExamRecord | None:
         ...
 
     def get_course_by_relation_id(self, relation_page_id: str) -> Any | None:
@@ -452,6 +471,17 @@ def enforce_write_policy(
         and actor is not AutomationActor.HUMAN_APPROVAL_APPLIER
     ):
         raise PolicyViolation("Exam.Scope Confirmed=true is human-only")
+
+    if (
+        _normal_key(target_db) in {"exams", "exam"}
+        and actor is not AutomationActor.HUMAN_APPROVAL_APPLIER
+        and any(
+            _normal_key(str(key))
+            in {_normal_key("Scope Confirmed"), _normal_key("Included Sessions")}
+            for key in patch
+        )
+    ):
+        raise PolicyViolation("Exam scope fields are applier-only")
 
     # Decision is human-owned for every internal capability.  The applier
     # records Decision By/At but never changes Decision itself; ApprovalReader
@@ -1384,22 +1414,30 @@ def _unique_approval_row(rows: Sequence[Any], proposal_id: str) -> Any | None:
 def _require_phase4_queue_backend(record: Any, adapter: Any) -> None:
     proposal_type = _get_field(record, "Proposal Type", "proposal_type", default=None)
     proposal_type = _wire_value(proposal_type)
-    if proposal_type in {ProposalType.MATERIAL_USAGE.value, ProposalType.PAGE_RANGE.value} and not callable(
+    if proposal_type in {
+        ProposalType.MATERIAL_USAGE.value,
+        ProposalType.PAGE_RANGE.value,
+        ProposalType.EXAM_SCOPE.value,
+    } and not callable(
         getattr(adapter, "find_approval_rows", None)
     ):
-        raise PolicyViolation("Phase4 guarded Queue path requires physical uniqueness lookup")
+        raise PolicyViolation("guarded Queue path requires physical uniqueness lookup")
 
 
 def _validate_phase4_queue_identity(record: Any) -> None:
     proposal_type = _wire_value(_get_field(record, "Proposal Type", "proposal_type", default=None))
-    if proposal_type not in {ProposalType.MATERIAL_USAGE.value, ProposalType.PAGE_RANGE.value}:
+    if proposal_type not in {
+        ProposalType.MATERIAL_USAGE.value,
+        ProposalType.PAGE_RANGE.value,
+        ProposalType.EXAM_SCOPE.value,
+    }:
         return
     from uls.domain.approval_identity import canonical_semantics_from_queue, derive_proposal_id
 
     try:
         semantics = canonical_semantics_from_queue(record)
     except (TypeError, ValueError) as exc:
-        raise PolicyViolation("stored Phase4 Queue action is malformed") from exc
+        raise PolicyViolation("stored strict Queue action is malformed") from exc
     stored_id = _proposal_id(record)
     expected_id = derive_proposal_id(str(proposal_type), semantics)
     if stored_id != expected_id:
@@ -1482,9 +1520,12 @@ def _target_entity_id(proposal: Any, action: Mapping[str, Any]) -> str:
         "target_id",
         default=None,
     )
-    if action_target is not None and proposal_target is not None:
-        if str(action_target).strip() != str(proposal_target).strip():
-            raise PolicyViolation("Proposed action targets a different entity")
+    if (
+        action_target is not None
+        and proposal_target is not None
+        and str(action_target).strip() != str(proposal_target).strip()
+    ):
+        raise PolicyViolation("Proposed action targets a different entity")
     return _valid_proposal_id(action_target if action_target is not None else proposal_target)
 
 
@@ -2009,6 +2050,7 @@ class Proposal:
     decision_at: str | None = None
     applied_at: str | None = None
     target_fingerprint: Mapping[str, Any] | None = None
+    name: str | None = None
 
     def as_properties(self) -> dict[str, Any]:
         properties: dict[str, Any] = {
@@ -2019,10 +2061,28 @@ class Proposal:
             "Target Entity ID": self.target_entity_id,
             "Proposed Action": dict(self.proposed_action),
         }
+        if self.name is not None:
+            properties["Name"] = self.name
         phase4_type = self.proposal_type in {
             ProposalType.MATERIAL_USAGE,
             ProposalType.PAGE_RANGE,
+            ProposalType.EXAM_SCOPE,
         }
+        if self.proposal_type is ProposalType.EXAM_SCOPE:
+            # Keep the existing Queue display mirrors for fields already in
+            # the frozen schema.  Proposed Action remains the identity source;
+            # these mirrors are checked against it on every read/write.
+            course = self.proposed_action.get("course")
+            if isinstance(course, Mapping):
+                relation_page_id = course.get("relation_page_id")
+                if isinstance(relation_page_id, str) and relation_page_id.strip():
+                    properties["Course"] = {"relation": [{"id": relation_page_id}]}
+            evidence = self.proposed_action.get("evidence")
+            if evidence is not None:
+                properties["Evidence"] = evidence
+            review_reason = self.proposed_action.get("review_reason")
+            if review_reason is not None:
+                properties["Review Reason"] = review_reason
         # Phase4 keeps logical target/database and target snapshot inside the
         # canonical Proposed Action JSON.  They are deliberately not emitted
         # as legacy Queue properties, which would create a second mutable
@@ -2229,6 +2289,7 @@ class HumanApprovalApplier:
         if _wire_value(_get_field(current, "Proposal Type", "proposal_type")) in {
             ProposalType.MATERIAL_USAGE.value,
             ProposalType.PAGE_RANGE.value,
+            ProposalType.EXAM_SCOPE.value,
         }:
             # The caller's Phase4 mirrors have been compared above, but they
             # must not be merged into the provider's current row.  Merging an
@@ -2369,7 +2430,7 @@ class HumanApprovalApplier:
             )
         except PolicyViolation:
             raise
-        except Exception:
+        except Exception:  # noqa: BLE001 - provider ambiguity must fail closed
             # A marker write can commit and raise, and its read-back can also
             # be unavailable.  Neither case authorizes a target write.
             return False
@@ -2429,7 +2490,7 @@ class HumanApprovalApplier:
             physical_id = _physical_or_logical_id(current, proposal_id)
         except PolicyViolation:
             raise
-        except Exception:
+        except Exception:  # noqa: BLE001 - provider ambiguity must fail closed
             return False
 
         try:
@@ -2441,7 +2502,7 @@ class HumanApprovalApplier:
                 {"Last Error": marker},
                 automation_queue_ids=set(self._queue_ids or ()),
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - provider ambiguity must fail closed
             return self._phase4_marker_is_verified(
                 proposal_id,
                 proposal_type,
@@ -2843,6 +2904,350 @@ class HumanApprovalApplier:
             target_patch,
         )
         return ApprovalApplyResult(proposal_id, QueueState.APPLIED, False, None)
+
+    def _exam_scope_reconciliation(
+        self,
+        proposal_id: str,
+        semantics: Mapping[str, Any],
+        target_patch: Mapping[str, Any],
+        *,
+        desired: bool | None = None,
+    ) -> str:
+        """Revalidate the Exam target, parent Course, and all action dependencies."""
+
+        from uls.domain.approval_identity import EXAM_SCOPE_TARGET_DB
+        # ``proposal_id`` is not the Exam ID; callers pass the exact target ID
+        # through the action and only use this helper after canonicalization.
+        target_id = str(semantics["target_entity_id"])
+        target = _find_target(self._adapter, EXAM_SCOPE_TARGET_DB, target_id)
+        if target is None:
+            return "unknown"
+        if desired is not None:
+            snapshot = semantics["desired_snapshot"] if desired else semantics["old_snapshot"]
+            if not self._exam_target_matches_snapshot(target, snapshot):
+                return "unknown"
+        graph = self._graph_reader
+        if graph is None:
+            return "unknown"
+        get_exam = getattr(graph, "get_exam", None)
+        get_session = getattr(graph, "get_session", None)
+        if not callable(get_exam) or not callable(get_session):
+            return "unknown"
+        try:
+            exam = get_exam(target_id)
+            if exam is None or not _phase4_graph_id_matches(exam, target_id, "E"):
+                return "unknown"
+            from uls.domain.academic import ExamRecord
+
+            if isinstance(exam, ExamRecord):
+                typed_snapshot = _phase4_typed_exam_snapshot(graph, exam, target_id)
+                if typed_snapshot is None:
+                    return "unknown"
+                course, exam_relation, typed_scope_confirmed = typed_snapshot
+                if desired is None:
+                    if self._exam_target_matches_snapshot(target, semantics["desired_snapshot"]):
+                        expected_snapshot = semantics["desired_snapshot"]
+                    elif self._exam_target_matches_snapshot(target, semantics["old_snapshot"]):
+                        expected_snapshot = semantics["old_snapshot"]
+                    else:
+                        return "unknown"
+                else:
+                    expected_snapshot = semantics["desired_snapshot"] if desired else semantics["old_snapshot"]
+                expected_ids = expected_snapshot["included_session_ids"]
+                expected_relation = None if expected_ids is None else tuple(expected_ids)
+                if not _same_exam_session_membership(exam_relation, expected_relation):
+                    return "unknown"
+                if typed_scope_confirmed is not expected_snapshot["scope_confirmed"]:
+                    return "unknown"
+            else:
+                exam_relation = _strict_exam_session_relation(
+                    _get_field(exam, "Included Sessions", "included_sessions", default=_PATCH_MISSING)
+                )
+            desired_ids = tuple(semantics["desired_snapshot"]["included_session_ids"])
+            if not isinstance(exam, ExamRecord) and desired is True and not _same_exam_session_membership(exam_relation, desired_ids):
+                return "unknown"
+            if not isinstance(exam, ExamRecord) and desired is False:
+                old_ids = semantics["old_snapshot"]["included_session_ids"]
+                old_relation = None if old_ids is None else tuple(old_ids)
+                if not _same_exam_session_membership(exam_relation, old_relation):
+                    return "unknown"
+            course = _phase4_course(graph, exam)
+            if course is None:
+                return "unknown"
+            expected_course = semantics["course"]
+            if (
+                course.relation_page_id != expected_course["relation_page_id"]
+                or course.course_key != expected_course["course_key"]
+            ):
+                return "unknown"
+            for dependency in semantics["session_dependencies"]:
+                session_id = dependency["session_id"]
+                session = get_session(session_id)
+                if session is None or not _phase4_graph_id_matches(session, session_id, "S"):
+                    return "unknown"
+                session_course = _phase4_course(graph, session)
+                if session_course is None:
+                    return "unknown"
+                if (
+                    session_course.relation_page_id != course.relation_page_id
+                    or session_course.course_key != course.course_key
+                    or session_course.relation_page_id
+                    != dependency["course_relation_page_id"]
+                    or session_course.course_key != dependency["course_key"]
+                ):
+                    return "unknown"
+                if dependency["source_ref"] is not None:
+                    if self._source_reader is None or self._source_binding_resolver is None:
+                        return "unknown"
+                    current_ref = _phase4_resolve_graph_source(
+                        self._source_binding_resolver,
+                        graph,
+                        session,
+                        session_id,
+                        ("Normalized Transcript", "normalized_transcript"),
+                    )
+                    expected_ref = _phase4_dependency_ref(dependency)
+                    if current_ref.identity != expected_ref.identity:
+                        return "unknown"
+                    if _phase4_source_fingerprint(self._source_reader, current_ref) != _phase4_dependency_fp(dependency):
+                        return "unknown"
+        except (PolicyViolation, ProviderUnavailableError, ProviderRateLimitedError):
+            return "unknown"
+        except Exception:  # noqa: BLE001 - dependency uncertainty must fail closed
+            return "unknown"
+        if desired is None:
+            if self._exam_target_matches_snapshot(target, semantics["desired_snapshot"]):
+                return "desired"
+            if self._exam_target_matches_snapshot(target, semantics["old_snapshot"]):
+                return "old"
+            return "unknown"
+        return "desired" if desired else "old"
+
+    @staticmethod
+    def _exam_scope_target_patch(semantics: Mapping[str, Any]) -> dict[str, Any]:
+        """Build the only target patch allowed by a canonical Exam action."""
+
+        return {
+            "Included Sessions": {
+                "relation": [
+                    {"id": value}
+                    for value in semantics["desired_snapshot"]["included_session_ids"]
+                ]
+            },
+            "Scope Confirmed": True,
+        }
+
+    @staticmethod
+    def _exam_target_matches_snapshot(target: Any, snapshot: Mapping[str, Any] | None) -> bool:
+        if snapshot is None:
+            return True
+
+        included = _get_field(target, "Included Sessions", "included_sessions", default=_PATCH_MISSING)
+        confirmed = _get_field(target, "Scope Confirmed", "scope_confirmed", default=_PATCH_MISSING)
+        expected_ids = snapshot["included_session_ids"]
+        try:
+            current_ids = _strict_exam_session_relation(included)
+        except (TypeError, ValueError):
+            return False
+        expected_relation = None if expected_ids is None else tuple(expected_ids)
+        if not _same_exam_session_membership(current_ids, expected_relation):
+            return False
+        return confirmed is snapshot["scope_confirmed"]
+
+    def _apply_exam_scope(self, proposal_id: str, current: Any) -> ApprovalApplyResult:
+        """Apply EXAM_SCOPE with the same durable marker protocol as Phase4."""
+
+        from uls.domain.approval_identity import canonical_semantics_from_queue
+
+        if not _is_human_decision_by(self._decision_by):
+            raise PolicyViolation("EXAM_SCOPE applier requires a trusted human identity at its boundary")
+        semantics = canonical_semantics_from_queue(current)
+        target_id = semantics["target_entity_id"]
+        state = coerce_queue_state(_get_field(current, "State", default=None))
+        decision = coerce_decision(_decision_field(current))
+        target = _find_target(self._adapter, "Exams", target_id)
+        if target is None:
+            return self._mark_terminal(proposal_id, QueueState.SUPERSEDED, "approval target was deleted")
+        try:
+            target_patch = self._validate_exam_scope_action(semantics, target)
+        except _StaleApproval as exc:
+            # A prepared marker plus a later desired read-back is ambiguous:
+            # the current applier cannot prove it caused that effect.  Keep
+            # the row APPROVED for reconciliation and never turn it into
+            # APPLIED.  With no prepared marker, the same desired state is an
+            # external change and is terminally superseded.
+            recovery_patch = self._exam_scope_target_patch(semantics)
+            marker_phase = _phase4_apply_marker_phase(
+                current,
+                proposal_id=proposal_id,
+                proposal_type=ProposalType.EXAM_SCOPE.value,
+                semantics=semantics,
+                target_patch=recovery_patch,
+            )
+            if state is QueueState.APPLIED:
+                if self._exam_scope_reconciliation(
+                    target_id, semantics, recovery_patch, desired=True
+                ) == "desired":
+                    if marker_phase == _PHASE4_APPLY_MARKER_PHASE_EFFECT_OBSERVED:
+                        if not _phase4_audit_fields_complete(current):
+                            return self._phase4_repair_applied_audit(
+                                proposal_id,
+                                ProposalType.EXAM_SCOPE.value,
+                                semantics,
+                                recovery_patch,
+                                current,
+                            )
+                        return ApprovalApplyResult(
+                            proposal_id, QueueState.APPLIED, False, "already applied"
+                        )
+                    if marker_phase is None and _phase4_audit_fields_complete(current):
+                        return ApprovalApplyResult(
+                            proposal_id, QueueState.APPLIED, False, "already applied"
+                        )
+                return self._phase4_recoverable(
+                    proposal_id, "APPLIED Exam scope requires reconciliation"
+                )
+            if marker_phase == _PHASE4_APPLY_MARKER_PHASE_PREPARED and self._exam_scope_reconciliation(
+                target_id, semantics, recovery_patch, desired=True
+            ) == "desired":
+                return self._phase4_recoverable(
+                    proposal_id,
+                    "prepared marker has no attributable Exam effect",
+                )
+            if marker_phase == _PHASE4_APPLY_MARKER_PHASE_EFFECT_OBSERVED and self._exam_scope_reconciliation(
+                target_id, semantics, recovery_patch, desired=True
+            ) == "desired":
+                target_patch = recovery_patch
+            else:
+                return self._mark_terminal(proposal_id, QueueState.SUPERSEDED, str(exc))
+        marker_phase = _phase4_apply_marker_phase(
+            current,
+            proposal_id=proposal_id,
+            proposal_type=ProposalType.EXAM_SCOPE.value,
+            semantics=semantics,
+            target_patch=target_patch,
+        )
+        if state is QueueState.APPLIED:
+            if self._exam_scope_reconciliation(
+                target_id, semantics, target_patch, desired=True
+            ) == "desired":
+                if marker_phase == _PHASE4_APPLY_MARKER_PHASE_EFFECT_OBSERVED:
+                    if not _phase4_audit_fields_complete(current):
+                        return self._phase4_repair_applied_audit(
+                            proposal_id,
+                            ProposalType.EXAM_SCOPE.value,
+                            semantics,
+                            target_patch,
+                            current,
+                        )
+                    return ApprovalApplyResult(
+                        proposal_id, QueueState.APPLIED, False, "already applied"
+                    )
+                if marker_phase is None and _phase4_audit_fields_complete(current):
+                    return ApprovalApplyResult(
+                        proposal_id, QueueState.APPLIED, False, "already applied"
+                    )
+            return self._phase4_recoverable(proposal_id, "APPLIED Exam scope requires reconciliation")
+        if state in {QueueState.REJECTED, QueueState.SUPERSEDED, QueueState.FAILED}:
+            raise PolicyViolation(f"Proposal {proposal_id} is terminal: {state.value}")
+        if state is not QueueState.APPROVED or decision is not Decision.Approve:
+            raise PolicyViolation("HumanApprovalApplier requires State=APPROVED and Decision=Approve")
+
+        initial = self._exam_scope_reconciliation(target_id, semantics, target_patch)
+        if initial == "unknown":
+            return self._phase4_recoverable(proposal_id, "Exam target or dependency basis is unavailable")
+        if initial == "desired":
+            if marker_phase == _PHASE4_APPLY_MARKER_PHASE_EFFECT_OBSERVED:
+                pass
+            elif marker_phase == _PHASE4_APPLY_MARKER_PHASE_PREPARED:
+                return self._phase4_recoverable(proposal_id, "prepared marker has no attributable Exam effect")
+            else:
+                return self._mark_terminal(
+                    proposal_id,
+                    QueueState.SUPERSEDED,
+                    "Exam target changed to desired state without a prior application effect",
+                )
+        else:
+            if marker_phase is not None:
+                return self._phase4_recoverable(proposal_id, "previous Exam target attempt requires reconciliation")
+            if not self._phase4_arm_marker(
+                proposal_id, ProposalType.EXAM_SCOPE.value, semantics, target_patch
+            ):
+                return self._phase4_recoverable(proposal_id, "Exam write-ahead marker persistence is not verified")
+            marker_phase = _PHASE4_APPLY_MARKER_PHASE_PREPARED
+            if self._exam_scope_reconciliation(target_id, semantics, target_patch, desired=False) != "old":
+                return self._phase4_recoverable(proposal_id, "Exam basis changed after marker arm")
+            # This must be the final observable read before the target write.
+            # Dependency validation above may revoke approval or introduce a
+            # duplicate Queue row, so the earlier marker read is insufficient.
+            checked = self._phase4_approved_queue(
+                proposal_id, ProposalType.EXAM_SCOPE.value, semantics, target_patch
+            )
+            if checked is None or checked[1] != _PHASE4_APPLY_MARKER_PHASE_PREPARED:
+                return self._phase4_recoverable(proposal_id, "Exam approval changed before target mutation")
+            try:
+                _guarded_update(
+                    self._adapter,
+                    self._actor,
+                    "Exams",
+                    target_id,
+                    target_patch,
+                )
+            except Exception as exc:  # noqa: BLE001 - write outcome is ambiguous
+                outcome = self._exam_scope_reconciliation(target_id, semantics, target_patch)
+                if isinstance(exc, ProviderWriteNotAppliedError) and outcome == "old":
+                    self._phase4_clear_marker(
+                        proposal_id, ProposalType.EXAM_SCOPE.value, semantics, target_patch
+                    )
+                    return ApprovalApplyResult(proposal_id, QueueState.APPROVED, False, "target write outcome is retryable")
+                # Even a desired read-back after an ambiguous exception is not
+                # attributable to this applier.  Keep prepared for audit-only
+                # reconciliation and never promote it to effect_observed.
+                return self._phase4_recoverable(proposal_id, f"Exam target write outcome requires reconciliation: {type(exc).__name__}")
+            if self._exam_scope_reconciliation(target_id, semantics, target_patch, desired=True) != "desired":
+                return self._phase4_recoverable(proposal_id, "Exam target read-back requires reconciliation")
+            if not self._phase4_mark_effect_observed(
+                proposal_id, ProposalType.EXAM_SCOPE.value, semantics, target_patch
+            ):
+                return self._phase4_recoverable(proposal_id, "Exam effect-observed marker persistence is not verified")
+            marker_phase = _PHASE4_APPLY_MARKER_PHASE_EFFECT_OBSERVED
+
+        if self._exam_scope_reconciliation(target_id, semantics, target_patch, desired=True) != "desired":
+            return self._phase4_recoverable(proposal_id, "Exam target/dependencies changed before audit")
+        checked = self._phase4_approved_queue(
+            proposal_id, ProposalType.EXAM_SCOPE.value, semantics, target_patch
+        )
+        if checked is None or checked[1] != _PHASE4_APPLY_MARKER_PHASE_EFFECT_OBSERVED:
+            return self._phase4_recoverable(proposal_id, "Exam effect marker is not authoritatively visible")
+        queue_patch = {
+            "Decision By": self._decision_by,
+            "Decision At": _get_field(current, "Decision At", "decision_at", default=None) or self._timestamp(),
+            "Applied At": self._timestamp(),
+            "State": QueueState.APPLIED.value,
+        }
+        try:
+            _guarded_update(
+                self._adapter,
+                self._actor,
+                self._queue_db_id,
+                _physical_or_logical_id(checked[0], proposal_id),
+                queue_patch,
+                automation_queue_ids=set(self._queue_ids or ()),
+            )
+        except Exception as exc:  # noqa: BLE001 - audit outcome is ambiguous
+            if self._phase4_confirm_applied_queue(
+                proposal_id, ProposalType.EXAM_SCOPE.value, semantics, target_patch, marker_expected=True
+            ):
+                return ApprovalApplyResult(proposal_id, QueueState.APPLIED, True, None)
+            return ApprovalApplyResult(proposal_id, QueueState.APPROVED, True, f"approval audit update pending: {type(exc).__name__}: {exc}")
+        if not self._phase4_confirm_applied_queue(
+            proposal_id, ProposalType.EXAM_SCOPE.value, semantics, target_patch, marker_expected=True
+        ):
+            return ApprovalApplyResult(proposal_id, QueueState.APPROVED, True, "approval audit read-back requires reconciliation")
+        self._phase4_clear_applied_marker(
+            proposal_id, ProposalType.EXAM_SCOPE.value, semantics, target_patch
+        )
+        return ApprovalApplyResult(proposal_id, QueueState.APPLIED, True, None)
 
     def _apply_phase4(self, proposal_id: str, current: Any) -> ApprovalApplyResult:
         """Apply a canonical Material Usage/PAGE_RANGE action with recovery."""
@@ -3647,21 +4052,32 @@ class HumanApprovalApplier:
         return {"Verified": True}
 
     def _validate_exam_scope_action(self, action: Mapping[str, Any], target: Any) -> dict[str, Any]:
-        _validate_scope_action(action, target)
-        confirmed = _action_value(action, "Scope Confirmed", "scope_confirmed", default=None)
-        if confirmed is None:
-            field = _action_value(action, "field", "Field", default=None)
-            value = _action_value(action, "value", "Value", default=None)
-            if _normal_key(str(field)) == _normal_key("Scope Confirmed"):
-                confirmed = value
-            operation = _normal_key(
-                str(_action_value(action, "operation", "Operation", default=""))
-            )
-            if operation in {"confirmscope", "setscopeconfirmed", "markscopeconfirmed"}:
-                confirmed = value if value is not None else True
-        if confirmed is not True:
-            raise PolicyViolation("EXAM_SCOPE approval must explicitly set Scope Confirmed=true")
-        return {"Scope Confirmed": True}
+        from uls.domain.approval_identity import canonical_exam_scope_semantics
+
+        try:
+            semantics = canonical_exam_scope_semantics(action)
+        except (TypeError, ValueError) as exc:
+            raise PolicyViolation("EXAM_SCOPE approval action is malformed") from exc
+        target_ids_value = _get_field(target, "Included Sessions", "included_sessions", default=_PATCH_MISSING)
+        target_confirmed = _get_field(target, "Scope Confirmed", "scope_confirmed", default=_PATCH_MISSING)
+        old_ids = semantics["old_snapshot"]["included_session_ids"]
+        try:
+            current_ids = _strict_exam_session_relation(target_ids_value)
+        except (TypeError, ValueError) as exc:
+            raise _StaleApproval("Exam scope relation is malformed") from exc
+        if target_confirmed is _PATCH_MISSING:
+            raise _StaleApproval("Exam scope snapshot is not present on the target")
+        old_relation = None if old_ids is None else tuple(old_ids)
+        if (
+            not _same_exam_session_membership(current_ids, old_relation)
+            or target_confirmed is not semantics["old_snapshot"]["scope_confirmed"]
+        ):
+            raise _StaleApproval("Approved exam scope old snapshot no longer matches")
+        desired_ids = semantics["desired_snapshot"]["included_session_ids"]
+        return {
+            "Included Sessions": {"relation": [{"id": value} for value in desired_ids]},
+            "Scope Confirmed": True,
+        }
 
     def _validate_material_revision_action(
         self,
@@ -3734,6 +4150,8 @@ class HumanApprovalApplier:
             ProposalType.PAGE_RANGE.value,
         }:
             return self._apply_phase4(proposal_id, current)
+        if proposal_type_value == ProposalType.EXAM_SCOPE.value:
+            return self._apply_exam_scope(proposal_id, current)
         state_value = _get_field(current, "State", "state", default=None)
         decision_value = _decision_field(current)
         if state_value is None or decision_value is None:
@@ -3891,22 +4309,102 @@ def _phase4_call(reader: Any, method_name: str, *args: Any) -> Any:
 def _phase4_graph_id_matches(record: Any, expected_id: str, expected_type: str) -> bool:
     """Bind a current graph record's exact logical ``ID`` property."""
 
+    from uls.domain.academic import ExamRecord
     from uls.retrieval.scope import usage_app_id
+
+    if isinstance(record, ExamRecord):
+        actual = strict_entity_id(record.entity_id, expected_type)
+        expected = strict_entity_id(expected_id, expected_type)
+        return expected_type == "E" and actual is not None and actual == expected
 
     actual = strict_entity_id(usage_app_id(record), expected_type)
     expected = strict_entity_id(expected_id, expected_type)
     return actual is not None and actual == expected
 
 
+def _strict_exam_session_relation(value: Any) -> tuple[str, ...] | None:
+    """Parse the raw Exam relation without collapsing malformed data to empty."""
+
+    if value is _PATCH_MISSING:
+        return None
+    from uls.domain.course_identity import strict_relation_page_ids
+
+    return strict_relation_page_ids(value, expected_type="S")
+
+
+def _same_exam_session_membership(
+    current: Sequence[str] | None,
+    expected: Sequence[str] | None,
+) -> bool:
+    if current is None or expected is None:
+        return current is None and expected is None
+    return tuple(sorted(current)) == tuple(sorted(expected))
+
+
 def _phase4_course(reader: Any, record: Any) -> Any | None:
-    from uls.domain.course_identity import resolve_course_relation, validate_course_record
+    from uls.domain.academic import ExamRecord
+    from uls.domain.course_identity import (
+        CourseIdentity,
+        strict_single_relation_page_id,
+        validate_course_record,
+    )
     from uls.retrieval._compat import raw_field
 
-    relation_id = resolve_course_relation(raw_field(record, "Course", "course", default=None))
+    if isinstance(record, ExamRecord):
+        typed_course = record.course
+        if not isinstance(typed_course, CourseIdentity):
+            return None
+        current_row = _phase4_call(reader, "get_course_by_relation_id", typed_course.relation_page_id)
+        current_course = validate_course_record(current_row, typed_course.relation_page_id)
+        return current_course if current_course == typed_course else None
+
+    try:
+        relation_id = strict_single_relation_page_id(
+            raw_field(record, "Course", "course", default=None)
+        )
+    except (TypeError, ValueError):
+        return None
     if relation_id is None:
         return None
     course = _phase4_call(reader, "get_course_by_relation_id", relation_id)
     return validate_course_record(course, relation_id)
+
+
+def _phase4_typed_exam_snapshot(
+    reader: Any,
+    record: Any,
+    expected_id: str,
+) -> tuple[Any, tuple[str, ...] | None, bool] | None:
+    """Revalidate a typed ExamRecord against the current provider graph."""
+
+    from uls.domain.academic import ExamRecord
+
+    if not isinstance(record, ExamRecord):
+        return None
+    if strict_entity_id(record.entity_id, "E") != strict_entity_id(expected_id, "E"):
+        return None
+    if type(record.scope_confirmed) is not bool:
+        return None
+    included = record.included_session_ids
+    if included is None:
+        included_ids = None
+    elif isinstance(included, Sequence) and not isinstance(included, (str, bytes, bytearray)):
+        included_ids_list: list[str] = []
+        for session_id in included:
+            if (
+                not isinstance(session_id, str)
+                or strict_entity_id(session_id, "S") != session_id
+                or session_id in included_ids_list
+            ):
+                return None
+            included_ids_list.append(session_id)
+        included_ids = tuple(included_ids_list)
+    else:
+        return None
+    course = _phase4_course(reader, record)
+    if course is None:
+        return None
+    return course, included_ids, record.scope_confirmed
 
 
 def _phase4_config_mapping(config: Any, name: str) -> Mapping[str, str]:
@@ -4181,7 +4679,11 @@ def upsert_proposal(
     )
     if isinstance(proposal_type_value, Enum):
         proposal_type_value = proposal_type_value.value
-    if proposal_type_value in {ProposalType.MATERIAL_USAGE.value, ProposalType.PAGE_RANGE.value}:
+    if proposal_type_value in {
+        ProposalType.MATERIAL_USAGE.value,
+        ProposalType.PAGE_RANGE.value,
+        ProposalType.EXAM_SCOPE.value,
+    }:
         return _upsert_phase4_proposal(
             adapter,
             proposal_properties,
@@ -4266,7 +4768,7 @@ def _create_phase4_queue_once(
     from uls.domain.approval_identity import canonical_semantics_from_queue
 
     proposal_type = _wire_value(_get_field(properties, "Proposal Type", default=None))
-    if proposal_type not in {"MATERIAL_USAGE", "PAGE_RANGE"}:
+    if proposal_type not in {"MATERIAL_USAGE", "PAGE_RANGE", "EXAM_SCOPE"}:
         return create()
     _validate_phase4_queue_identity(properties)
     semantics = canonical_semantics_from_queue(properties)
@@ -4314,7 +4816,7 @@ def _upsert_phase4_proposal(
     queue_db_id: str,
     queue_ids: set[str],
 ) -> Any:
-    """Strict immutable Queue path for Material Usage and PAGE_RANGE."""
+    """Strict immutable Queue path for Phase 4 and EXAM_SCOPE proposals."""
 
     from uls.domain.approval_identity import (
         canonical_action_json,
@@ -4331,7 +4833,7 @@ def _upsert_phase4_proposal(
     }
     if any(_normal_key(str(key)) in forbidden for key in supplied):
         raise PolicyViolation(
-            "Phase4 Queue schema does not persist Target DB or Target Fingerprint"
+            "strict Queue schema does not persist Target DB or Target Fingerprint"
         )
     for name in ("Decision By", "Decision At", "Applied At"):
         if _get_field(supplied, name, name.casefold().replace(" ", "_"), default=_MISSING) is not _MISSING:
@@ -4341,7 +4843,7 @@ def _upsert_phase4_proposal(
         supplied, "Proposed Action", "proposed_action", "action", default=_MISSING
     )
     if action_value is _MISSING:
-        raise PolicyViolation("Phase4 proposal requires Proposed Action")
+        raise PolicyViolation("strict proposal requires Proposed Action")
     action_mapping = parse_action_json(action_value)
     # Validate all action keys, explicit nulls, and mirrors before any lookup.
     action_record = dict(supplied)
@@ -4349,10 +4851,10 @@ def _upsert_phase4_proposal(
     try:
         semantics = canonical_semantics_from_queue(action_record)
     except (TypeError, ValueError) as exc:
-        raise PolicyViolation("Phase4 proposal action is malformed") from exc
+        raise PolicyViolation(f"strict proposal action is malformed: {exc}") from exc
     expected_id = derive_proposal_id(proposal_type, semantics)
     if proposal_id != expected_id:
-        raise PolicyViolation("Proposal ID does not match canonical Phase4 semantics")
+        raise PolicyViolation("Proposal ID does not match canonical strict semantics")
 
     patch = dict(supplied)
     patch["Proposal ID"] = proposal_id
@@ -4361,9 +4863,9 @@ def _upsert_phase4_proposal(
     patch.setdefault("Decision", Decision.Pending.value)
     patch.setdefault("State", QueueState.PENDING_REVIEW.value)
     if _wire_value(patch["Decision"]) != Decision.Pending.value:
-        raise PolicyViolation("Phase4 proposal creation requires Decision=Pending")
+        raise PolicyViolation("strict proposal creation requires Decision=Pending")
     if _wire_value(patch["State"]) != QueueState.PENDING_REVIEW.value:
-        raise PolicyViolation("Phase4 proposal creation requires State=PENDING_REVIEW")
+        raise PolicyViolation("strict proposal creation requires State=PENDING_REVIEW")
     _require_queue_display_fields(patch)
     enforce_write_policy(
         AutomationActor.AUTOMATION,
@@ -4478,6 +4980,7 @@ __all__ = [
     "AUTOMATION_QUEUE",
     "AUTOMATION_QUEUE_DATABASE",
     "AUTOMATION_QUEUE_DB",
+    "AcademicNotionReader",
     "ApprovalApplyResult",
     "ApprovalProposal",
     "ApprovalReader",

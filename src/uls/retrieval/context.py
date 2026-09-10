@@ -8,7 +8,7 @@ from typing import Any
 
 from uls.domain.enums import FreshnessStatus, SourceAuthority
 from uls.domain.models import ContextPackage, EvidenceItem
-from uls.domain.source_ref import SourceFingerprint
+from uls.domain.source_ref import SourceFingerprint, SourceRef
 
 from .authority import authority_for
 from .schemas import RetrievalBudget
@@ -55,10 +55,20 @@ def bounded_evidence(
         if content != item.content:
             provisional = bool(getattr(item, "provisional", False))
             source_ref = getattr(item, "source_ref", None)
+            extras = {
+                key: value
+                for key, value in vars(item).items()
+                if key not in EvidenceItem.__dataclass_fields__
+            }
             # Domain EvidenceItem is frozen but its shape is canonical.  A
             # replacement retains locator/fingerprint/authority/provenance/
             # freshness, which is the important truncation invariant.
             item = replace(item, content=content)
+            for key, value in extras.items():
+                # EvidenceItem is frozen but Phase 5 attaches non-authorizing
+                # coverage metadata.  Keep every additive attribute when a
+                # budgeted copy is made.
+                object.__setattr__(item, key, value)
             if provisional:
                 object.__setattr__(item, "provisional", True)
             if source_ref is not None:
@@ -77,6 +87,7 @@ def make_evidence_item(
     content: str,
     provenance: Any,
     freshness: FreshnessStatus | str = FreshnessStatus.FRESH,
+    source_ref: SourceRef | None = None,
     provisional: bool = False,
 ) -> EvidenceItem:
     item = EvidenceItem(
@@ -88,6 +99,7 @@ def make_evidence_item(
         content=content,
         provenance=provenance,
         freshness=freshness,
+        source_ref=source_ref,
     )
     if provisional:
         # The frozen domain shape intentionally stays compact.  Preserve the
@@ -106,9 +118,10 @@ def assemble_context_package(
     warnings: Iterable[Any] = (),
     context_id: str | None = None,
     budget: RetrievalBudget | None = None,
+    already_bounded: bool = False,
 ) -> ContextPackage:
     effective_budget = budget or RetrievalBudget()
-    bounded = bounded_evidence(sources, effective_budget)
+    bounded = tuple(sources) if already_bounded else bounded_evidence(sources, effective_budget)
     return ContextPackage(
         entity=dict(entity),
         scope=dict(scope or {}),

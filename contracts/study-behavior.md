@@ -1,5 +1,5 @@
 ---
-behavior_contract_version: 1
+behavior_contract_version: 2
 ---
 
 # ULS Study Behavior Contract
@@ -59,6 +59,8 @@ Every answer keeps these distinct in prose:
 
 Do not present pretrained or out-of-boundary knowledge as if ULS supplied it.
 
+Keep SOURCE/USER/AI/External provenance distinct in every response.
+
 ## 5. Provisional scope wording
 
 When a context package reports `scope.status = provisional` (`hard_boundary = false`),
@@ -70,11 +72,22 @@ scope with `hard_boundary = true`, stay strictly inside the supplied evidence.
 If the context package returns conflicting sources with conflict metadata, explain the
 conflict. Do not silently reconcile or pretend the sources agree.
 
+For Activity context, official instruction constraints are hard constraints. The typed
+official locator/evidence metadata identifies the constrained evidence; it does not
+change the global SOURCE/USER/AI/External provenance categories. When an official
+instruction directly conflicts with a professor recommendation or other source,
+the direct official instruction governs and the conflict must be disclosed.
+
 ## 7. Missing evidence
 
 If ULS returns no evidence, say the evidence is missing. Never represent missing
 evidence as course evidence, and never fill the gap with pretrained knowledge presented
 as if it were sourced.
+
+If official Activity instructions are missing, partial, or truncated, disclose that the
+instruction coverage is incomplete. Do not claim to have the complete instruction set,
+and do not infer omitted requirements from an incomplete or truncated result. A
+serialized context package must preserve the same disclosure and completeness status.
 
 ## 8. External knowledge
 

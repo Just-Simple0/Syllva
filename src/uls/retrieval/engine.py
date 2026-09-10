@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 from uls.adapters.drive.base import DriveReader
-from uls.adapters.drive.binding import SourceBindingResolver
+from uls.adapters.drive.binding import ActivityInstructionBinding, SourceBindingResolver
 from uls.adapters.notion.base import NotionReader
+from uls.domain.academic import ActivityConstraintMetadata, ActivityRecord, ExamRecord
 from uls.domain.course_identity import (
     CourseIdentity,
-    resolve_course_relation,
+    strict_single_relation_page_id,
     validate_course_record,
 )
 from uls.domain.enums import DerivativeStatus, FreshnessStatus, RetrievalIntent
@@ -60,6 +61,27 @@ from .scope import (
     usage_app_id,
     user_reference,
 )
+
+
+@dataclass
+class _SessionEvidenceCollection:
+    session: Any
+    course: CourseIdentity
+    evidence: list[EvidenceItem]
+    bindings: list[CapabilityBinding]
+    warnings: list[Any]
+    user_context: tuple[Mapping[str, Any], ...]
+    professor_signals: tuple[Mapping[str, Any], ...]
+    transcript_loaded: bool
+
+
+@dataclass
+class _MaterialEvidenceCollection:
+    material: Any
+    course: CourseIdentity
+    evidence: list[EvidenceItem]
+    bindings: list[CapabilityBinding]
+    warnings: list[Any]
 
 
 class RetrievalEngine:
@@ -119,20 +141,13 @@ class RetrievalEngine:
 
         return self.get_session_context(session_id, **kwargs)
 
-    def get_material_context(
+    def _collect_material_evidence(
         self,
         material_id: str,
         *,
         query: str | None = None,
-        include_user_annotations: bool = False,
-        caller_scope: str | None = None,
-    ) -> ContextPackage:
-        """Return a bounded material context for M0/read-only callers.
-
-        Phase 2's main path is Session retrieval, but keeping this small
-        domain operation real makes the engine usable by the frozen M0
-        contract without exposing arbitrary Drive reads.
-        """
+    ) -> _MaterialEvidenceCollection:
+        """Collect one material's raw candidates without budgeting or issuing."""
 
         material = self._lookup_material(material_id)
         if material is None:
@@ -176,7 +191,7 @@ class RetrievalEngine:
             from .chunking import select_chunks
 
             chunks = select_chunks(chunks, query)
-        sources: list[EvidenceItem] = []
+        evidence: list[EvidenceItem] = []
         bindings: list[CapabilityBinding] = []
         for chunk in chunks:
             item = self._evidence_from_chunk(
@@ -186,7 +201,7 @@ class RetrievalEngine:
                 front_matter=front,
                 source_ref=source_ref,
             )
-            sources.append(item)
+            evidence.append(item)
             bindings.append(
                 CapabilityBinding(
                     entity_id=material_id,
@@ -201,6 +216,31 @@ class RetrievalEngine:
                     course_key=course.course_key,
                 )
             )
+        return _MaterialEvidenceCollection(material, course, evidence, bindings, warnings)
+
+    def get_material_context(
+        self,
+        material_id: str,
+        *,
+        query: str | None = None,
+        include_user_annotations: bool = False,
+        caller_scope: str | None = None,
+    ) -> ContextPackage:
+        """Return a bounded material context for M0/read-only callers.
+
+        Phase 2's main path is Session retrieval, but keeping this small
+        domain operation real makes the engine usable by the frozen M0
+        contract without exposing arbitrary Drive reads.
+        """
+
+        collection = self._collect_material_evidence(material_id, query=query)
+        material = collection.material
+        warnings = collection.warnings
+        sources, bindings = self._retain_current_evidence(
+            collection.evidence,
+            collection.bindings,
+            warnings,
+        )
         user_context: tuple[Mapping[str, Any], ...] = ()
         if include_user_annotations:
             # Material annotations are outside the Phase 2 NotionReader
@@ -219,7 +259,6 @@ class RetrievalEngine:
                         "Notion material annotation lookup is unavailable"
                     ) from exc
                 break
-        sources, bindings = self._retain_current_evidence(sources, bindings, warnings)
         final_sources, final_bindings = self._budget_evidence_bindings(sources, bindings)
         capability = self.capabilities.issue(final_bindings, caller_scope=caller_scope)
         return assemble_context_package(
@@ -229,18 +268,17 @@ class RetrievalEngine:
             user_context=user_context,
             warnings=warnings,
             context_id=capability.context_id,
-            budget=self.budget,
+            already_bounded=True,
         )
 
-    def get_session_context(
+    def _collect_session_evidence(
         self,
         session_id: str,
         *,
         query: str | None = None,
         include_provisional: bool = False,
-        caller_scope: str | None = None,
-    ) -> ContextPackage:
-        """Return bounded context for an already-resolved Session ID."""
+    ) -> _SessionEvidenceCollection:
+        """Collect one Session's raw candidates without budgeting or issuing."""
 
         if type(include_provisional) is not bool:
             raise PolicyDeniedError("include_provisional must be a boolean")
@@ -262,7 +300,6 @@ class RetrievalEngine:
         transcript_derivative: Any | None = None
         transcript_fingerprint: SourceFingerprint | None = None
         transcript_loaded = False
-        provisional_included = False
 
         transcript_source = self._resolve_source_ref(
             session,
@@ -449,13 +486,448 @@ class RetrievalEngine:
             transcript_fingerprint,
             warnings,
         )
+        return _SessionEvidenceCollection(
+            session,
+            session_course,
+            evidence,
+            bindings,
+            warnings,
+            user_context,
+            professor_signals,
+            transcript_loaded,
+        )
+
+    def get_exam_context(
+        self,
+        exam_id: str,
+        *,
+        query: str | None = None,
+        caller_scope: str | None = None,
+    ) -> ContextPackage:
+        """Return verified evidence bounded by the current Exam scope."""
+
+        exam = self._get_exam_record(exam_id)
+        if exam is None:
+            raise EntityNotFoundError(f"Exam not found: {exam_id}", details={"exam_id": exam_id})
+        warnings: list[Any] = []
+        included_ids = exam.included_session_ids
+        if included_ids is None or not included_ids:
+            warnings.append(_warning("EXAM_SCOPE_EMPTY", "Exam Included Sessions is absent or empty"))
+        if not exam.scope_confirmed:
+            warnings.append(_warning("EXAM_SCOPE_UNCONFIRMED", "Exam scope has not been human-confirmed"))
+
+        evidence: list[EvidenceItem] = []
+        bindings: list[CapabilityBinding] = []
+        for session_id in included_ids or ():
+            try:
+                collection = self._collect_session_evidence(
+                    session_id,
+                    query=query,
+                    include_provisional=False,
+                )
+                if collection.course != exam.course:
+                    raise SourceUnavailableError(
+                        "Exam Included Session does not share the exact Course identity"
+                    )
+                if not collection.transcript_loaded and not collection.evidence:
+                    raise SourceUnavailableError("no usable transcript derivative is available")
+            except (EntityNotFoundError, SourceUnavailableError, SourcePartialError) as exc:
+                warnings.append(_warning("SOURCE_UNAVAILABLE", f"Session {session_id}: {exc}"))
+                continue
+            warnings.extend(collection.warnings)
+            for item, binding in zip(collection.evidence, collection.bindings, strict=False):
+                evidence.append(item)
+                bindings.append(
+                    replace(
+                        binding,
+                        parent_entity_id=exam.entity_id,
+                        parent_entity_type="exam",
+                        parent_course_relation_page_id=exam.course.relation_page_id,
+                        parent_course_key=exam.course.course_key,
+                        parent_scope_confirmed=exam.scope_confirmed,
+                        parent_included_session_ids=tuple(included_ids or ()),
+                        parent_path_leaf="material_usage" if binding.material_id else "session",
+                    )
+                )
 
         evidence, bindings = self._retain_current_evidence(evidence, bindings, warnings)
         final_evidence, final_bindings = self._budget_evidence_bindings(evidence, bindings)
-        # Budgeting may replace a truncated EvidenceItem, and
-        # multiple independent Usage bases may intentionally produce the same
-        # locator.  Provisional reporting therefore follows the retained
-        # authorization bases, not the identity of a pre-budget item.
+        capability = self.capabilities.issue(final_bindings, caller_scope=caller_scope)
+        scope = {
+            "intent": RetrievalIntent.EXAM.value,
+            "status": "confirmed" if exam.scope_confirmed else "provisional",
+            "hard_boundary": exam.scope_confirmed,
+            "included_sessions": None if included_ids is None else list(included_ids),
+            "parent_snapshot": {
+                "entity_id": exam.entity_id,
+                "course": exam.course.as_dict(),
+                "scope_confirmed": exam.scope_confirmed,
+                "included_session_ids": None if included_ids is None else list(included_ids),
+            },
+        }
+        return assemble_context_package(
+            entity={"type": "exam", "id": exam.entity_id, "title": exam.title or exam.entity_id},
+            scope=scope,
+            sources=final_evidence,
+            warnings=warnings,
+            context_id=capability.context_id,
+            already_bounded=True,
+        )
+
+    def get_activity_context(
+        self,
+        activity_id: str,
+        *,
+        query: str | None = None,
+        caller_scope: str | None = None,
+    ) -> ContextPackage:
+        """Return official Activity instructions and related verified evidence."""
+
+        activity = self._get_activity_record(activity_id)
+        if activity is None:
+            raise EntityNotFoundError(
+                f"Activity not found: {activity_id}", details={"activity_id": activity_id}
+            )
+        warnings: list[Any] = []
+        evidence: list[EvidenceItem] = []
+        bindings: list[CapabilityBinding] = []
+        expected_locators: tuple[str, ...] = ()
+        official_status = "unavailable"
+        if activity.instructions_source_url is None or activity.normalized_instructions_url is None:
+            warnings.append(_warning("INSTRUCTIONS_INCOMPLETE", "official instruction pointer pair is incomplete"))
+        else:
+            try:
+                instruction_binding = self._resolve_activity_instructions(activity)
+                derivative, fingerprint, front = self._read_activity_derivative(
+                    activity, instruction_binding
+                )
+                all_chunks = page_chunks(derivative, entity_id=activity.entity_id)
+                expected_locators = tuple(str(chunk.locator) for chunk in all_chunks)
+                chunks = all_chunks
+                if query:
+                    from .chunking import select_chunks
+
+                    chunks = select_chunks(chunks, query)
+                if str(front.get("status", "")).casefold() == DerivativeStatus.PARTIAL.value:
+                    warnings.append(_warning("SOURCE_PARTIAL", "official Activity derivative is partial"))
+                constraint = ActivityConstraintMetadata(
+                    official_locator_set=expected_locators,
+                    official_evidence_set=expected_locators,
+                )
+                for chunk in chunks:
+                    item = replace(
+                        self._evidence_from_chunk(
+                            chunk,
+                            source_class="official_activity",
+                            fingerprint=fingerprint,
+                            front_matter=front,
+                            source_ref=instruction_binding.source_ref,
+                        ),
+                        constraint_metadata=constraint,
+                    )
+                    evidence.append(item)
+                    bindings.append(
+                        CapabilityBinding(
+                            entity_id=activity.entity_id,
+                            locator=item.locator,
+                            source_hash=fingerprint.source_hash,
+                            source_version=fingerprint.source_version,
+                            source_class="official_activity",
+                            source_ref=instruction_binding.source_ref,
+                            parent_entity_id=activity.entity_id,
+                            parent_entity_type="activity",
+                            parent_course_relation_page_id=activity.course.relation_page_id,
+                            parent_course_key=activity.course.course_key,
+                            parent_related_session_ids=activity.related_session_ids,
+                            parent_related_material_ids=activity.related_material_ids,
+                            parent_path_leaf="activity_instructions",
+                            activity_instructions_source_url=activity.instructions_source_url,
+                            activity_normalized_instructions_url=activity.normalized_instructions_url,
+                            activity_binding_identity=instruction_binding.source_ref.identity,
+                        )
+                    )
+                official_status = "ready" if str(front.get("status", "")).casefold() == DerivativeStatus.READY.value else "partial"
+            except (SourceUnavailableError, SourcePartialError) as exc:
+                warnings.append(_warning("INSTRUCTIONS_INCOMPLETE", str(exc)))
+            except Exception as exc:  # noqa: BLE001 - malformed provider data is incomplete context
+                warnings.append(_warning("INSTRUCTIONS_INCOMPLETE", f"official instruction read failed: {exc}"))
+
+        parent_sessions = activity.related_session_ids
+        parent_materials = activity.related_material_ids
+        for session_id in parent_sessions or ():
+            try:
+                session_collection = self._collect_session_evidence(
+                    session_id,
+                    query=query,
+                    include_provisional=False,
+                )
+                if session_collection.course != activity.course:
+                    raise SourceUnavailableError(
+                        "related Session does not share the exact Activity Course identity"
+                    )
+                if not session_collection.transcript_loaded and not session_collection.evidence:
+                    raise SourceUnavailableError("no usable transcript derivative is available")
+            except (EntityNotFoundError, SourceUnavailableError, SourcePartialError) as exc:
+                warnings.append(_warning("SOURCE_UNAVAILABLE", f"related Session {session_id}: {exc}"))
+                continue
+            warnings.extend(session_collection.warnings)
+            for item, binding in zip(session_collection.evidence, session_collection.bindings, strict=False):
+                evidence.append(item)
+                bindings.append(
+                    replace(
+                        binding,
+                        parent_entity_id=activity.entity_id,
+                        parent_entity_type="activity",
+                        parent_course_relation_page_id=activity.course.relation_page_id,
+                        parent_course_key=activity.course.course_key,
+                        parent_related_session_ids=parent_sessions,
+                        parent_related_material_ids=parent_materials,
+                        parent_path_leaf="material_usage" if binding.material_id else "session",
+                        activity_instructions_source_url=activity.instructions_source_url,
+                        activity_normalized_instructions_url=activity.normalized_instructions_url,
+                    )
+                )
+        for material_id in parent_materials or ():
+            try:
+                material_collection = self._collect_material_evidence(material_id, query=query)
+                if material_collection.course != activity.course:
+                    raise SourceUnavailableError(
+                        "related Material does not share the exact Activity Course identity"
+                    )
+            except (EntityNotFoundError, SourceUnavailableError, SourcePartialError) as exc:
+                warnings.append(_warning("SOURCE_UNAVAILABLE", f"related Material {material_id}: {exc}"))
+                continue
+            warnings.extend(material_collection.warnings)
+            for item, binding in zip(material_collection.evidence, material_collection.bindings, strict=False):
+                evidence.append(item)
+                bindings.append(
+                    replace(
+                        binding,
+                        parent_entity_id=activity.entity_id,
+                        parent_entity_type="activity",
+                        parent_course_relation_page_id=activity.course.relation_page_id,
+                        parent_course_key=activity.course.course_key,
+                        parent_related_session_ids=parent_sessions,
+                        parent_related_material_ids=parent_materials,
+                        parent_path_leaf="material",
+                        activity_instructions_source_url=activity.instructions_source_url,
+                        activity_normalized_instructions_url=activity.normalized_instructions_url,
+                    )
+                )
+
+        evidence, bindings = self._retain_current_evidence(evidence, bindings, warnings)
+        prebudget_evidence = tuple(evidence)
+        final_evidence, final_bindings = self._budget_evidence_bindings(evidence, bindings)
+        returned_locators = tuple(
+            str(item.locator) for item in final_evidence if item.source_class == "official_activity"
+        )
+        missing_locators = tuple(
+            locator for locator in expected_locators if locator not in returned_locators
+        )
+        budget_truncated = len(final_evidence) < len(prebudget_evidence) or any(
+            len(item.content) < len(original.content)
+            for item, original in zip(final_evidence, prebudget_evidence, strict=False)
+        )
+        complete = (
+            official_status == "ready"
+            and query is None
+            and not missing_locators
+            and not budget_truncated
+            and bool(expected_locators)
+        )
+        if expected_locators and not complete:
+            warnings.append(_warning("INSTRUCTIONS_PARTIAL", "official instruction coverage is incomplete"))
+        elif not expected_locators:
+            warnings.append(_warning("INSTRUCTIONS_INCOMPLETE", "official instructions have no justified page coverage"))
+        coverage = {
+            "expected_locators": list(expected_locators),
+            "returned_locators": list(returned_locators),
+            "missing_locators": list(missing_locators),
+            "truncated": budget_truncated,
+            "complete": complete,
+        }
+        constraint = ActivityConstraintMetadata(
+            official_locator_set=expected_locators,
+            official_evidence_set=returned_locators,
+        )
+        final_evidence = tuple(
+            replace(item, constraint_metadata=constraint)
+            if item.source_class == "official_activity" else item
+            for item in final_evidence
+        )
+        capability = self.capabilities.issue(final_bindings, caller_scope=caller_scope)
+        return assemble_context_package(
+            entity={
+                "type": "activity",
+                "id": activity.entity_id,
+                "title": activity.title or activity.entity_id,
+                "result": activity.result,
+            },
+            scope={
+                "intent": RetrievalIntent.ACTIVITY.value,
+                "hard_boundary": True,
+                "official_constraint": constraint,
+                "instruction_coverage": coverage,
+                "constraint_conflict_rule": "official_activity instructions govern conflicting recommendations",
+            },
+            sources=final_evidence,
+            warnings=warnings,
+            context_id=capability.context_id,
+            already_bounded=True,
+        )
+
+    def _get_exam_record(self, exam_id: str) -> ExamRecord | None:
+        expected = strict_entity_id(exam_id, "E")
+        if expected is None:
+            raise SourceUnavailableError("requested Exam logical ID is malformed")
+        method = getattr(self.notion_reader, "get_exam", None)
+        if not callable(method):
+            raise SourceUnavailableError("NotionReader has no get_exam method")
+        try:
+            raw = method(expected)
+        except _MISSING_PROVIDER_ERRORS:
+            return None
+        except Exception as exc:
+            raise SourceUnavailableError("Notion Exam lookup is unavailable") from exc
+        if raw is None:
+            return None
+        if isinstance(raw, ExamRecord):
+            if raw.entity_id != expected:
+                raise SourceUnavailableError(
+                    "typed Exam logical ID does not match the requested ID",
+                    details={"exam_id": expected},
+                )
+            self._validate_typed_course(raw.course, expected, "Exam")
+            return raw
+        course = self._course_for_record(raw, expected)
+        try:
+            record = ExamRecord.from_mapping(raw, course)
+        except (TypeError, ValueError) as exc:
+            raise SourceUnavailableError("Exam record is malformed") from exc
+        if record.entity_id != expected:
+            raise SourceUnavailableError(
+                "Exam logical ID does not match the requested ID",
+                details={"exam_id": expected},
+            )
+        return record
+
+    def _get_activity_record(self, activity_id: str) -> ActivityRecord | None:
+        expected = strict_entity_id(activity_id, "A")
+        if expected is None:
+            raise SourceUnavailableError("requested Activity logical ID is malformed")
+        method = getattr(self.notion_reader, "get_activity", None)
+        if not callable(method):
+            raise SourceUnavailableError("NotionReader has no get_activity method")
+        try:
+            raw = method(expected)
+        except _MISSING_PROVIDER_ERRORS:
+            return None
+        except Exception as exc:
+            raise SourceUnavailableError("Notion Activity lookup is unavailable") from exc
+        if raw is None:
+            return None
+        if isinstance(raw, ActivityRecord):
+            if raw.entity_id != expected:
+                raise SourceUnavailableError(
+                    "typed Activity logical ID does not match the requested ID",
+                    details={"activity_id": expected},
+                )
+            self._validate_typed_course(raw.course, expected, "Activity")
+            return raw
+        course = self._course_for_record(raw, expected)
+        try:
+            record = ActivityRecord.from_mapping(raw, course)
+        except (TypeError, ValueError) as exc:
+            raise SourceUnavailableError("Activity record is malformed") from exc
+        if record.entity_id != expected:
+            raise SourceUnavailableError(
+                "Activity logical ID does not match the requested ID",
+                details={"activity_id": expected},
+            )
+        return record
+
+    def _validate_typed_course(
+        self,
+        course: CourseIdentity,
+        entity_id: str,
+        record_type: str,
+    ) -> None:
+        current = self._course_by_relation_id(course.relation_page_id, entity_id)
+        if current != course:
+            raise SourceUnavailableError(
+                f"typed {record_type} Course identity is stale",
+                details={"entity_id": entity_id},
+            )
+
+    def _resolve_activity_instructions(self, activity: ActivityRecord) -> ActivityInstructionBinding:
+        resolver = self.source_binding_resolver
+        if resolver is None or not callable(getattr(resolver, "resolve_activity_instructions", None)):
+            raise SourceUnavailableError("trusted Activity instruction binding is unavailable")
+        try:
+            result = resolver.resolve_activity_instructions(
+                activity.entity_id,
+                activity.instructions_source_url or "",
+                activity.normalized_instructions_url or "",
+            )
+        except SourceUnavailableError:
+            raise
+        except Exception as exc:
+            raise SourceUnavailableError("trusted Activity instruction binding is unavailable") from exc
+        if not isinstance(result, ActivityInstructionBinding):
+            raise SourceUnavailableError("trusted Activity instruction binding is malformed")
+        return result
+
+    def _read_activity_derivative(
+        self,
+        activity: ActivityRecord,
+        binding: ActivityInstructionBinding,
+    ) -> tuple[Any, SourceFingerprint, dict[str, Any]]:
+        derivative = self._read_derived(binding.derivative_ref, activity.entity_id)
+        try:
+            derived_entity, _body, _, front = derivative_parts(derivative)
+        except Exception as exc:
+            raise SourceUnavailableError("Activity derivative could not be parsed") from exc
+        if derived_entity != activity.entity_id:
+            raise SourceUnavailableError("Activity derivative entity does not match")
+        derivative_fp = _front_fingerprint(front)
+        if derivative_fp is None:
+            raise SourceUnavailableError("Activity derivative has no valid fingerprint")
+        current = self._current_fingerprint(activity.entity_id, binding.source_ref)
+        if current is None:
+            current = self._current_fingerprint(activity.entity_id, binding.derivative_ref)
+        if current is None or current != derivative_fp:
+            raise SourcePartialError("Activity derivative is behind the current source")
+        _validate_read_front_matter(
+            front,
+            expected_schema="uls.activity.v1",
+            entity_id=activity.entity_id,
+            source_ref=binding.source_ref,
+            expected_course_key=activity.course.course_key,
+        )
+        return derivative, current, dict(front)
+
+    def get_session_context(
+        self,
+        session_id: str,
+        *,
+        query: str | None = None,
+        include_provisional: bool = False,
+        caller_scope: str | None = None,
+    ) -> ContextPackage:
+        """Return bounded context for an already-resolved Session ID."""
+
+        collection = self._collect_session_evidence(
+            session_id,
+            query=query,
+            include_provisional=include_provisional,
+        )
+        warnings = collection.warnings
+        evidence, bindings = self._retain_current_evidence(
+            collection.evidence,
+            collection.bindings,
+            warnings,
+        )
+        final_evidence, final_bindings = self._budget_evidence_bindings(evidence, bindings)
         provisional_usage_ids: set[str] = set()
         for binding in final_bindings:
             if not binding.provisional:
@@ -474,32 +946,31 @@ class RetrievalEngine:
                     ),
                 )
             )
-        provisional_included = bool(provisional_usage_ids)
+        effective_include_provisional = include_provisional and self._config_bool(
+            "allow_provisional_material_usage", True
+        )
         capability = self.capabilities.issue(final_bindings, caller_scope=caller_scope)
         package = assemble_context_package(
             entity={
                 "type": "session",
-                "id": canonical_id,
-                "title": record_label(session) or canonical_id,
+                "id": session_id,
+                "title": record_label(collection.session) or session_id,
             },
             scope={
                 "intent": RetrievalIntent.SESSION.value,
                 "status": "session",
                 "hard_boundary": False,
                 "include_provisional": effective_include_provisional,
-                "provisional": provisional_included,
+                "provisional": bool(provisional_usage_ids),
             },
             sources=final_evidence,
-            professor_signals=professor_signals,
-            user_context=user_context,
+            professor_signals=collection.professor_signals,
+            user_context=collection.user_context,
             warnings=warnings,
             context_id=capability.context_id,
-            budget=self.budget,
+            already_bounded=True,
         )
-        # A truly unavailable transcript with no usable relation is surfaced as
-        # a structured source error.  Existing partial/stale derivatives are
-        # represented by the package warning and limited evidence above.
-        if not transcript_loaded and not final_evidence:
+        if not collection.transcript_loaded and not final_evidence:
             unavailable = next(
                 (warning for warning in warnings if _warning_code(warning) == "SOURCE_UNAVAILABLE"),
                 None,
@@ -507,7 +978,7 @@ class RetrievalEngine:
             if unavailable is not None:
                 raise SourceUnavailableError(
                     "no usable transcript derivative is available",
-                    details={"session_id": canonical_id},
+                    details={"session_id": session_id},
                 )
         return package
 
@@ -949,12 +1420,21 @@ class RetrievalEngine:
 
     def _course_for_record(self, record: Any, entity_id: str) -> CourseIdentity:
         relation_value = raw_field(record, "Course", "course", default=None)
-        relation_page_id = resolve_course_relation(relation_value)
+        try:
+            relation_page_id = strict_single_relation_page_id(relation_value)
+        except (TypeError, ValueError) as exc:
+            raise SourceUnavailableError(
+                "record Course relation is malformed",
+                details={"entity_id": entity_id},
+            ) from exc
         if relation_page_id is None:
             raise SourceUnavailableError(
                 "record must have exactly one Course relation",
                 details={"entity_id": entity_id},
             )
+        return self._course_by_relation_id(relation_page_id, entity_id)
+
+    def _course_by_relation_id(self, relation_page_id: str, entity_id: str) -> CourseIdentity:
         method = getattr(self.notion_reader, "get_course_by_relation_id", None)
         if not callable(method):
             raise SourceUnavailableError(
@@ -1213,7 +1693,14 @@ class RetrievalEngine:
             if content != item.content:
                 provisional = bool(getattr(item, "provisional", False))
                 source_ref = getattr(item, "source_ref", None)
+                extras = {
+                    key: value
+                    for key, value in vars(item).items()
+                    if key not in EvidenceItem.__dataclass_fields__
+                }
                 item = replace(item, content=content)
+                for key, value in extras.items():
+                    object.__setattr__(item, key, value)
                 if provisional:
                     object.__setattr__(item, "provisional", True)
                 if source_ref is not None:
@@ -1234,6 +1721,8 @@ class RetrievalEngine:
         # transcript branch used to check only the Drive fingerprint, which
         # allowed a Course/source-pointer rewire to survive until after the
         # provider read.
+        if binding.parent_entity_id is not None and not self._binding_role_is_current(binding):
+            return None
         if (binding.session_id is not None or binding.material_id is not None) and not self._binding_role_is_current(binding):
             return None
         return self._current_fingerprint(binding.entity_id, binding.source_ref)
@@ -1264,16 +1753,17 @@ class RetrievalEngine:
             content=chunk.content,
             provenance=provenance,
             freshness=FreshnessStatus.FRESH,
+            source_ref=source_ref,
             provisional=provisional,
         )
-        if source_ref is not None:
-            object.__setattr__(item, "source_ref", source_ref)
         return item
 
     def _binding_role_is_current(self, binding: CapabilityBinding) -> bool:
         if binding.provisional and not self._config_bool(
             "allow_provisional_material_usage", True
         ):
+            return False
+        if binding.parent_entity_id is not None and not self._parent_binding_is_current(binding):
             return False
         if not binding.relation_required and binding.session_id and binding.material_id is None:
             session = self._get_session(binding.session_id)
@@ -1375,6 +1865,67 @@ class RetrievalEngine:
             binding.source_ref is not None
             and current_ref.identity == binding.source_ref.identity
         )
+
+    def _parent_binding_is_current(self, binding: CapabilityBinding) -> bool:
+        """Re-read every parent snapshot before authorizing a follow-up."""
+
+        if (
+            binding.parent_entity_id is None
+            or binding.parent_entity_type not in {"exam", "activity"}
+            or binding.parent_course_relation_page_id is None
+            or binding.parent_course_key is None
+            or binding.parent_path_leaf is None
+        ):
+            return False
+        if binding.parent_entity_type == "exam":
+            record = self._get_exam_record(binding.parent_entity_id)
+            if record is None or binding.parent_included_session_ids is None:
+                return False
+            if (
+                record.course.relation_page_id != binding.parent_course_relation_page_id
+                or record.course.course_key != binding.parent_course_key
+                or record.scope_confirmed != binding.parent_scope_confirmed
+                or record.included_session_ids != binding.parent_included_session_ids
+            ):
+                return False
+            if binding.entity_id == record.entity_id:
+                return True
+            if binding.session_id is not None:
+                return binding.session_id in (record.included_session_ids or ())
+            return binding.entity_id in (record.included_session_ids or ())
+        activity_record = self._get_activity_record(binding.parent_entity_id)
+        if activity_record is None:
+            return False
+        if (
+            activity_record.course.relation_page_id != binding.parent_course_relation_page_id
+            or activity_record.course.course_key != binding.parent_course_key
+            or activity_record.related_session_ids != binding.parent_related_session_ids
+            or activity_record.related_material_ids != binding.parent_related_material_ids
+            or activity_record.instructions_source_url != binding.activity_instructions_source_url
+            or activity_record.normalized_instructions_url != binding.activity_normalized_instructions_url
+        ):
+            return False
+        if binding.parent_path_leaf == "activity_instructions":
+            if self.source_binding_resolver is None or binding.activity_binding_identity is None:
+                return False
+            try:
+                current = self.source_binding_resolver.resolve_activity_instructions(
+                    activity_record.entity_id,
+                    activity_record.instructions_source_url or "",
+                    activity_record.normalized_instructions_url or "",
+                )
+            except Exception:  # noqa: BLE001 - failed revalidation revokes the capability
+                return False
+            return current.source_ref.identity == binding.activity_binding_identity
+        if binding.entity_id == activity_record.entity_id:
+            return True
+        if binding.parent_path_leaf == "session":
+            return binding.entity_id in (activity_record.related_session_ids or ())
+        if binding.parent_path_leaf == "material_usage":
+            return binding.session_id in (activity_record.related_session_ids or ())
+        if binding.parent_path_leaf == "material":
+            return binding.entity_id in (activity_record.related_material_ids or ())
+        return False
 
     def _direct_material_binding_is_current(self, binding: CapabilityBinding) -> bool:
         return self._binding_role_is_current(binding)
@@ -1592,6 +2143,8 @@ def _schema_for_source_class(source_class: str) -> str:
         return "uls.material.v1"
     if source_class == "professor_transcript":
         return "uls.transcript.v1"
+    if source_class == "official_activity":
+        return "uls.activity.v1"
     raise SourceUnavailableError(f"unsupported source class: {source_class}")
 
 
