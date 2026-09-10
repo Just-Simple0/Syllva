@@ -2,6 +2,35 @@
 
 **Last updated:** 2026-09-10
 
+## 최신 인수인계 — Phase5 구현·검증 완료 (2026-09-10)
+
+**Phase5 fix3와 테스트 보강분은 필수 웹·Gemini GO 및 Astra 최종 수용을 통과했다.** 구현 커밋은 `354a2606b2e2e60049babc257e0e883dfb09b2a5`이며, 시작 기준은 `9ba41a5`, 작업 브랜치는 `codex/phase5-8-completion`이다. 사용자 지시에 따라 이번 범위는 Phase5에서 끝난다.
+
+### 완료한 동작
+
+- Exam scope 제안은 Automation Queue로 들어가며, 현재 유효한 사람 승인·Course·의존성 검증을 통과한 `HumanApprovalApplier`만 `Scope Confirmed=true`를 적용한다. Typed Exam과 raw provider 입력을 모두 지원하고 재적용·감사 복구는 대상 쓰기를 반복하지 않는다.
+- Exam 조회는 확인된 범위 안의 근거를 제공하고 미확정 범위는 provisional로 표시한다. Activity 공식 지침은 실제 출처 identity와 정규화 포인터를 검증해 가장 높은 제공 제약으로 전달하며, 누락·Partial·예산 잘림을 명시한다.
+- 후속 청크 조회는 발급된 capability allowlist와 현재 관계·출처를 다시 검증한다. 읽기 전용 Exam/Activity callable MCP 도구, Behavior Contract v2와 여섯 클라이언트 projection을 포함한다.
+
+### 검증과 근거
+
+- Python3.11.16·3.14.7 각각 **전체995개 테스트 통과**. 현재 수정 집중69개, 테스트 보강 후 Activity37개도 두 버전에서 통과했다. 정확한 이전 소스에 새 회귀8개를 적용하면5실패·3통과, 현재 소스에서는8통과다.
+- 웹 최종 **GO**: UI 검증된 Latest / 매우 높음(허용된 Pro 쿼터 대체, Pro 아님),810초 후 정상 회수. Gemini3.8Flash high **GO**: 실제59페이지와 보강 테스트6페이지 출력을 루트가 원본 대조했다. 웹 검토 후 제품 코드는 바뀌지 않았고 테스트 단언만 별도로 강화·검증했다.
+- Projection/hash lint, compileall, diff check 통과. Ruff183개·mypy74개 기존 지적은 남아 있으며 새 정규화 지적은0개다.
+- 명세 §46 대응과 리뷰·검증의 정확한 범위는 [Phase5 검증 기록](docs/plans/phase5-verification.md), 진행 이력은 [Phase5 실행 기록](docs/plans/phase5-8-execution.md)에 있다. 승인된 [계획 rev3](docs/plans/phase5-exam-activity.md)의 과거 UNAPPROVED 헤더는 검토 당시 해시 보존을 위해 유지했다.
+
+### 다음 작업의 경계
+
+Phase6–8은 구현하지 않았으며 이번 전달 범위에 포함하지 않는다. 실제 Notion/Drive/client 연결, MCP 서버·transport·배포 및 명세 §41 live 선행 검증도 완료로 주장하지 않는다. `require_ready` helper의 더 엄격한 의미와 Due 종료일 순서/IANA 검증은 비차단 후속 항목이다.
+
+사용자는 이 인수인계 후 작업 브랜치 push, Phase5 PR 생성·merge, 로컬 main 최신화까지 명시적으로 승인했다. 이 문서는 검토된 구현 커밋의 인수인계이며, 실제 PR·merge 커밋은 GitHub 기록으로 확인한다. 현재 저장소에는 GitHub Actions workflow나 필수 상태 검사가 설정돼 있지 않아 로컬 검증을 CI 통과로 표현하지 않는다.
+
+`.review/`와 `.insane-review/`는 현재 작업 환경에만 있는 Git 제외 증거다. 다른 checkout에서는 커밋된 검증 문서와 [웹 리뷰 대화](https://chatgpt.com/g/g-p-6a9fdbd2dc3081919990a6607f8fe7c4-syllva-eeb93c01/c/6aa24073-fb9c-83ee-97e5-753edb99b85d)를 먼저 참조한다.
+
+---
+
+**이하 내용은 Phase4와 당시 정책 전달의 역사 기록이다. 아래의 “현재”, “승인 범위”, “금지”, “대기”는 당시 상태이며 위 Phase5 인수인계와 최신 사용자 지시가 우선한다.**
+
 **Repo / merged main:** https://github.com/Just-Simple0/Syllva · Phase4는 PR1로 `main`에 `e55705f`로 병합됨 (2026-09-10 09:32:55 KST)
 
 **정책 후속 PR2:** `codex/syllva-project-agents` 정책 정렬 변경이 `main`에 `2b4fbe4ed368d1b1d92721f7f33bdd0ab307281d`로 병합됨 (2026-09-10 10:55:41 KST)
@@ -12,7 +41,7 @@
 
 **Phase4 당시 시작 기준:** `bfc592b` (Phase3 인수인계)
 
-## 최신 인수인계 — Phase4 완료 및 정책 정렬 후속
+## 이전 인수인계 — Phase4 완료 및 정책 정렬 후속
 
 **Phase4 구현 rev10은 독립 리뷰 GO와 총괄 검증·수용을 통과했고 PR1로 `main`에 병합됐다. 정책 정렬 후속도 PR2로 `main`에 병합되어 현재 기준에 반영됐다.** 아래 Phase4 완료 근거와 역사 기록은 보존한다. Phase5–8 구현과 미래 제품 push는 승인 범위 밖이다. 이 제한은 완료된 사용자 승인 PR2 delivery를 금지하는 뜻이 아니다.
 
