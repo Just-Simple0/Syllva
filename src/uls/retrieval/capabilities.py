@@ -145,6 +145,18 @@ class CapabilityManager:
                             "course_relation_page_id": binding.course_relation_page_id,
                             "course_key": binding.course_key,
                             "usage_range": binding.usage_range,
+                            "parent_entity_id": binding.parent_entity_id,
+                            "parent_entity_type": binding.parent_entity_type,
+                            "parent_course_relation_page_id": binding.parent_course_relation_page_id,
+                            "parent_course_key": binding.parent_course_key,
+                            "parent_scope_confirmed": binding.parent_scope_confirmed,
+                            "parent_included_session_ids": binding.parent_included_session_ids,
+                            "parent_related_session_ids": binding.parent_related_session_ids,
+                            "parent_related_material_ids": binding.parent_related_material_ids,
+                            "parent_path_leaf": binding.parent_path_leaf,
+                            "activity_instructions_source_url": binding.activity_instructions_source_url,
+                            "activity_normalized_instructions_url": binding.activity_normalized_instructions_url,
+                            "activity_binding_identity": binding.activity_binding_identity,
                         }
                         for key, value in metadata.items():
                             object.__setattr__(allowed, key, value)
@@ -535,6 +547,11 @@ def _source_identity(value: Any) -> str | None:
 def _is_managed_material_binding(binding: CapabilityBinding) -> bool:
     """Whether a binding carries the Phase4 Material Usage contract."""
 
+    # Activity instruction evidence carries Course/parent metadata for
+    # revocation, but it is governed by the typed Activity binding contract,
+    # not the Material Usage contract below.
+    if binding.source_class.casefold() in {"official_activity", "official_exam"}:
+        return False
     if _is_material_identity(binding.entity_id, binding.source_class):
         return True
     if binding.relation_required is True or any(
@@ -614,6 +631,7 @@ def _validate_binding_for_issue(binding: CapabilityBinding) -> None:
         raise LocatorNotAllowedError("capability binding relation_required flag is invalid")
     if type(binding.provisional) is not bool:
         raise LocatorNotAllowedError("capability binding provisional flag is invalid")
+    _validate_parent_binding(binding)
     if not _is_managed_material_binding(binding):
         return
 
@@ -677,6 +695,98 @@ def _valid_source_ref(value: SourceRef) -> bool:
         and bool(value.file_id.strip())
         and not value.file_id.casefold().startswith(("http://", "https://"))
     )
+
+
+def _validate_parent_binding(binding: CapabilityBinding) -> None:
+    fields = (
+        binding.parent_entity_id,
+        binding.parent_entity_type,
+        binding.parent_course_relation_page_id,
+        binding.parent_course_key,
+        binding.parent_scope_confirmed,
+        binding.parent_included_session_ids,
+        binding.parent_related_session_ids,
+        binding.parent_related_material_ids,
+        binding.parent_path_leaf,
+        binding.activity_instructions_source_url,
+        binding.activity_normalized_instructions_url,
+        binding.activity_binding_identity,
+    )
+    if not any(value is not None for value in fields):
+        return
+    if not isinstance(binding.parent_entity_id, str) or not binding.parent_entity_id.strip():
+        raise LocatorNotAllowedError("parent capability requires parent_entity_id")
+    if binding.parent_entity_type not in {"exam", "activity"}:
+        raise LocatorNotAllowedError("parent capability has an unsupported parent_entity_type")
+    expected_type = "E" if binding.parent_entity_type == "exam" else "A"
+    try:
+        parent_type = parse_entity_id(binding.parent_entity_id).entity_type
+    except UlsError as exc:
+        raise LocatorNotAllowedError("parent capability entity ID is invalid") from exc
+    if parent_type != expected_type:
+        raise LocatorNotAllowedError("parent capability entity/type mismatch")
+    if (
+        not isinstance(binding.parent_course_relation_page_id, str)
+        or not binding.parent_course_relation_page_id.strip()
+        or not isinstance(binding.parent_course_key, str)
+        or not binding.parent_course_key.strip()
+    ):
+        raise LocatorNotAllowedError("parent capability requires a complete Course identity")
+    try:
+        parse_course_key(binding.parent_course_key)
+    except Exception as exc:
+        raise LocatorNotAllowedError("parent capability Course Key is invalid") from exc
+    if not isinstance(binding.parent_path_leaf, str) or not binding.parent_path_leaf.strip():
+        raise LocatorNotAllowedError("parent capability requires parent_path_leaf")
+    if binding.parent_entity_type == "exam":
+        if binding.parent_path_leaf not in {"session", "material_usage"}:
+            raise LocatorNotAllowedError("Exam parent capability has an invalid path leaf")
+        if type(binding.parent_scope_confirmed) is not bool or binding.parent_included_session_ids is None:
+            raise LocatorNotAllowedError("Exam parent capability requires scope snapshot")
+        _validate_parent_ids(binding.parent_included_session_ids, "S")
+        if binding.parent_related_session_ids is not None or binding.parent_related_material_ids is not None:
+            raise LocatorNotAllowedError("Exam parent capability has Activity relation metadata")
+        if any(value is not None for value in (binding.activity_instructions_source_url, binding.activity_normalized_instructions_url, binding.activity_binding_identity)):
+            raise LocatorNotAllowedError("Exam parent capability has Activity pointer metadata")
+    else:
+        if binding.parent_path_leaf not in {"activity_instructions", "session", "material_usage", "material"}:
+            raise LocatorNotAllowedError("Activity parent capability has an invalid path leaf")
+        if binding.parent_related_session_ids is not None:
+            _validate_parent_ids(binding.parent_related_session_ids, "S")
+        if binding.parent_related_material_ids is not None:
+            _validate_parent_ids(binding.parent_related_material_ids, "M")
+        if binding.parent_scope_confirmed is not None or binding.parent_included_session_ids is not None:
+            raise LocatorNotAllowedError("Activity parent capability has Exam scope metadata")
+        pointers = (
+            binding.activity_instructions_source_url,
+            binding.activity_normalized_instructions_url,
+        )
+        if any(value is not None and (not isinstance(value, str) or not value.strip()) for value in pointers):
+            raise LocatorNotAllowedError("Activity parent capability pointers are invalid")
+        if binding.parent_path_leaf == "activity_instructions" and (
+            pointers[0] is None
+            or pointers[1] is None
+            or binding.activity_binding_identity is None
+        ):
+            raise LocatorNotAllowedError(
+                "Activity instruction capability requires pointer pair and trusted identity"
+            )
+        if binding.activity_binding_identity is not None:
+            if pointers[0] is None or pointers[1] is None:
+                raise LocatorNotAllowedError(
+                    "Activity parent binding identity requires both instruction pointers"
+                )
+            provider, file_id = binding.activity_binding_identity
+            if not provider.strip() or not file_id.strip() or file_id.casefold().startswith(("http://", "https://")):
+                raise LocatorNotAllowedError("Activity parent binding identity is invalid")
+
+
+def _validate_parent_ids(values: Sequence[str], expected_type: str) -> None:
+    if len(set(values)) != len(values):
+        raise LocatorNotAllowedError("parent relation snapshot contains duplicates")
+    for value in values:
+        if parse_entity_id(value).entity_type != expected_type:
+            raise LocatorNotAllowedError("parent relation snapshot contains an invalid entity ID")
 
 
 def _full_usage_basis(binding: CapabilityBinding) -> tuple[Any, ...]:

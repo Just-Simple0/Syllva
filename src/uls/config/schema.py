@@ -96,7 +96,7 @@ class RemoteMcpCfg:
 
 @dataclass
 class BehaviorContractCfg:
-    version: int = 1
+    version: int = 2
     path: str = ""
 
 

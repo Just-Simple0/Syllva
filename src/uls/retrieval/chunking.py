@@ -9,6 +9,7 @@ from itertools import pairwise
 from typing import Any
 
 from uls.domain.models import PageLocator, TimeLocator, is_contained
+from uls.normalization.activity import NormalizedActivity
 from uls.normalization.schemas import NormalizedTranscript, TimestampMark
 from uls.normalization.validators import ParsedDerivative, parse_derivative
 
@@ -49,6 +50,8 @@ def derivative_parts(derivative: Any) -> tuple[str | None, str, tuple[TimestampM
 
     if isinstance(derivative, NormalizedTranscript):
         return derivative.entity_id, derivative.body, derivative.marks, derivative.as_front_matter()
+    if isinstance(derivative, NormalizedActivity):
+        return derivative.entity_id, derivative.body, (), derivative.as_front_matter()
     if isinstance(derivative, ParsedDerivative):
         return derivative.entity_id, derivative.body, _marks(derivative.body), dict(derivative.front_matter)
     if isinstance(derivative, str):

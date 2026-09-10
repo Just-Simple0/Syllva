@@ -7,7 +7,7 @@ from typing import Any
 from fake_drive import FakeDriveReader
 from fake_notion import COURSE_KEY, COURSE_PAGE_ID, FakeNotionAdapter, FakeNotionReader
 
-from uls.adapters.drive.binding import ValidatedSourceBindingResolver
+from uls.adapters.drive.binding import ActivityInstructionBinding, ValidatedSourceBindingResolver
 from uls.domain.approval_identity import (
     build_material_usage_semantics,
     canonical_action_json,
@@ -16,6 +16,7 @@ from uls.domain.approval_identity import (
 from uls.domain.enums import AutomationActor
 from uls.domain.page_range import PageRange
 from uls.domain.source_ref import SourceFingerprint, SourceRef
+from uls.normalization.activity import normalize_activity_instructions
 from uls.normalization.transcript import normalize_transcript
 from uls.retrieval.scope import material_usage_scopes
 
@@ -61,6 +62,88 @@ Master theorem material
 Page 2
 Round robin examples
 """
+
+
+ACTIVITY_SOURCE_POINTER = "https://drive.google.com/file/d/activity-source-01/view"
+ACTIVITY_NORMALIZED_POINTER = "https://drive.google.com/file/d/activity-normalized-01/view"
+
+
+def activity_derivative(
+    *,
+    source_hash: str = "activity-source-v1",
+    source_version: int = 1,
+    activity_id: str = "COMP319-A01",
+) -> Any:
+    return normalize_activity_instructions(
+        "Page 1\nOfficial: do not use X.\nPage 2\nSubmit the exact repository ref.",
+        entity_id=activity_id,
+        course_key=COURSE_KEY,
+        source_ref=SourceRef("google_drive", "activity-source-01", ACTIVITY_SOURCE_POINTER),
+        source_hash=source_hash,
+        source_version=source_version,
+        processor_version="1.2.0",
+        now="2026-09-04T00:00:00+09:00",
+    )
+
+
+def activity_binding(
+    *,
+    activity_id: str = "COMP319-A01",
+    instructions_source_url: str = ACTIVITY_SOURCE_POINTER,
+    normalized_instructions_url: str = ACTIVITY_NORMALIZED_POINTER,
+    source_ref: SourceRef | None = None,
+    derivative_ref: SourceRef | None = None,
+) -> ActivityInstructionBinding:
+    return ActivityInstructionBinding(
+        activity_id,
+        instructions_source_url,
+        normalized_instructions_url,
+        derivative_ref or SourceRef("google_drive", "activity-normalized-01"),
+        source_ref or SourceRef("google_drive", "activity-source-01", ACTIVITY_SOURCE_POINTER),
+    )
+
+
+def activity_record(
+    *,
+    activity_id: str = "COMP319-A01",
+    related_sessions: list[str] | None = None,
+    related_materials: list[str] | None = None,
+    instructions_source_url: str | None = ACTIVITY_SOURCE_POINTER,
+    normalized_instructions_url: str | None = ACTIVITY_NORMALIZED_POINTER,
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "ID": activity_id,
+        "Name": "HW1",
+        "Course": {"relation": [{"id": COURSE_PAGE_ID}]},
+        "Instructions Source": instructions_source_url,
+        "Normalized Instructions": normalized_instructions_url,
+        "Result Type": "GitHub",
+        "Submission Ref": "refs/heads/assignment-1",
+    }
+    if related_sessions is not None:
+        record["Related Sessions"] = {"relation": [{"id": value} for value in related_sessions]}
+    if related_materials is not None:
+        record["Related Materials"] = {"relation": [{"id": value} for value in related_materials]}
+    return record
+
+
+def exam_record(
+    *,
+    exam_id: str = "COMP319-E01",
+    included_sessions: list[str] | None | object = (),
+    scope_confirmed: bool = False,
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "ID": exam_id,
+        "Name": "Midterm",
+        "Course": {"relation": [{"id": COURSE_PAGE_ID}]},
+        "Scope Confirmed": scope_confirmed,
+    }
+    if included_sessions is not None:
+        record["Included Sessions"] = {
+            "relation": [{"id": value} for value in included_sessions]
+        }
+    return record
 
 
 def ready_phase4(
@@ -204,11 +287,17 @@ def phase4_applier_kwargs(reader, drive, resolver) -> dict[str, Any]:
 
 
 __all__ = [
+    "ACTIVITY_NORMALIZED_POINTER",
+    "ACTIVITY_SOURCE_POINTER",
     "COURSE_KEY",
     "COURSE_PAGE_ID",
     "AutomationActor",
     "FakeNotionAdapter",
     "FakeNotionReader",
+    "activity_binding",
+    "activity_derivative",
+    "activity_record",
+    "exam_record",
     "material_derivative",
     "phase4_applier_kwargs",
     "phase4_proposal",

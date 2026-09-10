@@ -1,8 +1,8 @@
 ---
 name: study-session
 description: Summarize / study a specific lecture session grounded in ULS course context.
-behavior_contract_version: 1
-behavior_contract_hash: sha256:83a0362614e634249f4b8204c7eb57009b54f01ebda749579b7caaf8d51bdc14
+behavior_contract_version: 2
+behavior_contract_hash: sha256:987d09ec152f91e368e070c5ccbe961602a18da8b6113afd968ac965406aae1a
 ---
 
 # Study a session (SESSION intent)
@@ -25,6 +25,13 @@ CPU 스케줄링 부분 설명해줘".
 ## Rules
 
 - Never traverse Notion/Drive directly.
+- Keep SOURCE/USER/AI/External provenance distinct: supplied professor/official
+  evidence is SOURCE, the learner's notes are USER, interpretation is AI, and general
+  knowledge is External.
 - Label professor SOURCE, USER notes, and your own AI inference separately.
 - Surface page/timestamp locators when asked "where".
+- If supplied Activity instructions are missing, partial, or truncated, disclose
+  incomplete coverage and do not claim to have the complete instruction set or infer
+  omitted requirements. Direct official instructions govern conflicting
+  recommendations; typed constraint metadata does not change provenance categories.
 - On `CONTEXT_EXPIRED` / `LOCATOR_STALE`, recover per the Behavior Contract (retry once).

@@ -109,6 +109,8 @@ class FakeNotionReader:
         courses: Iterable[Mapping[str, Any]] | None = None,
         sessions: Iterable[Mapping[str, Any]] | None = None,
         materials: Iterable[Mapping[str, Any]] | None = None,
+        exams: Iterable[Mapping[str, Any]] | Mapping[str, Mapping[str, Any]] | None = None,
+        activities: Iterable[Mapping[str, Any]] | Mapping[str, Mapping[str, Any]] | None = None,
         material_usage: Mapping[str, Iterable[Mapping[str, Any]]] | None = None,
         enrichments: Mapping[str, Any] | None = None,
         material_enrichments: Mapping[str, Any] | None = None,
@@ -138,6 +140,16 @@ class FakeNotionReader:
         self.materials = {
             str(item["ID"]): _canonical_graph_record(item, course_keys)
             for item in material_values
+        }
+        exam_values = _record_values(exams)
+        activity_values = _record_values(activities)
+        self.exams = {
+            str(item["ID"]): _canonical_graph_record(item, course_keys)
+            for item in exam_values
+        }
+        self.activities = {
+            str(item["ID"]): _canonical_graph_record(item, course_keys)
+            for item in activity_values
         }
         self.material_usage = {
             key: [_canonical_usage(item, course_keys, self.sessions) for item in values]
@@ -186,6 +198,12 @@ class FakeNotionReader:
 
     def get_material(self, material_id: str) -> Mapping[str, Any] | None:
         return self.materials.get(material_id)
+
+    def get_exam(self, exam_id: str) -> Mapping[str, Any] | None:
+        return self.exams.get(exam_id)
+
+    def get_activity(self, activity_id: str) -> Mapping[str, Any] | None:
+        return self.activities.get(activity_id)
 
     def get_material_enrichment(self, material_id: str) -> Any | None:
         return self.material_enrichments.get(material_id)
@@ -292,6 +310,18 @@ class FakeNotionWriter:
         if logical == "automationqueue":
             rows = [row for row in self._queue_values() if row.get("record_id") == entity_id]
             return rows[0] if len(rows) == 1 else None
+        if logical == "exams":
+            return (
+                self.reader.exams.get(entity_id)
+                or self.entities.get((target_db, entity_id))
+                or self.entities.get((logical, entity_id))
+            )
+        if logical == "activities":
+            return (
+                self.reader.activities.get(entity_id)
+                or self.entities.get((target_db, entity_id))
+                or self.entities.get((logical, entity_id))
+            )
         return self.entities.get((target_db, entity_id)) or self.entities.get((logical, entity_id))
 
     def create_entity(
@@ -336,6 +366,16 @@ class FakeNotionWriter:
                 raise PolicyViolation("Material Usage Session relation is required")
             self.reader.material_usage.setdefault(session_id, []).append(item)
             self.entities[("Material Usage", str(item["ID"]))] = item
+        elif logical == "exams":
+            entity_id = str(item.get("ID", item.get("id", f"fake-{self.create_calls}")))
+            self.reader.exams[entity_id] = item
+            self.entities[(target_db, entity_id)] = item
+            self.entities[(logical, entity_id)] = item
+        elif logical == "activities":
+            entity_id = str(item.get("ID", item.get("id", f"fake-{self.create_calls}")))
+            self.reader.activities[entity_id] = item
+            self.entities[(target_db, entity_id)] = item
+            self.entities[(logical, entity_id)] = item
         else:
             entity_id = str(item.get("ID", item.get("id", f"fake-{self.create_calls}")))
             self.entities[(target_db, entity_id)] = item
@@ -383,20 +423,43 @@ class FakeNotionWriter:
             self.writes.append((target_db, entity_id, dict(patch), actor))
             self.events.append(("queue_update", row.get("record_id"), deepcopy(dict(patch))))
             return row
-        if logical == "materialusage":
+        if logical in {"materialusage", "exams"}:
             if self.raise_before_target or self.target_raise_before_mutation:
                 self.raise_before_target = False
                 self.target_raise_before_mutation = False
                 raise ProviderWriteNotAppliedError("target write failed before mutation")
-            row = self._usage_row(entity_id)
+            row = (
+                self._usage_row(entity_id)
+                if logical == "materialusage"
+                else (
+                    self.reader.exams.get(entity_id)
+                    or self.entities.get((target_db, entity_id))
+                    or self.entities.get((logical, entity_id))
+                )
+            )
+            if row is None:
+                raise KeyError(entity_id)
             row.update(deepcopy(dict(patch)))
             self.target_mutations += 1
             self.writes.append((target_db, entity_id, dict(patch), actor))
-            self.events.append(("usage_update", entity_id, deepcopy(dict(patch))))
+            self.events.append(("usage_update" if logical == "materialusage" else "exam_update", entity_id, deepcopy(dict(patch))))
             if self.mutate_then_raise_target or self.target_mutate_then_raise:
                 self.mutate_then_raise_target = False
                 self.target_mutate_then_raise = False
                 raise RuntimeError("target write committed before provider timeout")
+            return row
+        if logical == "activities":
+            if self.raise_before_target or self.target_raise_before_mutation:
+                self.raise_before_target = False
+                self.target_raise_before_mutation = False
+                raise ProviderWriteNotAppliedError("target write failed before mutation")
+            row = self.reader.activities.get(entity_id)
+            if row is None:
+                raise KeyError(entity_id)
+            row.update(deepcopy(dict(patch)))
+            self.target_mutations += 1
+            self.writes.append((target_db, entity_id, dict(patch), actor))
+            self.events.append(("activity_update", entity_id, deepcopy(dict(patch))))
             return row
         row = self.entities.get((target_db, entity_id)) or self.entities.get((logical, entity_id))
         if row is None:
@@ -566,6 +629,16 @@ class FakeNotionAdapter(FakeNotionWriter):
 
 
 FakeNotion = FakeNotionReader
+
+
+def _record_values(
+    values: Iterable[Mapping[str, Any]] | Mapping[str, Mapping[str, Any]] | None,
+) -> list[Mapping[str, Any]]:
+    if values is None:
+        return []
+    if isinstance(values, Mapping):
+        return list(values.values())
+    return list(values)
 
 
 def _fake_key(value: str) -> str:

@@ -7,11 +7,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from .academic import ActivityConstraintMetadata
 from .enums import FreshnessStatus, SourceAuthority
 from .errors import LocatorParseError, UlsError
 from .ids import parse_entity_id
 from .provenance import Provenance
-from .source_ref import SourceFingerprint
+from .source_ref import SourceFingerprint, SourceRef
 
 
 _TIMESTAMP_PATTERN = re.compile(r"[0-9]{2}:[0-9]{2}:[0-9]{2}\Z")
@@ -265,6 +266,8 @@ class EvidenceItem:
     content: str
     provenance: Provenance
     freshness: FreshnessStatus | str
+    source_ref: SourceRef | None = None
+    constraint_metadata: ActivityConstraintMetadata | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.locator, str):
