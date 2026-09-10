@@ -4,7 +4,9 @@
 
 **Repo / merged main:** https://github.com/Just-Simple0/Syllva · Phase4는 PR1로 `main`에 `e55705f`로 병합됨 (2026-09-10 09:32:55 KST)
 
-**정책 후속 work branch:** `codex/syllva-project-agents` · Phase4 병합 이후 정책 문서 작업용, 이 정책 후속 변경은 원격 `main`에 미반영(push 없음)
+**정책 후속 PR2:** `codex/syllva-project-agents` 정책 정렬 변경이 `main`에 `2b4fbe4ed368d1b1d92721f7f33bdd0ab307281d`로 병합됨 (2026-09-10 10:55:41 KST)
+
+**PR2 병합 후 확인 기록:** PR2 병합 후 로컬 `main`이 `2b4fbe4ed368d1b1d92721f7f33bdd0ab307281d`와 같은 커밋으로 동기화된 것을 확인했다. AGENTS/handoff 정책 정렬은 완료됐다.
 
 **Phase4 구현 커밋:** `3f190fc`  ·  **Phase4 완료·검증 기록:** `d9fe77e`  ·  **정책 채택 기록:** `f974c7f`
 
@@ -12,7 +14,7 @@
 
 ## 최신 인수인계 — Phase4 완료 및 정책 정렬 후속
 
-**Phase4 구현 rev10은 독립 리뷰 GO와 총괄 검증·수용을 통과했고 PR1로 `main`에 병합됐다.** 아래 Phase4 완료 근거와 역사 기록은 보존한다. 현재 후속 작업은 정책 문서 정렬만 다루며 Phase5–8 구현이나 push를 포함하지 않는다.
+**Phase4 구현 rev10은 독립 리뷰 GO와 총괄 검증·수용을 통과했고 PR1로 `main`에 병합됐다. 정책 정렬 후속도 PR2로 `main`에 병합되어 현재 기준에 반영됐다.** 아래 Phase4 완료 근거와 역사 기록은 보존한다. Phase5–8 구현과 미래 제품 push는 승인 범위 밖이다. 이 제한은 완료된 사용자 승인 PR2 delivery를 금지하는 뜻이 아니다.
 
 ### 현재 지침과 경계
 
@@ -20,7 +22,7 @@
 - 제품의 `Single-active-worker`는 ULS runtime 제약이며 Codex subagent 동시성을 정하지 않는다.
 - **MCP search surface (MCP 검색 표면)**는 v1.2에서 read-only인 계약/스캐폴드 경계다. 현재 MCP 배포나 실제 클라이언트 검증 완료를 주장하지 않는다.
 - 승인·확인은 human-owned다. AI와 일반 자동화는 독립적으로 승인·승격할 수 없다. 자동 적용에서는 지정된 `HumanApprovalApplier`만 정책·freshness·identity 검사를 모두 통과한, 현재 유효하고 human attribution이 있는 승인 변경을 적용할 수 있으며 human approval 자체를 만들 수 없다.
-- 현재 승인된 제품 범위는 **Phase4까지**다. Phase5–8은 새 사용자 지시 없이 시작하지 않고, push도 하지 않는다.
+- 현재 승인된 제품 범위는 **Phase4까지**다. Phase5–8 구현과 미래 제품 push는 새 사용자 지시 없이 시작하지 않는다. 완료된 사용자 승인 PR2 정책 delivery는 이 미래 범위 제한과 구분한다.
 - 승인 계획은 **rev6**, 완료 구현은 **rev10**이다. 계획의 과거 UNAPPROVED 헤더는 후속 리뷰 기록으로 승인됐으므로 수정하지 않는다. 승인 계획과 두 frozen 명세의 해시는 그대로 유지했다.
 - 정책 정렬·호환성 감사와 검증 근거는 [Codex 정책 채택 기록](docs/codex-policy-adoption.md)에 보존한다. 전역 Codex 지침은 일반적으로 `~/.codex/AGENTS.md`, 프로젝트 지침은 [AGENTS.md](AGENTS.md)를 따른다.
 
