@@ -228,13 +228,16 @@ class ActivityInstructionRefs:
 
 @dataclass(frozen=True)
 class ActivityResultMetadata:
-    """Typed result/submission metadata; GitHub retrieval remains Phase 6."""
+    """Typed result/submission metadata with the frozen Notion property names."""
 
     result_type: str
     submission_ref: str | None = None
     repository_ref: str | None = None
     pull_request_ref: str | None = None
     status: str | None = None
+    repository_path: str | None = None
+    result_source: str | None = None
+    result_artifact: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.result_type, str) or not self.result_type.strip():
@@ -244,6 +247,9 @@ class ActivityResultMetadata:
             (self.repository_ref, "repository_ref"),
             (self.pull_request_ref, "pull_request_ref"),
             (self.status, "status"),
+            (self.repository_path, "repository_path"),
+            (self.result_source, "result_source"),
+            (self.result_artifact, "result_artifact"),
         ):
             if value is not None and (not isinstance(value, str) or not value.strip()):
                 raise ValueError(f"{name} must be a non-empty string or None")
@@ -255,6 +261,9 @@ class ActivityResultMetadata:
             "repository_ref": self.repository_ref,
             "pull_request_ref": self.pull_request_ref,
             "status": self.status,
+            "repository_path": self.repository_path,
+            "result_source": self.result_source,
+            "result_artifact": self.result_artifact,
         }
 
 
@@ -382,9 +391,12 @@ class ActivityRecord:
         result = ActivityResultMetadata(
             result_type,
             _text(_raw(value, "Submission Ref", "Submission URL", "submission_ref", default=_MISSING), "Submission Ref", required=False),
-            _text(_raw(value, "Repository Ref", "repository_ref", default=_MISSING), "Repository Ref", required=False),
-            _text(_raw(value, "Pull Request Ref", "pull_request_ref", default=_MISSING), "Pull Request Ref", required=False),
+            _text(_raw(value, "Repository", "Repository Ref", "repository_ref", default=_MISSING), "Repository", required=False),
+            _text(_raw(value, "PR", "Pull Request Ref", "pull_request_ref", default=_MISSING), "PR", required=False),
             _text(_raw(value, "Status", "status", default=_MISSING), "Status", required=False),
+            _text(_raw(value, "Repository Path", "repository_path", default=_MISSING), "Repository Path", required=False),
+            _text(_raw(value, "Result Source", "result_source", default=_MISSING), "Result Source", required=False),
+            _text(_raw(value, "Result Artifact", "result_artifact", default=_MISSING), "Result Artifact", required=False),
         )
         related_sessions = _relation_ids(_raw(value, "Related Sessions", "Sessions", "related_session_ids", default=_MISSING), "Related Sessions", "S")
         related_materials = _relation_ids(_raw(value, "Related Materials", "Materials", "related_material_ids", default=_MISSING), "Related Materials", "M")

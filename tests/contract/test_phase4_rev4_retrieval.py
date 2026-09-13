@@ -651,5 +651,5 @@ def test_navigation_only_pointer_change_during_final_material_read_preserves_ide
     _install_read_mutation(drive, "material-m03", navigate)
     item = engine.get_source_chunk(package.context_id, "COMP319-M03:p1")
 
-    assert item.content == "Page 1\nMaster theorem material"
+    assert item.content == "Master theorem material"
     assert item.fingerprint == SourceFingerprint(1, "material-hash-v1")

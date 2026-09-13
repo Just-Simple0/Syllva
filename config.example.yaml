@@ -1,5 +1,6 @@
 # University Learning System — example configuration (spec §5)
-# Copy to config.yaml. Secrets stay in .env, never here.
+# Copy to config.yaml. Secrets come from the process environment, never here.
+# The CLI does not automatically load .env files.
 
 system:
   timezone: Asia/Seoul
@@ -16,9 +17,29 @@ storage:
 
 google_drive:
   university_root_id: "..."
+  # Legacy global inbox (v1.2 reader only). Not used when semester_registries is active.
   inbox_root_id: "..."
 
+  # v1.3 preview — semester-scoped intake. Remove or leave empty to use legacy reader only.
+  semester_registries:
+    - semester: "2026-2"
+      # Top-level semester folder in Drive.
+      folder_id: "<semester-folder-id>"
+      # Single shared upload folder where you drop new files.
+      upload_folder_id: "<upload-folder-id>"
+      # Map from course_key → course root folder ID.
+      course_folder_ids:
+        "2026-2_COURSE-001-001": "<course-folder-id>"
+      # Per-course static sub-folders (created once at semester setup).
+      course_static_folder_ids:
+        "2026-2_COURSE-001-001":
+          recordings_folder_id: "<recordings-folder-id>"
+          materials_folder_id: "<materials-folder-id>"
+      # Optional per-course upload overrides. Leave empty to use the shared upload folder.
+      optional_course_upload_folder_ids: {}
+
 notion:
+  # Legacy global database IDs (v1.2 custom ULS MCP reader — read-only retrieval surface).
   courses_db_id: "..."
   sessions_db_id: "..."
   materials_db_id: "..."
@@ -26,6 +47,21 @@ notion:
   activities_db_id: "..."
   exams_db_id: "..."
   automation_queue_db_id: "..."
+
+  # v1.3 preview — semester-scoped native Notion workspaces.
+  # Each semester needs exactly 5 native data sources provisioned in Notion.
+  semester_workspaces:
+    - semester: "2026-2"
+      # Parent page ID under which the 5 data sources live.
+      connection_settings_files_parent_id: "<notion-parent-page-id>"
+      academic_courses_data_source_id: "<courses-db-id>"
+      sessions_data_source_id: "<sessions-db-id>"
+      materials_data_source_id: "<materials-db-id>"
+      file_intake_data_source_id: "<file-intake-db-id>"
+      input_requests_data_source_id: "<input-requests-db-id>"
+      # Map from course_key → Notion portal page ID (dashboard page per course).
+      portal_page_ids:
+        "2026-2_COURSE-001-001": "<course-portal-page-id>"
 
 normalization:
   schema_version: v1
@@ -62,12 +98,29 @@ remote_mcp:
   public_unauthenticated: false
 
 behavior_contract:
-  version: 1
+  version: 2
   path: contracts/study-behavior.md
 
 courses:
-  - course_key: "2026-1_COMP319-002"
-    name: "알고리즘1"
-    code: "COMP319"
-    section: "002"
-    semester: "2026-1"
+  # Add one entry per course. course_key must match keys in semester_registries and semester_workspaces.
+  - course_key: "2026-2_COURSE-001-001"
+    name: "예시 과목명"
+    code: "COURSE-001"
+    section: "001"
+    semester: "2026-2"
+  # - course_key: "2026-2_COURSE-002-001"
+  #   name: "두 번째 과목"
+  #   code: "COURSE-002"
+  #   section: "001"
+  #   semester: "2026-2"
+
+# LMS sidecar — Canvas/KNU LMS hourly sync (optional).
+# Default state is paused. Credentials come from the process environment only.
+lms:
+  enabled: false
+  base_url: "https://canvas.knu.ac.kr"
+  sync_interval_minutes: 60
+  # course_ids are LMS-internal IDs, not course_key values.
+  # Run 'uls lms probe' to discover IDs after providing CANVAS_ACCESS_TOKEN in env.
+  course_ids: []
+  # semester: "2026-2"

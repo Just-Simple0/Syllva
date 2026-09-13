@@ -15,12 +15,11 @@ from typing import Any
 from uls.domain.source_ref import SourceRef
 
 from .schemas import (
+    TRANSCRIPT_SCHEMA,
     NormalizedTranscript,
     TimestampMark,
     TranscriptFrontMatter,
-    TRANSCRIPT_SCHEMA,
 )
-
 
 # Square brackets are the Alt export form.  The paired Unicode/round forms
 # are accepted as harmless provider variants while preserving their spelling
@@ -28,8 +27,10 @@ from .schemas import (
 _MARKER_RE = re.compile(
     r"(?P<open>\[|【|\()(?P<stamp>[^\]\】\)]*)(?P<close>\]|】|\))"
 )
-_TIMESTAMP_TEXT_RE = re.compile(r"\d{1,2}:\d{2}:\d{2}\Z")
-_TIMESTAMP_LIKE_RE = re.compile(r"\d[^\]\】\)]*:[^\]\】\)]*:[^\]\】\)]*")
+_TIMESTAMP_TEXT_RE = re.compile(r"(?:\d{1,2}:\d{2}:\d{2}|\d{1,2}:\d{2})\Z")
+_TIMESTAMP_LIKE_RE = re.compile(
+    r"(?:\d[^\]\】\)]*:[^\]\】\)]*:[^\]\】\)]*|\d{1,2}:[^\s:\]\】\)]*)"
+)
 
 
 def normalize_newlines(raw: str | bytes) -> str:
@@ -43,12 +44,20 @@ def normalize_newlines(raw: str | bytes) -> str:
 
 
 def timestamp_to_seconds(value: str) -> int:
-    """Parse an ``H:MM:SS``/``HH:MM:SS`` timestamp deterministically."""
+    """Parse raw ``M:SS``/``MM:SS`` or ``H:MM:SS``/``HH:MM:SS``.
+
+    Two-part exports use elapsed minutes (up to 99). This input flexibility
+    does not change the canonical three-part evidence locator grammar.
+    """
 
     if not isinstance(value, str) or _TIMESTAMP_TEXT_RE.fullmatch(value) is None:
         raise ValueError(f"invalid timestamp: {value!r}")
-    hours, minutes, seconds = (int(piece) for piece in value.split(":"))
-    if minutes > 59 or seconds > 59:
+    parts = tuple(int(piece) for piece in value.split(":"))
+    if len(parts) == 2:
+        hours, minutes, seconds = 0, *parts
+    else:
+        hours, minutes, seconds = parts
+    if (len(parts) == 3 and minutes > 59) or seconds > 59:
         raise ValueError(f"invalid timestamp: {value!r}")
     return hours * 3600 + minutes * 60 + seconds
 
@@ -61,7 +70,7 @@ def extract_timestamp_marks(body: str) -> tuple[tuple[TimestampMark, ...], bool]
     """Extract sidecar marks and report whether any timestamp parse failed.
 
     Ordinary bracketed prose is ignored.  A bracket whose contents clearly
-    attempts a three-part timestamp is considered a timestamp marker; if its
+    attempts a two- or three-part timestamp is considered a timestamp marker; if its
     digits/ranges are invalid the derivative is marked ``partial`` rather
     than silently claiming ``ready``.
     """

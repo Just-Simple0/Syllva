@@ -1,9 +1,6 @@
-"""uls retry command.
+"""Programmatic entry point for `uls retry`; shares parser and runtime."""
+from functools import partial
 
-Spec reference: spec §38.
-Implementation delegated to Codex (dev/impl role); this is a scaffold stub.
-"""
+from . import execute_command
 
-from __future__ import annotations
-
-# TODO(codex): implement per spec §38.
+execute = partial(execute_command, 'retry')

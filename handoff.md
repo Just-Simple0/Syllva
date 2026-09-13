@@ -1,8 +1,168 @@
 # Syllva (ULS v1.2) — Handoff
 
-**Last updated:** 2026-09-10
+**Last updated:** 2026-09-13
 
-## 최신 인수인계 — Phase5 구현·검증 완료 (2026-09-10)
+## Native Notion 대시보드 직접 적용 완료 (2026-09-13)
+
+사용자가 실제 적용을 요청해 [2026-1 학기 페이지](https://app.notion.com/p/34154b33957f801cb86ed4435bd80253)를
+**내 과목 → 이어서 공부(최대3) → To DO → 캘린더 → 파일 확인** 순서로 구성했다.
+기존 과목7개·캘린더를 보존하고 기존 일정 원본을 To DO/캘린더에서 함께 사용한다.
+등록된 실제 수업1개 바로가기, 알고리즘 과목의 수업 연결 뷰, 새 파일 확인 페이지를 연결했다.
+현재 일정 기록0개이므로 가짜 데이터를 채우지 않았다. 최근 학습 자동 갱신·파일 자동 접수는 연결 전이다.
+
+[적용·재검토 기록](docs/ux/review-20260913-native-dashboard.md)과
+[실제 native 저장 결과](docs/ux/dashboard-native-readback.md)에 검증을 남겼다.
+웹 GPT-5.6 Sol(매우 높음) 최종GO·Gemini3.8 Flash high 최종GO, 필수 미해결0건이다.
+원본 블록·뷰·질의를 재조회해 확인했으며 브라우저 화면 접근이 승인되지 않아 픽셀/모바일 검증은 하지 않았다.
+제품 코드·frozen 문서·기존 전사 수정·사용자 상태를 보존했다. 커밋·푸시는 하지 않았다.
+아래의 ‘실제 적용 전’ 기록은 이 요청 이전의 이력이다.
+
+## 공통 메뉴와 Notion 구현 대상 명확화 (2026-09-13)
+
+사용자 선호에 따라 공통 메뉴는 **대시보드·현재 학기의 과목별 바로가기·파일 확인**으로
+제한했다. 수업은 과목의 목록에서 열고 같은 목록으로 돌아간다. 대시보드 본문 최근 수업
+바로가기는 유지한다. 실제 사용 화면은 **Notion 기본 페이지·연결 뷰**이며 HTML은 합성
+모형이다. HTML 웹앱으로 전환한 것이 아니다. [탐색 결정](docs/ux/navigation-notion.md)과
+[재검토 기록](docs/ux/review-20260913-navigation.md)에 대응 요소와 한계를 명시했다.
+웹 GPT-5.6 Sol(매우 높음)·Gemini 3.8 Flash high 모두 GO. 기존 모형 검사34 + 탐색 확인6
+그룹 통과, JS 오류0. 이번 보완도 설계·모형 범위이며 실제 Notion 설정은 후속 구현이다.
+제품 코드·frozen 문서·운영 데이터·기존 전사 수정은 보존했고 커밋·푸시는 하지 않았다.
+
+## UX 정의 수정·재리뷰 완료 — rev10 설계 수용 (2026-09-13)
+
+사용자의 ‘이에 맞춰 수정 및 재리뷰로 고도화’ 요청을 완료했다. 현재 assistant가 직접 문서와
+합성 모형을 수정하고, 독립 웹 **GPT-5.6 Sol (매우 높음)** 및 **Gemini 3.8 Flash high** 리뷰의
+필수 지적을 반영했다. Pro 한도 소진에 대한 사용자의 대체 모드 승인을 그대로 사용했다.
+최종 묶음 판정은 **설계 수용 GO**다. 넓은 검토에서 시작해 변경 영향을 좁혀 재검토했으며,
+마지막 C6 산출물 재사용 identity는 웹/Gemini 모두 GO다. 전체 저장소 구현 승인은 아니다.
+
+- [사용자 UX 정의](docs/ux/file-intake.md): 학기 대시보드→과목→수업, Drive 단일 `+ 업로드`,
+  선택 과목 폴더, 정확한 입력/수업 선택, 개인 일정 원본, 전체 학습 노트 목표.
+- [UX-C1 실행 계약](docs/ux/intake-execution-contract.md): durable intake/receipt, Session·Material
+  reserve/apply와 폴더 회복, 실제 차시/내부 ID 분리, Usage v2 사람 승인, 최신 노트 요청/단일
+  attempt·재사용·취소 격리, SOURCE/AI/USER·Partial·freshness, C1–C8 다음 버전 명세 개정.
+- [리뷰·판정·검증 기록](docs/ux/review-20260913-revised.md): 실제 모델/대화 링크, 반복 리뷰 지적
+  처리, 검증 범위와 한계. 34개 합성 UX 검사 통과, JS 오류 0, 320/390/736/1024px 및 다크 확인.
+
+현재 완료 범위는 **설계·실행 계약·합성 UX 검증**이다. 제품 코드, frozen 문서, 운영
+Drive/Notion, AI 공급자는 변경하지 않았고 기존 전사 정규화/테스트 수정도 보존했다.
+커밋·푸시는 하지 않았다. 실제 구현/배포는 후속 작업이며 A01–A45와 하위 수용 사례의
+SQLite crash/restart, provider 응답 유실/권한, 실제 HAA/노트 생성 검증이 남는다.
+추가 사용자 질문은 없다. 아래 초기 리뷰/정의 기록은 당시 상태를 보존한 과거 기록이다.
+
+## UX 정의 독립 리뷰 완료 (2026-09-13)
+
+사용자가 `insane-review`로 UX 정의 검토를 요청했다. Pro 사용량 제한으로 사용자가 명시한
+대체 모드 **웹 ChatGPT GPT-5.6 Sol (매우 높음)**을 UI 검증해 사용했으며, 독립
+Gemini 3.8 Flash high 검토도 완료했다. 두 결론은 방향 적합·구현 전 보완(REVISE)이다.
+
+[최종 리뷰·의견 채택 근거](docs/ux/review-20260913.md)에 필수 4항목(미확인 범위와 전체 사용
+구분, 기존 Session 연결, 지속적인 접수 기록·확인 화면, 학습 노트 생성/쓰기/갱신 계약)과
+중요 2항목(개인 할 일·공통 일정 저장, 전사 시간 형식과 분류기 정합성)을 정리했다.
+빈 범위·분류기 동작은 합성 입력으로 확인했다. 리뷰어의 과도한 서비스 단정, 임의 큐 필드,
+이미 결정된 UX 재질문 등은 채택하지 않았다.
+
+설계·명세·코드 35개를 누락 없이 전송했고, 웹 완료 응답을 회수했다. 비공개 강의 시연 보고서
+업로드는 자동 승인 심사가 거절해 제외했다. 상세 증거는 `.review/ux-definition-20260913-*`와
+위 리뷰 문서에 있다. 정의안 원문·제품 코드·frozen 명세·운영 Drive/Notion은 이번 리뷰에서
+변경하지 않았다. 후속 정의 개정/구현은 아직 수행하지 않았으며, 이번 리뷰를 GO나 구현 완료로
+취급하지 않는다. 추가 사용자 응답을 기다리는 항목은 없다.
+
+## 학습 UX 정의 — 대시보드와 파일 입력 (2026-09-12)
+
+사용자 방향은 **Notion 학기 대시보드 → 과목 → 세션**이다. 대시보드에서 과목 접근,
+과제·시험 마감, 학사 일정, 해야 할 일을 함께 본다. Drive는 학기별 **‘+ 업로드’ 하나**에
+넣으면 시스템이 정리하는 방식을 기본으로 하고, 과목별 업로드 폴더 템플릿도 선택할 수 있게 한다.
+
+[UX 정의안](docs/ux/file-intake.md)에 화면 구조, 파일 종류별 입력 규칙, 분류·날짜 확인,
+자료와 세션의 관계, 읽기·노트 준비·내 공부 상태의 구분, 예외와 수용 사례를 정리했다.
+모호한 파일은 학기 접수 공간에서 과목을 확인한 뒤 정식 수집으로 전달한다. 파일 분류만으로
+Material Usage나 시험 범위의 사람 확인을 대신하지 않는다.
+
+현재 단계는 **정의안 작성**이다. 담당은 현재 assistant이며 이번 변경 범위는 위 UX 문서와
+이 인수인계뿐이다. 추가 사용자 응답을 기다리는 항목은 없다. 자동 발견·분류·Drive 이동,
+대시보드·확인 UI와 다중 자료형 native 처리는 후속 구현 대상이다. 저장 방식과 이동 동작은
+frozen 모델·기존 Notion DB·provider 권한에 맞춰 검증해야 한다. 실제 외부 파일·페이지는
+이번 UX 정의에서 변경하지 않았다. 제품 코드·기존 시연 수정은 보존하며 커밋하지 않았다.
+문서의 로컬 링크·코드 블록·공백 검사와 `git diff --check`를 통과했다. 문서만 변경했으므로
+제품 테스트는 재실행하지 않았다. 독립 모델 리뷰를 수행한 구현 승인 문서로 취급하지 않는다.
+
+## 실제 전사문 시연 후속 — 알고리즘 1 (2026-09-10)
+
+사용자 제공 `1주차.md`와 확인된 강의일 2026-03-06으로 직접 테스트했다.
+원문 M:SS/MM:SS 113개를 놓치던 정규화기를 보완해 전체 123개 시간 구간을
+원문 보존 상태로 처리한다. Canonical locator 문법은 유지하며 전체 1,058 tests 통과.
+
+ULS core ingest + 연결된 도구로 Drive 업로드/readback, Notion 수업 생성/readback,
+SQLite 완료 provenance, 중복 입력 무쓰기까지 확인했다. 검색은 실제 readback snapshot과
+완료 기록으로 확인했다. Native worker/MCP credentials와 실제 AI client E2E 완료는 아니다.
+‘루프 불변식’은 ASR의 ‘루프 불편성’과 달라 관련 근거를 놓치는 검색 품질 한계가 남는다.
+Notion은 Courses/Sessions 두 DB의 시연 공간이며 전체 운영 DB 구성은 아니다.
+
+[실제 수업 기록](https://app.notion.com/p/3d754b33957f8121a21ef41d7b4e1ab1),
+[검증·한계·임시 증거](docs/plans/live-transcript-20260306.md).
+이 후속 수정은 현재 작업 트리에 있으며 아직 커밋하지 않았다.
+
+2026-09-11 사용자 피드백으로 같은 수업 페이지의 짧은 AI 개요를 학습 노트로 확장했다.
+9개 단원에 단계별 배열 추적, 불변식 증명, 실행 횟수/수식 유도, 오개념 표와
+연습문제 10개/접힌 해설을 넣었다. 전사 중 교수 자기 정정도 표시하고 계산을 검산했다.
+SOURCE/USER와 메타데이터를 보존했다. PDF 텍스트는 대조했으나 이미지/손글씨의
+시각 검증은 로그인 origin 자동 승인 차단으로 수행하지 않았다. 자동 enrichment나
+product code를 추가 구현한 것이 아닌 학습 결과물과 품질 기준 보완이다.
+
+## 최신 인수인계 — Phase6–8 저장소 구현·로컬 검증 완료 (2026-09-10)
+
+사용자의 최신 지시 **“오케스트레이션 무시하고 너가 phase 8까지 구현 완료”**에 따라
+현재 assistant가 단독으로 설계·구현·검증했다. 이번 작업에서는 위임과 독립 웹/Gemini
+리뷰 단계를 실행하지 않았다. 제품의 frozen 계약, 읽기 전용 MCP와 사람 승인 경계는
+유지했다. 기준은 Phase5 병합 커밋 `f4c321e`, 작업 브랜치는 `codex/phase6-8-direct`다.
+
+### 구현한 동작
+
+- **Phase6:** GitHub 저장소·정확한 commit/tag 검증, 고정 tree/blob 조회와 checksum,
+  Activity 결과의 Repository Path/Submission Ref 연결. 잘못된 ref는 명시적 오류가 되며
+  현재 branch로 대체하지 않는다. 공식 지침과 제출 코드의 출처·권한을 구분한다.
+- **Phase7:** Behavior Contract v2와 여섯 projection의 해시 검증, 11파일 client zip,
+  설치 안내·support matrix·실제 client E2E 체크리스트. ChatGPT 연결은
+  `DEPLOYMENT_DEFERRED`이며 실사용 지원 검증을 완료했다고 표시하지 않는다.
+- **Phase8:** 같은 `uls run`을 실행하는 launchd/Task Scheduler, 실제 SDK stdio/HTTP
+  MCP와 11개 읽기 전용 도구, 분리된 RO provider 조합, TLS·짧은 bearer 인증,
+  status/doctor/health, 작업 잠금·재시도·재처리와 백업·복원·offline 안내.
+- Native transcript 흐름은 등록 원본 → 정규화 업로드/readback → Notion SOURCE
+  메타데이터 → durable provenance → 읽기 전용 검색까지 연결했다. 재처리 중 과거
+  처리 기록을 보존하고 USER가 바꾼 포인터를 덮어쓰지 않는다. AI 보강 결과가 원본
+  binding이나 재처리 대상으로 섞이지 않도록 회귀 검증했다.
+
+### 검증과 전달
+
+- Python **3.14.7·3.11.16 각각 전체 1,051개 통과**. 3.11에서는 독립 환경에 설치한
+  wheel의 실제 MCP SDK 프로세스도 검증했다. 추가 회귀는 총 56개다.
+- Canonical projection/hash lint, client zip, wheel 설치·CLI·SQLite 백업, compileall,
+  diff check, macOS plist lint와 Windows XML 검증 통과.
+- Ruff **183개**, mypy **74개** 기존 지적은 남는다. Phase5 감사와 비교한 새 정규화
+  지적은 0개다. 외부 Starlette/AnyIO deprecation warning 1개가 남는다.
+- macOS/Windows × Python3.11/3.14 GitHub Actions 정의를 추가했다. 원격 CI 실행,
+  push/merge, scheduler 설치와 외부 서비스 변경은 수행하지 않았다.
+- 세부 수용·검증·한계: [Phase6–8 검증 기록](docs/plans/phase6-8-verification.md).
+  작업 기록: [직접 실행 기록](docs/plans/phase6-8-direct.md).
+  운영 시작점: [설치·운영 안내](deployment/README.md).
+
+### 여전히 필요한 live 검증
+
+이번 완료 범위는 명세 §47–49의 저장소 구현과 로컬 검증이다. **전체 v1.2 live Done
+(§56) 완료는 아니다.** 이전 §41 C0/M0/VS0/VS0-B/Goodnotes live gates, 실제
+Notion/Drive/Claude/ChatGPT 계정 E2E, Windows host 실행, 배포와 권한·TLS 경로 확인은
+미검증 상태다. Native scheduler 입력은 현재 transcript만 지원하며 다른 원본 종류는
+거부한다. 기존 provider-neutral PDF/enrichment/approval 코드를 모두 live worker에
+연결했다고 주장하지 않는다. 내장 remote는 개발용 bearer profile이며 OAuth/OIDC와
+상시 모바일 연결은 제공하지 않는다. Primary PC가 켜져 있고 online이어야 한다.
+
+---
+
+**아래는 이전 인수인계다. 당시 범위·완료·승인·미구현 표현은 역사 기록이며 위 최신
+인수인계와 현재 사용자 지시가 우선한다.**
+
+## 이전 인수인계 — Phase5 구현·검증 완료 (2026-09-10)
 
 **Phase5 fix3와 테스트 보강분은 필수 웹·Gemini GO 및 Astra 최종 수용을 통과했다.** 구현 커밋은 `354a2606b2e2e60049babc257e0e883dfb09b2a5`이며, 시작 기준은 `9ba41a5`, 작업 브랜치는 `codex/phase5-8-completion`이다. 사용자 지시에 따라 이번 범위는 Phase5에서 끝난다.
 

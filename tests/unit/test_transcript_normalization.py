@@ -2,12 +2,15 @@ import pathlib
 import sys
 from dataclasses import fields
 
+import pytest
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
 from uls.domain.source_ref import SourceRef
 from uls.normalization.schemas import NormalizedTranscript, TimestampMark
 from uls.normalization.transcript import normalize_transcript
 from uls.normalization.validators import parse_transcript_derivative, validate_normalized_transcript
+from uls.retrieval.chunking import timestamp_chunks
 
 
 def _normalize(raw: str) -> NormalizedTranscript:
@@ -56,3 +59,42 @@ def test_timestamp_parse_failure_keeps_body_and_downgrades_to_partial() -> None:
     assert normalized.body == raw.replace("\r\n", "\n")
     assert normalized.status.value == "partial"
     assert normalized.marks == (TimestampMark(3, normalized.body.index("[00:00:03]")),)
+
+
+def test_export_switching_from_minutes_to_hours_keeps_all_evidence() -> None:
+    raw = "[0:01] 도입😀\r\n[59:59] 한 시간 직전\n[1:00:00] 이후"
+    normalized = _normalize(raw)
+    assert normalized.body == raw.replace("\r\n", "\n")
+    assert normalized.status.value == "ready"
+    assert normalized.marks == tuple(
+        TimestampMark(seconds, normalized.body.index(stamp))
+        for stamp, seconds in (("[0:01]", 1), ("[59:59]", 3599), ("[1:00:00]", 3600))
+    )
+    reparsed = parse_transcript_derivative(normalized.to_markdown())
+    assert reparsed.marks == normalized.marks
+    chunks = timestamp_chunks(reparsed)
+    assert [str(chunk.locator) for chunk in chunks] == [
+        "COMP319-S05:t00:00:01-00:59:58",
+        "COMP319-S05:t00:59:59",
+        "COMP319-S05:t01:00:00",
+    ]
+    assert "".join(chunk.content for chunk in chunks) == normalized.body
+
+
+@pytest.mark.parametrize("marker", ["[1:60]", "[1:2]", "[1:xx]", "[1:02", "[1:02)"])
+def test_malformed_short_timestamp_is_partial(marker: str) -> None:
+    normalized = _normalize(marker)
+    assert normalized.body == marker
+    assert normalized.status.value == "partial"
+    assert normalized.marks == ()
+
+
+def test_short_timestamps_support_provider_brackets_and_elapsed_minutes() -> None:
+    raw = "[참고: 예제] (알림: 중간 퀴즈)\n【01:02】 첫째\n(65:13) 둘째"
+    normalized = _normalize(raw)
+    assert normalized.body == raw
+    assert normalized.status.value == "ready"
+    assert normalized.marks == (
+        TimestampMark(62, raw.index("【01:02】")),
+        TimestampMark(3913, raw.index("(65:13)")),
+    )

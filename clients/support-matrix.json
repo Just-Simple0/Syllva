@@ -1,0 +1,8 @@
+{
+  "recorded_at": "2026-09-10",
+  "profiles": [
+    {"client": "Claude local MCP", "status": "EXPERIMENTAL", "reason": "Local stdio and instructions available; real-client domain E2E unrecorded."},
+    {"client": "ChatGPT remote MCP/App", "status": "DEPLOYMENT_DEFERRED", "reason": "Target-account connectivity, OAuth when required, and domain E2E remain external validation."},
+    {"client": "Generic MCP SDK", "status": "EXPERIMENTAL", "reason": "Automated protocol tests do not validate a user-facing AI client."}
+  ]
+}

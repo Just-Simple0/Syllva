@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import types
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Any, Union, get_args, get_origin, get_type_hints
@@ -14,7 +14,7 @@ from uls.domain.ids import parse_course_key
 from uls.retrieval.authority import SUPPORTED_MATERIAL_SOURCE_CLASSES
 
 from .errors import ConfigurationError
-from .schema import UlsConfig
+from .schema import CourseStaticFolderCfg, SemesterRegistryCfg, SemesterWorkspaceCfg, UlsConfig
 
 MAX_CONFIG_TTL_SECONDS = 24 * 60 * 60
 
@@ -156,7 +156,136 @@ def validate_config(cfg: UlsConfig) -> list[str]:
         or cfg.behavior_contract.version < 1
     ):
         problems.append("behavior_contract.version must be positive")
+    _validate_intake_config(cfg, problems)
     return problems
+
+
+def _validate_intake_config(cfg: UlsConfig, problems: list[str]) -> None:
+    """Validate optional v1.3 preview configuration when it is supplied.
+
+    Empty legacy configurations remain valid for the existing retrieval and
+    transcript paths.  Once a semester preview row is present, its IDs and
+    every configured course binding are fail-closed and semester scoped.
+    """
+
+    drive_rows = cfg.google_drive.semester_registries
+    notion_rows = cfg.notion.semester_workspaces
+    if not isinstance(drive_rows, list) or not isinstance(notion_rows, list):
+        problems.append("intake semester configuration must be lists")
+        return
+    _validate_unique_semester_rows(drive_rows, "google_drive.semester_registries", problems)
+    _validate_unique_semester_rows(notion_rows, "notion.semester_workspaces", problems)
+    if not drive_rows and not notion_rows:
+        return
+    if len(drive_rows) != len(notion_rows):
+        problems.append("Drive and Notion intake semester rows must cover the same semesters")
+    drive_by_semester = {row.semester: row for row in drive_rows if isinstance(row, SemesterRegistryCfg)}
+    notion_by_semester = {row.semester: row for row in notion_rows if isinstance(row, SemesterWorkspaceCfg)}
+    if set(drive_by_semester) != set(notion_by_semester):
+        problems.append("Drive and Notion intake semester rows must match exactly")
+    for index, row in enumerate(drive_rows):
+        prefix = f"google_drive.semester_registries[{index}]"
+        if not isinstance(row, SemesterRegistryCfg):
+            problems.append(f"{prefix} must be a SemesterRegistryCfg")
+            continue
+        _validate_opaque_id(row.folder_id, f"{prefix}.folder_id", problems)
+        _validate_opaque_id(row.upload_folder_id, f"{prefix}.upload_folder_id", problems)
+        _validate_opaque_id_map(row.course_folder_ids, f"{prefix}.course_folder_ids", problems)
+        _validate_opaque_id_map(
+            row.optional_course_upload_folder_ids,
+            f"{prefix}.optional_course_upload_folder_ids",
+            problems,
+        )
+        if not isinstance(row.course_static_folder_ids, dict):
+            problems.append(f"{prefix}.course_static_folder_ids must be a mapping")
+        else:
+            for key, folders in row.course_static_folder_ids.items():
+                if not isinstance(folders, CourseStaticFolderCfg):
+                    problems.append(f"{prefix}.course_static_folder_ids[{key!r}] is invalid")
+                    continue
+                _validate_opaque_id(
+                    folders.recordings_folder_id,
+                    f"{prefix}.course_static_folder_ids[{key!r}].recordings_folder_id",
+                    problems,
+                )
+                _validate_opaque_id(
+                    folders.materials_folder_id,
+                    f"{prefix}.course_static_folder_ids[{key!r}].materials_folder_id",
+                    problems,
+                )
+        configured_keys = {
+            course.course_key
+            for course in cfg.courses
+            if course.course_key.startswith(f"{row.semester}_")
+        }
+        if set(row.course_folder_ids) != configured_keys:
+            problems.append(f"{prefix}.course_folder_ids must map every configured course exactly")
+        if set(row.course_static_folder_ids) != configured_keys:
+            problems.append(
+                f"{prefix}.course_static_folder_ids must map every configured course exactly"
+            )
+        if any(not key.startswith(f"{row.semester}_") for key in row.course_folder_ids):
+            problems.append(f"{prefix} contains a course from another semester")
+    for index, row in enumerate(notion_rows):
+        prefix = f"notion.semester_workspaces[{index}]"
+        if not isinstance(row, SemesterWorkspaceCfg):
+            problems.append(f"{prefix} must be a SemesterWorkspaceCfg")
+            continue
+        for name in (
+            "connection_settings_files_parent_id",
+            "academic_courses_data_source_id",
+            "sessions_data_source_id",
+            "materials_data_source_id",
+            "file_intake_data_source_id",
+            "input_requests_data_source_id",
+        ):
+            _validate_opaque_id(getattr(row, name), f"{prefix}.{name}", problems)
+        _validate_opaque_id_map(row.portal_page_ids, f"{prefix}.portal_page_ids", problems, allow_empty=True)
+        if any(not key.startswith(f"{row.semester}_") for key in row.portal_page_ids):
+            problems.append(f"{prefix} contains a portal from another semester")
+
+
+def _validate_unique_semester_rows(rows: Sequence[object], name: str, problems: list[str]) -> None:
+    seen: set[object] = set()
+    for index, row in enumerate(rows):
+        semester = getattr(row, "semester", None)
+        if not isinstance(semester, str) or not semester:
+            problems.append(f"{name}[{index}].semester is required")
+            continue
+        try:
+            # A semester is the first component of a valid Course Key.  Keep
+            # this validation aligned with the frozen identifier grammar.
+            parse_course_key(f"{semester}_LMS101-001")
+        except UlsError:
+            problems.append(f"{name}[{index}].semester is invalid")
+        if semester in seen:
+            problems.append(f"{name} contains duplicate semester {semester}")
+        seen.add(semester)
+
+
+def _validate_opaque_id(value: object, name: str, problems: list[str]) -> None:
+    if not isinstance(value, str) or not value.strip() or value.strip() in {"...", "…"}:
+        problems.append(f"{name} must be an explicit provider ID")
+    elif any(character.isspace() for character in value) or len(value.encode("utf-8")) > 512:
+        problems.append(f"{name} is not a valid opaque provider ID")
+
+
+def _validate_opaque_id_map(
+    value: object,
+    name: str,
+    problems: list[str],
+    *,
+    allow_empty: bool = True,
+) -> None:
+    if not isinstance(value, dict):
+        problems.append(f"{name} must be a mapping")
+        return
+    if not allow_empty and not value:
+        problems.append(f"{name} must not be empty")
+    for key, identifier in value.items():
+        if not isinstance(key, str) or not key:
+            problems.append(f"{name} keys must be non-empty strings")
+        _validate_opaque_id(identifier, f"{name}[{key!r}]", problems)
 
 
 def _validate_bool(value: object, name: str, problems: list[str]) -> None:

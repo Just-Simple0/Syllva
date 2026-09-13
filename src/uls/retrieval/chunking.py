@@ -181,7 +181,7 @@ def timestamp_chunks(
 # positive-integer prefix (for example the ``1`` in ``1.5``) would silently
 # create page evidence for malformed declarations.
 _PAGE_DECLARATION_RE = re.compile(
-    r"(?im)(?:^|\n)\s*(?:(?:#{1,6})\s*)?(?:page|페이지)\s*[:#-]?\s*([^\s]+)"
+    r"(?im)(?:^|\n)[ \t]*(?:(?:#{1,6})[ \t]*)?(?:page|페이지)[ \t]*[:#-]?[ \t]*([^\s]+)[ \t]*(?=\n|$)"
     r"|(?:\[\[\s*page\s*[:=]\s*([^\]\s]+)\s*\]\])"
     r"|(?:<!--\s*page\s*[:=]\s*([^\s>]+)\s*-->)"
 )
@@ -216,21 +216,37 @@ def page_chunks(
 
     result: list[DerivativeChunk] = []
     markers = index.markers
-    for marker_index, (offset, page) in enumerate(markers):
+    marker_matches = tuple(_PAGE_DECLARATION_RE.finditer(body))
+    if len(marker_matches) != len(markers):
+        return []
+    for marker_index, ((offset, page), marker_match) in enumerate(zip(markers, marker_matches)):
         next_offset = markers[marker_index + 1][0] if marker_index + 1 < len(markers) else len(body)
-        if page < allowed_start or page > allowed_end or next_offset <= offset:
+        if page < allowed_start or page > allowed_end:
             continue
-        content_start = 0 if marker_index == 0 else offset
-        # A pre-marker preamble is part of page one rather than a second
-        # duplicate page chunk.  It is justified only because page 1 is an
-        # explicit marker in the validated index.
+        next_marker_start = (
+            marker_matches[marker_index + 1].start()
+            if marker_index + 1 < len(marker_matches)
+            else len(body)
+        )
         if marker_index == 0 and offset > 0:
+            # Preserve the established preamble behavior for unusual inputs
+            # that place text before the first explicit marker.
             content_start = 0
+            content = body[:next_offset]
+        else:
+            content_start = marker_match.end()
+            content_end = next_marker_start
+            content = body[content_start:content_end].strip("\r\n")
+            # A marker-only page carries locator structure but no SOURCE
+            # text.  Keep the chunk so page ranges remain contiguous without
+            # turning the marker itself into factual evidence.
+            if not content.strip():
+                content = ""
         result.append(
             DerivativeChunk(
                 entity_id,
                 PageLocator(entity_id, page, page),
-                body[content_start:next_offset],
+                content,
                 content_start,
                 next_offset,
             )
