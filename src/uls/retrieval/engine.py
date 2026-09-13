@@ -210,7 +210,10 @@ class RetrievalEngine:
         warnings: list[Any] = []
         if str(front["status"]).casefold() == DerivativeStatus.PARTIAL.value:
             warnings.append(_warning("SOURCE_PARTIAL", "material derivative is partial"))
-        chunks = page_chunks(derivative, entity_id=material_id)
+        chunks = [
+            chunk for chunk in page_chunks(derivative, entity_id=material_id)
+            if chunk.content.strip()
+        ]
         if not chunks:
             raise SourceUnavailableError(
                 "material derivative has no validated page markers",
@@ -455,12 +458,16 @@ class RetrievalEngine:
                             f"material derivative {usage_scope.material_id} is partial",
                         )
                     )
-                chunks = page_chunks(
-                    derivative,
-                    entity_id=usage_scope.material_id,
-                    start_page=usage_scope.start_page,
-                    end_page=usage_scope.end_page,
-                )
+                chunks = [
+                    chunk
+                    for chunk in page_chunks(
+                        derivative,
+                        entity_id=usage_scope.material_id,
+                        start_page=usage_scope.start_page,
+                        end_page=usage_scope.end_page,
+                    )
+                    if chunk.content.strip()
+                ]
                 if not chunks:
                     warnings.append(
                         _warning(
@@ -1177,6 +1184,11 @@ class RetrievalEngine:
         if chunk is None:
             raise LocatorNotAllowedError(
                 "locator was authorized but no current chunk contains it",
+                details={"locator": str(parsed_locator)},
+            )
+        if not chunk.content.strip():
+            raise SourceUnavailableError(
+                "authorized page has no source text",
                 details={"locator": str(parsed_locator)},
             )
         try:

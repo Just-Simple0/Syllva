@@ -30,7 +30,11 @@ authenticated HTTPS MCP connection only if your target environment supports it.
 The built-in short-lived bearer profile is a development integration, not OAuth.
 A client requiring OAuth must remain `DEPLOYMENT_DEFERRED` until an OAuth
 provider/gateway is configured and independently validated. Instructions alone
-cannot create a connector or grant access. Never paste credentials into them.
+cannot create a connector or grant access. CODEX desktop/CLI can use local stdio
+or streamable HTTP MCP servers through its supported local configuration. ChatGPT
+web uses a separate remote connection setting whose availability must be checked
+for the account and target environment; it does not read this checkout's local
+configuration. Never paste credentials into client instructions.
 
 ## Validation
 

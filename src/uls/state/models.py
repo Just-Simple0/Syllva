@@ -112,11 +112,143 @@ class EntityAllocation:
     next_sequence: int
 
 
+@dataclass(frozen=True)
+class SemesterRegistration:
+    semester: str
+    config_fingerprint: str
+    workspace_fingerprint: str
+    drive_static_ids_json: str
+    notion_resolved_ids_json: str
+    provider_account_binding_id: str
+    captured_at: str = ""
+
+
+@dataclass(frozen=True)
+class IntakeItem:
+    intake_id: str
+    provider: str
+    provider_file_id: str
+    semester: str
+    original_parent_id: str
+    observed_parent_id: str
+    original_name: str
+    mime_type: str
+    source_hash: str
+    source_version: int
+    status: str = "OBSERVED"
+    observed_kind: str = "UNKNOWN"
+    course_candidates_json: str = "[]"
+    selected_course_key: str | None = None
+    selected_kind: str | None = None
+    file_intake_page_id: str | None = None
+    input_request_page_id: str | None = None
+    request_revision_hash: str | None = None
+    plan_revision: str | None = None
+    pending_request_key: str | None = None
+    canonical_entity_id: str | None = None
+    canonical_source_json: str | None = None
+    content_status: str = "Pending"
+    last_error_code: str | None = None
+    last_error: str | None = None
+    last_successful_stage: str | None = None
+    first_seen_at: str = ""
+    last_seen_at: str = ""
+
+
+@dataclass(frozen=True)
+class IntakeObservation:
+    id: str
+    intake_id: str
+    source_hash: str
+    source_version: int
+    metadata_json: str
+    observed_at: str = ""
+
+
+@dataclass(frozen=True)
+class RequestReceipt:
+    receipt_id: str
+    provider: str
+    input_requests_data_source_id: str
+    request_key: str
+    request_revision_hash: str
+    provider_page_id: str | None = None
+    normalized_user_hash: str | None = None
+    target_snapshot_hash: str = ""
+    submitted_at: str | None = None
+    plan_revision: str | None = None
+    state: str = "Draft"
+    workspace_fingerprint: str = ""
+    request_type: str | None = None
+    intake_ids_json: str | None = None
+
+
+@dataclass(frozen=True)
+class IntakePlan:
+    plan_id: str
+    intake_id: str
+    request_revision_hash: str
+    plan_revision: str
+    resolved_workspace_fingerprint: str
+    target_snapshot_json: str
+    plan_hash: str
+    status: str = "PLANNED"
+    created_at: str = ""
+
+
+@dataclass(frozen=True)
+class ProviderWriteAttempt:
+    attempt_id: str
+    operation: str
+    operation_key: str
+    provider: str
+    target_id: str | None
+    prewrite_committed_at: str
+    dispatched_at: str | None = None
+    response_state: str = "PREPARED"
+    readback_json: str | None = None
+    error_class: str | None = None
+
+
+@dataclass(frozen=True)
+class EntityReservation:
+    reservation_id: str
+    intake_id: str
+    entity_kind: str
+    entity_app_id: str
+    parent_folder_id: str
+    marker_key: str
+    state: str
+    plan_revision: str
+    source_file_id: str | None = None
+    created_at: str = ""
+
+
+@dataclass(frozen=True)
+class SessionSourceBinding:
+    binding_id: str
+    course_key: str
+    session_id: str
+    provider: str
+    provider_file_id: str
+    reservation_id: str
+    state: str
+    created_at: str = ""
+
+
 __all__ = [
     "Checkpoint",
     "EntityAllocation",
+    "EntityReservation",
+    "IntakeItem",
+    "IntakeObservation",
+    "IntakePlan",
     "Job",
     "ProcessingRecord",
+    "ProviderWriteAttempt",
+    "RequestReceipt",
+    "SemesterRegistration",
+    "SessionSourceBinding",
     "SourceFile",
     "SourceVersion",
 ]

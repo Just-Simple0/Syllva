@@ -30,7 +30,11 @@ from uls.state.sqlite import SQLiteStateStore
 
 def load_sources(path: Path, course_keys: set[str]) -> list[dict[str, Any]]:
     if not path.is_file():
-        raise ConfigurationError('Source registrations missing; create workspace sources.json')
+        # The semester intake preview resolves provider files from its
+        # authoritative registered upload folders.  A missing legacy
+        # ``sources.json`` therefore means an empty legacy lane, not a reason
+        # to block preview discovery.
+        return []
     if path.stat().st_size > 1_000_000:
         raise ConfigurationError('Source registration file exceeds size limit')
     raw = json.loads(path.read_text(encoding='utf-8'))
@@ -205,7 +209,11 @@ class NativeWorker:
                                                  frozenset(previous_pointers)))
 
 
-def build_worker(config: Any, secrets: Any = None) -> NativeWorker:
+def build_worker(config: Any, secrets: Any = None) -> Any:
+    if config.google_drive.semester_registries and config.notion.semester_workspaces:
+        from uls.runtime import build_intake_worker
+
+        return build_intake_worker(config, secrets=secrets)
     from notion_client import Client
     values = os.environ if secrets is None else secrets
     for key in ('GOOGLE_WORKER_CREDENTIALS_FILE', 'NOTION_WORKER_TOKEN'):

@@ -30,6 +30,10 @@ class StorageCfg:
 class DriveCfg:
     university_root_id: str = ""
     inbox_root_id: str = ""
+    # The v1.3 intake preview is explicitly semester scoped.  These values
+    # are provider IDs returned by reviewed static provisioning; they are not
+    # discovered by display name and are never used as a retrieval fallback.
+    semester_registries: list["SemesterRegistryCfg"] = field(default_factory=list)
 
 
 @dataclass
@@ -41,6 +45,37 @@ class NotionCfg:
     activities_db_id: str = ""
     exams_db_id: str = ""
     automation_queue_db_id: str = ""
+    # Current-semester canonical/operational data sources.  The existing
+    # *_db_id fields above remain the v1.2 legacy retrieval lane.
+    semester_workspaces: list["SemesterWorkspaceCfg"] = field(default_factory=list)
+
+
+@dataclass
+class CourseStaticFolderCfg:
+    recordings_folder_id: str = ""
+    materials_folder_id: str = ""
+
+
+@dataclass
+class SemesterRegistryCfg:
+    semester: str = ""
+    folder_id: str = ""
+    upload_folder_id: str = ""
+    course_folder_ids: dict[str, str] = field(default_factory=dict)
+    course_static_folder_ids: dict[str, CourseStaticFolderCfg] = field(default_factory=dict)
+    optional_course_upload_folder_ids: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class SemesterWorkspaceCfg:
+    semester: str = ""
+    connection_settings_files_parent_id: str = ""
+    academic_courses_data_source_id: str = ""
+    sessions_data_source_id: str = ""
+    materials_data_source_id: str = ""
+    file_intake_data_source_id: str = ""
+    input_requests_data_source_id: str = ""
+    portal_page_ids: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -134,10 +169,18 @@ class UlsConfig:
 
         return self.google_drive
 
+    def resolve_semester_workspace(self, course_key: str):
+        """Resolve an intake workspace without falling back to legacy IDs."""
+
+        from .intake import resolve_semester_workspace
+
+        return resolve_semester_workspace(self, course_key)
+
 
 __all__ = [
     "BehaviorContractCfg",
     "CourseCfg",
+    "CourseStaticFolderCfg",
     "DriveCfg",
     "McpCfg",
     "NormalizationCfg",
@@ -145,6 +188,8 @@ __all__ = [
     "RemoteMcpCfg",
     "RetrievalCfg",
     "StorageCfg",
+    "SemesterRegistryCfg",
+    "SemesterWorkspaceCfg",
     "SystemCfg",
     "UlsConfig",
     "WorkerCfg",

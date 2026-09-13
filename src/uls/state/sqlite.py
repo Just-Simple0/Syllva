@@ -33,8 +33,16 @@ from uls.orchestration.jobs import derive_job_key
 from .models import (
     Checkpoint,
     EntityAllocation,
+    EntityReservation,
+    IntakeItem,
+    IntakeObservation,
+    IntakePlan,
     Job,
     ProcessingRecord,
+    ProviderWriteAttempt,
+    RequestReceipt,
+    SemesterRegistration,
+    SessionSourceBinding,
     SourceFile,
     SourceVersion,
 )
@@ -61,6 +69,141 @@ _ALLOWED_TRANSITIONS: dict[JobStatus, frozenset[JobStatus]] = {
 }
 
 _JOB_KEY_PATTERN = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
+
+
+# The preview tables are installed idempotently after the frozen v1.2
+# migration.  Keeping this additive bootstrap inside the store lets existing
+# state files gain the new durable ledger without changing the v1.2 migration
+# count or rewriting an applied migration.
+_INTAKE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS semester_registrations (
+    semester TEXT PRIMARY KEY,
+    config_fingerprint TEXT NOT NULL,
+    workspace_fingerprint TEXT NOT NULL,
+    drive_static_ids_json TEXT NOT NULL,
+    notion_resolved_ids_json TEXT NOT NULL,
+    provider_account_binding_id TEXT NOT NULL,
+    captured_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS intake_items (
+    intake_id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    provider_file_id TEXT NOT NULL,
+    semester TEXT NOT NULL,
+    original_parent_id TEXT NOT NULL,
+    observed_parent_id TEXT NOT NULL,
+    original_name TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    source_version INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    observed_kind TEXT NOT NULL DEFAULT 'UNKNOWN',
+    course_candidates_json TEXT NOT NULL DEFAULT '[]',
+    selected_course_key TEXT,
+    selected_kind TEXT,
+    file_intake_page_id TEXT,
+    input_request_page_id TEXT,
+    request_revision_hash TEXT,
+    plan_revision TEXT,
+    pending_request_key TEXT,
+    canonical_entity_id TEXT,
+    canonical_source_json TEXT,
+    content_status TEXT NOT NULL DEFAULT 'Pending',
+    last_error_code TEXT,
+    last_error TEXT,
+    last_successful_stage TEXT,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    UNIQUE(provider, provider_file_id)
+);
+CREATE INDEX IF NOT EXISTS idx_intake_items_status ON intake_items(status);
+CREATE INDEX IF NOT EXISTS idx_intake_items_semester ON intake_items(semester);
+CREATE TABLE IF NOT EXISTS intake_observations (
+    id TEXT PRIMARY KEY,
+    intake_id TEXT NOT NULL REFERENCES intake_items(intake_id),
+    source_hash TEXT NOT NULL,
+    source_version INTEGER NOT NULL,
+    metadata_json TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    UNIQUE(intake_id, source_hash, source_version)
+);
+CREATE TABLE IF NOT EXISTS request_receipts (
+    receipt_id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    input_requests_data_source_id TEXT NOT NULL,
+    request_key TEXT NOT NULL,
+    request_revision_hash TEXT NOT NULL,
+    provider_page_id TEXT,
+    normalized_user_hash TEXT,
+    target_snapshot_hash TEXT NOT NULL,
+    submitted_at TEXT,
+    plan_revision TEXT,
+    state TEXT NOT NULL,
+    workspace_fingerprint TEXT NOT NULL DEFAULT '',
+    request_type TEXT,
+    intake_ids_json TEXT,
+    UNIQUE(provider, input_requests_data_source_id, request_key)
+);
+CREATE INDEX IF NOT EXISTS idx_request_receipts_page ON request_receipts(provider_page_id);
+CREATE TABLE IF NOT EXISTS intake_plans (
+    plan_id TEXT PRIMARY KEY,
+    intake_id TEXT NOT NULL REFERENCES intake_items(intake_id),
+    request_revision_hash TEXT NOT NULL,
+    plan_revision TEXT NOT NULL,
+    resolved_workspace_fingerprint TEXT NOT NULL,
+    target_snapshot_json TEXT NOT NULL,
+    plan_hash TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'PLANNED',
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS provider_write_attempts (
+    attempt_id TEXT PRIMARY KEY,
+    operation TEXT NOT NULL,
+    operation_key TEXT NOT NULL UNIQUE,
+    provider TEXT NOT NULL,
+    target_id TEXT,
+    prewrite_committed_at TEXT NOT NULL,
+    dispatched_at TEXT,
+    response_state TEXT NOT NULL,
+    readback_json TEXT,
+    error_class TEXT
+);
+CREATE TABLE IF NOT EXISTS entity_reservations (
+    reservation_id TEXT PRIMARY KEY,
+    intake_id TEXT NOT NULL REFERENCES intake_items(intake_id),
+    entity_kind TEXT NOT NULL,
+    entity_app_id TEXT NOT NULL,
+    parent_folder_id TEXT NOT NULL,
+    marker_key TEXT NOT NULL,
+    state TEXT NOT NULL,
+    plan_revision TEXT NOT NULL,
+    source_file_id TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(intake_id, entity_kind),
+    UNIQUE(entity_kind, entity_app_id)
+);
+CREATE TABLE IF NOT EXISTS session_source_bindings (
+    binding_id TEXT PRIMARY KEY,
+    course_key TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    provider_file_id TEXT NOT NULL,
+    reservation_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(course_key, session_id),
+    UNIQUE(provider, provider_file_id)
+);
+CREATE TABLE IF NOT EXISTS intake_stage_events (
+    event_id TEXT PRIMARY KEY,
+    intake_id TEXT,
+    operation_key TEXT,
+    stage TEXT NOT NULL,
+    detail_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_intake_stage_events_intake ON intake_stage_events(intake_id, event_id);
+"""
 
 
 class SQLiteStateStore:
@@ -137,6 +280,816 @@ class SQLiteStateStore:
                     "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (version, _utc_now()),
                 )
+            self._connection.executescript(_INTAKE_SCHEMA)
+            intake_columns = {
+                row[1]
+                for row in self._connection.execute("PRAGMA table_info(intake_items)").fetchall()
+            }
+            if "file_intake_page_id" not in intake_columns:
+                self._connection.execute(
+                    "ALTER TABLE intake_items ADD COLUMN file_intake_page_id TEXT"
+                )
+            if "pending_request_key" not in intake_columns:
+                self._connection.execute(
+                    "ALTER TABLE intake_items ADD COLUMN pending_request_key TEXT"
+                )
+            receipt_columns = {
+                row[1]
+                for row in self._connection.execute("PRAGMA table_info(request_receipts)").fetchall()
+            }
+            if "request_type" not in receipt_columns:
+                self._connection.execute(
+                    "ALTER TABLE request_receipts ADD COLUMN request_type TEXT"
+                )
+            if "intake_ids_json" not in receipt_columns:
+                self._connection.execute(
+                    "ALTER TABLE request_receipts ADD COLUMN intake_ids_json TEXT"
+                )
+
+    # ------------------------------------------------------------------
+    # v1.3 intake preview ledger
+    # ------------------------------------------------------------------
+    def register_semester_registration(
+        self,
+        registration: SemesterRegistration | None = None,
+        *,
+        semester: str | None = None,
+        config_fingerprint: str | None = None,
+        workspace_fingerprint: str | None = None,
+        drive_static_ids_json: Any = None,
+        notion_resolved_ids_json: Any = None,
+        provider_account_binding_id: str | None = None,
+        captured_at: str | None = None,
+    ) -> SemesterRegistration:
+        if registration is not None:
+            if any(
+                value is not None
+                for value in (
+                    semester,
+                    config_fingerprint,
+                    workspace_fingerprint,
+                    provider_account_binding_id,
+                )
+            ):
+                raise TypeError("pass either registration or registration fields")
+            semester = registration.semester
+            config_fingerprint = registration.config_fingerprint
+            workspace_fingerprint = registration.workspace_fingerprint
+            drive_static_ids_json = registration.drive_static_ids_json
+            notion_resolved_ids_json = registration.notion_resolved_ids_json
+            provider_account_binding_id = registration.provider_account_binding_id
+            captured_at = registration.captured_at
+        for value, name in (
+            (semester, "semester"),
+            (config_fingerprint, "config_fingerprint"),
+            (workspace_fingerprint, "workspace_fingerprint"),
+            (provider_account_binding_id, "provider_account_binding_id"),
+        ):
+            _require_text(value, name)
+        captured = captured_at or _utc_now()
+        drive_json = _json_text(drive_static_ids_json)
+        notion_json = _json_text(notion_resolved_ids_json)
+        with self._transaction(immediate=True) as connection:
+            connection.execute(
+                """
+                INSERT INTO semester_registrations(
+                    semester, config_fingerprint, workspace_fingerprint,
+                    drive_static_ids_json, notion_resolved_ids_json,
+                    provider_account_binding_id, captured_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(semester) DO UPDATE SET
+                    config_fingerprint=excluded.config_fingerprint,
+                    workspace_fingerprint=excluded.workspace_fingerprint,
+                    drive_static_ids_json=excluded.drive_static_ids_json,
+                    notion_resolved_ids_json=excluded.notion_resolved_ids_json,
+                    provider_account_binding_id=excluded.provider_account_binding_id,
+                    captured_at=excluded.captured_at
+                """,
+                (
+                    semester,
+                    config_fingerprint,
+                    workspace_fingerprint,
+                    drive_json,
+                    notion_json,
+                    provider_account_binding_id,
+                    captured,
+                ),
+            )
+            return _semester_registration_from_row(
+                connection.execute(
+                    "SELECT * FROM semester_registrations WHERE semester = ?", (semester,)
+                ).fetchone()
+            )
+
+    def get_semester_registration(self, semester: str) -> SemesterRegistration | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM semester_registrations WHERE semester = ?", (semester,)
+            ).fetchone()
+            return None if row is None else _semester_registration_from_row(row)
+
+    def upsert_intake_item(
+        self,
+        item: IntakeItem | None = None,
+        *,
+        intake_id: str | None = None,
+        provider: str | None = None,
+        provider_file_id: str | None = None,
+        semester: str | None = None,
+        original_parent_id: str | None = None,
+        observed_parent_id: str | None = None,
+        original_name: str | None = None,
+        mime_type: str | None = None,
+        source_hash: str | None = None,
+        source_version: int | None = None,
+        status: str = "OBSERVED",
+        observed_kind: str = "UNKNOWN",
+        course_candidates_json: Any = None,
+        selected_course_key: str | None = None,
+        selected_kind: str | None = None,
+        file_intake_page_id: str | None = None,
+        input_request_page_id: str | None = None,
+        request_revision_hash: str | None = None,
+        plan_revision: str | None = None,
+        canonical_entity_id: str | None = None,
+        canonical_source_json: Any = None,
+        content_status: str = "Pending",
+        last_error_code: str | None = None,
+        last_error: str | None = None,
+        last_successful_stage: str | None = None,
+        first_seen_at: str | None = None,
+        last_seen_at: str | None = None,
+    ) -> IntakeItem:
+        if item is not None:
+            if any(value is not None for value in (intake_id, provider, provider_file_id, semester)):
+                raise TypeError("pass either item or intake fields")
+            values = item
+            intake_id = values.intake_id
+            provider = values.provider
+            provider_file_id = values.provider_file_id
+            semester = values.semester
+            original_parent_id = values.original_parent_id
+            observed_parent_id = values.observed_parent_id
+            original_name = values.original_name
+            mime_type = values.mime_type
+            source_hash = values.source_hash
+            source_version = values.source_version
+            status = values.status
+            observed_kind = values.observed_kind
+            course_candidates_json = values.course_candidates_json
+            selected_course_key = values.selected_course_key
+            selected_kind = values.selected_kind
+            file_intake_page_id = values.file_intake_page_id
+            input_request_page_id = values.input_request_page_id
+            request_revision_hash = values.request_revision_hash
+            plan_revision = values.plan_revision
+            canonical_entity_id = values.canonical_entity_id
+            canonical_source_json = values.canonical_source_json
+            content_status = values.content_status
+            last_error_code = values.last_error_code
+            last_error = values.last_error
+            last_successful_stage = values.last_successful_stage
+            first_seen_at = values.first_seen_at
+            last_seen_at = values.last_seen_at
+        for value, name in (
+            (intake_id, "intake_id"),
+            (provider, "provider"),
+            (provider_file_id, "provider_file_id"),
+            (semester, "semester"),
+            (original_parent_id, "original_parent_id"),
+            (observed_parent_id, "observed_parent_id"),
+            (original_name, "original_name"),
+            (mime_type, "mime_type"),
+            (source_hash, "source_hash"),
+        ):
+            _require_text(value, name)
+        if isinstance(source_version, bool) or not isinstance(source_version, int) or source_version < 1:
+            raise ValueError("source_version must be a positive integer")
+        first_seen = first_seen_at or _utc_now()
+        last_seen = last_seen_at or first_seen
+        candidates_json = _json_text([] if course_candidates_json is None else course_candidates_json)
+        canonical_json = None if canonical_source_json is None else _json_text(canonical_source_json)
+        with self._transaction(immediate=True) as connection:
+            existing = connection.execute(
+                "SELECT * FROM intake_items WHERE provider = ? AND provider_file_id = ?",
+                (provider, provider_file_id),
+            ).fetchone()
+            if existing is None:
+                connection.execute(
+                    """
+                    INSERT INTO intake_items(
+                        intake_id, provider, provider_file_id, semester,
+                        original_parent_id, observed_parent_id, original_name, mime_type,
+                        source_hash, source_version, status, observed_kind,
+                        course_candidates_json, selected_course_key, selected_kind,
+                        file_intake_page_id, input_request_page_id, request_revision_hash, plan_revision,
+                        canonical_entity_id, canonical_source_json, content_status,
+                        last_error_code, last_error, last_successful_stage,
+                        first_seen_at, last_seen_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        intake_id,
+                        provider,
+                        provider_file_id,
+                        semester,
+                        original_parent_id,
+                        observed_parent_id,
+                        original_name,
+                        mime_type,
+                        source_hash,
+                        source_version,
+                        status,
+                        observed_kind,
+                        candidates_json,
+                        selected_course_key,
+                        selected_kind,
+                        file_intake_page_id,
+                        input_request_page_id,
+                        request_revision_hash,
+                        plan_revision,
+                        canonical_entity_id,
+                        canonical_json,
+                        content_status,
+                        last_error_code,
+                        last_error,
+                        last_successful_stage,
+                        first_seen,
+                        last_seen,
+                    ),
+                )
+            else:
+                if existing["intake_id"] != intake_id:
+                    raise ValueError("provider/file identity is already bound to another intake ID")
+                # Discovery updates only immutable observations and derived
+                # metadata.  It never overwrites user-selected routing or a
+                # canonical binding that may already exist.
+                connection.execute(
+                    """
+                    UPDATE intake_items SET
+                        observed_parent_id=?, original_name=?, mime_type=?,
+                        source_hash=?, source_version=?, observed_kind=?,
+                        course_candidates_json=?, last_seen_at=?
+                    WHERE intake_id=?
+                    """,
+                    (
+                        observed_parent_id,
+                        original_name,
+                        mime_type,
+                        source_hash,
+                        source_version,
+                        observed_kind,
+                        candidates_json,
+                        last_seen,
+                        intake_id,
+                    ),
+                )
+            return _intake_item_from_row(
+                connection.execute("SELECT * FROM intake_items WHERE intake_id = ?", (intake_id,)).fetchone()
+            )
+
+    def get_intake_item(self, intake_id: str) -> IntakeItem | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM intake_items WHERE intake_id = ?", (intake_id,)
+            ).fetchone()
+            return None if row is None else _intake_item_from_row(row)
+
+    def get_intake_item_by_provider_file(self, provider: str, provider_file_id: str) -> IntakeItem | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM intake_items WHERE provider = ? AND provider_file_id = ?",
+                (provider, provider_file_id),
+            ).fetchone()
+            return None if row is None else _intake_item_from_row(row)
+
+    def list_intake_items(
+        self, *, semester: str | None = None, status: str | None = None, limit: int = 1000
+    ) -> list[IntakeItem]:
+        if type(limit) is not int or not 1 <= limit <= 10_000:
+            raise ValueError("intake listing limit must be 1–10000")
+        clauses: list[str] = []
+        values: list[Any] = []
+        if semester is not None:
+            clauses.append("semester = ?")
+            values.append(semester)
+        if status is not None:
+            clauses.append("status = ?")
+            values.append(status)
+        query = "SELECT * FROM intake_items"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY first_seen_at ASC, intake_id ASC LIMIT ?"
+        values.append(limit)
+        with self._lock:
+            return [_intake_item_from_row(row) for row in self._connection.execute(query, values)]
+
+    def update_intake_item(self, intake_id: str, **patch: Any) -> IntakeItem:
+        allowed = {
+            "observed_parent_id", "status", "observed_kind", "course_candidates_json",
+            "selected_course_key", "selected_kind", "file_intake_page_id", "input_request_page_id",
+            "request_revision_hash", "plan_revision", "pending_request_key", "canonical_entity_id",
+            "canonical_source_json", "content_status", "last_error_code", "last_error",
+            "last_successful_stage", "last_seen_at",
+        }
+        unknown = set(patch) - allowed
+        if unknown:
+            raise ValueError("unknown intake fields: " + ", ".join(sorted(unknown)))
+        if not patch:
+            current = self.get_intake_item(intake_id)
+            if current is None:
+                raise KeyError(intake_id)
+            return current
+        values: dict[str, Any] = {}
+        for key, value in patch.items():
+            if key.endswith("_json") and value is not None:
+                value = _json_text(value)
+            values[key] = value
+        values["last_seen_at"] = values.get("last_seen_at") or _utc_now()
+        assignments = ", ".join(f"{key} = ?" for key in values)
+        with self._transaction(immediate=True) as connection:
+            cursor = connection.execute(
+                f"UPDATE intake_items SET {assignments} WHERE intake_id = ?",
+                [*values.values(), intake_id],
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(intake_id)
+            return _intake_item_from_row(
+                connection.execute("SELECT * FROM intake_items WHERE intake_id = ?", (intake_id,)).fetchone()
+            )
+
+    def record_intake_observation(
+        self,
+        observation: IntakeObservation | None = None,
+        *,
+        intake_id: str | None = None,
+        source_hash: str | None = None,
+        source_version: int | None = None,
+        metadata: Any = None,
+        observation_id: str | None = None,
+        observed_at: str | None = None,
+    ) -> IntakeObservation:
+        if observation is not None:
+            intake_id = observation.intake_id
+            source_hash = observation.source_hash
+            source_version = observation.source_version
+            metadata = observation.metadata_json
+            observation_id = observation.id
+            observed_at = observation.observed_at
+        for value, name in ((intake_id, "intake_id"), (source_hash, "source_hash")):
+            _require_text(value, name)
+        if isinstance(source_version, bool) or not isinstance(source_version, int) or source_version < 1:
+            raise ValueError("source_version must be a positive integer")
+        identifier = observation_id or _new_id("obs_")
+        metadata_json = metadata if isinstance(metadata, str) else _json_text(metadata or {})
+        captured = observed_at or _utc_now()
+        with self._transaction(immediate=True) as connection:
+            connection.execute(
+                """
+                INSERT INTO intake_observations(id, intake_id, source_hash, source_version, metadata_json, observed_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(intake_id, source_hash, source_version) DO NOTHING
+                """,
+                (identifier, intake_id, source_hash, source_version, metadata_json, captured),
+            )
+            row = connection.execute(
+                """
+                SELECT * FROM intake_observations
+                WHERE intake_id=? AND source_hash=? AND source_version=?
+                """,
+                (intake_id, source_hash, source_version),
+            ).fetchone()
+            return _intake_observation_from_row(row)
+
+    def list_intake_observations(self, intake_id: str) -> list[IntakeObservation]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM intake_observations WHERE intake_id = ? ORDER BY observed_at, id",
+                (intake_id,),
+            ).fetchall()
+            return [_intake_observation_from_row(row) for row in rows]
+
+    def create_request_receipt(
+        self,
+        receipt: RequestReceipt | None = None,
+        **kwargs: Any,
+    ) -> RequestReceipt:
+        if receipt is not None:
+            if kwargs:
+                raise TypeError("pass either receipt or receipt fields")
+            values = dict(receipt.__dict__)
+        else:
+            values = dict(kwargs)
+        if not values.get("receipt_id"):
+            values["receipt_id"] = _new_id("receipt_")
+        values.setdefault("state", "Draft")
+        values.setdefault("workspace_fingerprint", "")
+        values.setdefault("provider_page_id", None)
+        values.setdefault("normalized_user_hash", None)
+        values.setdefault("submitted_at", None)
+        values.setdefault("plan_revision", None)
+        values.setdefault("request_type", None)
+        values.setdefault("intake_ids_json", None)
+        for name in (
+            "receipt_id", "provider", "input_requests_data_source_id", "request_key",
+            "request_revision_hash", "target_snapshot_hash", "state",
+        ):
+            _require_text(values.get(name), name)
+        with self._transaction(immediate=True) as connection:
+            existing = connection.execute(
+                """
+                SELECT * FROM request_receipts
+                WHERE provider=? AND input_requests_data_source_id=? AND request_key=?
+                """,
+                (values["provider"], values["input_requests_data_source_id"], values["request_key"]),
+            ).fetchone()
+            if existing is not None:
+                if existing["request_revision_hash"] != values["request_revision_hash"] or existing["target_snapshot_hash"] != values["target_snapshot_hash"]:
+                    raise ValueError("Request Key is already bound to a different request tuple")
+                return _request_receipt_from_row(existing)
+            connection.execute(
+                """
+                INSERT INTO request_receipts(
+                    receipt_id, provider, input_requests_data_source_id, request_key,
+                    request_revision_hash, provider_page_id, normalized_user_hash,
+                    target_snapshot_hash, submitted_at, plan_revision, state,
+                    workspace_fingerprint, request_type, intake_ids_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                tuple(values.get(name) for name in (
+                    "receipt_id", "provider", "input_requests_data_source_id", "request_key",
+                    "request_revision_hash", "provider_page_id", "normalized_user_hash",
+                    "target_snapshot_hash", "submitted_at", "plan_revision", "state",
+                    "workspace_fingerprint", "request_type", "intake_ids_json",
+                )),
+            )
+            return _request_receipt_from_row(
+                connection.execute(
+                    "SELECT * FROM request_receipts WHERE receipt_id=?", (values["receipt_id"],)
+                ).fetchone()
+            )
+
+    def get_request_receipt(
+        self, request_key: str | None = None, *, receipt_id: str | None = None
+    ) -> RequestReceipt | None:
+        if request_key is None and receipt_id is None:
+            raise TypeError("request_key or receipt_id is required")
+        query = "SELECT * FROM request_receipts WHERE receipt_id=?" if receipt_id else "SELECT * FROM request_receipts WHERE request_key=?"
+        value = receipt_id or request_key
+        with self._lock:
+            row = self._connection.execute(query, (value,)).fetchone()
+            return None if row is None else _request_receipt_from_row(row)
+
+    def list_request_receipts(
+        self, *, provider: str | None = None, data_source_id: str | None = None
+    ) -> list[RequestReceipt]:
+        clauses: list[str] = []
+        values: list[Any] = []
+        if provider is not None:
+            clauses.append("provider=?")
+            values.append(provider)
+        if data_source_id is not None:
+            clauses.append("input_requests_data_source_id=?")
+            values.append(data_source_id)
+        query = "SELECT * FROM request_receipts"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY receipt_id"
+        with self._lock:
+            return [_request_receipt_from_row(row) for row in self._connection.execute(query, values)]
+
+    def bind_request_page(self, request_key: str, provider_page_id: str) -> RequestReceipt:
+        _require_text(provider_page_id, "provider_page_id")
+        with self._transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM request_receipts WHERE request_key=?", (request_key,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(request_key)
+            if row["provider_page_id"] not in (None, provider_page_id):
+                raise ValueError("Request Key is already bound to a different provider page")
+            connection.execute(
+                "UPDATE request_receipts SET provider_page_id=? WHERE request_key=?",
+                (provider_page_id, request_key),
+            )
+            return _request_receipt_from_row(
+                connection.execute(
+                    "SELECT * FROM request_receipts WHERE request_key=?", (request_key,)
+                ).fetchone()
+            )
+
+    def update_request_receipt(self, request_key: str, **patch: Any) -> RequestReceipt:
+        allowed = {
+            "provider_page_id", "normalized_user_hash", "submitted_at", "plan_revision",
+            "state", "workspace_fingerprint",
+        }
+        if set(patch) - allowed:
+            raise ValueError("unknown request receipt fields")
+        if "provider_page_id" in patch:
+            current = self.get_request_receipt(request_key)
+            if current is None:
+                raise KeyError(request_key)
+            if current.provider_page_id not in (None, patch["provider_page_id"]):
+                raise ValueError("provider page ID cannot be rebound")
+        if not patch:
+            current = self.get_request_receipt(request_key)
+            if current is None:
+                raise KeyError(request_key)
+            return current
+        assignments = ", ".join(f"{key}=?" for key in patch)
+        with self._transaction(immediate=True) as connection:
+            cursor = connection.execute(
+                f"UPDATE request_receipts SET {assignments} WHERE request_key=?",
+                [*patch.values(), request_key],
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(request_key)
+            return _request_receipt_from_row(
+                connection.execute(
+                    "SELECT * FROM request_receipts WHERE request_key=?", (request_key,)
+                ).fetchone()
+            )
+
+    def create_intake_plan(self, plan: IntakePlan | None = None, **kwargs: Any) -> IntakePlan:
+        values = dict(plan.__dict__) if plan is not None else dict(kwargs)
+        values.setdefault("plan_id", _new_id("plan_"))
+        values.setdefault("status", "PLANNED")
+        values.setdefault("created_at", _utc_now())
+        for name in (
+            "plan_id", "intake_id", "request_revision_hash", "plan_revision",
+            "resolved_workspace_fingerprint", "plan_hash",
+        ):
+            _require_text(values.get(name), name)
+        target_json = _json_text(values.get("target_snapshot_json", {}))
+        with self._transaction(immediate=True) as connection:
+            existing = connection.execute(
+                "SELECT * FROM intake_plans WHERE plan_hash=?", (values["plan_hash"],)
+            ).fetchone()
+            if existing is not None:
+                if existing["intake_id"] != values["intake_id"]:
+                    raise ValueError("plan hash is bound to another intake")
+                return _intake_plan_from_row(existing)
+            connection.execute(
+                """
+                INSERT INTO intake_plans(
+                    plan_id, intake_id, request_revision_hash, plan_revision,
+                    resolved_workspace_fingerprint, target_snapshot_json,
+                    plan_hash, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    values["plan_id"], values["intake_id"], values["request_revision_hash"],
+                    values["plan_revision"], values["resolved_workspace_fingerprint"],
+                    target_json, values["plan_hash"], values["status"], values["created_at"],
+                ),
+            )
+            return _intake_plan_from_row(
+                connection.execute("SELECT * FROM intake_plans WHERE plan_id=?", (values["plan_id"],)).fetchone()
+            )
+
+    def get_intake_plan(self, plan_revision: str) -> IntakePlan | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM intake_plans WHERE plan_revision=? ORDER BY created_at DESC LIMIT 1",
+                (plan_revision,),
+            ).fetchone()
+            return None if row is None else _intake_plan_from_row(row)
+
+    def record_provider_write_attempt(
+        self, attempt: ProviderWriteAttempt | None = None, **kwargs: Any
+    ) -> ProviderWriteAttempt:
+        values = dict(attempt.__dict__) if attempt is not None else dict(kwargs)
+        values.setdefault("attempt_id", _new_id("write_"))
+        values.setdefault("target_id", None)
+        values.setdefault("prewrite_committed_at", _utc_now())
+        values.setdefault("dispatched_at", None)
+        values.setdefault("response_state", "PREPARED")
+        values.setdefault("readback_json", None)
+        values.setdefault("error_class", None)
+        if values["readback_json"] is not None:
+            # Provider readbacks are commonly passed as mappings/dataclasses
+            # by the worker.  Normalize them at the StateStore boundary so
+            # the durable TEXT column never receives a Python object.
+            values["readback_json"] = _json_text(values["readback_json"])
+        for name in ("attempt_id", "operation", "operation_key", "provider", "response_state"):
+            _require_text(values.get(name), name)
+        with self._transaction(immediate=True) as connection:
+            existing = connection.execute(
+                "SELECT * FROM provider_write_attempts WHERE operation_key=?",
+                (values["operation_key"],),
+            ).fetchone()
+            if existing is not None:
+                if existing["operation"] != values["operation"] or existing["provider"] != values["provider"]:
+                    raise ValueError("operation key is bound to a different write")
+                return _provider_write_attempt_from_row(existing)
+            connection.execute(
+                """
+                INSERT INTO provider_write_attempts(
+                    attempt_id, operation, operation_key, provider, target_id,
+                    prewrite_committed_at, dispatched_at, response_state,
+                    readback_json, error_class
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                tuple(values.get(name) for name in (
+                    "attempt_id", "operation", "operation_key", "provider", "target_id",
+                    "prewrite_committed_at", "dispatched_at", "response_state",
+                    "readback_json", "error_class",
+                )),
+            )
+            return _provider_write_attempt_from_row(
+                connection.execute(
+                    "SELECT * FROM provider_write_attempts WHERE attempt_id=?", (values["attempt_id"],)
+                ).fetchone()
+            )
+
+    def get_provider_write_attempt(self, operation_key: str) -> ProviderWriteAttempt | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM provider_write_attempts WHERE operation_key=?", (operation_key,)
+            ).fetchone()
+            return None if row is None else _provider_write_attempt_from_row(row)
+
+    def update_provider_write_attempt(self, operation_key: str, **patch: Any) -> ProviderWriteAttempt:
+        allowed = {"target_id", "dispatched_at", "response_state", "readback_json", "error_class"}
+        if set(patch) - allowed:
+            raise ValueError("unknown provider write attempt fields")
+        if "readback_json" in patch and patch["readback_json"] is not None:
+            patch["readback_json"] = _json_text(patch["readback_json"])
+        if not patch:
+            row = self.get_provider_write_attempt(operation_key)
+            if row is None:
+                raise KeyError(operation_key)
+            return row
+        assignments = ", ".join(f"{key}=?" for key in patch)
+        with self._transaction(immediate=True) as connection:
+            cursor = connection.execute(
+                f"UPDATE provider_write_attempts SET {assignments} WHERE operation_key=?",
+                [*patch.values(), operation_key],
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(operation_key)
+            return _provider_write_attempt_from_row(
+                connection.execute(
+                    "SELECT * FROM provider_write_attempts WHERE operation_key=?", (operation_key,)
+                ).fetchone()
+            )
+
+    def reserve_entity(
+        self, reservation: EntityReservation | None = None, **kwargs: Any
+    ) -> EntityReservation:
+        values = dict(reservation.__dict__) if reservation is not None else dict(kwargs)
+        values.setdefault("reservation_id", _new_id("reserve_"))
+        values.setdefault("source_file_id", None)
+        values.setdefault("created_at", _utc_now())
+        for name in (
+            "reservation_id", "intake_id", "entity_kind", "entity_app_id",
+            "parent_folder_id", "marker_key", "state", "plan_revision",
+        ):
+            _require_text(values.get(name), name)
+        with self._transaction(immediate=True) as connection:
+            existing = connection.execute(
+                "SELECT * FROM entity_reservations WHERE intake_id=? AND entity_kind=?",
+                (values["intake_id"], values["entity_kind"]),
+            ).fetchone()
+            if existing is not None:
+                if any(existing[name] != values[name] for name in ("entity_app_id", "parent_folder_id", "marker_key")):
+                    raise ValueError("intake already has a different entity reservation")
+                return _entity_reservation_from_row(existing)
+            collision = connection.execute(
+                "SELECT * FROM entity_reservations WHERE entity_kind=? AND entity_app_id=?",
+                (values["entity_kind"], values["entity_app_id"]),
+            ).fetchone()
+            if collision is not None:
+                raise ValueError("entity app ID is already reserved")
+            connection.execute(
+                """
+                INSERT INTO entity_reservations(
+                    reservation_id, intake_id, entity_kind, entity_app_id,
+                    parent_folder_id, marker_key, state, plan_revision,
+                    source_file_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                tuple(values.get(name) for name in (
+                    "reservation_id", "intake_id", "entity_kind", "entity_app_id",
+                    "parent_folder_id", "marker_key", "state", "plan_revision",
+                    "source_file_id", "created_at",
+                )),
+            )
+            return _entity_reservation_from_row(
+                connection.execute(
+                    "SELECT * FROM entity_reservations WHERE reservation_id=?", (values["reservation_id"],)
+                ).fetchone()
+            )
+
+    def get_entity_reservation(
+        self, reservation_id: str | None = None, *, intake_id: str | None = None, entity_kind: str | None = None
+    ) -> EntityReservation | None:
+        if reservation_id is None and (intake_id is None or entity_kind is None):
+            raise TypeError("reservation ID or intake/entity kind is required")
+        if reservation_id is not None:
+            query, values = "SELECT * FROM entity_reservations WHERE reservation_id=?", (reservation_id,)
+        else:
+            query, values = "SELECT * FROM entity_reservations WHERE intake_id=? AND entity_kind=?", (intake_id, entity_kind)
+        with self._lock:
+            row = self._connection.execute(query, values).fetchone()
+            return None if row is None else _entity_reservation_from_row(row)
+
+    def update_entity_reservation(self, reservation_id: str, **patch: Any) -> EntityReservation:
+        allowed = {"state"}
+        if set(patch) - allowed:
+            raise ValueError("entity reservation identity is immutable")
+        with self._transaction(immediate=True) as connection:
+            cursor = connection.execute(
+                "UPDATE entity_reservations SET state=? WHERE reservation_id=?",
+                (patch.get("state"), reservation_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(reservation_id)
+            return _entity_reservation_from_row(
+                connection.execute(
+                    "SELECT * FROM entity_reservations WHERE reservation_id=?", (reservation_id,)
+                ).fetchone()
+            )
+
+    def record_session_source_binding(
+        self, binding: SessionSourceBinding | None = None, **kwargs: Any
+    ) -> SessionSourceBinding:
+        values = dict(binding.__dict__) if binding is not None else dict(kwargs)
+        values.setdefault("binding_id", _new_id("binding_"))
+        values.setdefault("created_at", _utc_now())
+        for name in (
+            "binding_id", "course_key", "session_id", "provider",
+            "provider_file_id", "reservation_id", "state",
+        ):
+            _require_text(values.get(name), name)
+        with self._transaction(immediate=True) as connection:
+            existing = connection.execute(
+                "SELECT * FROM session_source_bindings WHERE provider=? AND provider_file_id=?",
+                (values["provider"], values["provider_file_id"]),
+            ).fetchone()
+            if existing is not None:
+                if any(existing[name] != values[name] for name in ("course_key", "session_id", "reservation_id")):
+                    raise ValueError("source file is already bound to a different Session")
+                return _session_source_binding_from_row(existing)
+            connection.execute(
+                """
+                INSERT INTO session_source_bindings(
+                    binding_id, course_key, session_id, provider, provider_file_id,
+                    reservation_id, state, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                tuple(values.get(name) for name in (
+                    "binding_id", "course_key", "session_id", "provider",
+                    "provider_file_id", "reservation_id", "state", "created_at",
+                )),
+            )
+            return _session_source_binding_from_row(
+                connection.execute(
+                    "SELECT * FROM session_source_bindings WHERE binding_id=?", (values["binding_id"],)
+                ).fetchone()
+            )
+
+    def record_intake_stage_event(
+        self,
+        stage: str,
+        *,
+        intake_id: str | None = None,
+        operation_key: str | None = None,
+        detail: Any = None,
+        event_id: str | None = None,
+    ) -> str:
+        _require_text(stage, "stage")
+        identifier = event_id or _new_id("event_")
+        with self._transaction(immediate=True) as connection:
+            connection.execute(
+                """
+                INSERT INTO intake_stage_events(event_id, intake_id, operation_key, stage, detail_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (identifier, intake_id, operation_key, stage, _json_text(detail or {}), _utc_now()),
+            )
+        return identifier
+
+    def list_intake_stage_events(self, intake_id: str | None = None) -> list[dict[str, Any]]:
+        query = "SELECT * FROM intake_stage_events"
+        values: tuple[Any, ...] = ()
+        if intake_id is not None:
+            query += " WHERE intake_id=?"
+            values = (intake_id,)
+        query += " ORDER BY created_at, event_id"
+        with self._lock:
+            rows = self._connection.execute(query, values).fetchall()
+            return [
+                {
+                    "event_id": row["event_id"],
+                    "intake_id": row["intake_id"],
+                    "operation_key": row["operation_key"],
+                    "stage": row["stage"],
+                    "detail": json.loads(row["detail_json"]),
+                    "created_at": row["created_at"],
+                }
+                for row in rows
+            ]
 
     # ------------------------------------------------------------------
     # Jobs
@@ -294,6 +1247,56 @@ class SQLiteStateStore:
                         "SELECT * FROM jobs WHERE job_key = ?", (job_id,)
                     ).fetchone()
             return None if row is None else _job_from_row(row)
+
+    def bind_job_source_identity(
+        self,
+        job_id: str,
+        *,
+        source_file_id: str,
+        source_hash: str,
+        course_key: str | None = None,
+    ) -> Job:
+        """Bind a plan job to the verified source generation before provenance.
+
+        Intake jobs are created after USER routing but before a content read, so
+        their deterministic plan key is not the legacy source-processing key.
+        Once the provider bytes have passed the freshness gate, this narrow
+        binding supplies the source identity needed by the existing read-only
+        provenance join.  A bound job can never be rebound to another source
+        generation.
+        """
+
+        _require_text(job_id, "job_id")
+        _require_text(source_file_id, "source_file_id")
+        _require_text(source_hash, "source_hash")
+        if course_key is not None:
+            _require_text(course_key, "course_key")
+        with self._transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if row is None:
+                row = connection.execute(
+                    "SELECT * FROM jobs WHERE job_key = ?", (job_id,)
+                ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown job: {job_id}")
+            if row["source_file_id"] not in (None, source_file_id):
+                raise ValueError("job source file identity cannot be rebound")
+            if row["source_hash"] not in (None, source_hash):
+                raise ValueError("job source hash cannot be rebound")
+            connection.execute(
+                """
+                UPDATE jobs
+                SET source_file_id = ?, source_hash = ?,
+                    course_key = COALESCE(course_key, ?), updated_at = ?
+                WHERE id = ?
+                """,
+                (source_file_id, source_hash, course_key, _utc_now(), row["id"]),
+            )
+            return _job_from_row(
+                connection.execute("SELECT * FROM jobs WHERE id = ?", (row["id"],)).fetchone()
+            )
 
     def list_jobs(self, *, limit: int = 100, entity_id: str | None = None) -> list[Job]:
         if type(limit) is not int or not 1 <= limit <= 1000:
@@ -994,6 +1997,23 @@ class SQLiteStateStore:
                 ).fetchone()
             )
 
+    def get_processing_record(
+        self, job_id: str, *, operation: str | None = None
+    ) -> ProcessingRecord | None:
+        """Read one job's durable processing result without provider access."""
+
+        _require_text(job_id, "job_id")
+        query = "SELECT * FROM processing_records WHERE job_id = ?"
+        values: list[Any] = [job_id]
+        if operation is not None:
+            _require_text(operation, "operation")
+            query += " AND operation = ?"
+            values.append(operation)
+        query += " ORDER BY started_at DESC, id DESC LIMIT 1"
+        with self._lock:
+            row = self._connection.execute(query, values).fetchone()
+            return None if row is None else _processing_record_from_row(row)
+
     # ------------------------------------------------------------------
     # Checkpoints and entity allocation
     # ------------------------------------------------------------------
@@ -1196,6 +2216,38 @@ def _checkpoint_from_row(row: sqlite3.Row) -> Checkpoint:
 
 def _entity_allocation_from_row(row: sqlite3.Row) -> EntityAllocation:
     return EntityAllocation(**dict(row))
+
+
+def _semester_registration_from_row(row: sqlite3.Row) -> SemesterRegistration:
+    return SemesterRegistration(**dict(row))
+
+
+def _intake_item_from_row(row: sqlite3.Row) -> IntakeItem:
+    return IntakeItem(**dict(row))
+
+
+def _intake_observation_from_row(row: sqlite3.Row) -> IntakeObservation:
+    return IntakeObservation(**dict(row))
+
+
+def _request_receipt_from_row(row: sqlite3.Row) -> RequestReceipt:
+    return RequestReceipt(**dict(row))
+
+
+def _intake_plan_from_row(row: sqlite3.Row) -> IntakePlan:
+    return IntakePlan(**dict(row))
+
+
+def _provider_write_attempt_from_row(row: sqlite3.Row) -> ProviderWriteAttempt:
+    return ProviderWriteAttempt(**dict(row))
+
+
+def _entity_reservation_from_row(row: sqlite3.Row) -> EntityReservation:
+    return EntityReservation(**dict(row))
+
+
+def _session_source_binding_from_row(row: sqlite3.Row) -> SessionSourceBinding:
+    return SessionSourceBinding(**dict(row))
 
 
 def _seed_entity_allocation(

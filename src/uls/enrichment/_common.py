@@ -279,12 +279,16 @@ def prepare_derivative(
         )
     else:
         page_count = _page_count(front)
-        chunks = page_chunks(
-            derivative,
-            entity_id=entity_id,
-            end_page=page_count,
-            max_chunks=max_chunks,
-        )
+        chunks = [
+            chunk
+            for chunk in page_chunks(
+                derivative,
+                entity_id=entity_id,
+                end_page=page_count,
+                max_chunks=max_chunks,
+            )
+            if chunk.content.strip()
+        ]
     return DerivativeContext(
         entity_id=entity_id,
         body=body,

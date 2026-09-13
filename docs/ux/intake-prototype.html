@@ -1,0 +1,254 @@
+<style>
+#uls-ux { color:light-dark(#292824,#e8e5df); font:15px/1.55 -apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo",sans-serif; }
+#uls-ux * { box-sizing:border-box; }
+#uls-ux [hidden] { display:none!important; }
+#uls-ux .uls-window { background:light-dark(#ffffff,#20211f); border:1px solid light-dark(#e4e2dd,#454641); border-radius:10px; overflow:clip; }
+#uls-ux .uls-chrome { padding:16px 24px; background:light-dark(#f7f7f4,#282926); display:flex; flex-wrap:wrap; align-items:center; gap:12px; border-bottom:1px solid light-dark(#e4e2dd,#454641); }
+#uls-ux .uls-brand { font-weight:600; margin-right:auto; }
+#uls-ux .uls-small { font-size:13px; color:light-dark(#65655e,#b8bbb1); }
+#uls-ux button, #uls-ux input, #uls-ux select { font:inherit; color:inherit; }
+#uls-ux button { min-height:44px; padding:8px 13px; border:1px solid light-dark(#d9dcd4,#53584e); border-radius:6px; background:light-dark(#ffffff,#2d302a); cursor:pointer; }
+#uls-ux button:hover { background:light-dark(#f0f3ed,#383e32); }
+#uls-ux button:disabled { cursor:default; opacity:.5; }
+#uls-ux button.uls-primary { background:light-dark(#295b43,#a4d4b0); color:light-dark(#ffffff,#173721); border-color:transparent; }
+#uls-ux .uls-nav { padding:12px 24px 0; display:flex; flex-wrap:wrap; gap:6px; }
+#uls-ux .uls-nav button { border-color:transparent; background:transparent; }
+#uls-ux .uls-nav button[aria-current] { background:light-dark(#edf2e9,#353e2e); font-weight:600; }
+#uls-ux .uls-page { padding:22px 28px 30px; }
+#uls-ux h1 { font-size:27px; line-height:1.3; font-weight:600; margin:0 0 6px; }
+#uls-ux h2 { font-size:17px; font-weight:600; margin:0 0 12px; }
+#uls-ux h3 { font-size:15px; font-weight:600; margin:0 0 8px; }
+#uls-ux p { margin:6px 0 14px; }
+#uls-ux .uls-section { padding:20px 0; border-bottom:1px solid light-dark(#e9e8e3,#454641); }
+#uls-ux .uls-section:last-child { border:0; padding-bottom:0; }
+#uls-ux .uls-row { display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:10px 0; }
+#uls-ux .uls-grow { flex:1; min-width:140px; }
+#uls-ux .uls-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+#uls-ux .uls-box { background:light-dark(#f8f8f5,#292c26); border:1px solid light-dark(#e3e5de,#484d41); padding:18px; border-radius:7px; }
+#uls-ux .uls-badge { display:inline-block; font-size:13px; padding:3px 8px; border-radius:4px; background:light-dark(#ecf0e8,#3b4433); color:light-dark(#3f5639,#cad9bd); }
+#uls-ux .uls-notice { background:light-dark(#fbf4e5,#403724); padding:12px 14px; border-radius:5px; margin:12px 0; }
+#uls-ux .uls-error { color:light-dark(#a33021,#ffb4a6); margin:10px 0; }
+#uls-ux label { display:block; }
+#uls-ux .uls-field { margin:12px 0; }
+#uls-ux input:not([type="checkbox"]), #uls-ux select { display:block; width:100%; min-width:0; min-height:44px; margin-top:5px; border:1px solid light-dark(#cdd2c7,#5b6353); border-radius:5px; background:light-dark(#ffffff,#242820); padding:8px; font-size:16px; }
+#uls-ux .uls-check { display:flex; align-items:center; gap:10px; min-height:44px; }
+#uls-ux input[type="checkbox"] { width:19px; height:19px; accent-color:light-dark(#295b43,#a4d4b0); flex:none; }
+#uls-ux .uls-actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:14px; }
+#uls-ux .uls-sim { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:12px 0 0; font-size:13px; }
+#uls-ux .uls-sim select { width:auto; font-size:13px; margin:0; }
+#uls-ux .uls-sim button { font-size:13px; }
+#uls-ux .uls-status { margin-top:12px; min-height:24px; }
+#uls-ux details { border-top:1px solid light-dark(#d9dcd4,#53584e); padding-top:12px; margin-top:12px; }
+#uls-ux summary { cursor:pointer; min-height:44px; padding:8px 0; }
+@media(max-width:560px) { #uls-ux .uls-grid { grid-template-columns:1fr; } #uls-ux .uls-page { padding:18px 16px; } #uls-ux .uls-chrome { padding:12px 16px; } #uls-ux .uls-nav { padding:8px 10px 0; } #uls-ux h1 { font-size:24px; } }
+</style>
+<div id="uls-ux" aria-label="Syllva 학습 대시보드 설계 미리보기">
+ <div class="uls-window">
+  <header class="uls-chrome"><span class="uls-brand">Syllva · 2026년 1학기</span><span class="uls-small">Notion 구성 미리보기</span><span class="uls-small" id="uls-sync">마지막 동기화 · 방금 (모의 상태)</span></header>
+  <nav class="uls-nav" aria-label="학습 탐색">
+   <button type="button" data-go="dash" aria-current="page">대시보드</button>
+   <button type="button" data-go="course">알고리즘1</button>
+   <button type="button" data-go="intake">파일 확인</button>
+  </nav>
+  <main class="uls-page">
+   <section data-page="dash">
+    <h1>오늘의 공부</h1><p class="uls-small">2026년 1학기 · 예시 데이터</p>
+    <div class="uls-section"><h2>할 일과 마감</h2>
+     <label class="uls-check"><input type="checkbox" id="uls-task">3월 6일 수업 복습하기 <span class="uls-small">내 할 일</span></label>
+     <div class="uls-row"><span class="uls-grow">알고리즘1 · 연습 과제 1</span><span class="uls-small">3월 13일 · 과제 원본</span></div>
+    </div>
+    <div class="uls-section"><h2>내 과목</h2><div class="uls-box"><div class="uls-row"><div class="uls-grow"><h3>알고리즘1</h3><span class="uls-small">수업 <span id="uls-count">1</span>개 · 전사와 자료를 연결해 공부하기</span></div><button type="button" data-go="course">과목 열기</button></div></div></div>
+    <div class="uls-section"><h2>이어서 공부</h2><div class="uls-row"><span class="uls-grow"><span id="uls-resume-title">3월 6일 · 첫 수업</span> <span class="uls-badge" id="uls-resume">전사 연결 필요</span></span><button type="button" data-go="session">수업 열기</button></div></div>
+    <div class="uls-section"><h2>학사 일정</h2><div class="uls-row"><span class="uls-grow">수강 정정 마감</span><span class="uls-small">3월 9일 · 학기 공통 일정</span></div></div>
+    <div class="uls-section"><h2>파일 확인</h2><div class="uls-row"><span class="uls-grow" id="uls-inbox-summary">1주차.md · 과목과 강의 날짜 입력 필요</span><button type="button" data-go="intake">확인 항목 열기</button></div><span class="uls-small">파일 추가: Drive의 학기 + 업로드 폴더 · 업로드 후 다음 동기화 시 표시</span></div>
+   </section>
+   <section data-page="course" hidden><h1>알고리즘1</h1><p class="uls-small">2026년 1학기 / 과목</p>
+    <div class="uls-section"><h2>수업</h2><div id="uls-session-list"></div></div>
+    <div class="uls-section"><h2>강의자료</h2><div>Lec2.pdf <span class="uls-badge" id="uls-material">읽기 준비 · 사용 범위 미확인</span></div><p class="uls-small">자료 번호와 수업 차시는 별개입니다.</p></div>
+    <div class="uls-section"><h2>과제</h2><div>연습 과제 1 · 3월 13일 마감</div><span class="uls-small">대시보드와 같은 과제 원본</span></div>
+   </section>
+   <section data-page="intake" hidden><h1>파일 확인</h1><p class="uls-small">+ 업로드 / 1주차.md · 원본 파일명 유지</p>
+    <div class="uls-notice">Notion의 ‘입력 요청’ 속성 편집과 제출 체크를 시험하는 화면입니다.</div>
+    <div id="uls-intake-form" role="group" aria-label="전사 입력 요청">
+     <div class="uls-grid">
+      <label class="uls-field">과목<select id="uls-course"><option value="">과목 선택</option><option value="algo">알고리즘1</option></select></label>
+      <label class="uls-field">실제 강의 날짜<input id="uls-date" type="date" aria-describedby="uls-date-hint"></label>
+     </div><p class="uls-small" id="uls-date-hint">업로드 날짜로 채우지 않습니다. 날짜를 모르면 초안으로 두세요.</p>
+     <label class="uls-field">수업 연결 방식<select id="uls-session-choice"><option value="">연결 방식 선택</option><option value="existing">기존 수업에 연결</option><option value="new">새 수업 만들기</option></select></label>
+     <label class="uls-field" id="uls-existing-field" hidden>기존 수업<select id="uls-existing-session"><option value="">정확한 수업 선택</option><option value="existing">2026-03-06 · 첫 수업</option><option value="later">2026-03-06 · 두 번째 수업 (선택 시험)</option></select></label>
+     <label class="uls-field" id="uls-number-field" hidden>실제 차시 (선택)<input id="uls-session-number" type="number" min="1"><span class="uls-small">모르면 비워 두세요. 내부 수업 번호로 채우지 않습니다.</span></label>
+     <div id="uls-input-error" class="uls-error" role="alert"></div>
+     <div class="uls-actions"><button class="uls-primary" id="uls-submit-input" type="button">입력 제출</button><button id="uls-cancel-input" type="button" disabled>취소 요청</button></div>
+    </div><div class="uls-status" id="uls-input-status" role="status">초안 · 아직 제출하지 않음</div><p class="uls-small">처리 후 수정하려면 새 입력 요청을 만드세요.</p>
+   </section>
+   <section data-page="session" hidden>
+    <nav class="uls-row" aria-label="수업 위치"><button type="button" data-go="course">알고리즘1 수업 목록</button><span class="uls-small">수업 상세</span></nav>
+    <h1 id="uls-session-title">3월 6일 · 첫 수업</h1><p class="uls-small">2026년 1학기 / 알고리즘1 / 수업</p>
+    <div class="uls-section"><h2>수업 원문</h2><div id="uls-source-state">전사 연결 필요</div><div class="uls-actions"><button type="button" data-go="intake">입력 요청 열기</button></div></div>
+    <div class="uls-section"><h2>사용한 강의자료</h2><div>Lec2.pdf · PDF 24쪽 <span class="uls-badge" id="uls-usage-status">범위 미확인</span></div>
+     <div id="uls-range-form" role="group" aria-label="자료 사용 범위 입력">
+      <p class="uls-small" id="uls-usage-target">새 사용 관계 · 역할까지 확인한 제안을 만듭니다.</p>
+      <label class="uls-field" id="uls-role-field">이 수업에서의 사용 역할<select id="uls-usage-role"><option value="">역할 선택</option><option value="Primary">주자료</option><option value="Supporting">보조자료</option><option value="Reference">참고자료</option></select></label>
+      <label class="uls-field">이 수업에서 사용한 범위<select id="uls-range"><option value="unknown">미확인</option><option value="bounded">지정 페이지</option><option value="whole">전체 자료</option></select></label>
+      <div class="uls-grid" id="uls-pages"><label>시작 PDF 페이지<input id="uls-start" type="number" min="1" max="24"></label><label>끝 PDF 페이지<input id="uls-end" type="number" min="1" max="24"></label></div><p class="uls-small">미확인·전체 자료는 페이지 칸을 비워 주세요.</p>
+      <div id="uls-range-error" class="uls-error" role="alert"></div><div class="uls-actions"><button id="uls-submit-range" type="button">범위 입력 제출</button></div>
+     </div>
+     <div id="uls-proposal" class="uls-notice" hidden><h3>자료 사용 확인 제안</h3><div id="uls-proposal-text"></div><div class="uls-actions"><button id="uls-approve" type="button">이 제안 승인</button><button id="uls-reject" type="button">이 제안 거절</button><button id="uls-cancel-range" type="button">원 입력 요청 취소</button></div><div class="uls-small">승인·거절: Queue의 Decision / 취소: 원 입력 요청의 취소 체크</div></div>
+     <div id="uls-range-status" class="uls-status" role="status">빈 범위는 전체 자료 사용으로 바뀌지 않습니다.</div>
+    </div>
+    <div class="uls-section"><h2>학습 노트</h2>
+     <label class="uls-field">요청할 근거<select id="uls-mode"><option value="transcript">전사만</option><option value="confirmed">전사 + 확인된 강의자료</option><option value="provisional">임시 자료 포함 · 직접 선택</option></select></label>
+     <div id="uls-material-choices" hidden><p class="uls-small">이 수업의 자료를 직접 선택합니다. 선택만으로 사용 승인이 바뀌지 않습니다.</p><label class="uls-check"><input type="checkbox" data-material="slides">Lec2.pdf · 강의자료</label><label class="uls-check"><input type="checkbox" data-material="book">M20 · 알고리즘 교과서 · 사용 미확인</label><label class="uls-check"><input type="checkbox" data-material="reference">M21 · 참고 문제집 · 사용 미확인</label></div>
+     <div id="uls-note-error" class="uls-error" role="alert"></div>
+     <div class="uls-actions"><button id="uls-note-request" type="button" class="uls-primary">새 학습 요청 제출</button></div>
+     <div id="uls-note-status" class="uls-status" role="status">아직 요청하지 않음</div>
+     <div id="uls-note-preview" class="uls-box" hidden><h3>학습 노트의 구성</h3><p id="uls-artifact-status" class="uls-small"></p><p>개념 설명 → 단계별 예제 → 필요한 증명·계산 → 오개념 → 연습문제</p><span class="uls-small">현재 화면은 구성 미리보기입니다. 실제 강의 내용이나 생성 결과가 아닙니다.</span><details><summary>연습문제 해설 영역</summary><div>풀이 과정과 원문 위치, AI 보충 여부를 함께 보여줍니다.</div></details></div>
+    </div>
+    <div class="uls-section"><h2>내 필기</h2><p class="uls-small">USER 영역 · 노트 생성으로 바뀌지 않음</p><label class="uls-check" id="uls-review-task"><input type="checkbox" id="uls-review-done">3월 6일 수업 복습하기 완료</label></div>
+   </section>
+  </main>
+ </div>
+ <div class="uls-sim" aria-label="모의 실행 제어"><span>설계 시험</span><label for="uls-connection">연결</label><select id="uls-connection"><option value="online">정상</option><option value="offline">최근 동기화 없음</option></select><button id="uls-tick" type="button">다음 동기화 재현</button><button id="uls-change-source" type="button">자료 변경 재현</button></div>
+ <div class="uls-sim"><label for="uls-note-outcome">노트 결과 재현</label><select id="uls-note-outcome"><option value="ready">성공</option><option value="partial">일부 근거만 읽음</option><option value="failed">영구 생성 오류</option><option value="publish-failed">노션 게시 재시도 소진</option><option value="disconnected">AI 연결 필요</option></select><label for="uls-poll-minutes">동기화 목표(분)</label><select id="uls-poll-minutes"><option value="1">1</option><option value="3">3</option></select></div>
+ <div class="uls-sim"><span id="uls-poll-label"></span><button type="button" id="uls-change-book">M20 변경 재현</button><button type="button" id="uls-change-reference">M21 변경 재현</button></div>
+ <div id="uls-sim-status" role="status" class="uls-small uls-status">실제 Notion·Drive·AI 호출 없음</div>
+</div>
+<script>
+(() => {
+ const root = document.getElementById('uls-ux');
+ const $ = id => root.querySelector('#uls-' + id);
+ const text = (id,value) => { $(id).textContent=value; };
+ const makeSession = (id,date,title) => ({id,date,title,bound:false,sessionNo:null,intent:0,noteGeneration:0,headActive:false,cancelIntent:null,pendingRange:null,proposal:null,usage:null,note:null,lastArtifact:null,rangeMessage:'빈 범위는 전체 자료 사용으로 바뀌지 않습니다.'});
+ const state={sessions:[makeSession('existing','2026-03-06','첫 수업'),makeSession('later','2026-03-06','두 번째 수업')],activeId:'existing',receipt:null,cancelled:false,revision:1,bookRevision:1,referenceRevision:1,pollMinutes:1,online:true};
+ const roleLabel=role=>({Primary:'주자료',Supporting:'보조자료',Reference:'참고자료'}[role]);
+ const active=()=>state.sessions.find(s=>s.id===state.activeId);
+ const title=s=>`${Number(s.date.slice(5,7))}월 ${Number(s.date.slice(8,10))}일 · ${s.title}`;
+ const currentUsage=s=>s.usage&&s.usage.revision===state.revision;
+ const evidence=(s,mode,materials=[])=>JSON.stringify([s.id,s.date,s.bound,mode,mode==='confirmed'?(currentUsage(s)?[s.usage.revision,s.usage.label,s.usage.intent,s.usage.role,s.usage.targetId]:null):mode==='provisional'?materials.map(id=>[id,id==='book'?state.bookRevision:id==='reference'?state.referenceRevision:state.revision,id==='slides'&&currentUsage(s)?s.usage.label:'미확인']):null]);
+ function go(name) {
+  root.querySelectorAll('[data-page]').forEach(el=>el.hidden=el.dataset.page!==name);
+  const location=name==='session'?'course':name;
+  root.querySelectorAll('.uls-nav [data-go]').forEach(el=>{if(el.dataset.go===location)el.setAttribute('aria-current',name==='session'?'location':'page');else el.removeAttribute('aria-current');});
+ }
+ root.querySelectorAll('[data-go]').forEach(el=>el.addEventListener('click',()=>go(el.dataset.go)));
+ function render() {
+  const s=active(), bound=state.sessions.find(x=>x.bound);
+  text('count',String(state.sessions.length));text('resume-title',title(s));text('session-title',title(s));
+  text('resume',s.bound?'전사 준비됨':'전사 연결 필요');text('source-state',s.bound?'1주차.md · 전사 읽기 준비됨':'전사 연결 필요');
+  text('inbox-summary',bound?`1주차.md · ${title(bound)}에 연결됨`:state.receipt?'1주차.md · 입력 반영 대기':'1주차.md · 과목과 강의 날짜 입력 필요');
+  text('sync',state.online?'마지막 동기화 · 방금 (모의 상태)':'최근 동기화 없음 · PC 또는 연결 확인');
+  text('poll-label',`자동 확인 목표: ${state.pollMinutes}분 (모의 설정) · 처리 시간 보장 아님`);
+  $('submit-input').disabled=!!state.receipt||!!bound;$('cancel-input').disabled=!state.receipt;
+  $('session-list').replaceChildren();
+  for(const rowSession of state.sessions) {
+   const row=document.createElement('div'), label=document.createElement('span'), button=document.createElement('button');
+   row.className='uls-row';label.className='uls-grow';label.textContent=title(rowSession);button.type='button';button.textContent='수업 열기';button.dataset.sessionId=rowSession.id;
+   button.addEventListener('click',()=>{state.activeId=rowSession.id;render();go('session');});row.append(label,button);$('session-list').append(row);
+  }
+  text('usage-status',currentUsage(s)?'확인된 '+s.usage.label:s.usage?'자료 변경 · 새 확인 필요':'범위 미확인');
+  text('material','읽기 준비 · 사용 범위는 수업별 확인');
+  $('role-field').hidden=!!s.usage;
+  $('usage-role').disabled=!!s.usage;
+  if(s.usage)$('usage-role').value='';
+  text('usage-target',s.usage?`변경 대상: ${title(s)} / Lec2.pdf / ${roleLabel(s.usage.role)} · 기존 역할 유지`:'새 사용 관계 · 역할까지 확인한 제안을 만듭니다.');
+  $('proposal').hidden=!s.proposal;
+  if(s.proposal) {
+   $('proposal').dataset.proposalId=s.proposal.proposalId;
+   text('proposal-text',`알고리즘1 / ${title(s)} / Lec2.pdf v${s.proposal.revision} / ${roleLabel(s.proposal.role)} / ${s.proposal.label} / ${s.proposal.operation==='create'?'새 관계':'기존 관계 범위 변경'}`);
+   $('approve').disabled=!!s.proposal.decision||!!s.pendingRange||s.proposal.revision!==state.revision||s.cancelIntent===s.proposal.intent;
+   $('reject').disabled=!!s.proposal.decision||!!s.pendingRange||s.cancelIntent===s.proposal.intent;
+   $('cancel-range').disabled=!!s.pendingRange||s.cancelIntent===s.proposal.intent;
+  }
+  text('range-status',s.rangeMessage);
+  text('note-status',s.note?s.note.message:'아직 요청하지 않음');
+  $('note-preview').hidden=!s.lastArtifact;
+  text('artifact-status',s.lastArtifact?(s.lastArtifact.evidence!==evidence(s,s.lastArtifact.mode,s.lastArtifact.materials)?'이전 AI 노트 · 갱신 필요':s.lastArtifact.status==='partial'?'부분 노트 보존 · 누락 근거 있음':'이전 생성 노트 보존 · 마지막 검증 기준'):'');
+  $('review-task').hidden=s.id!=='existing';
+ }
+ $('submit-input').addEventListener('click',()=>{
+  text('input-error','');
+  if(!$('course').value||!$('date').value){text('input-error','과목과 실제 강의 날짜를 입력해 주세요. 아직 수업을 만들지 않았습니다.');return;}
+  if(!$('session-choice').value){text('input-error','새 수업인지 기존 수업인지 선택해 주세요.');return;}
+  if($('session-choice').value==='new'&&$('existing-session').value){text('input-error','새 수업을 만들려면 기존 수업 선택을 비워 주세요.');return;}
+  if($('session-choice').value==='existing'&&!$('existing-session').value){text('input-error','같은 날짜여도 정확한 기존 수업을 선택해 주세요.');return;}
+  if($('session-choice').value==='existing'&&$('date').value!=='2026-03-06'){text('input-error','선택한 기존 수업의 날짜는 2026-03-06입니다. 날짜 또는 수업을 다시 확인해 주세요.');return;}
+  const number=$('session-number').value;
+  if(number&&($('session-choice').value!=='new'||!Number.isInteger(Number(number))||Number(number)<1)){text('input-error','실제 차시는 새 수업에서만 양의 정수로 입력합니다. 기존 수업 연결이면 비워 주세요.');return;}
+  state.receipt={course:$('course').value,date:$('date').value,target:$('session-choice').value,existing:$('existing-session').value,number};state.cancelled=false;
+  text('input-status','제출됨 · 다음 동기화에서 반영합니다.');render();
+ });
+ $('cancel-input').addEventListener('click',()=>{state.cancelled=true;text('input-status','취소 요청됨 · worker 확인 대기');});
+ $('session-choice').addEventListener('change',()=>{$('existing-field').hidden=$('session-choice').value!=='existing'&&!$('existing-session').value;$('number-field').hidden=$('session-choice').value!=='new'&&!$('session-number').value;});
+ $('submit-range').addEventListener('click',()=>{
+  const s=active(),choice=$('range').value,start=Number($('start').value),end=Number($('end').value);text('range-error','');
+  const role=s.usage?s.usage.role:$('usage-role').value;
+  if(!role){text('range-error','이 수업에서의 사용 역할을 선택해 주세요.');return;}
+  if(choice!=='bounded'&&($('start').value!==''||$('end').value!=='')){text('range-error','미확인·전체 자료는 남아 있는 페이지 값을 비운 후 제출해 주세요.');return;}
+  if(choice==='bounded'&&(!Number.isInteger(start)||!Number.isInteger(end)||start<1||end<start||end>24)){text('range-error','PDF 1~24쪽 안에서 시작과 끝을 입력해 주세요.');return;}
+  s.pendingRange={choice,label:choice==='whole'?'전체 24쪽 사용':choice==='unknown'?'미확인':`PDF ${start}~${end}쪽`,revision:state.revision,role,operation:s.usage?'update':'create',targetId:choice==='unknown'?null:s.usage?s.usage.targetId:`demo:${s.id}:${role}:${choice}:${start}:${end}`};
+  s.rangeMessage='범위 입력 제출됨 · 이전 제안 갱신 대기';render();
+ });
+ $('approve').addEventListener('click',()=>{const s=active();if(s.proposal&&!s.pendingRange&&s.proposal.revision===state.revision){s.proposal.decision='approve';s.rangeMessage='내 승인 선택됨 · 아직 적용 전, 다음 동기화 대기';render();}});
+ $('reject').addEventListener('click',()=>{const s=active();if(s.proposal&&!s.pendingRange){s.proposal.decision='reject';s.rangeMessage='내 거절 선택됨 · 반영 대기';render();}});
+ $('cancel-range').addEventListener('click',()=>{const s=active();if(s.proposal&&!s.pendingRange){s.cancelIntent=s.proposal.intent;s.rangeMessage='원 입력 취소 요청됨 · 반영 여부 확인 대기';render();}});
+ $('note-request').addEventListener('click',()=>{
+  const s=active(),mode=$('mode').value,materials=Array.from(root.querySelectorAll('[data-material]:checked')).map(el=>el.dataset.material).sort();
+  text('note-error','');
+  if(mode==='provisional'&&!materials.length){text('note-error','함께 읽을 자료를 하나 이상 선택해 주세요.');return;}
+  if(mode!=='provisional'&&materials.length){text('note-error','직접 선택 모드가 아니면 선택한 자료를 먼저 비워 주세요.');return;}
+  if(s.note&&s.note.status==='ready'&&s.note.evidence===evidence(s,mode,materials)){s.note.message='같은 근거의 준비된 노트를 재사용합니다.';render();return;}
+  s.noteGeneration++;s.note={status:'queued',mode,materials,generation:s.noteGeneration,evidence:null,message:`학습 요청 제출됨 · 현재 요청 ${s.noteGeneration} · 실행 대기`};render();
+ });
+ $('mode').addEventListener('change',()=>{$('material-choices').hidden=$('mode').value!=='provisional'&&!root.querySelector('[data-material]:checked');});
+ $('poll-minutes').addEventListener('change',()=>{state.pollMinutes=Number($('poll-minutes').value);render();});
+ $('change-book').addEventListener('click',()=>{state.bookRevision++;text('sim-status','M20 교과서 변경을 가정합니다.');});
+ $('change-reference').addEventListener('click',()=>{state.referenceRevision++;text('sim-status','M21 참고 문제집 변경을 가정합니다.');});
+ $('connection').addEventListener('change',()=>{state.online=$('connection').value==='online';render();});
+ $('change-source').addEventListener('click',()=>{state.revision++;text('sim-status','Drive 자료가 변경됐다고 가정합니다. 다음 동기화에서 변화가 감지됩니다.');});
+ $('tick').addEventListener('click',()=>{
+  if(!state.online){text('sim-status','동기화되지 않았습니다. 요청은 대기 상태로 유지됩니다.');return;}
+  text('sim-status','모의 동기화 완료 · 실제 API 호출 없음');
+  if(state.receipt) {
+   const r=state.receipt,changed=r.course!==$('course').value||r.date!==$('date').value||r.target!==$('session-choice').value||r.existing!==$('existing-session').value||r.number!==$('session-number').value;
+   if(state.cancelled||changed){text('input-status',state.cancelled?'취소 완료 · 반영된 변경 없음':'내용 변경으로 중단 · 새 입력 요청으로 제출하세요.');}
+   else {
+    let target=state.sessions[0];
+    if(r.target==='new'){target=makeSession('new',r.date,r.number?`${r.number}차시 · 내부 ID S03`:'차시 미입력 · 내부 ID S03');target.sessionNo=r.number?Number(r.number):null;state.sessions.push(target);}
+    else if(r.existing==='later'){target=state.sessions.find(x=>x.id==='later');if(!target){target=makeSession('later',r.date,'두 번째 수업');state.sessions.push(target);}}
+    target.bound=true;state.activeId=target.id;
+    text('input-status','반영 완료 · '+(r.target==='existing'?'기존 수업에 연결, 새 수업 0개':title(target)+'에 연결, 기존 수업 유지')+' · 원본 파일 ID 유지');
+   }
+   state.receipt=null;
+  }
+  for(const s of state.sessions) {
+   if(s.pendingRange) {
+    const request=s.pendingRange;s.pendingRange=null;s.intent++;s.headActive=true;s.proposal=null;
+    if(request.revision!==state.revision){s.rangeMessage='자료가 바뀌었습니다. 현재 버전으로 새 범위를 제출하세요.';}
+    else if(request.choice==='unknown'){s.rangeMessage=currentUsage(s)?'이번 입력은 미확인 · 이전 미적용 제안 종료 · 기존 확인 범위 유지':'미확인으로 유지 · 이전 미적용 제안 종료. 전체 사용 제안은 없습니다.';}
+    else{s.proposal={...request,intent:s.intent,proposalId:`demo-proposal:${s.id}:${s.intent}`,decision:null};s.rangeMessage='제안 준비됨 · 내용을 읽고 승인 여부를 선택하세요.';}
+   }
+   if(s.cancelIntent!==null){if(s.cancelIntent===s.intent){s.headActive=false;s.proposal=null;s.rangeMessage=s.usage?'취소 완료 · 미적용 제안 종료, 기존 사용 범위 유지':'취소 완료 · 미적용 제안 종료, 사용 관계 변경 없음';}s.cancelIntent=null;}
+   if(s.proposal&&s.headActive) {
+    if(s.proposal.revision!==state.revision||s.proposal.intent!==s.intent){s.proposal=null;s.rangeMessage='자료가 변경되어 과거 제안을 적용하지 않았습니다. 현재 버전으로 새 범위를 제출하세요.';}
+    else if(s.proposal.decision==='reject'){s.proposal=null;s.rangeMessage=currentUsage(s)?'변경 제안 거절됨 · 기존 확인 범위 유지':'제안 거절됨 · 범위 미확인';}
+    else if(s.proposal.decision==='approve'){s.usage={...s.proposal};s.proposal=null;s.rangeMessage='적용됨 · 정확한 대상과 범위에 사람 승인 반영';}
+   }
+   if(s.note) {
+    if(['ready','partial'].includes(s.note.status)&&s.note.evidence!==evidence(s,s.note.mode,s.note.materials)){s.note.status='stale';s.note.message='갱신 필요 · 자료 또는 사용 관계 변경. 이전 AI 노트는 보존합니다.';}
+    else if(['queued','waiting'].includes(s.note.status)) {
+     if(!s.bound){s.note.status='waiting';s.note.message='입력 필요 · 먼저 수업 전사를 연결해 주세요.';}
+     else if(s.note.mode==='confirmed'&&!currentUsage(s)){s.note.status='waiting';s.note.message='자료 사용 확인 필요 · 전사만으로 줄여 생성하지 않습니다.';}
+     else if($('note-outcome').value==='disconnected'){s.note.status='waiting';s.note.message='AI 생성 연결 필요 · 최초 설정을 완료해 주세요. 아직 AI 호출 없음';}
+     else if($('note-outcome').value==='failed'){s.note.status='failed';s.note.message='생성 실패 · AI 공급자 영구 오류 · 마지막 성공: 근거 확인 · 자동 재시도 없음. 연결 설정을 점검한 뒤 새 학습 요청을 제출하세요.';}
+     else if($('note-outcome').value==='publish-failed'){s.note.status='failed';s.note.message='생성 실패 · 노션 게시 재시도 소진 · 마지막 성공: 산출물 저장 · 자동 재시도 없음. 노션 연결을 확인한 뒤 새 요청을 제출하세요. 저장된 산출물을 재사용합니다.';}
+     else{s.note.status=$('note-outcome').value==='partial'?'partial':'ready';s.note.evidence=evidence(s,s.note.mode,s.note.materials);s.note.message=s.note.status==='partial'?'부분 노트 (모의) · 검증된 일부 근거로 생성 · 누락: 수식 구간. 원문을 확인해 보완하세요.':'준비됨 (모의) · '+(s.note.mode==='confirmed'?'전사 + 확인된 PDF':s.note.mode==='provisional'?'임시 자료 포함 · '+s.note.materials.map(id=>id==='book'?'M20 사용 미확인':id==='reference'?'M21 사용 미확인':currentUsage(s)?'Lec2 확인된 '+s.usage.label:'Lec2 사용 미확인').join(', '):'전사만')+' · 요청 범위 전체 · 마지막 검증: 방금';s.lastArtifact={...s.note};}
+    }
+   }
+  }
+  render();
+ });
+ $('task').addEventListener('change',()=>{$('review-done').checked=$('task').checked;});
+ $('review-done').addEventListener('change',()=>{$('task').checked=$('review-done').checked;});
+ render();
+})();
+</script>

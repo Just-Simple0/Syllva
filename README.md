@@ -1,7 +1,7 @@
 # University Learning System (ULS) — v1.2
 
 **Status:** Phase 6–8 repository implementation and local validation complete; live release validation deferred
-**Architecture style:** Model-agnostic · MCP-centered · Local-primary · Single-active-worker · Cross-platform
+**Architecture style:** Model-agnostic · MCP-centered · Local-primary · Single-active-execution · Cross-platform
 **Primary desktop platforms:** macOS, Windows
 **Core language:** Python 3
 
@@ -47,22 +47,38 @@ tests/            unit / contract / integration / e2e / fixtures
 ```bash
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
-pip install -e ".[dev,mcp,drive,notion]"
+pip install -e '.[dev,mcp,drive,notion,pdf]'
 uls init
 uls doctor
 ```
 
 Edit the generated config and metadata-only `sources.json`, and provide separate
-worker/MCP credentials through the process environment. The runtime does not
+execution/MCP credentials through the process environment. The runtime does not
 automatically load `.env` files. `doctor` reports missing configuration until
 provider IDs and credentials are configured.
 
-See [desktop/remote setup](deployment/README.md), [client packaging](clients/README.md)
-and [implementation verification](docs/plans/phase6-8-verification.md). The native
-scheduled worker currently handles transcript registrations. Real client E2E,
-Windows-host operation and the earlier live source-validation gates are still
-unrecorded; the built-in authenticated remote profile uses development bearer
-credentials, not OAuth.
+See [getting started](docs/user-guide/getting-started.md), [desktop/remote setup](deployment/README.md),
+and [client packaging](clients/README.md). The `pdf` extra is required for PDF material preview.
+The LMS sidecar syncs Canvas/KNU assignments and materials on an hourly schedule; its default
+scheduler state is paused and it requires a separate `CANVAS_ACCESS_TOKEN` in the process environment.
+Real client E2E, Windows-host operation, and the authenticated remote profile (development bearer
+credentials only, not OAuth) remain unvalidated in the live environment.
+
+## First setup path
+
+Read [the beginner setup guide](docs/user-guide/getting-started.md) before adding
+provider IDs or credentials. `uls init` creates local state and an empty explicit
+transcript registry; it does not watch Drive, upload files, or create Notion pages.
+Setup time depends on separate execution, MCP, Drive, and Notion configuration gates.
+Run `uls doctor` and `uls behavior lint` after configuration, then use the local
+MCP or a supported client for read-only retrieval. The LMS sidecar uses an explicit
+semester registry and sanitized metadata snapshots; a partial course never becomes
+a complete semester result. Its default scheduler state is paused and it does not
+enroll credentials or activate a heartbeat.
+
+Daily workflows, supported inputs, and honest MCP/client boundaries are in
+[daily use](docs/user-guide/daily-use.md), [MCP and clients](docs/user-guide/mcp-and-clients.md),
+and [troubleshooting](docs/user-guide/troubleshooting.md).
 
 ## CLI
 

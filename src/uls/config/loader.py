@@ -13,6 +13,7 @@ import yaml
 from .schema import (
     BehaviorContractCfg,
     CourseCfg,
+    CourseStaticFolderCfg,
     DriveCfg,
     McpCfg,
     NormalizationCfg,
@@ -20,6 +21,8 @@ from .schema import (
     RemoteMcpCfg,
     RetrievalCfg,
     StorageCfg,
+    SemesterRegistryCfg,
+    SemesterWorkspaceCfg,
     SystemCfg,
     UlsConfig,
     WorkerCfg,
@@ -78,12 +81,22 @@ def load_config_unvalidated(path: str | os.PathLike[str]) -> UlsConfig:
             raise ValueError(f"courses[{index}] must be a YAML mapping")
 
     drive_raw = raw.get("google_drive", raw.get("drive", {}))
+    if not isinstance(drive_raw, Mapping):
+        raise ValueError("google_drive must be a YAML mapping")
+    semester_registries = _semester_registries(drive_raw.get("semester_registries", []))
+    drive_values = dict(drive_raw)
+    drive_values["semester_registries"] = semester_registries
+    notion_raw = _section(raw, "notion")
+    notion_values = dict(notion_raw)
+    notion_values["semester_workspaces"] = _semester_workspaces(
+        notion_raw.get("semester_workspaces", [])
+    )
     return UlsConfig(
         system=_from_mapping(SystemCfg, _section(raw, "system")),
         worker=_from_mapping(WorkerCfg, _section(raw, "worker")),
         storage=_from_mapping(StorageCfg, _section(raw, "storage")),
-        google_drive=_from_mapping(DriveCfg, drive_raw),
-        notion=_from_mapping(NotionCfg, _section(raw, "notion")),
+        google_drive=_from_mapping(DriveCfg, drive_values),
+        notion=_from_mapping(NotionCfg, notion_values),
         normalization=_from_mapping(NormalizationCfg, _section(raw, "normalization")),
         retrieval=_from_mapping(RetrievalCfg, _section(raw, "retrieval")),
         mcp=_from_mapping(McpCfg, _section(raw, "mcp")),
@@ -126,6 +139,65 @@ def _from_mapping(cls: type[_CfgT], value: Any) -> _CfgT:
     allowed = {item.name for item in fields(cls)}
     kwargs = {name: value[name] for name in allowed if name in value}
     return cls(**kwargs)
+
+
+def _semester_registries(value: Any) -> list[SemesterRegistryCfg]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("google_drive.semester_registries must be a YAML list")
+    result: list[SemesterRegistryCfg] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, Mapping):
+            raise ValueError(f"semester_registries[{index}] must be a YAML mapping")
+        raw_static = item.get("course_static_folder_ids", {})
+        if raw_static is None:
+            raw_static = {}
+        if not isinstance(raw_static, Mapping):
+            raise ValueError(
+                f"semester_registries[{index}].course_static_folder_ids must be a mapping"
+            )
+        static: dict[str, CourseStaticFolderCfg] = {}
+        for course_key, folders in raw_static.items():
+            if not isinstance(course_key, str) or not isinstance(folders, Mapping):
+                raise ValueError(
+                    f"semester_registries[{index}].course_static_folder_ids entries must be mappings"
+                )
+            static[course_key] = _from_mapping(CourseStaticFolderCfg, folders)
+        values = dict(item)
+        values["course_static_folder_ids"] = static
+        for name in (
+            "course_folder_ids",
+            "optional_course_upload_folder_ids",
+        ):
+            nested = values.get(name, {})
+            if nested is None:
+                nested = {}
+            if not isinstance(nested, Mapping):
+                raise ValueError(f"semester_registries[{index}].{name} must be a mapping")
+            values[name] = dict(nested)
+        result.append(_from_mapping(SemesterRegistryCfg, values))
+    return result
+
+
+def _semester_workspaces(value: Any) -> list[SemesterWorkspaceCfg]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("notion.semester_workspaces must be a YAML list")
+    result: list[SemesterWorkspaceCfg] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, Mapping):
+            raise ValueError(f"semester_workspaces[{index}] must be a YAML mapping")
+        values = dict(item)
+        portals = values.get("portal_page_ids", {})
+        if portals is None:
+            portals = {}
+        if not isinstance(portals, Mapping):
+            raise ValueError(f"semester_workspaces[{index}].portal_page_ids must be a mapping")
+        values["portal_page_ids"] = dict(portals)
+        result.append(_from_mapping(SemesterWorkspaceCfg, values))
+    return result
 
 
 def _read_dotenv(path: Path) -> dict[str, str]:
