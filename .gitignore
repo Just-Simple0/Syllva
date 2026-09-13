@@ -25,6 +25,12 @@ venv/
 .coverage
 htmlcov/
 
+# Documentation site
+docs-site/node_modules/
+docs-site/dist/
+docs-site/.astro/
+docs-site/src/content/docs/
+
 # Tooling / agent runtime state
 .omc/
 .insane-review/

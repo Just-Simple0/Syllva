@@ -1,0 +1,17 @@
+{
+  "name": "syllva-docs",
+  "version": "0.1.3",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sync:docs": "node scripts/sync-docs.mjs",
+    "check:docs": "node scripts/sync-docs.mjs --check",
+    "dev": "node scripts/sync-docs.mjs && astro dev",
+    "build": "node scripts/sync-docs.mjs && astro build",
+    "preview": "astro preview"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "0.42.0",
+    "astro": "7.3.2"
+  }
+}
