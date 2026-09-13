@@ -1,79 +1,66 @@
 # Changelog
 
-All notable changes to this project are documented here.
+[한국어](CHANGELOG.ko.md)
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+All notable repository changes are documented here. The format follows the spirit of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), but Syllva has not yet published a stable public package release.
 
 ## [Unreleased]
 
-### Added
-- Initial repository scaffold derived from the frozen v1.2 design and implementation
-  specifications (repository layout §3, domain types §6, StateStore §7–8,
-  EphemeralStore §9, Retrieval Engine §20, MCP tools §24, Behavior Contract §31).
-- Fully implemented normative `Locator` grammar, canonical AST, serialization, and
-  typed containment (spec §6.3).
-- Domain enums, `SourceRef`, `SourceFingerprint`, provenance, and error taxonomy.
-- StateStore / EphemeralStore protocol contracts and SQLite initial migration.
-- Config schema and example config / `.env` templates.
+No public release is currently published.
 
-### Phase 1 — Core Hardening (spec §42)
-- `SQLiteStateStore`: repeatable migrations, job lifecycle, source files/versions,
-  checkpoints, and source-bound idempotent entity allocation (§8.6.1, `BEGIN IMMEDIATE`).
-- Deterministic `job_key` derivation (§8.1.1, 0x1F-separated SHA-256).
-- `MemoryEphemeralStore`: process-local, TTL-bounded, restart-invalidating resolution
-  handles and context capabilities; locator authorization via typed containment (§9, §25).
-- Local single-worker lock with PID/host metadata and stale recovery (§40).
-- Retry/rate-limit policy: error classes + bounded exponential backoff with jitter (§36).
-- Config loader/schema/validation with required security checks (§5, §38).
-- Notion human-gate write policy: defensive write guards (§15.1), Rich-text alias parsing
-  (§14.0), Automation Queue state machine, `ApprovalReader`, and `HumanApprovalApplier`
-  with stale-approval revalidation and self-approval prevention (§15.2, §33).
-- Model-independent contract tests (release blockers §50.6–§50.9, §50.18–§50.22).
-- Implemented by Codex (Luna, max) across two parallel tasks; gates verified by oversight.
+## [0.1.3] — Beta repository baseline (unpublished)
 
-### Phase 1 — Review hardening (dual independent review)
-- Reviewed by insane-review (GPT-5.6 Sol, High) + AGY Gemini 3.8 Flash (High); oversight
-  (Opus 4.8) adjudicated and independently reproduced each finding before/after fixes.
-- Security/correctness fixes across four Codex fix rounds:
-  - Automation Queue write guard identified by configured DB id, fail-closed on unknown
-    targets (§15.1/§33); `HumanApprovalApplier` requires a real human `Decision By`
-    (no machine self-approval); create/update Decision separation (§15.2).
-  - `load_config` is fail-closed and strictly type-checks every boolean config field (§5/§27).
-  - Context capabilities bind source fingerprints; `authorize_locator` is fail-closed and
-    raises `LOCATOR_STALE` on mismatch, denies when no current fingerprint is supplied (§25).
-  - Canonical `job_key` enforced at the StateStore boundary; `register_source_version`
-    entity consistency (§8.1.1/§8.6.1); retry re-queue transitions + provider `Retry-After`
-    honored uncapped (§36); truthy-bypass guard for human-only fields (§15.1).
-  - Defined system-transition path restored for automation `SUPERSEDED`/`FAILED` (§15.1/§15.2).
-  - Worker lock made TOCTOU-safe (fd advisory lock); ephemeral candidate-id leak/rollback
-    and single-use resolution consumption (§9); domain `EphemeralStore` contract aligned to
-    the fail-closed §25 signature with a contract-conformance test.
-- Final state: 86 model-independent contract/unit tests passing; both reviewers GO.
+### Changed
 
-### Phase 2 — Transcript Vertical Slice (spec §43)
-- Deterministic transcript normalization (`uls.transcript.v1`): verbatim body (LF-only),
-  timestamps kept in a sidecar index (code-point offsets), single source-of-truth status,
-  partial-on-extraction-failure — no LLM, no rewriting (§11/§16).
-- `ingest_transcript` orchestrator enforcing §17 commit order (PROCESSING → staged write →
-  validate → atomic publish → Notion → processing record → READY last) with Partial 3-way
-  consistency; mandatory commit participants and source/version registration are fail-closed;
-  §8.6.1 source-bound canonical entity allocation cannot be pre-seeded by the caller.
-- Read-only `NotionReader` / `DriveReader` protocols; the Retrieval Engine depends only on
-  these (no write path reachable) (§4/§13/§27).
-- `RetrievalEngine.resolve_entity` / `select_resolution` (stable ambiguity handles) and
-  `get_session_context(session_id, …)` returning a bounded `ContextPackage` with a
-  fingerprint- and role-bound context capability; per-chunk exact locator allowlist
-  (no convex-hull over-authorization); §25 six-check authorization; SESSION authority policy
-  (§17/§18/§21) with fetch-order ≠ authority-rank.
-- Freshness: stale enrichment excluded from factual evidence; stale-locator revalidation;
-  incomplete/mismatched derivative front matter is fail-closed (never served as current).
-- Resolver precedence is sequential per §10.1 ("5강"/Session-No vs alias); strict boolean
-  `Verified` read (§14.4); structured error taxonomy (§53).
-- Reviewed via the plan→plan-review→implement→verify→dual-review pipeline: two independent
-  reviewers (GPT-5.6 Sol High + AGY Gemini 3.8 Flash High) across a plan-review REVISE and
-  five implementation fix rounds; oversight (Opus 4.8) reproduced every finding.
-- Final state: 148 model-independent contract/unit tests passing; both reviewers GO.
+- Reframed the public project identity as **Syllva** while retaining `uls` as the CLI and University Learning System as the core system name.
+- Set package metadata/runtime `__version__` to **0.1.3** and documented the release as beta/unpublished.
+- Kept `PROTOCOL_VERSION = "1.2"`; package release version and frozen core protocol version are independent.
+- Adopted the **MIT License**.
+- Rewrote the public README around product purpose, user workflow, status, quick start, architecture, and trust boundaries.
+- Added paired English/Korean public documentation (`*.md` + `*.ko.md`) for user, operator, concept, reference, client, and deployment paths.
 
-## [1.2.0] — Frozen design baseline
+### Current beta capabilities
 
-- v1.2 architecture and implementation specifications frozen for implementation.
+- Model-neutral domain and retrieval core with source/provenance handling.
+- SQLite durable orchestration state plus in-memory bounded capabilities.
+- Transcript/PDF normalization paths and source freshness/authority checks.
+- Material/session/exam/activity retrieval and proposal/enrichment infrastructure.
+- Read-only MCP tool surface shared across supported client projections.
+- Semester intake preview using explicit Drive/Notion identities and user-owned submit/cancel gates.
+- Optional KNU/Canvas-oriented LMS sidecar with separate operational gating.
+- macOS/Windows local scheduling templates and development remote-MCP profile.
+
+### Validation posture
+
+- Unit/contract/integration coverage is maintained in-repository.
+- CI targets supported Python versions on macOS and Windows.
+- Live provider/client validation remains environment-dependent.
+- Claude local MCP remains experimental until target-environment domain E2E is recorded.
+- ChatGPT remote MCP/App remains deployment-deferred until account/auth/client requirements are validated.
+
+## Core implementation history
+
+The following entries summarize the implementation path built against the frozen 1.2 protocol. Detailed plan/review evidence remains under `docs/plans/`, `docs/ux/`, git history, and the frozen specifications.
+
+### Phase 1 — Core hardening
+
+- Repeatable SQLite migrations, job lifecycle, source files/versions, checkpoints, source-bound idempotent allocation, local worker locking, retry/rate-limit policy, strict config validation, human-gate write guards, and model-independent contract tests.
+- Hardened capability/source-fingerprint binding, job-key enforcement, fail-closed configuration, human approval separation, and TOCTOU-safe local lock behavior through independent review/fix rounds.
+
+### Phase 2 — Transcript vertical slice
+
+- Deterministic transcript normalization with verbatim body plus timestamp sidecar.
+- Commit ordering that preserves Partial/Ready state honestly and records source/version provenance.
+- Read-only provider interfaces for retrieval, entity resolution/selection, bounded session context, exact locator authorization, authority policy, freshness, and structured errors.
+
+### Later implemented slices
+
+- Enrichment/freshness support for sessions/materials.
+- Material-usage proposal, guarded approval, recovery, and retrieval/capability work.
+- Exam/activity context and capability lifecycle work.
+- Additional phase 6–8 repository implementation and local validation recorded in the corresponding plans/evidence.
+- v0.1.3 semester-intake preview, dashboard/UX integration records, and LMS sidecar work.
+
+## Protocol 1.2 frozen design baseline
+
+The repository historically used `1.2.0` package metadata while implementing a frozen **v1.2 design/implementation protocol**. Before public package publication, package versioning was reset to the beta line **0.1.3**. The v1.2 frozen documents remain authoritative protocol references; they are not a claim that Syllva has published a stable 1.2 product release.

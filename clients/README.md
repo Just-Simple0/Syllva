@@ -1,44 +1,45 @@
-# ULS client packages
+# Syllva client packages
 
-All clients consume the same read-only tools and server-enforced evidence scope.
-`contracts/study-behavior.md` is canonical. Each instruction/skill declares its
-version and hash. Run `uls behavior lint` before packaging.
+[한국어](README.ko.md)
 
-Build a portable bundle from this checkout:
+All clients consume the same read-only MCP tools and server-enforced evidence scope. `contracts/study-behavior.md` is canonical for shared study behavior. Each instruction/skill projection declares its contract relationship, and `uls behavior lint` should pass before packaging.
 
-```sh
+Syllva 0.1.3 is beta. A checked-in client projection or config example means the integration shape exists; it does **not** automatically mean that a real end-user client has completed live domain E2E.
+
+## Build a portable bundle
+
+From the repository checkout:
+
+```bash
 python scripts/package_clients.py --output /absolute/path/uls-clients.zip
 ```
 
-The archive includes the canonical contract, five Claude skills, ChatGPT
-instructions, local MCP config template, support matrix and E2E checklist. No
-credentials or user config are included. Existing output files are not overwritten.
+The archive includes the canonical behavior contract, Claude skills, ChatGPT instructions, local MCP config material, support metadata, and the E2E checklist. It does not include credentials or user configuration. Existing output files are not overwritten.
 
 ## Claude local MCP
 
-Install the Python package with the `mcp,drive,notion` extras. Configure read-only
-provider credentials in the environment used by the MCP process. Adapt
-`claude/mcp-config.example.json` with absolute executable/config paths, then add
-that server configuration in your client's supported MCP settings. Copy the
-individual `claude/skills/*` directories to the skill location supported by your
-Claude client. Not every Claude interface supports local MCP or skills.
+Install Syllva with the `mcp,drive,notion` extras. Configure read-only provider credentials in the environment used by the MCP process. Adapt `claude/mcp-config.example.json` with absolute executable/config paths, then register that server in a Claude client that supports local MCP.
 
-## ChatGPT remote MCP
+Copy individual `claude/skills/*` directories only to a Claude environment that supports the corresponding skill mechanism. Client capabilities vary; the repository does not treat every Claude surface as equivalent.
 
-Use `chatgpt/instructions/study-behavior.md` as the instruction projection and an
-authenticated HTTPS MCP connection only if your target environment supports it.
-The built-in short-lived bearer profile is a development integration, not OAuth.
-A client requiring OAuth must remain `DEPLOYMENT_DEFERRED` until an OAuth
-provider/gateway is configured and independently validated. Instructions alone
-cannot create a connector or grant access. CODEX desktop/CLI can use local stdio
-or streamable HTTP MCP servers through its supported local configuration. ChatGPT
-web uses a separate remote connection setting whose availability must be checked
-for the account and target environment; it does not read this checkout's local
-configuration. Never paste credentials into client instructions.
+Current status: **EXPERIMENTAL** until a real-client domain E2E is recorded for the target environment.
+
+## Codex desktop/CLI
+
+Codex can use the same local stdio MCP server through its supported MCP configuration. See [Operator: MCP Clients](../docs/operator-guide/mcp-clients.md) for the command/TOML examples.
+
+Validate the exact executable/config paths from the environment Codex will launch. Local configuration availability is not the same as a completed end-user E2E.
+
+## ChatGPT remote MCP/App
+
+Use `chatgpt/instructions/study-behavior.md` as the behavior projection only when paired with an authenticated MCP connection supported by the target ChatGPT environment.
+
+The built-in remote profile is a short-lived **development bearer** integration, not OAuth. A target that requires OAuth or another supported gateway must remain **DEPLOYMENT_DEFERRED** until that external auth layer, account connectivity, and domain E2E are independently validated.
+
+ChatGPT web does not read this checkout's local stdio configuration. Never paste credentials into ChatGPT instructions or prompts.
 
 ## Validation
 
-See `support-matrix.json` and `e2e-checklist.md`. Automated SDK tests establish
-protocol behavior, not real client support. A profile becomes VALIDATED only
-after the complete domain E2E checklist has recorded evidence. Offline Primary
-PCs cannot answer remote requests; do not use public sharing as a workaround.
+See `support-matrix.json` and `e2e-checklist.md`. Automated SDK/protocol tests establish repository behavior, not real-client support.
+
+A client profile should be called validated only after its complete target-environment E2E has been recorded. Offline primary machines cannot answer remote requests, and public/anyone-with-link sharing is not an acceptable workaround.
