@@ -2215,6 +2215,21 @@ def _write_json_path(path_value: str | None, value: Any, output: TextIO) -> None
 def main(argv: list[str] | None = None, *, output: TextIO | None = None, error: TextIO | None = None) -> int:
     output_stream = sys.stdout if output is None else output
     error_stream = sys.stderr if error is None else error
+    # _write_json/_write_json_path use ensure_ascii=False, so non-ASCII
+    # content (e.g. a Korean course name) is written verbatim. Windows'
+    # default stdout/stderr encoding is the legacy console codepage, not
+    # UTF-8, so writing that content there raises UnicodeEncodeError
+    # otherwise -- which _write_json's own except (TypeError, ValueError)
+    # clause (UnicodeEncodeError is a ValueError subclass) turns into a
+    # misleading output_serialization SyncError. Reconfigure to UTF-8
+    # where supported; injected test doubles without reconfigure() (e.g.
+    # io.StringIO) are left untouched.
+    for stream in (output_stream, error_stream):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8")
+            except (OSError, ValueError):
+                pass
     try:
         args = _parser().parse_args(argv)
         if args.command == "hold-lock":

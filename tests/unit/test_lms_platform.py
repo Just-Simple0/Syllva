@@ -125,6 +125,7 @@ class _FakeKernel32:
     def __init__(self, *, handle=42, attributes=0, get_info_ok=True):
         self.create_file_calls = []
         self.closed_handles = []
+        self.get_info_calls = []
         self._handle = handle
         self._attributes = attributes
         self._get_info_ok = get_info_ok
@@ -138,6 +139,7 @@ class _FakeKernel32:
             return True
 
         def get_file_information_by_handle(handle, info_ptr):
+            self.get_info_calls.append(handle)
             if not self._get_info_ok:
                 return False
             info_ptr.contents.dwFileAttributes = self._attributes
@@ -164,6 +166,7 @@ def _install_fake_win32_open(monkeypatch: pytest.MonkeyPatch, kernel32: _FakeKer
 
 
 def test_windows_open_no_follow_accepts_a_plain_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    file_flag_open_reparse_point = 0x00200000
     monkeypatch.setattr(fsplat, "IS_WINDOWS", True)
     kernel32 = _FakeKernel32(handle=42, attributes=0)
     osf_calls = _install_fake_win32_open(monkeypatch, kernel32, open_osfhandle_result=7)
@@ -175,6 +178,12 @@ def test_windows_open_no_follow_accepts_a_plain_file(monkeypatch: pytest.MonkeyP
     # both read the same already-open handle, so there is no separate
     # path-based pre-check a symlink swap could race against.
     assert len(kernel32.create_file_calls) == 1
+    (_path, _access, _share, _disposition, flags_attrs) = kernel32.create_file_calls[0]
+    assert flags_attrs & file_flag_open_reparse_point, "CreateFileW must request FILE_FLAG_OPEN_REPARSE_POINT"
+    # The attribute check and the fd conversion both operate on the exact
+    # handle CreateFileW returned -- not a fresh path-based lookup.
+    assert kernel32.get_info_calls == [42]
+    assert osf_calls[0][0] == 42
 
 
 def test_windows_open_no_follow_rejects_a_reparse_point_handle(
@@ -191,11 +200,14 @@ def test_windows_open_no_follow_rejects_a_reparse_point_handle(
     monkeypatch.setattr(fsplat, "IS_WINDOWS", True)
     file_attribute_reparse_point = 0x400
     kernel32 = _FakeKernel32(handle=99, attributes=file_attribute_reparse_point)
-    _install_fake_win32_open(monkeypatch, kernel32)
+    osf_calls = _install_fake_win32_open(monkeypatch, kernel32)
     with pytest.raises(OSError):
         fsplat.open_nofollow(tmp_path / "link.txt", os.O_RDONLY)
     # The reparse-point handle must not be leaked.
     assert kernel32.closed_handles == [99]
+    assert kernel32.get_info_calls == [99]
+    # A rejected reparse point must never be converted into a usable fd.
+    assert osf_calls == []
 
 
 def test_windows_open_no_follow_translates_missing_file(
@@ -217,13 +229,16 @@ def test_windows_open_no_follow_translates_missing_file(
         fsplat.open_nofollow(tmp_path / "missing.txt", os.O_RDONLY)
 
 
-def test_windows_open_no_follow_full_reservation_cycle_rejects_replaced_link(
+def test_windows_open_no_follow_real_host_rejects_an_existing_symlink(
     tmp_path: Path,
 ) -> None:
-    """End-to-end version of the regression, run for real on an actual
-    Windows host only (see the fake-kernel32 tests above for the
-    deterministic, cross-platform-runnable version of this same
-    guarantee)."""
+    """Real ctypes call, real Windows host only: rejects a symlink that
+    already existed before this call (no timing/race control here -- the
+    fake-kernel32 tests above are what deterministically prove there is
+    no separate check-then-open step for a symlink swapped in mid-race;
+    this test only confirms the real CreateFileW/
+    GetFileInformationByHandle calls behave the same way against an
+    actual reparse point on a real filesystem)."""
     if not fsplat.IS_WINDOWS:
         pytest.skip("real reparse-point creation requires a Windows host")
     target = tmp_path / "real.txt"

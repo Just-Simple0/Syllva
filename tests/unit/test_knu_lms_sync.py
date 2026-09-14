@@ -921,7 +921,7 @@ def test_cli_snapshot_and_project_are_executable(tmp_path: Path) -> None:
         "--input",
         str(raw_path),
     ]
-    captured = subprocess.run(command, check=True, capture_output=True, text=True)
+    captured = subprocess.run(command, check=True, capture_output=True, text=True, encoding="utf-8")
     canonical_path.write_text(captured.stdout, encoding="utf-8")
     readback_path.write_text(
         json.dumps({"rows": [], "course_pages": [], "course_parent_verified": True, "private_root_verified": True}),
@@ -932,6 +932,7 @@ def test_cli_snapshot_and_project_are_executable(tmp_path: Path) -> None:
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     result = json.loads(projected.stdout)
     assert result["datasource_count"] == 1
@@ -1095,7 +1096,7 @@ def test_bootstrap_binds_identity_candidate_with_private_atomic_registry(tmp_pat
     }}), encoding="utf-8")
     result = sync.bind_bootstrap(str(registry_path), str(candidate_path))
     assert result["status"] == "bound"
-    assert sync.registry_from_document(json.loads(registry_path.read_text())).courses[0].expected_code == "NEW-001"
+    assert sync.registry_from_document(json.loads(registry_path.read_text(encoding="utf-8"))).courses[0].expected_code == "NEW-001"
 
 
 def test_registry_project_cli_requires_prior_and_observed_on(tmp_path: Path) -> None:
