@@ -38,11 +38,16 @@ def owns_path(path: Path, *, posix_stat: os.stat_result | None = None) -> bool:
 
     POSIX compares the file owner UID to os.getuid() (using posix_stat when
     the caller already has a fresh stat result, to avoid a redundant
-    syscall). Windows has no UID concept; it compares the file owner SID
-    (via GetNamedSecurityInfoW) to the current process token user SID (via
+    syscall). Windows has no UID concept; it compares the file's owner SID
+    (via GetNamedSecurityInfoW) to this process token's TokenOwner SID (via
     OpenProcessToken + GetTokenInformation), through ctypes only so no extra
-    dependency beyond the stdlib is required. Any failure to read either SID
-    is treated as non-ownership, never as an implicit pass.
+    dependency beyond the stdlib is required. This proves the file's owner
+    matches this token's default-owner-for-new-objects, which is what NTFS
+    actually stamps a newly created file with -- it is not proof of
+    exclusive personal ownership or same-process creation, since
+    TokenOwner can itself be a shared group SID (see
+    _windows_default_owner_sid). Any failure to read either SID is treated
+    as non-ownership, never as an implicit pass.
     """
     if not IS_WINDOWS:
         try:
@@ -79,15 +84,119 @@ def chmod_if_supported(path: Path, mode: int) -> None:
 def open_nofollow(path: str | os.PathLike[str], flags: int, mode: int = 0o777) -> int:
     """os.open with O_NOFOLLOW added where the platform supports it.
 
-    Windows has no O_NOFOLLOW, so a symlink there would otherwise be
-    followed silently instead of rejected. Path.is_symlink() is used as
-    an explicit pre-check there; this has the same inherent TOCTOU window
-    as O_NOFOLLOW-based checks elsewhere in this module, but closes the
-    much larger gap of not rejecting a symlink at all.
+    Windows has no O_NOFOLLOW flag for os.open, so a symlink there would
+    otherwise be followed silently instead of rejected. A prior version of
+    this function used a Path.is_symlink() pre-check before calling
+    os.open(); that has a real TOCTOU gap an independent review caught: a
+    plain file can be replaced by a symlink between the check and the
+    open, and the following os.open() call would then silently follow it,
+    since Windows os.open() has no equivalent of O_NOFOLLOW to fall back
+    on. This is now closed by opening via CreateFileW with
+    FILE_FLAG_OPEN_REPARSE_POINT (a handle to the reparse point itself,
+    never the link target) and inspecting that same open handle's own
+    attributes for FILE_ATTRIBUTE_REPARSE_POINT before it is ever used for
+    anything else. There is no separate check-then-open step: the open and
+    the reparse-point rejection both operate on one already-open handle,
+    so nothing can be substituted in between.
     """
-    if IS_WINDOWS and Path(path).is_symlink():
-        raise OSError(errno.ELOOP, "symlink rejected", str(path))
+    if IS_WINDOWS:
+        return _windows_open_no_follow(path, flags, mode)
     return os.open(path, flags | NOFOLLOW_FLAG, mode)
+
+
+def _windows_open_no_follow(path: str | os.PathLike[str], flags: int, mode: int) -> int:
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class _FileTime(ctypes.Structure):
+        _fields_ = [("dwLowDateTime", wintypes.DWORD), ("dwHighDateTime", wintypes.DWORD)]
+
+    class _ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", _FileTime),
+            ("ftLastAccessTime", _FileTime),
+            ("ftLastWriteTime", _FileTime),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    del mode  # Windows os.chmod-style mode bits are not meaningful here;
+    # see chmod_if_supported/fchmod_if_supported.
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CreateFileW.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
+    kernel32.GetFileInformationByHandle.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(_ByHandleFileInformation),
+    )
+
+    generic_read = 0x80000000
+    generic_write = 0x40000000
+    file_share_read = 0x00000001
+    file_share_write = 0x00000002
+    open_existing = 3
+    open_always = 4
+    create_new = 1
+    file_attribute_normal = 0x80
+    file_flag_open_reparse_point = 0x00200000
+    file_attribute_reparse_point = 0x400
+    invalid_handle_value = wintypes.HANDLE(-1).value
+    error_file_not_found = 2
+    error_path_not_found = 3
+
+    access = generic_read
+    if flags & (os.O_RDWR | os.O_WRONLY):
+        access |= generic_write
+    if flags & os.O_CREAT:
+        disposition = create_new if flags & os.O_EXCL else open_always
+    else:
+        disposition = open_existing
+
+    handle = kernel32.CreateFileW(
+        str(path),
+        access,
+        file_share_read | file_share_write,
+        None,
+        disposition,
+        file_attribute_normal | file_flag_open_reparse_point,
+        None,
+    )
+    if handle == invalid_handle_value:
+        error = ctypes.get_last_error()
+        if error in (error_file_not_found, error_path_not_found):
+            raise FileNotFoundError(errno.ENOENT, "file not found", str(path))
+        raise OSError(error, "CreateFileW failed", str(path))
+
+    try:
+        info = _ByHandleFileInformation()
+        if not kernel32.GetFileInformationByHandle(handle, ctypes.pointer(info)):
+            raise OSError(ctypes.get_last_error(), "GetFileInformationByHandle failed", str(path))
+        if info.dwFileAttributes & file_attribute_reparse_point:
+            raise OSError(errno.ELOOP, "symlink rejected", str(path))
+        crt_flags = os.O_RDWR if access & generic_write else os.O_RDONLY
+        crt_flags |= getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0)
+        return msvcrt.open_osfhandle(handle, crt_flags)
+    except BaseException:
+        kernel32.CloseHandle(handle)
+        raise
 
 
 def sync_directory(path: Path) -> None:
@@ -208,9 +317,14 @@ def _windows_default_owner_sid() -> str:
     signed-in user's personal SID -- confirmed against a real GitHub
     windows-latest runner, where TokenUser returned a personal
     S-1-5-21-...-500 SID but a file this same process had just created
-    reported an owner of S-1-5-32-544. Comparing against TokenOwner
-    matches what NTFS actually assigns, so provable same-process
-    ownership works in both the personal-owner and group-owner cases.
+   reported an owner of S-1-5-32-544. Comparing against TokenOwner
+    matches what NTFS actually assigns to a new file in both the
+    personal-owner and group-owner cases. Note this is a default-owner
+    match, not proof of exclusive personal ownership or same-process
+    creation: TokenOwner can itself be a shared group SID (BUILTIN
+    Administrators here), so a match only shows the file's owner equals
+    what this token would stamp on a new object, which any other process
+    running under the same default-owner configuration would also match.
     """
     import ctypes
     from ctypes import wintypes

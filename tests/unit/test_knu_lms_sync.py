@@ -1136,6 +1136,15 @@ def test_read_enrolled_token_full_path_on_simulated_windows(
     monkeypatch.setattr(sync.fsplat, "IS_WINDOWS", True)
     monkeypatch.setattr(sync.fsplat, "_windows_owner_sid", lambda path: "S-1-5-21-SAME")
     monkeypatch.setattr(sync.fsplat, "_windows_default_owner_sid", lambda: "S-1-5-21-SAME")
+    # _windows_open_no_follow needs real ctypes.WinDLL/msvcrt, which do not
+    # exist on this test host; the real CreateFileW-based implementation
+    # has its own dedicated fake-kernel32 coverage in test_lms_platform.py,
+    # so this end-to-end flow test only needs a working real POSIX open
+    # here to exercise everything around it (config/manifest reads).
+    monkeypatch.setattr(
+        sync.fsplat, "_windows_open_no_follow",
+        lambda path, flags, mode: sync.os.open(path, flags, mode or 0o666),
+    )
     issued = dt.datetime(2026, 9, 1, tzinfo=dt.UTC)
     now = dt.datetime(2026, 9, 13, tzinfo=dt.UTC)
     document = _auth_document(issued=issued, expires=dt.datetime(2026, 9, 30, tzinfo=dt.UTC))

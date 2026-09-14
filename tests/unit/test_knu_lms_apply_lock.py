@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -104,6 +105,15 @@ def test_full_reservation_cycle_on_simulated_windows(
     monkeypatch.setattr(lock.fsplat, "IS_WINDOWS", True)
     monkeypatch.setattr(lock.fsplat, "_windows_owner_sid", lambda path: "S-1-5-21-SAME")
     monkeypatch.setattr(lock.fsplat, "_windows_default_owner_sid", lambda: "S-1-5-21-SAME")
+    # _windows_open_no_follow needs real ctypes.WinDLL/msvcrt, which do not
+    # exist on this test host; the real CreateFileW-based implementation
+    # has its own dedicated fake-kernel32 coverage in test_lms_platform.py,
+    # so this end-to-end flow test only needs a working real POSIX open
+    # here to exercise everything around it (ownership, retries, JSON).
+    monkeypatch.setattr(
+        lock.fsplat, "_windows_open_no_follow",
+        lambda path, flags, mode: os.open(path, flags, mode or 0o666),
+    )
 
     def locking(fd, mode, _nbytes):
         del fd, mode
