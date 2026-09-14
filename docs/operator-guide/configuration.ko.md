@@ -39,9 +39,9 @@ provider 측 least privilege를 적용하세요. provider가 지원하면 MCP cr
 
 ```yaml
 courses:
-  - course_key: "2026-2_COURSE-001-001"
+  - course_key: "2026-2_COURSE001-001"
     name: "예시 과목"
-    code: "COURSE-001"
+    code: "COURSE001"
     section: "001"
     semester: "2026-2"
 ```
@@ -59,7 +59,7 @@ google_drive:
       folder_id: "<semester-folder-id>"
       upload_folder_id: "<upload-folder-id>"
       course_folder_ids:
-        "2026-2_COURSE-001-001": "<course-folder-id>"
+        "2026-2_COURSE001-001": "<course-folder-id>"
 
 notion:
   semester_workspaces:

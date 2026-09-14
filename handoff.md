@@ -2,6 +2,115 @@
 
 **Last updated:** 2026-09-14
 
+## Credential 저장소 아키텍처 재설계 — GPT Pro 리뷰 완료, 구현은 다음 세션 (2026-09-14)
+
+이전 항목(LMS 사이드카 Windows 크로스플랫폼 지원)에서 이어진 논의다. 사용자가 "Canvas sidecar처럼
+나머지 7개 credential(Google Drive worker/MCP, Notion worker/MCP, GitHub, LLM, Remote MCP)도
+다 OS keyring/Credential Manager로 옮기는 게 낫지 않냐"고 제안했고, 독립 웹 GPT Pro 리뷰를 거쳐
+**전면 전환은 권장하지 않는다는 결론**과 함께 구체적인 하이브리드 구조를 받았다. 이번 세션에서는
+코드를 건드리지 않았고, 결론과 실행 계획만 기록한다. 다음 세션은 여기서부터 이어간다.
+
+### 검증 경로
+- 이 대화 세션(Codex exec 샌드박스)에서는 `insane-review`(로컬 Chrome/Brave CDP 실행)와
+  `aside exec`(daemon auth) 둘 다 네트워크 차단으로 실패했다. `curl 127.0.0.1:9222` 자체가
+  `Operation not permitted`로 거부되는 것을 확인해, 이 exec 세션의 샌드박스가 루프백을 포함한
+  아웃바운드 네트워크를 전면 차단한다는 근본 원인을 진단했다 (도구 문제가 아님).
+- 사용자가 질문 텍스트를 직접 ChatGPT 웹(Pro)에 붙여넣어 답변을 받아왔다. 실제 GPT Pro 응답이며,
+  모델 자동추론 등급(Pro)에서 나온 근거 인용(Apple Developer 문서, Microsoft Learn, jaraco/keyring
+  GitHub README/이슈)이 포함되어 있다.
+
+### GPT Pro 결론 요약
+1. **전면 keyring 전환 비권장.** macOS default/login Keychain은 사용자 로그인 세션에 결합되어
+   있어(Launch Agent vs Launch Daemon 구분, Apple 공식 문서 인용), 로그아웃 상태에서도 도는 진짜
+   무인 LaunchDaemon에는 부적합하다. Keychain lock/ACL 승인 팝업이 뜨면 GUI 없는 환경에서 멈춘다.
+2. Python `keyring` 자체가 "같은 Python executable을 쓰는 스크립트는 OS 프롬프트 없이 서로의
+   secret을 읽을 수 있다"고 Security Considerations에 명시함 (jaraco/keyring README 인용).
+   즉 keyring item을 worker/MCP별로 나눠도 진짜 프로세스 격리가 생기지 않는다 — provider 측
+   read/write 권한 분리(현재 이미 잘 되어 있음)가 여전히 핵심 경계다.
+3. Windows Credential Manager는 상대적으로 낫지만(`CredRead`가 logon session에 결합, Password
+   logon Task라면 unattended에 적합), **Credential Blob이 최대 2560바이트**로 제한된다
+   (Microsoft Learn `CREDENTIALA` 문서, jaraco/keyring 이슈#540 — 긴 값 이슈가 2026-07 PR
+   제출 후에도 아직 open). Google 서비스 계정 JSON처럼 큰 데이터를 keyring에 통째로 넣는 설계는
+   피해야 한다.
+4. **실제 발견된 버그**: `deployment/windows/uls-task.xml`이 `<LogonType>InteractiveToken</LogonType>`
+   으로 되어 있는데, Microsoft 공식 정의상 이 값은 "사용자가 이미 로그인되어 있어야만 실행"을
+   의미한다. 로그아웃 상태에서도 도는 무인 worker가 실제 요구사항이라면 이 설정 자체가 그 요구와
+   맞지 않는다. **keyring 전환 여부와 독립적으로 고쳐야 할 결함이며, 이 세션에서 직접
+   `grep -n LogonType deployment/windows/uls-task.xml`로 재확인했다.**
+
+### 권장 최종 구조 (하이브리드, GPT Pro 제안 그대로 채택 방향)
+
+| 크리덴셜 | 저장 방식 | 비고 |
+|---|---|---|
+| Canvas/KNU (사람이 직접 enroll) | keyring (현행 유지) | 이미 구현·검증됨 |
+| 메인 worker (무인 스케줄) | 보호된 secret file + 최소 환경변수 launcher | `.env`를 인터랙티브 셸에서 source하는 현재 방식은 스케줄 실행과 근본적으로 안 맞음 |
+| `NOTION_MCP_TOKEN`, `GITHUB_READ_TOKEN`, `LLM_API_KEY`(사람이 직접 실행하는 경로) | keyring 전환 후보 | 짧은 문자열 토큰이라 적합, UX 개선 효과 큼 |
+| `GOOGLE_WORKER_CREDENTIALS_FILE`, `GOOGLE_MCP_CREDENTIALS_FILE` | 파일 유지 + OS ACL 제한 | JSON을 keyring에 넣지 않음 (Windows blob 제한) |
+| `REMOTE_MCP_SECRET` | keyring보다 OAuth/OIDC 전환이 우선 | 장기 secret 자체를 없애는 게 keyring 저장보다 더 나은 개선 |
+
+제안된 구현 형태: 앱 전체를 keyring 종속으로 만들지 않고, 크리덴셜마다 `source: environment |
+keyring | file`을 명시하는 얇은 `CredentialResolver` 추상화를 두고, **silent fallback을
+금지**(한 source가 실패하면 fail-closed, 다른 source로 자동 전환하지 않음)한다. 이러면 이후
+`notion_worker: env → keyring`처럼 credential 하나씩 안전하게 옮길 수 있다.
+
+### 다음 세션에서 진행할 작업 (우선순위순, 아직 착수 안 함)
+1. **[버그 수정, 독립적]** `deployment/windows/uls-task.xml`의 `LogonType`을 실제 요구사항에
+   맞게 수정 (`Password` logon 또는 별도 service-account 모델 검토). `deployment/README.md`/
+   `.ko.md`에 로그아웃 상태 무인 실행이 필요하면 이 설정이 필수라는 점을 명시.
+2. `CredentialResolver` 추상화 설계 및 구현 (`src/uls/config/` 또는 신규 `src/uls/credentials/`
+   모듈 후보). config 스키마에 크리덴셜별 `source` 필드 추가, silent fallback 금지 원칙 테스트로
+   고정.
+3. `NOTION_MCP_TOKEN`, `GITHUB_READ_TOKEN`, `LLM_API_KEY`(interactive 경로)를 keyring 기반
+   source로 전환. Canvas sidecar의 `_explicit_os_keyring()` 패턴(explicit backend import +
+   `__module__` 검증)을 재사용/공유하는 방안 검토.
+4. 메인 worker용 "protected secret file + 최소 환경변수 launcher" 패턴 설계. macOS는
+   `~/Library/Application Support/Syllva/secrets/` 류 경로 + `0700`/`0600`, Windows는 NTFS DACL
+   (`icacls`)로 사용자/서비스 계정 한정. `.env`를 인터랙티브 셸에서 source하는 현재 안내를
+   스케줄러 문서에서 대체.
+5. 위 변경은 인증/자격증명 코드라 프로젝트 AGENTS.md 기준 "risky" 분류 — 구현 후 독립 웹 리뷰
+   (insane-review 또는 사용자가 직접 ChatGPT에 질문 붙여넣기) 필요. 이번 세션처럼 로컬 브라우저
+   자동화가 막힌 exec 환경이면 질문 텍스트를 사용자에게 직접 전달하는 방식으로 진행.
+
+## LMS 사이드카 Windows 크로스플랫폼 지원 및 문서 정합성 수정 (2026-09-14)
+
+사용자가 "windows 환경에서도 사용이 될텐데, keychain으로 관리하는 건 안 맞는 거 같은데?"라고
+지적해 [scripts/knu_lms_sync.py](scripts/knu_lms_sync.py)의 토큰 저장소를 macOS 전용에서
+macOS/Windows 양쪽 지원으로 일반화했다.
+
+### 코드 변경
+- `_explicit_mac_keyring()` → `_explicit_os_keyring()`로 이름 변경, `sys.platform`에 따라
+  macOS는 기존 `keyring.backends.macOS.Keyring`(`.keychain = None` 강제), Windows는
+  `keyring.backends.Windows.WinVaultKeyring`(Windows Credential Manager) 분기를 명시적으로
+  구성하고 각각 구체 클래스의 `__module__`을 검증해 위조된 backend를 거부한다.
+- `KEYCHAIN_BACKEND` 고정 상수를 `_expected_backend_module()` 함수로 교체해 config/manifest
+  binding 검증이 실행 시점의 실제 플랫폼을 반영하도록 했다. 다른 플랫폼에서 저장된 자격증명은
+  `keychain_platform_unsupported`/`config_binding_mismatch`로 명확히 거부되며 자동 fallback은 없다.
+- macOS 전용이던 `backend.keychain = None` 이중 방어 로직은 `hasattr(backend, "keychain")`으로
+  감싸 Windows `WinVaultKeyring`(이 속성이 없음)에서 무해하게 건너뛰도록 했다.
+- `tests/unit/test_knu_lms_sync.py`에 Windows 분기, 플랫폼 미지원 거부, backend 신원 위조 거부,
+  Windows에서 `read_enrolled_token` 정상 동작을 검증하는 테스트 6종을 추가했다. 기존 macOS 테스트는
+  함수명만 갱신해 그대로 통과한다 (전체 44/44 통과).
+- CI 매트릭스(`.github/workflows/ci.yml`)가 이미 `macos-latest`/`windows-latest` 양쪽에서
+  실행되므로 이번 변경으로 실제 Windows 러너에서도 해당 코드 경로가 검증된다.
+
+### 문서 정합성 수정
+- `docs/operator-guide/lms-sync.md`/`.ko.md`: 실제로 존재하지 않는 `CANVAS_ACCESS_TOKEN`
+  환경변수 서술을 제거하고, 실제 `scripts/knu_lms_sync.py enroll --confirm yes`
+  대화형 등록 → OS-native credential store 저장 흐름으로 정정했다.
+- `config.example.yaml`: 어떤 코드도 읽지 않는 가공의 `lms:` YAML 블록(이전 턴에서 잘못 추가됨,
+  존재하지 않는 `uls lms probe` 명령을 언급)을 제거하고 실제 사이드카 위치를 가리키는 주석으로 교체했다.
+- `config.example.yaml`, `docs/operator-guide/configuration.md`/`.ko.md`: 위 문서 점검 중
+  `course_key` 예시(`"COURSE-001"`)가 실제 `parse_course_key` 정규식과 불일치해
+  `tests/contract/test_worker_cli.py::test_cli_init_status_jobs_and_disabled_worker_no_credentials`가
+  깨지고 있던 것을 발견해 `"COURSE001"`로 수정했다 (이전 턴의 회귀, 이번 작업과 무관하게 발견·수정).
+- `docs/plans/knu-lms-hourly-*.md`는 과거 리뷰 시점의 승인 기록(engineering record)이라 이번
+  변경으로 소급 수정하지 않았다. 필요하면 별도 plan-review 사이클로 다룬다.
+
+### 검증
+- `pytest -q`: 1236 passed, 0 failed (수정 전 1개 실패 확인 → 수정 후 0개).
+- `ruff check scripts/knu_lms_sync.py tests/unit/test_knu_lms_sync.py`: 통과.
+- 커밋/푸시는 아직 하지 않았다. `insane-review` 독립 검토는 진행 예정이다.
+
 ## Phase 6–8 구현, v1.3 Intake Lane & LMS Sidecar 완료 및 main 머지 (2026-09-14)
 
 PR [#5 feat: v1.3 preview intake lane, LMS sidecar, and user docs](https://github.com/Just-Simple0/Syllva/pull/5)가 승인 및 머지되었으며, 로컬 `main` 브랜치 최신화(commit `6ea0459`)가 완료되었다.
@@ -27,12 +136,11 @@ PR [#5 feat: v1.3 preview intake lane, LMS sidecar, and user docs](https://githu
 ### 2. 현재 상태 및 후속 작업 (Next Steps)
 - **로컬 main 상태**: 작업 트리 clean, 최신 커밋 `6ea0459`(PR #5 merge).
 - **라이브 환경 배포 및 운영 검증 (사용자 인증정보 필요)**:
-  - 사용자 환경의 실제 Google Drive 및 Notion API 토큰, Canvas 토큰을 환경변수로 주입:
+  - 사용자 환경의 실제 Google Drive 및 Notion API 토큰을 환경변수로 주입 (Canvas 토큰은 환경변수가 아니라 아래 LMS 사이드카 절 참고):
     - `export GOOGLE_WORKER_CREDENTIALS_FILE=...`
     - `export NOTION_WORKER_TOKEN=...`
-    - `export CANVAS_ACCESS_TOKEN=...`
   - 진단 및 실행: `uls doctor` → `uls sync` → `uls run --max-jobs 20`.
-- **LMS 동기화 스케줄러**: 현재 `PAUSED` 상태이며, 토큰 주입 후 필요에 따라 활성화 가능.
+- **LMS 동기화 스케줄러**: 현재 `PAUSED` 상태. LMS 사이드카는 `config.yaml`과 무관한 별도 스크립트이며 아래 항목을 참고.
 
 ## Native Notion 대시보드 직접 적용 완료 (2026-09-13)
 

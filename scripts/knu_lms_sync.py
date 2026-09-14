@@ -2,7 +2,8 @@
 
 Snapshot/project are pure.  Collection and enrollment use explicit injected
 boundaries and are never exercised by this module's local self-tests against live
-Canvas or the real macOS Keychain.
+Canvas or the real OS credential store (macOS Keychain / Windows Credential
+Manager).
 """
 
 from __future__ import annotations
@@ -36,7 +37,6 @@ RUNTIME_DIR = PROJECT_ROOT / ".review" / "knu-lms-hourly"
 CONFIG_PATH = RUNTIME_DIR / "config.json"
 AUTH_MANIFEST_PATH = RUNTIME_DIR / "auth-manifest.json"
 KEYCHAIN_SERVICE = "Syllva KNU LMS"
-KEYCHAIN_BACKEND = "keyring.backends.macOS.Keyring"
 CONFIG_FIELDS = frozenset(
     {"version", "course", "origin", "service", "account", "backend", "resources", "issued_at", "expires_at"}
 )
@@ -449,7 +449,7 @@ def _config_from_document(document: Mapping[str, Any]) -> tuple[SyncConfig, dict
     expected_account = f"canvas.knu.ac.kr/course/{config.course_id}"
     if document.get("account") != expected_account:
         raise SyncError("config_binding_mismatch")
-    if document.get("backend") != KEYCHAIN_BACKEND:
+    if document.get("backend") != _expected_backend_module():
         raise SyncError("config_binding_mismatch")
     scope = document.get("resources")
     if scope != ["course", "assignments", "announcements", "modules"]:
@@ -513,21 +513,60 @@ def _ensure_participant(owner_id: str, scope_hash: str) -> None:
         raise SyncError("reservation_binding_mismatch") from exc
 
 
-def _explicit_mac_keyring() -> Any:
-    if sys.platform != "darwin":
-        raise SyncError("keychain_platform_unsupported")
-    try:
-        module = __import__("keyring.backends.macOS", fromlist=["Keyring"])
-        backend_type = module.Keyring
-        backend = backend_type()
-        backend.keychain = None
-        if backend.__class__.__module__ != "keyring.backends.macOS" or backend.keychain is not None:
-            raise SyncError("keychain_backend_invalid")
-        return backend
-    except SyncError:
-        raise
-    except Exception as exc:
-        raise SyncError("keychain_backend_unavailable") from exc
+def _expected_backend_module() -> str:
+    """Return the required backend dotted path for the current OS, or raise.
+
+    Evaluated fresh on every call (never cached) so that platform-specific
+    binding checks in config/manifest documents reflect the process's actual
+    ``sys.platform`` at call time, including test monkeypatching of
+    ``sys.platform``.
+    """
+    if sys.platform == "darwin":
+        return "keyring.backends.macOS.Keyring"
+    if sys.platform == "win32":
+        return "keyring.backends.Windows.WinVaultKeyring"
+    raise SyncError("keychain_platform_unsupported")
+
+
+def _explicit_os_keyring() -> Any:
+    """Return a freshly constructed, verified OS-native keyring backend.
+
+    macOS uses the explicit ``keyring.backends.macOS.Keyring`` class and
+    forces ``keychain = None`` so a ``KEYCHAIN_PATH``-style override cannot
+    redirect reads/writes away from the user's default system Keychain.
+    Windows uses the explicit ``keyring.backends.Windows.WinVaultKeyring``
+    class bound to Windows Credential Manager for the current OS user; it has
+    no analogous overridable vault-path property. Both branches verify the
+    constructed instance's concrete ``__module__`` to reject a
+    monkeypatched/global keyring backend substitution. No other platform is
+    supported; there is no fallback backend.
+    """
+    if sys.platform == "darwin":
+        try:
+            module = __import__("keyring.backends.macOS", fromlist=["Keyring"])
+            backend_type = module.Keyring
+            backend = backend_type()
+            backend.keychain = None
+            if backend.__class__.__module__ != "keyring.backends.macOS" or backend.keychain is not None:
+                raise SyncError("keychain_backend_invalid")
+            return backend
+        except SyncError:
+            raise
+        except Exception as exc:
+            raise SyncError("keychain_backend_unavailable") from exc
+    if sys.platform == "win32":
+        try:
+            module = __import__("keyring.backends.Windows", fromlist=["WinVaultKeyring"])
+            backend_type = module.WinVaultKeyring
+            backend = backend_type()
+            if backend.__class__.__module__ != "keyring.backends.Windows":
+                raise SyncError("keychain_backend_invalid")
+            return backend
+        except SyncError:
+            raise
+        except Exception as exc:
+            raise SyncError("keychain_backend_unavailable") from exc
+    raise SyncError("keychain_platform_unsupported")
 
 
 def _fixed_auth_document(config_document: dict[str, Any], state: str, scope_hash: str) -> dict[str, Any]:
@@ -545,7 +584,7 @@ def _fixed_auth_document(config_document: dict[str, Any], state: str, scope_hash
         },
         "service": KEYCHAIN_SERVICE,
         "account": f"canvas.knu.ac.kr/course/{config.course_id}",
-        "backend": KEYCHAIN_BACKEND,
+        "backend": _expected_backend_module(),
         "expires_at": config_document["expires_at"],
     }
 
@@ -589,10 +628,11 @@ def read_enrolled_token(
     for field in ("origin", "course", "service", "account", "backend", "expires_at"):
         if manifest.get(field) != expected[field]:
             raise SyncError("auth_manifest_binding_mismatch")
-    backend = _explicit_mac_keyring()
-    backend.keychain = None
-    if backend.keychain is not None:
-        raise SyncError("keychain_backend_invalid")
+    backend = _explicit_os_keyring()
+    if hasattr(backend, "keychain"):
+        backend.keychain = None
+        if backend.keychain is not None:
+            raise SyncError("keychain_backend_invalid")
     try:
         token = backend.get_password(KEYCHAIN_SERVICE, f"canvas.knu.ac.kr/course/{config.course_id}")
     except Exception as exc:
@@ -627,10 +667,11 @@ def enroll_keychain(
             raise SyncError("credential_noecho_unavailable") from None
         if not isinstance(token, str) or not token or any(not 0x21 <= ord(char) <= 0x7E for char in token):
             raise SyncError("credential_invalid")
-        selected_backend = backend if backend is not None else _explicit_mac_keyring()
-        selected_backend.keychain = None
-        if selected_backend.keychain is not None:
-            raise SyncError("keychain_backend_invalid")
+        selected_backend = backend if backend is not None else _explicit_os_keyring()
+        if hasattr(selected_backend, "keychain"):
+            selected_backend.keychain = None
+            if selected_backend.keychain is not None:
+                raise SyncError("keychain_backend_invalid")
         try:
             selected_backend.set_password(KEYCHAIN_SERVICE, f"canvas.knu.ac.kr/course/{config.course_id}", token)
         except Exception as exc:
