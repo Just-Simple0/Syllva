@@ -2,7 +2,7 @@
 
 Real Windows APIs cannot run on this test host, so the Windows branches are
 exercised by monkeypatching the narrow ctypes-calling seams
-(_windows_owner_sid / _windows_current_user_sid) and by injecting a fake
+(_windows_owner_sid / _windows_default_owner_sid) and by injecting a fake
 msvcrt module into sys.modules, while IS_WINDOWS is monkeypatched true. The
 POSIX branches are exercised for real, unchanged from before this module
 existed. The real Windows ctypes calls are verified by the project\'s
@@ -42,14 +42,14 @@ def test_owns_path_posix_rejects_stat_failure(monkeypatch: pytest.MonkeyPatch, t
 def test_owns_path_windows_matches_current_sid(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(fsplat, "IS_WINDOWS", True)
     monkeypatch.setattr(fsplat, "_windows_owner_sid", lambda path: "S-1-5-21-SAME")
-    monkeypatch.setattr(fsplat, "_windows_current_user_sid", lambda: "S-1-5-21-SAME")
+    monkeypatch.setattr(fsplat, "_windows_default_owner_sid", lambda: "S-1-5-21-SAME")
     assert fsplat.owns_path(tmp_path / "any") is True
 
 
 def test_owns_path_windows_rejects_mismatched_sid(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(fsplat, "IS_WINDOWS", True)
     monkeypatch.setattr(fsplat, "_windows_owner_sid", lambda path: "S-1-5-21-OWNER")
-    monkeypatch.setattr(fsplat, "_windows_current_user_sid", lambda: "S-1-5-21-OTHER")
+    monkeypatch.setattr(fsplat, "_windows_default_owner_sid", lambda: "S-1-5-21-OTHER")
     assert fsplat.owns_path(tmp_path / "any") is False
 
 
@@ -60,7 +60,7 @@ def test_owns_path_windows_fails_closed_on_readback_error(monkeypatch: pytest.Mo
         raise OSError("simulated ctypes failure")
 
     monkeypatch.setattr(fsplat, "_windows_owner_sid", _raise)
-    monkeypatch.setattr(fsplat, "_windows_current_user_sid", lambda: "S-1-5-21-OTHER")
+    monkeypatch.setattr(fsplat, "_windows_default_owner_sid", lambda: "S-1-5-21-OTHER")
     assert fsplat.owns_path(tmp_path / "any") is False
 
 
@@ -163,13 +163,21 @@ def test_try_lock_and_unlock_use_fcntl_on_posix(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(not fsplat.IS_WINDOWS, reason="diagnostic for the real Windows ctypes SID path only")
-def test_windows_sid_helpers_smoke_diagnostic(tmp_path: Path) -> None:
-    """Not a real assertion of correctness -- a temporary diagnostic that
-    lets a real Windows CI failure surface the exact ctypes/WinError detail
-    (owns_path()/callers only see the swallowed OSError) instead of only
-    'returned False'."""
-    current = fsplat._windows_current_user_sid()
-    assert current, "current-user SID lookup returned empty"
+def test_windows_sid_helpers_match_for_a_self_created_file(tmp_path: Path) -> None:
+    """Real end-to-end check (no mocking) on an actual Windows host: the
+    real ctypes calls must agree that a file this same process just
+    created is owned by this process, using the exact same TokenOwner vs
+    file-owner-SID comparison owns_path() performs in production.
+
+    This was a real regression once: comparing TokenUser (a personal SID)
+    against the file's owner SID always failed on GitHub's windows-latest
+    runner, because that runner's Administrator-context token stamps new
+    files with the BUILTIN Administrators group SID (S-1-5-32-544), not
+    the signed-in user's personal SID. TokenOwner matches what NTFS
+    actually assigns.
+    """
+    current = fsplat._windows_default_owner_sid()
+    assert current, "default-owner SID lookup returned empty"
     target = tmp_path / "owned"
     target.write_text("x", encoding="utf-8")
     owner = fsplat._windows_owner_sid(target)

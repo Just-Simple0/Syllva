@@ -103,7 +103,7 @@ def test_full_reservation_cycle_on_simulated_windows(
     real Windows runner much later."""
     monkeypatch.setattr(lock.fsplat, "IS_WINDOWS", True)
     monkeypatch.setattr(lock.fsplat, "_windows_owner_sid", lambda path: "S-1-5-21-SAME")
-    monkeypatch.setattr(lock.fsplat, "_windows_current_user_sid", lambda: "S-1-5-21-SAME")
+    monkeypatch.setattr(lock.fsplat, "_windows_default_owner_sid", lambda: "S-1-5-21-SAME")
 
     def locking(fd, mode, _nbytes):
         del fd, mode

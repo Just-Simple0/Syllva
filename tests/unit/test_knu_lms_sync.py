@@ -1132,7 +1132,7 @@ def test_read_enrolled_token_full_path_on_simulated_windows(
     monkeypatch.setattr(sync.sys, "platform", "win32")
     monkeypatch.setattr(sync.fsplat, "IS_WINDOWS", True)
     monkeypatch.setattr(sync.fsplat, "_windows_owner_sid", lambda path: "S-1-5-21-SAME")
-    monkeypatch.setattr(sync.fsplat, "_windows_current_user_sid", lambda: "S-1-5-21-SAME")
+    monkeypatch.setattr(sync.fsplat, "_windows_default_owner_sid", lambda: "S-1-5-21-SAME")
     issued = dt.datetime(2026, 9, 1, tzinfo=dt.UTC)
     now = dt.datetime(2026, 9, 13, tzinfo=dt.UTC)
     document = _auth_document(issued=issued, expires=dt.datetime(2026, 9, 30, tzinfo=dt.UTC))

@@ -50,7 +50,7 @@ def owns_path(path: Path, *, posix_stat: os.stat_result | None = None) -> bool:
         except OSError:
             return False
     try:
-        return _windows_owner_sid(path) == _windows_current_user_sid()
+        return _windows_owner_sid(path) == _windows_default_owner_sid()
     except OSError:
         return False
 
@@ -188,28 +188,39 @@ def _win32_dlls() -> tuple[object, object]:
     return advapi32, kernel32
 
 
-def _windows_current_user_sid() -> str:
+def _windows_default_owner_sid() -> str:
+    """Return this process token's default-owner SID for new objects.
+
+    Deliberately TokenOwner (4), not TokenUser (1). NTFS stamps a newly
+    created file's owner with the token's default-owner SID, which on an
+    elevated/Administrator-context token (the common case for CI runners)
+    is often the BUILTIN Administrators group SID (S-1-5-32-544), not the
+    signed-in user's personal SID -- confirmed against a real GitHub
+    windows-latest runner, where TokenUser returned a personal
+    S-1-5-21-...-500 SID but a file this same process had just created
+    reported an owner of S-1-5-32-544. Comparing against TokenOwner
+    matches what NTFS actually assigns, so provable same-process
+    ownership works in both the personal-owner and group-owner cases.
+    """
     import ctypes
     from ctypes import wintypes
 
     advapi32, kernel32 = _win32_dlls()
     token_query = 0x0008
-    token_user = 1
+    token_owner = 4
 
     token = wintypes.HANDLE()
     if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), token_query, ctypes.byref(token)):
         raise OSError(ctypes.get_last_error(), "OpenProcessToken failed")
     try:
         size = wintypes.DWORD(0)
-        advapi32.GetTokenInformation(token, token_user, None, 0, ctypes.byref(size))
+        advapi32.GetTokenInformation(token, token_owner, None, 0, ctypes.byref(size))
         if size.value == 0:
             raise OSError("GetTokenInformation size query failed")
         buf = ctypes.create_string_buffer(size.value)
-        if not advapi32.GetTokenInformation(token, token_user, buf, size, ctypes.byref(size)):
+        if not advapi32.GetTokenInformation(token, token_owner, buf, size, ctypes.byref(size)):
             raise OSError(ctypes.get_last_error(), "GetTokenInformation failed")
-        # TOKEN_USER is { SID_AND_ATTRIBUTES User } and SID_AND_ATTRIBUTES is
-        # { PSID Sid; DWORD Attributes }, so the first pointer-sized field of
-        # the buffer is the PSID.
+        # TOKEN_OWNER is { PSID Owner }, a single pointer-sized field.
         sid_ptr = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p))[0]
         return _sid_to_string(sid_ptr)
     finally:
