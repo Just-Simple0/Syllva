@@ -258,6 +258,9 @@ def test_worker_preserves_user_replaced_transcript_pointer(tmp_path, monkeypatch
         ),
         pytest.param({'capabilities': {'canEdit': False, 'canMoveItemWithinDrive': True}}, id='cannot_edit'),
         pytest.param({'permissions': None}, id='missing_permission_readback'),
+        pytest.param({'trashed': None}, id='trashed_missing_readback_null'),
+        pytest.param({'trashed': 'true'}, id='trashed_malformed_string'),
+        pytest.param({'trashed': 1}, id='trashed_malformed_integer'),
     ],
 )
 def test_native_worker_rejects_unsafe_derived_folder(tmp_path, monkeypatch, overrides):

@@ -598,6 +598,9 @@ def _metadata(value: Any) -> DriveMetadata:
             size = int(size)
         except (TypeError, ValueError):
             raise SourceUnavailableError("Drive size is malformed") from None
+    raw_trashed = value.get("trashed")
+    if not isinstance(raw_trashed, bool):
+        raise SourceUnavailableError("Drive trashed flag is malformed")
     raw_permissions = value.get("permissions")
     permission_types: tuple[str, ...] = ()
     permission_roles: tuple[tuple[str, str], ...] = ()
@@ -653,7 +656,7 @@ def _metadata(value: Any) -> DriveMetadata:
         parents=tuple(parents),
         modified_time=value.get("modifiedTime") if isinstance(value.get("modifiedTime"), str) else None,
         size=size,
-        trashed=value.get("trashed") is True,
+        trashed=raw_trashed,
         owned_by_me=value.get("ownedByMe") if isinstance(value.get("ownedByMe"), bool) else None,
         web_view_link=value.get("webViewLink") if isinstance(value.get("webViewLink"), str) else None,
         md5_checksum=value.get("md5Checksum") if isinstance(value.get("md5Checksum"), str) else None,
