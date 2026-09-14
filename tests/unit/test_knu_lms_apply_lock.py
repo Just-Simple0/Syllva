@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -91,3 +92,31 @@ def test_invalid_existing_record_blocks_instead_of_resetting(tmp_path: Path) -> 
     with pytest.raises(lock.ReservationError, match="reservation_invalid"):
         lock.Reservation.begin(runtime, SCOPE)
     assert path.read_text() == '{"state":"active"}'
+
+
+def test_full_reservation_cycle_on_simulated_windows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Exercise the entire begin/complete/close path (not just backend
+    selection) with IS_WINDOWS simulated true, so a Unix-only primitive
+    anywhere in this call chain fails this test instead of only failing on a
+    real Windows runner much later."""
+    monkeypatch.setattr(lock.fsplat, "IS_WINDOWS", True)
+    monkeypatch.setattr(lock.fsplat, "_windows_owner_sid", lambda path: "S-1-5-21-SAME")
+    monkeypatch.setattr(lock.fsplat, "_windows_current_user_sid", lambda: "S-1-5-21-SAME")
+
+    def locking(fd, mode, _nbytes):
+        del fd, mode
+
+    fake_msvcrt = SimpleNamespace(locking=locking, LK_NBLCK=1, LK_UNLCK=2)
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    runtime = tmp_path / "runtime"
+    reservation = lock.Reservation.begin(runtime, SCOPE)
+    try:
+        assert (runtime / "active-run.json").exists()
+        reservation.complete()
+    finally:
+        reservation.close()
+    second = lock.Reservation.begin(runtime, SCOPE)
+    second.complete()
+    second.close()

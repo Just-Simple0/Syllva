@@ -83,6 +83,36 @@ class DriveMetadata:
         return self.file_id
 
 
+def require_private_ownership(metadata: DriveMetadata, *, context: str = "Drive folder") -> None:
+    """Enforce the private-ownership/sharing boundary for a write destination.
+
+    Every writer that treats a Drive folder as an exclusively USER-owned,
+    non-shared-drive destination must apply this exact boundary. Both the
+    semester intake layout validator and the legacy transcript writer share
+    it so a misconfigured folder ID or a folder whose sharing changed after
+    initial setup cannot silently become an acceptable write target.
+
+    Callers remain responsible for identity, mime-type, and trashed checks
+    appropriate to their own context; this function only enforces ownership
+    and sharing. Ambiguous (None) readback is treated as unavailable, never
+    as an implicit pass.
+    """
+    if metadata.owned_by_me is not True:
+        raise PolicyDeniedError(f"{context} is not USER owned")
+    if metadata.drive_id is not None:
+        raise PolicyDeniedError(f"{context} is in a shared drive")
+    if metadata.permission_count is None or metadata.owner_only is None:
+        raise SourceUnavailableError(f"{context} lacks owner permission readback")
+    if metadata.owner_only is not True:
+        raise PolicyDeniedError(f"{context} is not solely USER owned")
+    if metadata.is_publicly_shared is None:
+        raise SourceUnavailableError(f"{context} lacks privacy readback")
+    if metadata.is_publicly_shared:
+        raise PolicyDeniedError(f"{context} has broad sharing")
+    if metadata.can_edit is not True or metadata.can_move is not True:
+        raise SourceUnavailableError(f"{context} lacks worker capabilities")
+
+
 @runtime_checkable
 class DriveWorkerPort(Protocol):
     """Minimal worker mutation/readback contract, independent of Google SDK."""
@@ -665,4 +695,5 @@ __all__ = [
     "InMemoryDriveWorker",
     "UnsupportedConnectorDrivePort",
     "ensure_marked_folder",
+    "require_private_ownership",
 ]

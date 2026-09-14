@@ -1119,3 +1119,34 @@ def test_registry_project_cli_requires_prior_and_observed_on(tmp_path: Path) -> 
     assert json.loads(completed.stdout) == {
         "status": "failed", "error": "semester_runtime_binding_required"
     }
+
+
+def test_read_enrolled_token_full_path_on_simulated_windows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Exercise the entire config/manifest read plus ownership-boundary path
+    (not just keyring backend selection) with the process's own os.name
+    branch simulated as Windows, so a Unix-only primitive anywhere in this
+    call chain (os.getuid/O_NOFOLLOW/O_DIRECTORY/fchmod) fails this test
+    instead of only failing on a real Windows runner much later."""
+    monkeypatch.setattr(sync.sys, "platform", "win32")
+    monkeypatch.setattr(sync.fsplat, "IS_WINDOWS", True)
+    monkeypatch.setattr(sync.fsplat, "_windows_owner_sid", lambda path: "S-1-5-21-SAME")
+    monkeypatch.setattr(sync.fsplat, "_windows_current_user_sid", lambda: "S-1-5-21-SAME")
+    issued = dt.datetime(2026, 9, 1, tzinfo=dt.UTC)
+    now = dt.datetime(2026, 9, 13, tzinfo=dt.UTC)
+    document = _auth_document(issued=issued, expires=dt.datetime(2026, 9, 30, tzinfo=dt.UTC))
+    scope_hash = _install_auth_files(monkeypatch, tmp_path, document)
+    enrolled = sync._fixed_auth_document(document, "enrolled", scope_hash)
+    sync.AUTH_MANIFEST_PATH.write_text(json.dumps(enrolled), encoding="utf-8")
+    sync.AUTH_MANIFEST_PATH.chmod(0o600)
+
+    class WindowsBackend:
+        def get_password(self, _service: str, _account: str) -> str:
+            return "windows-token"
+
+    monkeypatch.setattr(sync, "_explicit_os_keyring", lambda: WindowsBackend())
+    token, config, returned_scope_hash = sync.read_enrolled_token(now=now)
+    assert token == "windows-token"
+    assert config.course_id == 12345
+    assert returned_scope_hash == scope_hash

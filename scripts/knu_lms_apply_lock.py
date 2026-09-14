@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import fcntl
 import json
 import os
 import re
@@ -14,6 +13,9 @@ import tempfile
 import uuid
 from pathlib import Path
 from typing import Any, NoReturn, TextIO
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _lms_platform as fsplat
 
 RUNTIME = Path(__file__).resolve().parents[1] / ".review" / "knu-lms-hourly"
 
@@ -27,20 +29,21 @@ def prepare_directory(runtime: Path) -> None:
         if candidate.is_symlink():
             raise ReservationError("runtime_path_invalid")
     runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if not runtime.is_dir() or runtime.stat().st_uid != os.getuid():
+    if not runtime.is_dir() or not fsplat.owns_path(runtime):
         raise ReservationError("runtime_path_invalid")
-    os.chmod(runtime, 0o700)
+    fsplat.chmod_if_supported(runtime, 0o700)
 
 
 def read_record(path: Path) -> dict[str, Any] | None:
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = fsplat.open_nofollow(path, os.O_RDONLY)
     except FileNotFoundError:
         return None
     try:
         info = os.fstat(fd)
-        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
-                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 16384):
+        if (not stat.S_ISREG(info.st_mode) or not fsplat.owns_path(path, posix_stat=info)
+                or (not fsplat.IS_WINDOWS and stat.S_IMODE(info.st_mode) != 0o600)
+                or info.st_size > 16384):
             raise ReservationError("reservation_invalid")
         with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as stream:
             raw = json.load(stream)
@@ -64,7 +67,7 @@ def atomic_record(path: Path, payload: dict[str, Any]) -> None:
         raise ReservationError("reservation_path_invalid")
     fd, temporary = tempfile.mkstemp(prefix=".reservation-", dir=path.parent)
     with os.fdopen(fd, "w", encoding="utf-8") as stream:
-        os.fchmod(stream.fileno(), 0o600)
+        fsplat.fchmod_if_supported(stream.fileno(), 0o600)
         json.dump(payload, stream, ensure_ascii=False, sort_keys=True, allow_nan=False)
         stream.write("\n")
         stream.flush()
@@ -72,11 +75,7 @@ def atomic_record(path: Path, payload: dict[str, Any]) -> None:
     if path.is_symlink():
         raise ReservationError("reservation_path_invalid")
     os.replace(temporary, path)
-    parent_fd = os.open(path.parent, os.O_RDONLY)
-    try:
-        os.fsync(parent_fd)
-    finally:
-        os.close(parent_fd)
+    fsplat.sync_directory(path.parent)
 
 
 class Reservation:
@@ -91,16 +90,15 @@ class Reservation:
         if not re.fullmatch(r"[0-9a-f]{64}", scope_hash):
             raise ReservationError("scope_hash_invalid")
         prepare_directory(runtime)
-        fd = os.open(runtime / "apply.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        lock_path = runtime / "apply.lock"
+        fd = fsplat.open_nofollow(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
         try:
             info = os.fstat(fd)
-            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
-                    or stat.S_IMODE(info.st_mode) != 0o600):
+            if (not stat.S_ISREG(info.st_mode) or not fsplat.owns_path(lock_path, posix_stat=info)
+                    or (not fsplat.IS_WINDOWS and stat.S_IMODE(info.st_mode) != 0o600)):
                 raise ReservationError("lock_path_invalid")
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as exc:
-                raise ReservationError("run_busy") from exc
+            if not fsplat.try_lock_exclusive(fd):
+                raise ReservationError("run_busy")
             previous = read_record(runtime / "active-run.json")
             if previous is not None and previous["state"] != "completed":
                 raise ReservationError("interrupted_reservation_blocked")
