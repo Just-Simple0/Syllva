@@ -1,11 +1,14 @@
 # Authenticated remote development profile
 
-The built-in profile uses a short-lived bearer credential over **direct TLS**.
-It is development-only. It does not advertise OAuth or promise that a client
-requiring OAuth can connect. Keep such a client DEPLOYMENT_DEFERRED until an
-OAuth/OIDC gateway/provider has been configured and validated separately.
+[한국어](README.ko.md)
 
-Configure the `remote_mcp` section:
+The built-in remote profile is for **development validation**, not a production OAuth deployment.
+
+It uses a short-lived bearer credential over direct TLS. A target client that requires OAuth/OIDC or another gateway must remain deployment-deferred until that external auth layer and client E2E have been configured and validated separately.
+
+## Configuration
+
+Representative `remote_mcp` configuration:
 
 ```yaml
 remote_mcp:
@@ -19,25 +22,30 @@ remote_mcp:
   tls_keyfile: /private/path/privkey.pem
 ```
 
-Use a certificate trusted by the client and a hostname that reaches this
-listener through a private network or explicitly configured network route.
-The listener remains loopback unless you explicitly configure a different bind
-address. No firewall, DNS, tunnel or public endpoint is created automatically.
+Use a certificate trusted by the target client and an explicitly configured network route. The listener remains loopback unless you deliberately configure a different bind address. Syllva does not create DNS, firewall rules, tunnels, or a public endpoint for you.
 
-Provision a random URL-safe token of at least 32 characters through private
-secret storage and set `REMOTE_MCP_EXPIRES_AT` to an absolute Unix timestamp at
-most one hour in the future. Start `uls --config /absolute/config.yaml mcp remote`.
-Token values never belong in config, client instructions or command arguments.
-Restart with a new credential after expiry; restart invalidates old ephemeral
-capabilities. Do not set up an automatic perpetual extension of the same token.
+## Bearer credential
 
-All HTTP endpoints, including `/health`, require HTTPS, exact Host, an absent or
-matching Origin, and one valid Authorization Bearer header. Forwarded headers are
-not trusted. A TLS-terminating proxy that forwards plain HTTP is intentionally
-unsupported by this built-in profile. The MCP app runs one process; do not add
-multiple workers because capabilities are memory-only.
+Provision a random URL-safe token of at least 32 characters through private secret storage and set `REMOTE_MCP_EXPIRES_AT` to an absolute Unix timestamp no more than one hour in the future for this development profile.
 
-The single user's bearer credential can reach their ULS corpus, subject to the
-engine's domain policies. It is a high-value secret, not a per-course ACL.
-Use only separate read-only Drive/Notion/GitHub credentials in the MCP process.
-The worker is neither started by nor reachable as an MCP tool.
+Start:
+
+```bash
+uls --config /absolute/config.yaml mcp remote
+```
+
+Token values must not appear in config files, client instructions, command arguments, logs, or PR/issue text. Restart with a new credential after expiry; do not turn one development bearer into a silently perpetual credential.
+
+## HTTP/TLS boundary
+
+The checked-in profile expects direct TLS and authenticated endpoints. Exact Host/Origin/Authorization checks are part of the intended boundary. Forwarded headers are not a substitute for explicit trust configuration.
+
+A TLS-terminating proxy that forwards plain HTTP changes the trust boundary and is intentionally not represented as a validated production architecture here.
+
+The MCP app should remain a single process for the in-memory capability model; do not add multiple workers without redesigning that state model.
+
+## Permissions
+
+The bearer credential is high-value access to the configured user's Syllva corpus subject to engine policy. It is not a per-course ACL.
+
+Use only the separate read-only Drive/Notion/GitHub credentials intended for MCP retrieval. The ingestion worker is not started by and is not exposed as an MCP tool.

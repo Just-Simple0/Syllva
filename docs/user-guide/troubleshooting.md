@@ -1,27 +1,43 @@
-# 문제 해결
+# Troubleshooting
 
-## 기본 상태
+[한국어](troubleshooting.ko.md) · [User Guide](README.md)
 
-사용자: `uls doctor`, `uls status`, `uls jobs`를 순서대로 실행한다. `doctor`가
-credential separation 또는 provider ID를 지적하면 값을 문서에 붙여 넣지 말고
-운영자가 private config와 provider 권한을 확인한다. `uls behavior lint` 실패는
-client projection을 배포하기 전에 해결한다.
+## I cannot see a course/session
 
-## LMS 상태
+- Confirm you are looking at the correct semester.
+- Enter the course first; sessions are intentionally not global navigation items.
+- If the expected session is still missing, ask the operator to check the exact course relation/binding instead of creating a duplicate record.
 
-`partial`은 pagination, resource shape, bounded timeout 또는 하나의 과목 수집이
-끝나지 않았다는 뜻이다. `failed`는 identity/config/route 검증 실패다.
-`needs_verification`은 API course code 또는 registry binding이 확인되지 않은
-상태다. 이 상태를 title, 파일명, module 개수로 보완하지 않는다. 학술 과목 중
-하나라도 complete가 아니면 semester apply-ready가 아니다. 비교과 후보는 별도
-관찰 결과로 남고 학술 분모에는 넣지 않는다.
+## A new file is not being processed
 
-Drive에 파일을 넣었다고 자동 intake가 시작되거나 Notion page가 생성된다고 가정하지
-않는다. 현재 실행 가능한 경로는 명시적 transcript registration과 bounded 실행 경로다.
-PDF/OCR/PPT/STT, upload watching, automatic material/session creation은 기본 사용자
-흐름에 포함되지 않는다.
+A file appearing in Drive does not automatically prove that intake is configured and ready.
 
-MCP 연결이 안 되면 local server 실행 경로, client가 지원하는 transport, 계정별
-remote 연결 가능 여부를 운영자와 확인한다. native Notion readback에서 source
-binding, parent/privacy, source hash, 또는 USER edit conflict가 보이면 connector
-apply를 중단하고 fixed error code와 sanitized receipt만 전달한다.
+- Open **Files** and check whether an intake/request row exists.
+- Make sure any required course/session/date/intent fields are filled.
+- Confirm that you explicitly submitted the request and did not cancel it.
+- If the request says **Needs Input**, provide the missing information.
+- If it says **Reconcile Required** or **Failed**, ask the operator to inspect the worker/provider evidence before retrying.
+
+## The AI cannot find my material
+
+Possible causes include:
+
+- the client is not actually connected to Syllva MCP;
+- the material is still Partial/not current;
+- the question does not identify enough scope;
+- the source is outside the authorized course/session/material range;
+- the client profile has not completed live validation in your environment.
+
+Do not solve this by pasting private credentials or entire private source files into a prompt. Ask the operator to check `uls doctor`, MCP registration, and source readiness.
+
+## The AI says context is ambiguous
+
+Choose the correct candidate when the client presents course/session/material options. Ambiguity is a normal fail-closed behavior; guessing the first candidate would be less safe.
+
+## To DO/calendar looks empty
+
+An empty view can simply mean that no real records have been added. Do not create fake assignments or exam dates just to make the dashboard look populated.
+
+## I need operator help
+
+Give the operator the visible status/error code and the affected course/session/request identity. Do not send secrets. Operator diagnostics begin with `uls doctor`, `uls status`, and `uls jobs` as described in the [Operator Guide](../operator-guide/README.md).
