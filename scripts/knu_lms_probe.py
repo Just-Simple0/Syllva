@@ -864,17 +864,35 @@ def _run_bounded_aside_repl(script: str, timeout: float) -> tuple[bytes, bytes]:
         except (OSError, subprocess.TimeoutExpired):
             pass
 
-    events: queue.Queue[tuple[str, bytes]] = queue.Queue()
+    # Event kind is one of "data" (chunk is non-empty), "eof" (the stream
+    # ended cleanly, a real zero-length read), "overflow" (this stream
+    # alone would exceed MAX_ASIDE_OUTPUT_BYTES), or "error" (os.read()
+    # raised OSError). "eof" and "error" are kept distinct on purpose: an
+    # earlier version conflated a read failure with a clean stream close
+    # (both put a b"" chunk), which let an incomplete/corrupted read
+    # return a "successful" result whenever the other stream and the exit
+    # code looked fine. The byte budget is enforced inside the reader
+    # thread itself, before anything is queued, not only by the consumer
+    # after dequeuing -- a fast producer paired with a slow consumer could
+    # otherwise queue arbitrarily more than MAX_ASIDE_OUTPUT_BYTES before
+    # the consumer-side check ever ran.
+    events: queue.Queue[tuple[str, str, bytes]] = queue.Queue()
 
     def reader(name: str, stream: TextIO) -> None:
+        total = 0
         try:
             while True:
                 chunk = os.read(stream.fileno(), READ_CHUNK_BYTES)
-                events.put((name, chunk))
                 if not chunk:
+                    events.put((name, "eof", b""))
                     return
+                if total + len(chunk) > MAX_ASIDE_OUTPUT_BYTES:
+                    events.put((name, "overflow", b""))
+                    return
+                total += len(chunk)
+                events.put((name, "data", chunk))
         except OSError:
-            events.put((name, b""))
+            events.put((name, "error", b""))
 
     readers = {"stdout": process.stdout, "stderr": process.stderr}
     threads = [
@@ -893,17 +911,19 @@ def _run_bounded_aside_repl(script: str, timeout: float) -> tuple[bytes, bytes]:
                 kill_and_reap()
                 raise ProbeError("browser_timeout", incomplete=True)
             try:
-                name, chunk = events.get(timeout=min(remaining, 0.1))
+                name, kind, chunk = events.get(timeout=min(remaining, 0.1))
             except queue.Empty:
                 continue
-            if not chunk:
+            if kind == "eof":
                 open_streams.discard(name)
                 continue
-            buffer = buffers[name]
-            if len(buffer) + len(chunk) > MAX_ASIDE_OUTPUT_BYTES:
+            if kind == "overflow":
                 kill_and_reap()
                 raise ProbeError("browser_output_too_large")
-            buffer.extend(chunk)
+            if kind == "error":
+                kill_and_reap()
+                raise ProbeError("browser_transport_unavailable")
+            buffers[name].extend(chunk)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             kill_and_reap()
