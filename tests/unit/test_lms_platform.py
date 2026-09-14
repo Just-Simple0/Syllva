@@ -160,3 +160,17 @@ def test_try_lock_and_unlock_use_fcntl_on_posix(tmp_path: Path) -> None:
         fsplat.unlock(fd)
     finally:
         os.close(fd)
+
+
+@pytest.mark.skipif(not fsplat.IS_WINDOWS, reason="diagnostic for the real Windows ctypes SID path only")
+def test_windows_sid_helpers_smoke_diagnostic(tmp_path: Path) -> None:
+    """Not a real assertion of correctness -- a temporary diagnostic that
+    lets a real Windows CI failure surface the exact ctypes/WinError detail
+    (owns_path()/callers only see the swallowed OSError) instead of only
+    'returned False'."""
+    current = fsplat._windows_current_user_sid()
+    assert current, "current-user SID lookup returned empty"
+    target = tmp_path / "owned"
+    target.write_text("x", encoding="utf-8")
+    owner = fsplat._windows_owner_sid(target)
+    assert owner == current, f"owner={owner!r} current={current!r}"
