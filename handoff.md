@@ -1,6 +1,38 @@
 # Syllva (ULS v1.2) — Handoff
 
-**Last updated:** 2026-09-13
+**Last updated:** 2026-09-14
+
+## Phase 6–8 구현, v1.3 Intake Lane & LMS Sidecar 완료 및 main 머지 (2026-09-14)
+
+PR [#5 feat: v1.3 preview intake lane, LMS sidecar, and user docs](https://github.com/Just-Simple0/Syllva/pull/5)가 승인 및 머지되었으며, 로컬 `main` 브랜치 최신화(commit `6ea0459`)가 완료되었다.
+
+### 1. 주요 구현 및 산출물
+- **Multi-course Drive Intake Lane (`src/uls/intake/`, `src/uls/adapters/`)**:
+  - Drive 단일 업로드함(`+ 업로드`) 기반 파일 감지, 다중 과목 매핑 및 대상 폴더(Recordings/Materials) 이동.
+  - Notion 5개 Native Data Sources(Academic Courses, Sessions, Materials, File Intake, Input Request) 연동 및 durable `pending_request_key` 기반 중복 방지.
+  - `RequestReceipt` 및 `HumanApprovalApplier` 연동, `Submitted`/`Cancelled` 엄격한 identity 검증.
+  - 빈 PDF 페이지 위치 보존 및 marker-free 청크 분할 개선.
+- **KNU Canvas LMS Sidecar (`scripts/knu_lms_*.py`)**:
+  - `scripts/knu_lms_probe.py`: Canvas API 토큰 기반 과목 및 과제/강의자료 탐색.
+  - `scripts/knu_lms_sync.py`: 매시간(hourly) 다중 과목 메타데이터 안전 동기화 및 snapshot 생성.
+  - `scripts/knu_lms_apply_lock.py`: 단일 활성 worker 락 기반 경합 방지.
+- **문서화 (Documentation)**:
+  - `README.md`: `pdf` extra 의존성, v1.3 preview intake 및 LMS sidecar 명시.
+  - `config.example.yaml`: `semester_registries`, `semester_workspaces`, `lms` 섹션 템플릿 추가.
+  - `docs/user-guide/`: `getting-started.md`, `daily-use.md`, `mcp-and-clients.md`, `troubleshooting.md` 초보자 가이드 완비.
+- **테스트 및 코드 품질**:
+  - 1,231개 전체 테스트 통과 (`pytest`), `ruff` 및 `mypy` clean.
+  - Web ChatGPT 및 Gemini 독립 리뷰 전 트랙 GO 판정 수용.
+
+### 2. 현재 상태 및 후속 작업 (Next Steps)
+- **로컬 main 상태**: 작업 트리 clean, 최신 커밋 `6ea0459`(PR #5 merge).
+- **라이브 환경 배포 및 운영 검증 (사용자 인증정보 필요)**:
+  - 사용자 환경의 실제 Google Drive 및 Notion API 토큰, Canvas 토큰을 환경변수로 주입:
+    - `export GOOGLE_WORKER_CREDENTIALS_FILE=...`
+    - `export NOTION_WORKER_TOKEN=...`
+    - `export CANVAS_ACCESS_TOKEN=...`
+  - 진단 및 실행: `uls doctor` → `uls sync` → `uls run --max-jobs 20`.
+- **LMS 동기화 스케줄러**: 현재 `PAUSED` 상태이며, 토큰 주입 후 필요에 따라 활성화 가능.
 
 ## Native Notion 대시보드 직접 적용 완료 (2026-09-13)
 
