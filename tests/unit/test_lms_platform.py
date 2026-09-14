@@ -73,11 +73,13 @@ def test_fchmod_and_chmod_are_noop_on_simulated_windows(
         raise AssertionError("POSIX chmod/fchmod must not run on simulated Windows")
 
     monkeypatch.setattr(os, "chmod", _fail)
-    monkeypatch.setattr(os, "fchmod", _fail)
+    # os.fchmod does not exist as an attribute on real Windows at all.
+    monkeypatch.setattr(os, "fchmod", _fail, raising=False)
     fsplat.chmod_if_supported(tmp_path, 0o700)
     fsplat.fchmod_if_supported(0, 0o600)
 
 
+@pytest.mark.skipif(fsplat.IS_WINDOWS, reason="POSIX mode bits are not meaningful on Windows")
 def test_fchmod_and_chmod_run_on_posix(tmp_path: Path) -> None:
     target = tmp_path / "dir"
     target.mkdir()
@@ -101,6 +103,7 @@ def test_sync_directory_runs_on_posix(tmp_path: Path) -> None:
     fsplat.sync_directory(tmp_path)
 
 
+@pytest.mark.skipif(fsplat.IS_WINDOWS, reason="os.O_NOFOLLOW does not exist on Windows")
 def test_open_nofollow_rejects_symlink_on_posix(tmp_path: Path) -> None:
     target = tmp_path / "real.txt"
     target.write_text("x", encoding="utf-8")
@@ -157,4 +160,3 @@ def test_try_lock_and_unlock_use_fcntl_on_posix(tmp_path: Path) -> None:
         fsplat.unlock(fd)
     finally:
         os.close(fd)
-

@@ -137,12 +137,62 @@ def unlock(fd: int) -> None:
         pass
 
 
-def _windows_current_user_sid() -> str:
+def _win32_dlls() -> tuple[object, object]:
     import ctypes
     from ctypes import wintypes
 
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    # ctypes assumes a 32-bit C int for any return/argument type it is not
+    # told about. HANDLE and PSID values are pointer-sized (64-bit on x64),
+    # so leaving these prototypes unset silently truncates/misreads them on
+    # 64-bit Windows. Every prototype used below is declared explicitly.
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.GetCurrentProcess.argtypes = ()
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.LocalFree.restype = wintypes.HLOCAL
+    kernel32.LocalFree.argtypes = (wintypes.HLOCAL,)
+
+    advapi32.OpenProcessToken.restype = wintypes.BOOL
+    advapi32.OpenProcessToken.argtypes = (
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.HANDLE),
+    )
+    advapi32.GetTokenInformation.restype = wintypes.BOOL
+    advapi32.GetTokenInformation.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+    advapi32.ConvertSidToStringSidW.argtypes = (
+        wintypes.LPVOID,
+        ctypes.POINTER(ctypes.c_wchar_p),
+    )
+    advapi32.GetNamedSecurityInfoW.restype = wintypes.DWORD
+    advapi32.GetNamedSecurityInfoW.argtypes = (
+        wintypes.LPCWSTR,
+        ctypes.c_int,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+    )
+    return advapi32, kernel32
+
+
+def _windows_current_user_sid() -> str:
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32, kernel32 = _win32_dlls()
     token_query = 0x0008
     token_user = 1
 
@@ -157,6 +207,9 @@ def _windows_current_user_sid() -> str:
         buf = ctypes.create_string_buffer(size.value)
         if not advapi32.GetTokenInformation(token, token_user, buf, size, ctypes.byref(size)):
             raise OSError(ctypes.get_last_error(), "GetTokenInformation failed")
+        # TOKEN_USER is { SID_AND_ATTRIBUTES User } and SID_AND_ATTRIBUTES is
+        # { PSID Sid; DWORD Attributes }, so the first pointer-sized field of
+        # the buffer is the PSID.
         sid_ptr = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p))[0]
         return _sid_to_string(sid_ptr)
     finally:
@@ -165,14 +218,14 @@ def _windows_current_user_sid() -> str:
 
 def _windows_owner_sid(path: Path) -> str:
     import ctypes
+    from ctypes import wintypes
 
-    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32, kernel32 = _win32_dlls()
     se_file_object = 1
     owner_security_information = 0x00000001
 
-    owner_sid = ctypes.c_void_p()
-    security_descriptor = ctypes.c_void_p()
+    owner_sid = wintypes.LPVOID()
+    security_descriptor = wintypes.LPVOID()
     result = advapi32.GetNamedSecurityInfoW(
         str(path),
         se_file_object,
@@ -194,8 +247,7 @@ def _windows_owner_sid(path: Path) -> str:
 def _sid_to_string(sid_ptr: object) -> str:
     import ctypes
 
-    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32, kernel32 = _win32_dlls()
     string_sid = ctypes.c_wchar_p()
     if not advapi32.ConvertSidToStringSidW(sid_ptr, ctypes.byref(string_sid)):
         raise OSError(ctypes.get_last_error(), "ConvertSidToStringSidW failed")
@@ -217,4 +269,3 @@ __all__ = [
     "try_lock_exclusive",
     "unlock",
 ]
-

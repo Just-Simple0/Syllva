@@ -37,10 +37,17 @@ def test_stale_recovery_serializes_new_owner_attempt_before_delete(tmp_path, mon
     snapshot = reclaimer._stale_lock_snapshot()
     assert snapshot is not None
 
-    original_unlink = locks_module._unlink_path_if_fd_matches
     attempted = False
 
-    def attempt_new_owner_before_delete(target, fd):
+    # release()/_unlink_if_same_instance() call a different unlink helper on
+    # real Windows (no FILE_SHARE_DELETE for a still-open fd) than on POSIX;
+    # patch whichever one this real host actually uses.
+    target_name = (
+        "_unlink_path_if_signature_matches" if locks_module._IS_WINDOWS else "_unlink_path_if_fd_matches"
+    )
+    original_unlink = getattr(locks_module, target_name)
+
+    def attempt_new_owner_before_delete(target, second_arg):
         nonlocal attempted
         if target == path and not attempted:
             attempted = True
@@ -48,9 +55,9 @@ def test_stale_recovery_serializes_new_owner_attempt_before_delete(tmp_path, mon
             # descriptor lock.  A competing worker cannot replace that inode
             # in the check-to-delete interval.
             assert new_owner.acquire(timeout=0) is False
-        return original_unlink(target, fd)
+        return original_unlink(target, second_arg)
 
-    monkeypatch.setattr(locks_module, "_unlink_path_if_fd_matches", attempt_new_owner_before_delete)
+    monkeypatch.setattr(locks_module, target_name, attempt_new_owner_before_delete)
     assert reclaimer._unlink_if_same_instance(snapshot) is True
     assert attempted is True
 
