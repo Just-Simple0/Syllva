@@ -21,7 +21,7 @@ LMS 지원은 선택 기능이며 코어 Syllva retrieval의 필수조건이 아
 
 ## Credential
 
-활성화 시 Canvas/KNU sidecar는 process environment의 별도 `CANVAS_ACCESS_TOKEN` 경계를 사용합니다. repository file이나 log에 넣지 마세요.
+token 기반 sidecar 분기는 Canvas token을 environment variable, argument, file, browser session 어디서도 읽지 않습니다. `scripts/knu_lms_sync.py enroll --confirm yes`는 로컬 대화형 터미널에서 no-echo로 token을 한 번 입력받아, 현재 OS 사용자의 native credential store에 저장합니다: macOS에서는 명시적 `keyring.backends.macOS.Keyring` 클래스, Windows에서는 명시적 `keyring.backends.Windows.WinVaultKeyring`(Windows Credential Manager) 클래스를 사용합니다. 다른 플랫폼이나 fallback backend는 지원하지 않습니다. 이후 실행은 같은 OS-native store에서 enrolled token을 다시 읽으며, repository file이나 log에는 절대 기록되지 않습니다. 선호되는 Aside 브라우저 세션 분기는 이 token 경로를 전혀 사용하지 않고 credential을 읽거나 등록하지 않습니다.
 
 secure storage에서 secret을 꺼내거나 provider call을 하기 **전에** credential/config scope를 검증해야 합니다. config가 다른 소유자/범위로 바뀌었는데 이전 active-owner scope의 secret을 재사용하도록 허용하면 안 됩니다.
 

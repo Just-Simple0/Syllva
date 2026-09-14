@@ -521,7 +521,7 @@ def _auth_document(*, issued: dt.datetime, expires: dt.datetime) -> dict[str, An
         "origin": sync.ORIGIN,
         "service": sync.KEYCHAIN_SERVICE,
         "account": "canvas.knu.ac.kr/course/12345",
-        "backend": sync.KEYCHAIN_BACKEND,
+        "backend": sync._expected_backend_module(),
         "resources": ["course", "assignments", "announcements", "modules"],
         "issued_at": issued.isoformat(),
         "expires_at": expires.isoformat(),
@@ -572,7 +572,7 @@ def test_auth_manifest_preflight_blocks_pending_and_expired_before_keychain(monk
         called = True
         raise AssertionError("Keychain must not be reached")
 
-    monkeypatch.setattr(sync, "_explicit_mac_keyring", unexpected_keychain)
+    monkeypatch.setattr(sync, "_explicit_os_keyring", unexpected_keychain)
     with pytest.raises(sync.SyncError, match="auth_manifest_not_enrolled"):
         sync.read_enrolled_token(now=now)
     assert called is False
@@ -600,7 +600,7 @@ def test_future_issued_auth_blocks_getter_prompt_setter_and_probe(monkeypatch: p
         def set_password(self, _service: str, _account: str, _token: str) -> None:
             calls["setter"] += 1
 
-    monkeypatch.setattr(sync, "_explicit_mac_keyring", lambda: Backend())
+    monkeypatch.setattr(sync, "_explicit_os_keyring", lambda: Backend())
     with pytest.raises(sync.SyncError, match="auth_not_yet_valid"):
         sync.read_enrolled_token(now=now)
     with pytest.raises(sync.SyncError, match="auth_not_yet_valid"):
@@ -634,7 +634,7 @@ def test_collect_rejects_config_scope_drift_before_keychain_or_probe(monkeypatch
     calls = {"keychain": 0, "probe": 0}
     monkeypatch.setattr(sync, "_load_auth_config", lambda: next(loads))
     monkeypatch.setattr(sync, "_ensure_participant", lambda _owner, _scope: None)
-    monkeypatch.setattr(sync, "_explicit_mac_keyring", lambda: calls.__setitem__("keychain", 1))
+    monkeypatch.setattr(sync, "_explicit_os_keyring", lambda: calls.__setitem__("keychain", 1))
     monkeypatch.setattr(sync, "_probe_module", lambda: calls.__setitem__("probe", 1))
     with pytest.raises(sync.SyncError, match="scope_hash_mismatch"):
         sync.collect(
@@ -788,8 +788,81 @@ def test_explicit_backend_clears_keychain_path_without_global_selection(monkeypa
     monkeypatch.setattr(sync.sys, "platform", "darwin")
     monkeypatch.setenv("KEYCHAIN_PATH", "sentinel-no-dump")
     monkeypatch.setattr(builtins, "__import__", import_only_mac_backend)
-    backend = sync._explicit_mac_keyring()
+    backend = sync._explicit_os_keyring()
     assert backend.keychain is None
+
+
+def test_explicit_backend_selects_windows_vault_on_win32(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeWinVaultKeyring:
+        __module__ = "keyring.backends.Windows"
+
+    original_import = builtins.__import__
+
+    def import_only_windows_backend(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "keyring.backends.Windows":
+            return type("WindowsModule", (), {"WinVaultKeyring": FakeWinVaultKeyring})
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(sync.sys, "platform", "win32")
+    monkeypatch.setattr(builtins, "__import__", import_only_windows_backend)
+    backend = sync._explicit_os_keyring()
+    assert isinstance(backend, FakeWinVaultKeyring)
+    assert not hasattr(backend, "keychain")
+
+
+def test_explicit_backend_rejects_monkeypatched_windows_module_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    class SpoofedKeyring:
+        __module__ = "attacker.module"
+
+    original_import = builtins.__import__
+
+    def import_spoofed_backend(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "keyring.backends.Windows":
+            return type("WindowsModule", (), {"WinVaultKeyring": SpoofedKeyring})
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(sync.sys, "platform", "win32")
+    monkeypatch.setattr(builtins, "__import__", import_spoofed_backend)
+    with pytest.raises(sync.SyncError, match="keychain_backend_invalid"):
+        sync._explicit_os_keyring()
+
+
+def test_explicit_backend_rejects_unsupported_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sync.sys, "platform", "linux")
+    with pytest.raises(sync.SyncError, match="keychain_platform_unsupported"):
+        sync._explicit_os_keyring()
+    with pytest.raises(sync.SyncError, match="keychain_platform_unsupported"):
+        sync._expected_backend_module()
+
+
+def test_expected_backend_module_matches_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sync.sys, "platform", "darwin")
+    assert sync._expected_backend_module() == "keyring.backends.macOS.Keyring"
+    monkeypatch.setattr(sync.sys, "platform", "win32")
+    assert sync._expected_backend_module() == "keyring.backends.Windows.WinVaultKeyring"
+
+
+def test_read_enrolled_token_skips_keychain_property_reset_on_windows_backend(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(sync.sys, "platform", "win32")
+    issued = dt.datetime(2026, 9, 1, tzinfo=dt.UTC)
+    now = dt.datetime(2026, 9, 13, tzinfo=dt.UTC)
+    document = _auth_document(issued=issued, expires=dt.datetime(2026, 9, 30, tzinfo=dt.UTC))
+    scope_hash = _install_auth_files(monkeypatch, tmp_path, document)
+    enrolled = sync._fixed_auth_document(document, "enrolled", scope_hash)
+    sync.AUTH_MANIFEST_PATH.write_text(json.dumps(enrolled), encoding="utf-8")
+    sync.AUTH_MANIFEST_PATH.chmod(0o600)
+
+    class WindowsBackend:
+        def get_password(self, _service: str, _account: str) -> str:
+            return "windows-token"
+
+    monkeypatch.setattr(sync, "_explicit_os_keyring", lambda: WindowsBackend())
+    token, config, returned_scope_hash = sync.read_enrolled_token(now=now)
+    assert token == "windows-token"
+    assert config.course_id == 12345
+    assert returned_scope_hash == scope_hash
 
 
 def test_collect_uses_kst_current_day_and_reviewed_probe_boundary(monkeypatch: pytest.MonkeyPatch) -> None:

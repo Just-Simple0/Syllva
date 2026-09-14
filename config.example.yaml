@@ -29,10 +29,10 @@ google_drive:
       upload_folder_id: "<upload-folder-id>"
       # Map from course_key → course root folder ID.
       course_folder_ids:
-        "2026-2_COURSE-001-001": "<course-folder-id>"
+        "2026-2_COURSE001-001": "<course-folder-id>"
       # Per-course static sub-folders (created once at semester setup).
       course_static_folder_ids:
-        "2026-2_COURSE-001-001":
+        "2026-2_COURSE001-001":
           recordings_folder_id: "<recordings-folder-id>"
           materials_folder_id: "<materials-folder-id>"
       # Optional per-course upload overrides. Leave empty to use the shared upload folder.
@@ -61,7 +61,7 @@ notion:
       input_requests_data_source_id: "<input-requests-db-id>"
       # Map from course_key → Notion portal page ID (dashboard page per course).
       portal_page_ids:
-        "2026-2_COURSE-001-001": "<course-portal-page-id>"
+        "2026-2_COURSE001-001": "<course-portal-page-id>"
 
 normalization:
   schema_version: v1
@@ -103,24 +103,20 @@ behavior_contract:
 
 courses:
   # Add one entry per course. course_key must match keys in semester_registries and semester_workspaces.
-  - course_key: "2026-2_COURSE-001-001"
+  - course_key: "2026-2_COURSE001-001"
     name: "예시 과목명"
-    code: "COURSE-001"
+    code: "COURSE001"
     section: "001"
     semester: "2026-2"
-  # - course_key: "2026-2_COURSE-002-001"
+  # - course_key: "2026-2_COURSE002-001"
   #   name: "두 번째 과목"
-  #   code: "COURSE-002"
+  #   code: "COURSE002"
   #   section: "001"
   #   semester: "2026-2"
 
-# LMS sidecar — Canvas/KNU LMS hourly sync (optional).
-# Default state is paused. Credentials come from the process environment only.
-lms:
-  enabled: false
-  base_url: "https://canvas.knu.ac.kr"
-  sync_interval_minutes: 60
-  # course_ids are LMS-internal IDs, not course_key values.
-  # Run 'uls lms probe' to discover IDs after providing CANVAS_ACCESS_TOKEN in env.
-  course_ids: []
-  # semester: "2026-2"
+# The KNU/Canvas LMS sidecar (scripts/knu_lms_probe.py, scripts/knu_lms_sync.py)
+# is a separately gated, standalone script suite. It has no top-level key in
+# this file and reads no setting from config.yaml; it keeps its own runtime
+# config/manifest under .review/knu-lms-hourly/. See
+# docs/operator-guide/lms-sync.md for its credential model and safety rules.
+# It stays paused by default and is never activated merely by editing config.yaml.

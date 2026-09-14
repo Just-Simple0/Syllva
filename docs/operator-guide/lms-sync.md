@@ -21,7 +21,7 @@ Do not enroll credentials or activate a heartbeat merely because repository scri
 
 ## Credentials
 
-The Canvas/KNU sidecar uses a separate `CANVAS_ACCESS_TOKEN` boundary in the process environment when enabled. Keep it out of repository files and logs.
+The token-based sidecar branch does not read a Canvas token from an environment variable, argument, file, or browser session. `scripts/knu_lms_sync.py enroll --confirm yes` prompts once for the token in a local interactive terminal (no-echo) and stores it through the OS-native credential store for the current user: the explicit `keyring.backends.macOS.Keyring` class on macOS, or the explicit `keyring.backends.Windows.WinVaultKeyring` class on Windows (Windows Credential Manager). No other platform or fallback backend is supported. A later run reads the enrolled token back from that same OS-native store; it is never written to a repository file or log. The preferred Aside browser-session branch avoids this token path entirely and does not read or enroll any credential.
 
 Credential/config scope must be validated **before** retrieving a secret from secure storage or making provider calls. A changed/foreign config must not be allowed to reuse a secret under the previous active-owner scope.
 
