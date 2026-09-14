@@ -21,6 +21,7 @@ correctly on Windows, and never substitutes a weaker or plaintext fallback.
 
 from __future__ import annotations
 
+import errno
 import os
 from pathlib import Path
 
@@ -76,7 +77,16 @@ def chmod_if_supported(path: Path, mode: int) -> None:
 
 
 def open_nofollow(path: str | os.PathLike[str], flags: int, mode: int = 0o777) -> int:
-    """os.open with O_NOFOLLOW added where the platform supports it."""
+    """os.open with O_NOFOLLOW added where the platform supports it.
+
+    Windows has no O_NOFOLLOW, so a symlink there would otherwise be
+    followed silently instead of rejected. Path.is_symlink() is used as
+    an explicit pre-check there; this has the same inherent TOCTOU window
+    as O_NOFOLLOW-based checks elsewhere in this module, but closes the
+    much larger gap of not rejecting a symlink at all.
+    """
+    if IS_WINDOWS and Path(path).is_symlink():
+        raise OSError(errno.ELOOP, "symlink rejected", str(path))
     return os.open(path, flags | NOFOLLOW_FLAG, mode)
 
 

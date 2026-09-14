@@ -6,6 +6,8 @@ import os
 import socket
 from types import SimpleNamespace
 
+import pytest
+
 import uls.orchestration.locks as locks_module
 from uls.orchestration.locks import LocalWorkerLock
 
@@ -26,6 +28,16 @@ def test_stale_recovery_does_not_unlink_a_replaced_lock_instance(tmp_path) -> No
     assert json.loads(path.read_text(encoding="utf-8"))["token"] == "new"
 
 
+@pytest.mark.skipif(
+    locks_module._IS_WINDOWS,
+    reason=(
+        "Windows must release its lock before deleting a stale file (no "
+        "FILE_SHARE_DELETE for a still-open handle), so this exact POSIX "
+        "hold-through-delete interval guarantee does not apply there; see "
+        "test_stale_recovery_concurrent_reclaim_converges_on_single_owner "
+        "for the equivalent Windows safety property."
+    ),
+)
 def test_stale_recovery_serializes_new_owner_attempt_before_delete(tmp_path, monkeypatch) -> None:
     path = tmp_path / "worker.lock"
     path.write_text(
@@ -39,15 +51,9 @@ def test_stale_recovery_serializes_new_owner_attempt_before_delete(tmp_path, mon
 
     attempted = False
 
-    # release()/_unlink_if_same_instance() call a different unlink helper on
-    # real Windows (no FILE_SHARE_DELETE for a still-open fd) than on POSIX;
-    # patch whichever one this real host actually uses.
-    target_name = (
-        "_unlink_path_if_signature_matches" if locks_module._IS_WINDOWS else "_unlink_path_if_fd_matches"
-    )
-    original_unlink = getattr(locks_module, target_name)
+    original_unlink = locks_module._unlink_path_if_fd_matches
 
-    def attempt_new_owner_before_delete(target, second_arg):
+    def attempt_new_owner_before_delete(target, fd):
         nonlocal attempted
         if target == path and not attempted:
             attempted = True
@@ -55,9 +61,9 @@ def test_stale_recovery_serializes_new_owner_attempt_before_delete(tmp_path, mon
             # descriptor lock.  A competing worker cannot replace that inode
             # in the check-to-delete interval.
             assert new_owner.acquire(timeout=0) is False
-        return original_unlink(target, second_arg)
+        return original_unlink(target, fd)
 
-    monkeypatch.setattr(locks_module, target_name, attempt_new_owner_before_delete)
+    monkeypatch.setattr(locks_module, "_unlink_path_if_fd_matches", attempt_new_owner_before_delete)
     assert reclaimer._unlink_if_same_instance(snapshot) is True
     assert attempted is True
 
@@ -76,6 +82,55 @@ def test_dead_local_owner_can_be_recovered(tmp_path) -> None:
     assert lock.acquire() is True
     assert lock.is_held is True
     lock.release()
+    assert not path.exists()
+
+
+def test_stale_recovery_concurrent_reclaim_converges_on_single_owner_on_windows(
+    tmp_path, monkeypatch
+) -> None:
+    """Windows equivalent of test_stale_recovery_serializes_new_owner_attempt
+    _before_delete: it cannot hold the reclaimer's descriptor lock through
+    the delete (no FILE_SHARE_DELETE), so a second reclaimer racing in
+    during that window can legitimately win its own independent, fully
+    verified reclaim instead of being blocked outright. The safety property
+    that must still hold is convergence: exactly one instance ends up
+    truly owning the lock afterward, and nobody's fresh lock is deleted by
+    a loser's stale delete attempt."""
+    monkeypatch.setattr(locks_module, "_IS_WINDOWS", True)
+    _install_fake_msvcrt(monkeypatch)
+    path = tmp_path / "worker.lock"
+    path.write_text(
+        json.dumps({"pid": 999_999_999, "host": socket.gethostname(), "token": "old"}),
+        encoding="utf-8",
+    )
+    reclaimer = LocalWorkerLock(path)
+    racer = LocalWorkerLock(path)
+    snapshot = reclaimer._stale_lock_snapshot()
+    assert snapshot is not None
+
+    original_unlink = locks_module._unlink_path_if_signature_matches
+    triggered = False
+
+    def race_in_before_delete(target, signature):
+        nonlocal triggered
+        if target == path and not triggered:
+            triggered = True
+            # The racer performs a full independent verified reclaim while
+            # the reclaimer's descriptor lock is released.
+            assert racer.acquire(timeout=0) is True
+        return original_unlink(target, signature)
+
+    monkeypatch.setattr(locks_module, "_unlink_path_if_signature_matches", race_in_before_delete)
+    reclaimer_result = reclaimer._unlink_if_same_instance(snapshot)
+    assert triggered is True
+    # The racer already owns a fresh, live lock; the reclaimer must not
+    # have deleted it out from under the racer.
+    assert path.exists()
+    assert json.loads(path.read_text(encoding="utf-8"))["token"] == racer._token
+    # The reclaimer's own delete attempt correctly no-ops once the racer
+    # has replaced the file identity it was about to delete.
+    assert reclaimer_result is False
+    racer.release()
     assert not path.exists()
 
 

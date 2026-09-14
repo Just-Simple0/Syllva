@@ -554,7 +554,10 @@ def test_failed_atomic_state_write_keeps_private_temporary(monkeypatch: pytest.M
         sync._atomic_json_write(target, {"state": "pending"}, 0o600)
     temporary_files = list(runtime.glob(".auth-manifest.json.*"))
     assert len(temporary_files) == 1
-    assert temporary_files[0].stat().st_mode & 0o777 == 0o600
+    if not sync.fsplat.IS_WINDOWS:
+        # Windows has no fchmod; POSIX 0600 mode bits are not meaningful
+        # there (see fsplat.fchmod_if_supported).
+        assert temporary_files[0].stat().st_mode & 0o777 == 0o600
 
 
 def test_auth_manifest_preflight_blocks_pending_and_expired_before_keychain(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
