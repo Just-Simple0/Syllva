@@ -86,13 +86,36 @@ def status(config: Any) -> dict[str, Any]:
             'availability': 'Primary PC must be awake and online'}
 
 
+def _credential_ready(key: str) -> bool:
+    value = os.environ.get(key, '')
+    return bool(value) and (Path(value).expanduser().is_file() if key.endswith('_FILE') else True)
+
+
 def doctor(config: Any, *, live: bool = False) -> dict[str, Any]:
     checks: dict[str, Any] = {'behavior_contract': not lint_behavior(Path(config.behavior_contract.path)),
                               'state': status(config)['status'] == 'ok'}
-    for key in ('GOOGLE_WORKER_CREDENTIALS_FILE', 'NOTION_WORKER_TOKEN',
-                'GOOGLE_MCP_CREDENTIALS_FILE', 'NOTION_MCP_TOKEN', 'GITHUB_READ_TOKEN'):
-        value = os.environ.get(key, '')
-        checks[key] = bool(value) and (Path(value).expanduser().is_file() if key.endswith('_FILE') else True)
+    optional_checks: dict[str, Any] = {}
+    # The intake worker's Google/Notion write credentials are only relevant
+    # when the worker is actually enabled; requiring them for a read-only,
+    # MCP-search-only deployment would fail an otherwise complete minimal
+    # configuration (contradicting docs/operator-guide/installation.md,
+    # which promises doctor reports only the credentials a selected feature
+    # actually needs).
+    worker_credential_keys = ('GOOGLE_WORKER_CREDENTIALS_FILE', 'NOTION_WORKER_TOKEN')
+    if config.worker.enabled:
+        for key in worker_credential_keys:
+            checks[key] = _credential_ready(key)
+    else:
+        for key in worker_credential_keys:
+            optional_checks[key] = _credential_ready(key)
+    # The read-only MCP search surface is the system's core deliverable and
+    # is required regardless of whether the intake worker is enabled.
+    for key in ('GOOGLE_MCP_CREDENTIALS_FILE', 'NOTION_MCP_TOKEN'):
+        checks[key] = _credential_ready(key)
+    # GitHub is an optional supplemental source: GitHubAPIReader accepts an
+    # empty token and simply serves no GitHub content, so a missing token
+    # must never fail an otherwise complete minimal configuration.
+    optional_checks['GITHUB_READ_TOKEN'] = _credential_ready('GITHUB_READ_TOKEN')
     try:
         require_mcp_credentials(os.environ)
         checks['credential_separation'] = True
@@ -114,6 +137,8 @@ def doctor(config: Any, *, live: bool = False) -> dict[str, Any]:
                                            (config.remote_mcp.tls_certfile, config.remote_mcp.tls_keyfile))
         except (UlsError, ValueError):
             checks['remote_profile'] = False
+    else:
+        optional_checks['remote_profile'] = 'not_configured'
     if live:
         try:
             from uls.runtime import google_service
@@ -125,7 +150,8 @@ def doctor(config: Any, *, live: bool = False) -> dict[str, Any]:
         except Exception:  # noqa: BLE001 - health checks report booleans, never provider payloads
             checks['live_provider_read'] = False
     return {'status': 'ok' if all(checks.values()) else 'needs_configuration',
-            'checks': checks, 'client_e2e': 'not_proven_by_doctor'}
+            'checks': checks, 'optional_checks': optional_checks,
+            'client_e2e': 'not_proven_by_doctor'}
 
 
 def dispatch(args: argparse.Namespace) -> Any:

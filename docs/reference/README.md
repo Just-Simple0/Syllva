@@ -7,5 +7,6 @@ Reference pages are for looking up exact interfaces rather than learning the pro
 - [CLI](cli.md)
 - [Status Model](statuses.md)
 - [MCP Tools](mcp-tools.md)
+- [Feature Status](feature-status.md)
 
 For configuration concepts and examples, use the [Operator Configuration guide](../operator-guide/configuration.md). The canonical source code and frozen specifications remain authoritative if a reference page becomes stale.

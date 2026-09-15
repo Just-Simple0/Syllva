@@ -49,20 +49,27 @@ def validate_registered_drive_layout(
     root_drive_id: str | None = None
 
     def read_folder(file_id: str, *, parent_id: str | None = None) -> DriveMetadata:
-        if file_id in seen:
-            return metadata_by_id[file_id]
-        metadata = port.read_metadata(file_id)
-        if metadata.file_id != file_id or metadata.mime_type != DRIVE_FOLDER_MIME:
-            raise StaticLayoutReconcileRequired("registered Drive static ID is not a folder")
-        if metadata.trashed:
-            raise SourceUnavailableError("registered Drive static folder is trashed")
-        require_private_ownership(metadata, context="registered Drive static folder")
+        # A previously-seen ID reuses its cached readback (no redundant
+        # provider round-trip), but the parent check below always runs
+        # against that cached metadata rather than short-circuiting.
+        # Otherwise the same file ID could satisfy two roles that expect
+        # different parents -- e.g. a course folder misconfigured to the
+        # same ID as the school root -- without ever being caught, because
+        # only the first role's parent constraint would ever be checked.
+        metadata = metadata_by_id.get(file_id)
+        if metadata is None:
+            metadata = port.read_metadata(file_id)
+            if metadata.file_id != file_id or metadata.mime_type != DRIVE_FOLDER_MIME:
+                raise StaticLayoutReconcileRequired("registered Drive static ID is not a folder")
+            if metadata.trashed:
+                raise SourceUnavailableError("registered Drive static folder is trashed")
+            require_private_ownership(metadata, context="registered Drive static folder")
+            seen.add(file_id)
+            metadata_by_id[file_id] = metadata
         if parent_id is not None and metadata.parents != (parent_id,):
             raise StaticLayoutReconcileRequired(
                 "registered Drive static folder has an unexpected parent"
             )
-        seen.add(file_id)
-        metadata_by_id[file_id] = metadata
         return metadata
 
     for workspace in rows:

@@ -139,6 +139,8 @@ def extract_pdf(
     source_version: int = 1,
     processor_version: str = "1.3.0",
     max_bytes: int = 20_000_000,
+    max_pages: int = 2_000,
+    max_extracted_chars: int = 5_000_000,
     now: datetime | str | None = None,
 ) -> NormalizedPDF:
     """Extract text from a bounded PDF, retaining explicit partial states."""
@@ -160,6 +162,14 @@ def extract_pdf(
         from pypdf import PdfReader
 
         reader = PdfReader(BytesIO(raw), strict=False)
+        # ``len(reader.pages)`` can itself raise for a malformed or
+        # encrypted PDF whose object/page tree is only parsed lazily on
+        # first access -- constructing PdfReader successfully does not
+        # guarantee the page tree is readable.  This access must stay
+        # inside the same fail-closed try/except as construction, or such
+        # a PDF would raise an uncaught exception instead of converting to
+        # the intended Needs Review state.
+        pages = len(reader.pages)
     except ImportError:
         return _result(
             entity_id=entity_id, course_key=course_key, source_ref=source_ref,
@@ -175,11 +185,34 @@ def extract_pdf(
             reason="PDF cannot be opened or is encrypted",
         )
 
-    pages = len(reader.pages)
+    # A pathological page tree (e.g. a compact but deeply repeated
+    # structure) can declare far more pages than the byte-size bound would
+    # suggest.  Reject before iterating so the per-page extraction loop
+    # below can never become an unbounded CPU/memory sink for a file that
+    # otherwise passed the max_bytes check.
+    if pages > max_pages:
+        return _result(
+            entity_id=entity_id, course_key=course_key, source_ref=source_ref,
+            source_hash=digest, source_version=source_version, processor_version=processor_version,
+            normalized_at=normalized_at, status=PDFContentStatus.NEEDS_REVIEW,
+            page_count=pages,
+            reason=f"PDF exceeds the bounded page-count limit ({max_pages} pages)",
+        )
+
     extracted: list[str] = []
     page_texts: list[str] = []
     missing: list[int] = []
+    extracted_chars = 0
+    truncated_for_size = False
     for index, page in enumerate(reader.pages, start=1):
+        if truncated_for_size:
+            # Once the output-size bound is hit, stop paying the cost of
+            # extracting further pages; each remaining page is recorded as
+            # not extracted so the Partial/Needs Review status and
+            # page_texts length invariant both stay accurate.
+            missing.append(index)
+            page_texts.append("")
+            continue
         try:
             text = page.extract_text()
         except Exception:  # noqa: BLE001 - one unreadable page makes extraction partial
@@ -189,12 +222,24 @@ def extract_pdf(
             page_texts.append("")
             continue
         normalized_text = text.replace("\r\n", "\n").replace("\r", "\n").rstrip()
+        if extracted_chars + len(normalized_text) > max_extracted_chars:
+            missing.append(index)
+            page_texts.append("")
+            truncated_for_size = True
+            continue
         extracted.append(normalized_text)
         page_texts.append(normalized_text)
+        extracted_chars += len(normalized_text)
     extracted_text = "\n\n".join(extracted)
     if pages == 0:
         status = PDFContentStatus.NEEDS_REVIEW
         reason = "PDF has no pages"
+    elif truncated_for_size:
+        status = PDFContentStatus.PARTIAL if extracted else PDFContentStatus.NEEDS_REVIEW
+        reason = (
+            "text extraction stopped after exceeding the bounded output-size"
+            " limit; page(s) not extracted: " + ", ".join(map(str, missing))
+        )
     elif missing:
         status = PDFContentStatus.PARTIAL if extracted else PDFContentStatus.NEEDS_REVIEW
         reason = "text could not be extracted for page(s): " + ", ".join(map(str, missing))

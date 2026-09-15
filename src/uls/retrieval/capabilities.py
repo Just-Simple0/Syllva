@@ -11,6 +11,7 @@ from uls.domain.errors import (
     LocatorNotAllowedError,
     LocatorParseError,
     LocatorStaleError,
+    PolicyDeniedError,
     UlsError,
 )
 from uls.domain.ids import parse_course_key, parse_entity_id
@@ -25,6 +26,17 @@ from .scope import VALID_USAGE_ROLES
 
 BindingValidator = Callable[[CapabilityBinding], Any]
 
+# Upper-layer bookkeeping (_bindings/_followups) is intentionally finite
+# even though the lower EphemeralStore already TTL-bounds each context.
+# Nothing else in the process calls purge_expired on a schedule, so
+# without an independent cap and opportunistic reconciliation here, a
+# long-running process that keeps issuing capabilities without ever
+# calling purge_expired explicitly would grow these dicts without bound
+# even though every individual context still expires correctly at the
+# lower layer.
+DEFAULT_MAX_ACTIVE_CONTEXTS = 10_000
+_PURGE_EVERY_N_ISSUES = 50
+
 
 class CapabilityManager:
     """Bind returned ranges and revalidate each candidate independently.
@@ -35,13 +47,72 @@ class CapabilityManager:
     selects one.
     """
 
-    def __init__(self, ephemeral: Any, *, ttl_seconds: int = 900, max_followup_chunks: int = 8) -> None:
+    def __init__(
+        self,
+        ephemeral: Any,
+        *,
+        ttl_seconds: int = 900,
+        max_followup_chunks: int = 8,
+        max_active_contexts: int = DEFAULT_MAX_ACTIVE_CONTEXTS,
+    ) -> None:
         self.ephemeral = ephemeral
         self.ttl_seconds = ttl_seconds
         self.max_followup_chunks = max_followup_chunks
+        self.max_active_contexts = max_active_contexts
         self._bindings: dict[str, tuple[CapabilityBinding, ...]] = {}
         self._followups: dict[str, int] = {}
-        self._followup_lock = threading.Lock()
+        # A single lock protects both dicts; issuance, follow-up counting,
+        # and expiry reconciliation must never observe or mutate them
+        # independently of one another.
+        self._lock = threading.Lock()
+        self._issue_count = 0
+
+    @property
+    def active_context_count(self) -> int:
+        """Number of contexts still tracked by this manager's bookkeeping.
+
+        This reflects _bindings/_followups size, not the lower store's live
+        context count; call purge_expired() first to reconcile both before
+        relying on this for capacity checks.
+        """
+
+        with self._lock:
+            return len(self._bindings)
+
+    def purge_expired(self) -> int:
+        """Reconcile local bookkeeping against the lower store's expiry.
+
+        Delegates to the ephemeral store's own purge_expired when available,
+        then drops any _bindings/_followups entry whose context is no longer
+        retrievable there.  Safe to call at any time, including periodically
+        from a caller-owned maintenance loop; this manager also calls it
+        opportunistically from issue().
+        """
+
+        dropped_lower = 0
+        lower_purge = getattr(self.ephemeral, "purge_expired", None)
+        if callable(lower_purge):
+            dropped_lower = int(lower_purge())
+        with self._lock:
+            dropped_upper = self._purge_expired_locked()
+        return dropped_lower + dropped_upper
+
+    def _purge_expired_locked(self) -> int:
+        """Drop bookkeeping for contexts the lower store no longer has.
+
+        Caller must hold self._lock.
+        """
+
+        tracked_ids = set(self._bindings) | set(self._followups)
+        stale_ids = [
+            context_id
+            for context_id in tracked_ids
+            if self.ephemeral.get_context_capability(context_id) is None
+        ]
+        for context_id in stale_ids:
+            self._bindings.pop(context_id, None)
+            self._followups.pop(context_id, None)
+        return len(stale_ids)
 
     def issue(
         self,
@@ -69,6 +140,18 @@ class CapabilityManager:
         exact = tuple(exact_list)
         for binding in exact:
             _validate_binding_for_issue(binding)
+        with self._lock:
+            self._issue_count += 1
+            if self._issue_count % _PURGE_EVERY_N_ISSUES == 0:
+                self._purge_expired_locked()
+            if len(self._bindings) >= self.max_active_contexts:
+                self._purge_expired_locked()
+                if len(self._bindings) >= self.max_active_contexts:
+                    raise PolicyDeniedError(
+                        "capability issuance limit reached; too many active"
+                        " context capabilities are outstanding",
+                        details={"max_active_contexts": self.max_active_contexts},
+                    )
         specs = [
             {
                 "locator": str(binding.locator),
@@ -106,8 +189,9 @@ class CapabilityManager:
                     [], caller_scope, self.ttl_seconds, "empty", 1
                 )
         self._decorate_allowed_locators(capability, exact)
-        self._bindings[capability.context_id] = exact
-        self._followups[capability.context_id] = 0
+        with self._lock:
+            self._bindings[capability.context_id] = exact
+            self._followups[capability.context_id] = 0
         return capability
 
     @staticmethod
@@ -193,7 +277,8 @@ class CapabilityManager:
         return self.issue(bindings, caller_scope=caller_scope)
 
     def bindings_for(self, context_id: str) -> tuple[CapabilityBinding, ...] | None:
-        return self._bindings.get(context_id)
+        with self._lock:
+            return self._bindings.get(context_id)
 
     def authorize(
         self,
@@ -212,6 +297,9 @@ class CapabilityManager:
         if role_validator is None and validator is None:
             raise LocatorNotAllowedError("role_validator is required for source authorization")
         if self.ephemeral.get_context_capability(context_id) is None:
+            with self._lock:
+                self._bindings.pop(context_id, None)
+                self._followups.pop(context_id, None)
             raise ContextExpiredError(
                 "Context capability is missing or expired",
                 details={"context_id": context_id},
@@ -222,7 +310,8 @@ class CapabilityManager:
             raise LocatorNotAllowedError("requested locator is malformed") from exc
         if not isinstance(parsed, (PageLocator, TimeLocator)):
             raise LocatorNotAllowedError("requested locator is malformed")
-        bindings = self._bindings.get(context_id)
+        with self._lock:
+            bindings = self._bindings.get(context_id)
         if bindings is None:
             raise LocatorNotAllowedError(
                 "context has no source-class binding",
@@ -315,7 +404,7 @@ class CapabilityManager:
                 "locator capability policy denied the request",
                 details={"context_id": context_id, "locator": str(parsed)},
             )
-        with self._followup_lock:
+        with self._lock:
             count = self._followups.get(context_id, 0)
             if count >= self.max_followup_chunks:
                 raise LocatorNotAllowedError(
