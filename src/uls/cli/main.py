@@ -81,9 +81,48 @@ def status(config: Any) -> dict[str, Any]:
     state = ReadOnlyState(path)
     counts = {row[0]: row[1] for row in state._rows('SELECT status, COUNT(*) FROM jobs GROUP BY status')}
     return {'status': 'ok' if state.health() else 'unhealthy', 'jobs': counts,
+            'readiness_funnel': _readiness_funnel(counts),
             'worker_enabled': config.worker.enabled, 'remote_enabled': config.remote_mcp.enabled,
             'remote_running': 'unknown; use authenticated /health',
             'availability': 'Primary PC must be awake and online'}
+
+
+def _readiness_funnel(job_counts: dict[str, int]) -> dict[str, Any]:
+    """Compute a readiness funnel from job status counts.
+
+    Each stage reports only what the job status evidence can actually prove.
+    Labels are deliberately conservative to avoid overclaiming readiness.
+
+    Stage semantics:
+    - source_archival: at least one job reached READY or PARTIAL (source bytes
+      fetched, hashed, and a normalized derivative was produced or attempted).
+    - text_extraction: at least one job reached READY (full text extracted
+      without page-level gaps; PARTIAL jobs do not qualify).
+    - retrieval_credentials: always 'not_checked_here' — credential presence
+      is reported by 'uls doctor', not by the job-count-based status command.
+    - ai_client: always 'not_proven' — requires a human to confirm through
+      actual use; cannot be proven programmatically.
+    """
+    ready = job_counts.get('READY', 0)
+    partial = job_counts.get('PARTIAL', 0)
+    archived = ready + partial
+    if archived > 0 and ready > 0:
+        source_archival = 'done'
+        text_extraction = 'done'
+    elif archived > 0:
+        source_archival = 'done'
+        text_extraction = 'partial'
+    else:
+        source_archival = 'not_started'
+        text_extraction = 'not_started'
+    return {
+        'source_archival': source_archival,
+        'text_extraction': text_extraction,
+        'retrieval_credentials': 'not_checked_here',
+        'retrieval_credentials_note': 'run uls doctor to check credential readiness',
+        'ai_client': 'not_proven',
+        'ai_client_note': 'requires human confirmation through actual AI client use',
+    }
 
 
 def _credential_ready(key: str) -> bool:
