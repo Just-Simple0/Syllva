@@ -26,7 +26,8 @@
 | --- | --- | --- |
 | Intake worker(sync/process/run, single active worker lock) | 현재 사용 가능 | `worker.enabled: true`와 별도의 Google/Notion credential이 필요합니다. [운영자 가이드: Intake와 Notion](../operator-guide/intake-and-notion.ko.md) 참고. |
 | Bounded PDF 텍스트 추출 | 현재 사용 가능 | byte/page/텍스트 크기 상한이 있는 결정적 추출이며 `Ready`/`Partial`/`Needs Review`를 반환하고 부분 결과를 조용히 승격하지 않습니다. |
-| 단일 `+ 업로드` 요청 흐름, Automation Queue 분리, Notion 내부 학습 UI | 설계만 수용(다음 버전) | `docs/ux/intake-execution-contract.md`(rev10)에서 수용된 설계입니다. 문서 자체가 "다음 버전 명세 개정안이며 현재 v1.2의 배포 완료를 뜻하지 않는다"고 명시합니다. |
+| 업로드 발견, Input Request 생성, 제출된 Input Request 처리(학기 intake worker의 `_sync_unlocked()`/`run_once()`) | 제한된 preview | `docs/ux/intake-v1.3-preview.md`가 설명하는 같은 학기 intake slice의 일부로 이미 구현돼 있습니다. 미래의 단일 `+ 업로드` 흐름 중 실제로 동작하는 부분이며, 아래의 재구성된 Automation Queue 분리 경로로는 아직 연결되지 않습니다. |
+| 등록된 과목 하위 폴더까지 아우르는 단일 `+ 업로드` 통합, Input Request와 분리된 Automation Queue 재구성, Notion 내부 학습 노트 생성 UI/워크플로 | 설계만 수용(다음 버전) | `docs/ux/intake-execution-contract.md`(rev10)에서 수용된 설계입니다. 문서 자체가 "다음 버전 명세 개정안이며 현재 v1.2의 배포 완료를 뜻하지 않는다"고 명시합니다. |
 | KNU/Canvas LMS probe/sync sidecar | 운영 보류(기본 정지) | `scripts/` 아래 독립 스크립트이며 핵심 검색의 전제조건이 아닙니다. 기본 정지 안전 규칙은 [LMS Sync](../operator-guide/lms-sync.ko.md) 참고. |
 
 ## 원격 접속

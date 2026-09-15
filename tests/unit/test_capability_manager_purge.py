@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import pathlib
 import sys
+import threading
 import time
 
 import pytest
@@ -157,5 +158,107 @@ def test_max_active_contexts_recovers_once_old_contexts_expire(
 
     capability = manager.issue([_simple_binding()])
 
+    assert manager.active_context_count == 1
+    assert manager.bindings_for(capability.context_id) is not None
+
+
+class _DelayedCreationStore:
+    """Wraps a real ephemeral store, delaying create_context_capability().
+
+    This reproduces the review-reported race: an old two-lock issue()
+    implementation checks capacity, releases the lock, does the (here
+    artificially slow) lower-store creation, then re-acquires the lock to
+    register bookkeeping.  Delaying creation widens that gap so concurrent
+    callers reliably race through the check before any of them registers.
+    """
+
+    def __init__(self, real: MemoryEphemeralStore, delay: float) -> None:
+        self._real = real
+        self._delay = delay
+
+    def create_context_capability(self, *args, **kwargs):
+        time.sleep(self._delay)
+        return self._real.create_context_capability(*args, **kwargs)
+
+    def get_context_capability(self, context_id: str):
+        return self._real.get_context_capability(context_id)
+
+    def purge_expired(self) -> int:
+        return self._real.purge_expired()
+
+
+def test_concurrent_issue_never_overshoots_max_active_contexts() -> None:
+    """Regression: capacity check-then-register used to happen across two
+    separate lock acquisitions, so N callers racing the (slow) lower-store
+    creation could all pass the check before any of them registered,
+    overshooting max_active_contexts.  The check and the reservation must
+    happen atomically in one critical section.
+    """
+
+    real_store = MemoryEphemeralStore()
+    manager = CapabilityManager(real_store, max_active_contexts=1)
+    manager.ephemeral = _DelayedCreationStore(real_store, delay=0.05)
+
+    concurrency = 8
+    start_gate = threading.Event()
+    outcomes: list[str] = []
+    outcomes_lock = threading.Lock()
+
+    def worker() -> None:
+        start_gate.wait()
+        try:
+            manager.issue([])
+            outcome = "ok"
+        except PolicyDeniedError:
+            outcome = "denied"
+        with outcomes_lock:
+            outcomes.append(outcome)
+
+    threads = [threading.Thread(target=worker) for _ in range(concurrency)]
+    for thread in threads:
+        thread.start()
+    start_gate.set()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert outcomes.count("ok") == 1
+    assert outcomes.count("denied") == concurrency - 1
+    assert manager.active_context_count == 1
+    assert manager.active_context_count <= manager.max_active_contexts
+
+
+def test_concurrent_issue_failure_releases_the_reservation() -> None:
+    """A reservation claimed during the capacity check must be released if
+    lower-store creation subsequently fails, so a failed issuance never
+    permanently shrinks capacity for the next caller.
+    """
+
+    real_store = MemoryEphemeralStore()
+    manager = CapabilityManager(real_store, max_active_contexts=1)
+
+    class _BoomOnce:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def create_context_capability(self, *args, **kwargs):
+            self.calls += 1
+            raise RuntimeError("simulated lower-store failure")
+
+        def get_context_capability(self, context_id: str):
+            return real_store.get_context_capability(context_id)
+
+        def purge_expired(self) -> int:
+            return real_store.purge_expired()
+
+    boom = _BoomOnce()
+    manager.ephemeral = boom
+
+    with pytest.raises(RuntimeError):
+        manager.issue([])
+    assert boom.calls == 1
+    assert manager.active_context_count == 0
+
+    manager.ephemeral = real_store
+    capability = manager.issue([_simple_binding()])
     assert manager.active_context_count == 1
     assert manager.bindings_for(capability.context_id) is not None

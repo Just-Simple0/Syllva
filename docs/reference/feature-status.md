@@ -26,7 +26,8 @@ This page gives one place to check whether a feature or document describes what 
 | --- | --- | --- |
 | Intake worker (sync/process/run, single active worker lock) | Available | Requires `worker.enabled: true` and its own Google/Notion credentials; see [Operator Guide: Intake and Notion](../operator-guide/intake-and-notion.md). |
 | Bounded PDF text extraction | Available | Deterministic, byte/page/text-size bounded; produces `Ready`/`Partial`/`Needs Review`, never silently upgrades a partial result. |
-| Single `+ 업로드` request flow, Automation Queue separation, in-Notion study UI | Design only (accepted, not built) | Accepted design at `docs/ux/intake-execution-contract.md` (rev10). The document itself states this explicitly: it fixes wording for a future specification revision and does not mean current v1.2 deployment is complete. |
+| Upload discovery, Input Request creation, and processing of a submitted Input Request (semester intake worker's `_sync_unlocked()`/`run_once()`) | Limited preview | Implemented as part of the same semester intake slice described in `docs/ux/intake-v1.3-preview.md`. This is the working part of the future single `+ 업로드` flow; it does not yet route through the redesigned Automation Queue separation below. |
+| Single `+ 업로드` unification across registered course subfolders, Automation Queue separation from Input Requests, and the in-Notion study-note generation UI/workflow | Design only (accepted, not built) | Accepted design at `docs/ux/intake-execution-contract.md` (rev10). The document itself states this explicitly: it fixes wording for a future specification revision and does not mean current v1.2 deployment is complete. |
 | KNU/Canvas LMS probe/sync sidecar | Held / paused by default | Standalone scripts under `scripts/`; not a prerequisite for core retrieval. See [LMS Sync](../operator-guide/lms-sync.md) for the explicit paused-by-default safety rule. |
 
 ## Remote access

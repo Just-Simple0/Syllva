@@ -66,6 +66,13 @@ class CapabilityManager:
         # independently of one another.
         self._lock = threading.Lock()
         self._issue_count = 0
+        # Concurrent issue() calls must never both pass the capacity check
+        # before either has registered in _bindings -- that gap is exactly
+        # what let direct parallel callers overshoot max_active_contexts.
+        # _pending_reservations tracks slots claimed but not yet finalized,
+        # so "active or about-to-be-active" is checked and incremented in
+        # one locked critical section.
+        self._pending_reservations = 0
 
     @property
     def active_context_count(self) -> int:
@@ -114,6 +121,12 @@ class CapabilityManager:
             self._followups.pop(context_id, None)
         return len(stale_ids)
 
+    def _active_or_reserved_count_locked(self) -> int:
+        """Bindings already registered plus slots reserved but not yet
+        finalized.  Caller must hold self._lock."""
+
+        return len(self._bindings) + self._pending_reservations
+
     def issue(
         self,
         bindings: Sequence[CapabilityBinding | EvidenceItem],
@@ -144,55 +157,73 @@ class CapabilityManager:
             self._issue_count += 1
             if self._issue_count % _PURGE_EVERY_N_ISSUES == 0:
                 self._purge_expired_locked()
-            if len(self._bindings) >= self.max_active_contexts:
+            if self._active_or_reserved_count_locked() >= self.max_active_contexts:
                 self._purge_expired_locked()
-                if len(self._bindings) >= self.max_active_contexts:
+                if self._active_or_reserved_count_locked() >= self.max_active_contexts:
                     raise PolicyDeniedError(
                         "capability issuance limit reached; too many active"
                         " context capabilities are outstanding",
                         details={"max_active_contexts": self.max_active_contexts},
                     )
-        specs = [
-            {
-                "locator": str(binding.locator),
-                "entity_id": binding.entity_id,
-                "locator_range": str(binding.locator),
-                "source_hash": binding.source_hash,
-                "source_version": binding.source_version,
-                "source_class": binding.source_class,
-            }
-            for binding in exact
-        ]
+            # The reservation is claimed inside the same critical section
+            # as the capacity check above, so no other concurrent issue()
+            # call can observe stale room and also claim it.
+            self._pending_reservations += 1
+        reserved = True
         try:
-            capability = self.ephemeral.create_context_capability(
-                specs,
-                caller_scope=caller_scope,
-                ttl_seconds=self.ttl_seconds,
-            )
-        except TypeError:
-            # Compatibility is limited to old capability-construction fakes;
-            # mixed fingerprints are never collapsed to one global value.
-            fingerprints = {(b.source_hash, b.source_version) for b in exact}
-            if len(fingerprints) > 1:
-                raise
-            if exact:
-                source_hash, source_version = next(iter(fingerprints))
+            specs = [
+                {
+                    "locator": str(binding.locator),
+                    "entity_id": binding.entity_id,
+                    "locator_range": str(binding.locator),
+                    "source_hash": binding.source_hash,
+                    "source_version": binding.source_version,
+                    "source_class": binding.source_class,
+                }
+                for binding in exact
+            ]
+            try:
                 capability = self.ephemeral.create_context_capability(
-                    [str(binding.locator) for binding in exact],
-                    caller_scope,
-                    self.ttl_seconds,
-                    source_hash,
-                    source_version,
+                    specs,
+                    caller_scope=caller_scope,
+                    ttl_seconds=self.ttl_seconds,
                 )
-            else:
-                capability = self.ephemeral.create_context_capability(
-                    [], caller_scope, self.ttl_seconds, "empty", 1
-                )
-        self._decorate_allowed_locators(capability, exact)
-        with self._lock:
-            self._bindings[capability.context_id] = exact
-            self._followups[capability.context_id] = 0
-        return capability
+            except TypeError:
+                # Compatibility is limited to old capability-construction fakes;
+                # mixed fingerprints are never collapsed to one global value.
+                fingerprints = {(b.source_hash, b.source_version) for b in exact}
+                if len(fingerprints) > 1:
+                    raise
+                if exact:
+                    source_hash, source_version = next(iter(fingerprints))
+                    capability = self.ephemeral.create_context_capability(
+                        [str(binding.locator) for binding in exact],
+                        caller_scope,
+                        self.ttl_seconds,
+                        source_hash,
+                        source_version,
+                    )
+                else:
+                    capability = self.ephemeral.create_context_capability(
+                        [], caller_scope, self.ttl_seconds, "empty", 1
+                    )
+            self._decorate_allowed_locators(capability, exact)
+            with self._lock:
+                self._bindings[capability.context_id] = exact
+                self._followups[capability.context_id] = 0
+                # The reservation is now backed by a real binding; release
+                # it in the same statement so the total active-or-reserved
+                # count never dips or double-counts between the two.
+                self._pending_reservations -= 1
+                reserved = False
+            return capability
+        finally:
+            if reserved:
+                # Creation failed (or raised) after the slot was claimed;
+                # release it so a failed issuance never permanently shrinks
+                # capacity.
+                with self._lock:
+                    self._pending_reservations -= 1
 
     @staticmethod
     def _decorate_allowed_locators(
