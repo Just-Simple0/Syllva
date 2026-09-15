@@ -77,56 +77,83 @@ def status(config: Any) -> dict[str, Any]:
     from uls.state.reader import ReadOnlyState
     path = state_path(config)
     if not path.exists():
-        return {'status': 'not_initialized', 'worker_enabled': config.worker.enabled}
+        return {'status': 'not_initialized',
+                'readiness_funnel': _readiness_funnel({}),
+                'worker_enabled': config.worker.enabled}
     state = ReadOnlyState(path)
     counts = {row[0]: row[1] for row in state._rows('SELECT status, COUNT(*) FROM jobs GROUP BY status')}
     return {'status': 'ok' if state.health() else 'unhealthy', 'jobs': counts,
-            'readiness_funnel': _readiness_funnel(counts),
+            'readiness_funnel': _readiness_funnel(counts, state=state),
             'worker_enabled': config.worker.enabled, 'remote_enabled': config.remote_mcp.enabled,
             'remote_running': 'unknown; use authenticated /health',
             'availability': 'Primary PC must be awake and online'}
 
 
-def _readiness_funnel(job_counts: dict[str, int]) -> dict[str, Any]:
-    """Compute a readiness funnel from job status counts.
+def _readiness_funnel(job_counts: dict[str, int], *, state: Any = None) -> dict[str, Any]:
+    """Compute a readiness funnel from state store evidence and job status counts.
 
-    Each stage reports only what the job status evidence can actually prove.
+    Each stage reports only what durable provenance evidence can actually prove.
     Labels are deliberately conservative to avoid overclaiming readiness.
 
     Stage semantics:
-    - source_archival: at least one job reached READY.  PARTIAL alone is
-      insufficient because a PARTIAL job may result from a pre-download failure
-      (e.g. SourcePartialError raised before any bytes were fetched), which
-      provides no evidence that source bytes were actually received and hashed.
-    - text_extraction: at least one job reached READY (full text extracted
-      without page-level gaps); PARTIAL alone is 'not_proven' for the same
-      reason — the job count aggregate cannot distinguish a successful partial
-      extraction from a download-before-read failure.
+    - source_archival: confirmed durable source registration and version record
+      (source_files joined with current source_versions). Job status alone is
+      insufficient because a job can be created or marked PARTIAL/READY without
+      durable source bytes having been received and hashed.
+    - text_extraction: confirmed normalization completion evidenced by a
+      durable processing record with valid output derivative reference linked
+      to a matching source_file and READY normalization job (excluding
+      enrichment operations like enrich_session and enrich_material).
     - retrieval_credentials: always 'not_checked_here' — credential presence
       is reported by 'uls doctor', not by the job-count-based status command.
     - ai_client: always 'not_proven' — requires a human to confirm through
       actual use; cannot be proven programmatically.
     """
-    ready = job_counts.get('READY', 0)
+    has_archival = False
+    has_extraction = False
+    if state is not None:
+        try:
+            archival_rows = state._rows("""
+                SELECT COUNT(*) AS count
+                FROM source_files sf
+                JOIN source_versions sv ON sv.source_file_id = sf.source_file_id
+                  AND sv.source_hash = sf.current_hash
+            """)
+            has_archival = archival_rows[0]['count'] > 0
+
+            norm_rows = state._rows("""
+                SELECT COUNT(*) AS count
+                FROM source_files sf
+                JOIN jobs j ON j.source_file_id = sf.source_file_id
+                JOIN processing_records pr ON pr.job_id = j.id
+                WHERE j.source_hash = sf.current_hash
+                  AND pr.operation = j.operation
+                  AND pr.operation NOT IN ('enrich_session', 'enrich_material')
+                  AND pr.input_hash = sf.current_hash
+                  AND j.status = 'READY'
+                  AND pr.status = 'READY'
+                  AND pr.output_ref_json IS NOT NULL
+            """)
+            has_extraction = norm_rows[0]['count'] > 0
+        except Exception:
+            pass
+
+    total = sum(job_counts.values())
     pending_or_active = job_counts.get('PENDING', 0) + job_counts.get('PROCESSING', 0)
-    if ready > 0:
+
+    if has_archival:
         source_archival = 'done'
-        text_extraction = 'done'
-    elif pending_or_active > 0:
+    elif total == 0 or pending_or_active > 0:
         source_archival = 'not_started'
+    else:
+        source_archival = 'not_proven'
+
+    if has_extraction:
+        text_extraction = 'done'
+    elif total == 0 or pending_or_active > 0:
         text_extraction = 'not_started'
     else:
-        total = sum(job_counts.values())
-        if total == 0:
-            # No jobs at all: fresh install or empty state — not yet started.
-            source_archival = 'not_started'
-            text_extraction = 'not_started'
-        else:
-            # Some jobs exist but none reached READY.  PARTIAL/FAILED/NEEDS_REVIEW
-            # alone cannot prove that source bytes were received and hashed, so we
-            # stay conservative rather than claiming 'done'.
-            source_archival = 'not_proven'
-            text_extraction = 'not_proven'
+        text_extraction = 'not_proven'
     return {
         'source_archival': source_archival,
         'text_extraction': text_extraction,
