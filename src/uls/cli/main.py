@@ -113,6 +113,8 @@ def _readiness_funnel(job_counts: dict[str, int], *, state: Any = None) -> dict[
     has_extraction = False
     if state is not None:
         try:
+            from uls.state.reader import parse_derivative_ref
+
             archival_rows = state._rows("""
                 SELECT COUNT(*) AS count
                 FROM source_files sf
@@ -122,7 +124,7 @@ def _readiness_funnel(job_counts: dict[str, int], *, state: Any = None) -> dict[
             has_archival = archival_rows[0]['count'] > 0
 
             norm_rows = state._rows("""
-                SELECT COUNT(*) AS count
+                SELECT pr.output_ref_json
                 FROM source_files sf
                 JOIN jobs j ON j.source_file_id = sf.source_file_id
                 JOIN processing_records pr ON pr.job_id = j.id
@@ -134,7 +136,13 @@ def _readiness_funnel(job_counts: dict[str, int], *, state: Any = None) -> dict[
                   AND pr.status = 'READY'
                   AND pr.output_ref_json IS NOT NULL
             """)
-            has_extraction = norm_rows[0]['count'] > 0
+            for row in norm_rows:
+                try:
+                    parse_derivative_ref(row['output_ref_json'])
+                    has_extraction = True
+                    break
+                except (ValueError, TypeError):
+                    pass
         except Exception:
             pass
 

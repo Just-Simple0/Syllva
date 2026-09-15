@@ -11,6 +11,24 @@ from uls.domain.errors import SourceUnavailableError
 from uls.domain.source_ref import SourceRef
 
 
+def parse_derivative_ref(raw_json: Any) -> SourceRef:
+    """Parse and validate a stored output derivative reference JSON string.
+
+    Raises ValueError or TypeError if the payload is malformed, not a dict,
+    has an unsupported provider (only google_drive is supported in v1.2), or
+    lacks a valid non-empty file ID without path separators.
+    """
+    if not isinstance(raw_json, str) or not raw_json.strip():
+        raise ValueError('empty derivative ref json')
+    raw = json.loads(raw_json)
+    if not isinstance(raw, dict) or raw.get('provider') != 'google_drive':
+        raise ValueError('unsupported derivative ref')
+    file_id = raw.get('file_id')
+    if not isinstance(file_id, str) or not file_id or '/' in file_id:
+        raise ValueError('invalid derivative ID')
+    return SourceRef(raw['provider'], file_id, raw.get('web_url'))
+
+
 class ReadOnlyState:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path).expanduser().resolve()
@@ -48,12 +66,7 @@ class ReadOnlyState:
         refs = []
         for row in rows:
             try:
-                raw = json.loads(row['output_ref_json'])
-                if not isinstance(raw, dict) or raw.get('provider') != 'google_drive':
-                    raise ValueError('unsupported derivative ref')
-                ref = SourceRef(raw['provider'], raw['file_id'], raw.get('web_url'))
-                if not ref.file_id or '/' in ref.file_id:
-                    raise ValueError('invalid derivative ID')
+                ref = parse_derivative_ref(row['output_ref_json'])
                 refs.append((row['provider'], row['provider_file_id'], ref))
             except (TypeError, ValueError, KeyError):
                 raise SourceUnavailableError('Stored derivative provenance is malformed') from None

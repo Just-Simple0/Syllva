@@ -34,6 +34,7 @@ from uls.behavior import asset_root
 from uls.cli.main import _config, _readiness_funnel, initialize, status
 from uls.orchestration.jobs import derive_job_key
 from uls.runtime import state_path
+from uls.state.reader import parse_derivative_ref
 from uls.state.sqlite import SQLiteStateStore
 
 pytestmark = pytest.mark.contract
@@ -140,6 +141,82 @@ def test_enrichment_ready_alone_does_not_advance_funnel(tmp_path):
     result = status(config)
     funnel = result["readiness_funnel"]
     assert funnel["source_archival"] == "not_proven"
+    assert funnel["text_extraction"] == "not_proven"
+
+
+def test_parse_derivative_ref_unit_boundary_cases():
+    """Verify parse_derivative_ref rejects every invalid derivative shape."""
+    ref = parse_derivative_ref(json.dumps({"provider": "google_drive", "file_id": "valid_id", "web_url": "http://x"}))
+    assert ref.provider == "google_drive"
+    assert ref.file_id == "valid_id"
+
+    invalid_cases = [
+        None,
+        "",
+        "   ",
+        "null",
+        "{}",
+        "[]",
+        '{"invalid": "json"',
+        json.dumps({"file_id": "only_file"}),
+        json.dumps({"provider": "google_drive"}),
+        json.dumps({"provider": "google_drive", "file_id": ""}),
+        json.dumps({"provider": "notion", "file_id": "some_id"}),
+        json.dumps({"provider": "google_drive", "file_id": "path/with/slash"}),
+    ]
+    for case in invalid_cases:
+        with pytest.raises((ValueError, TypeError)):
+            parse_derivative_ref(case)
+
+
+@pytest.mark.parametrize(
+    "invalid_output_ref",
+    [
+        "",
+        "null",
+        "{}",
+        "[]",
+        "not-valid-json",
+        json.dumps({"file_id": "missing_provider"}),
+        json.dumps({"provider": "google_drive"}),
+        json.dumps({"provider": "google_drive", "file_id": ""}),
+        json.dumps({"provider": "unsupported_provider", "file_id": "id1"}),
+        json.dumps({"provider": "google_drive", "file_id": "sub/folder/file"}),
+    ],
+)
+def test_invalid_output_ref_json_rejected_by_funnel(tmp_path, invalid_output_ref):
+    """Regression: invalid or malformed output_ref_json values must not count as text_extraction done."""
+    config = _write_config(tmp_path)
+    file_id = "gfile_test"
+    source_hash = "sha256:testhash"
+    with SQLiteStateStore(state_path(config)) as store:
+        store.register_source_file(
+            "src_test", provider="google_drive", provider_file_id=file_id,
+            course_key=COURSE_KEY, source_kind="lecture"
+        )
+        store.register_source_version(
+            source_file_id="src_test", source_hash=source_hash,
+            canonical_entity_id=CANONICAL_ENTITY_ID,
+            source_ref_json={"provider": "google_drive", "file_id": file_id}
+        )
+        job_key = derive_job_key("src_test", source_hash, "TRANSCRIPT_INGEST", "1.2.0")
+        j = store.create_job(
+            job_key, operation="TRANSCRIPT_INGEST", stage="norm",
+            target_entity_id=CANONICAL_ENTITY_ID, source_file_id="src_test",
+            source_hash=source_hash, processor_version="1.2.0"
+        )
+        store.claim_job(j.id)
+        store.create_processing_record(
+            job_id=j.id, operation="TRANSCRIPT_INGEST", processor_version="1.2.0",
+            input_hash=source_hash,
+            output_ref_json=invalid_output_ref,
+            status="READY"
+        )
+        store.complete_job(j.id, "READY")
+
+    result = status(config)
+    funnel = result["readiness_funnel"]
+    assert funnel["source_archival"] == "done"
     assert funnel["text_extraction"] == "not_proven"
 
 
