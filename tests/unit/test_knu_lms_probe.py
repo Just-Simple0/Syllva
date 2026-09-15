@@ -10,7 +10,7 @@ import time
 import warnings
 from email.message import Message
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
 
@@ -764,12 +764,15 @@ def test_aside_reader_bounds_queued_bytes_with_fast_producer_slow_consumer(
     monkeypatch.setattr(probe.subprocess, "Popen", fake_popen)
 
     class _TrackingQueue(probe.queue.Queue):
-        max_size_seen = 0
+        bytes_enqueued: ClassVar[dict[str, int]] = {}
         _delayed_once = False
 
-        def put(self, *args: Any, **kwargs: Any) -> None:
-            super().put(*args, **kwargs)
-            type(self).max_size_seen = max(type(self).max_size_seen, self.qsize())
+        def put(self, item: Any, *args: Any, **kwargs: Any) -> None:
+            super().put(item, *args, **kwargs)
+            name, kind, chunk = item
+            if kind == "data":
+                totals = type(self).bytes_enqueued
+                totals[name] = totals.get(name, 0) + len(chunk)
 
         def get(self, *args: Any, **kwargs: Any) -> Any:
             if not type(self)._delayed_once:
@@ -782,11 +785,15 @@ def test_aside_reader_bounds_queued_bytes_with_fast_producer_slow_consumer(
     monkeypatch.setattr(probe.queue, "Queue", _TrackingQueue)
     with pytest.raises(probe.ProbeError, match="browser_output_too_large"):
         probe._run_bounded_aside_repl("synthetic", 5.0)
-    chunk_budget = probe.MAX_ASIDE_OUTPUT_BYTES // probe.READ_CHUNK_BYTES + 2
-    assert _TrackingQueue.max_size_seen <= chunk_budget, (
-        f"queue held {_TrackingQueue.max_size_seen} chunks, more than the "
-        f"{chunk_budget}-chunk budget the byte limit should enforce"
-    )
+    # Byte totals, not event/chunk counts: os.read() may return less than
+    # READ_CHUNK_BYTES per call (a smaller pipe buffer, a different OS,
+    # etc.), so a chunk-count budget is not a valid proxy for the actual
+    # byte limit the reader is supposed to enforce.
+    for name, total in _TrackingQueue.bytes_enqueued.items():
+        assert total <= probe.MAX_ASIDE_OUTPUT_BYTES, (
+            f"{name} reader enqueued {total} bytes, more than the "
+            f"{probe.MAX_ASIDE_OUTPUT_BYTES}-byte budget it should enforce"
+        )
 
 
 def test_aside_reader_error_on_stderr_fails_transport(monkeypatch: pytest.MonkeyPatch) -> None:
