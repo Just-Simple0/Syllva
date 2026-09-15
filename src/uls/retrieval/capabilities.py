@@ -11,6 +11,7 @@ from uls.domain.errors import (
     LocatorNotAllowedError,
     LocatorParseError,
     LocatorStaleError,
+    PolicyDeniedError,
     UlsError,
 )
 from uls.domain.ids import parse_course_key, parse_entity_id
@@ -25,6 +26,17 @@ from .scope import VALID_USAGE_ROLES
 
 BindingValidator = Callable[[CapabilityBinding], Any]
 
+# Upper-layer bookkeeping (_bindings/_followups) is intentionally finite
+# even though the lower EphemeralStore already TTL-bounds each context.
+# Nothing else in the process calls purge_expired on a schedule, so
+# without an independent cap and opportunistic reconciliation here, a
+# long-running process that keeps issuing capabilities without ever
+# calling purge_expired explicitly would grow these dicts without bound
+# even though every individual context still expires correctly at the
+# lower layer.
+DEFAULT_MAX_ACTIVE_CONTEXTS = 10_000
+_PURGE_EVERY_N_ISSUES = 50
+
 
 class CapabilityManager:
     """Bind returned ranges and revalidate each candidate independently.
@@ -35,13 +47,85 @@ class CapabilityManager:
     selects one.
     """
 
-    def __init__(self, ephemeral: Any, *, ttl_seconds: int = 900, max_followup_chunks: int = 8) -> None:
+    def __init__(
+        self,
+        ephemeral: Any,
+        *,
+        ttl_seconds: int = 900,
+        max_followup_chunks: int = 8,
+        max_active_contexts: int = DEFAULT_MAX_ACTIVE_CONTEXTS,
+    ) -> None:
         self.ephemeral = ephemeral
         self.ttl_seconds = ttl_seconds
         self.max_followup_chunks = max_followup_chunks
+        self.max_active_contexts = max_active_contexts
         self._bindings: dict[str, tuple[CapabilityBinding, ...]] = {}
         self._followups: dict[str, int] = {}
-        self._followup_lock = threading.Lock()
+        # A single lock protects both dicts; issuance, follow-up counting,
+        # and expiry reconciliation must never observe or mutate them
+        # independently of one another.
+        self._lock = threading.Lock()
+        self._issue_count = 0
+        # Concurrent issue() calls must never both pass the capacity check
+        # before either has registered in _bindings -- that gap is exactly
+        # what let direct parallel callers overshoot max_active_contexts.
+        # _pending_reservations tracks slots claimed but not yet finalized,
+        # so "active or about-to-be-active" is checked and incremented in
+        # one locked critical section.
+        self._pending_reservations = 0
+
+    @property
+    def active_context_count(self) -> int:
+        """Number of contexts still tracked by this manager's bookkeeping.
+
+        This reflects _bindings/_followups size, not the lower store's live
+        context count; call purge_expired() first to reconcile both before
+        relying on this for capacity checks.
+        """
+
+        with self._lock:
+            return len(self._bindings)
+
+    def purge_expired(self) -> int:
+        """Reconcile local bookkeeping against the lower store's expiry.
+
+        Delegates to the ephemeral store's own purge_expired when available,
+        then drops any _bindings/_followups entry whose context is no longer
+        retrievable there.  Safe to call at any time, including periodically
+        from a caller-owned maintenance loop; this manager also calls it
+        opportunistically from issue().
+        """
+
+        dropped_lower = 0
+        lower_purge = getattr(self.ephemeral, "purge_expired", None)
+        if callable(lower_purge):
+            dropped_lower = int(lower_purge())
+        with self._lock:
+            dropped_upper = self._purge_expired_locked()
+        return dropped_lower + dropped_upper
+
+    def _purge_expired_locked(self) -> int:
+        """Drop bookkeeping for contexts the lower store no longer has.
+
+        Caller must hold self._lock.
+        """
+
+        tracked_ids = set(self._bindings) | set(self._followups)
+        stale_ids = [
+            context_id
+            for context_id in tracked_ids
+            if self.ephemeral.get_context_capability(context_id) is None
+        ]
+        for context_id in stale_ids:
+            self._bindings.pop(context_id, None)
+            self._followups.pop(context_id, None)
+        return len(stale_ids)
+
+    def _active_or_reserved_count_locked(self) -> int:
+        """Bindings already registered plus slots reserved but not yet
+        finalized.  Caller must hold self._lock."""
+
+        return len(self._bindings) + self._pending_reservations
 
     def issue(
         self,
@@ -69,46 +153,77 @@ class CapabilityManager:
         exact = tuple(exact_list)
         for binding in exact:
             _validate_binding_for_issue(binding)
-        specs = [
-            {
-                "locator": str(binding.locator),
-                "entity_id": binding.entity_id,
-                "locator_range": str(binding.locator),
-                "source_hash": binding.source_hash,
-                "source_version": binding.source_version,
-                "source_class": binding.source_class,
-            }
-            for binding in exact
-        ]
+        with self._lock:
+            self._issue_count += 1
+            if self._issue_count % _PURGE_EVERY_N_ISSUES == 0:
+                self._purge_expired_locked()
+            if self._active_or_reserved_count_locked() >= self.max_active_contexts:
+                self._purge_expired_locked()
+                if self._active_or_reserved_count_locked() >= self.max_active_contexts:
+                    raise PolicyDeniedError(
+                        "capability issuance limit reached; too many active"
+                        " context capabilities are outstanding",
+                        details={"max_active_contexts": self.max_active_contexts},
+                    )
+            # The reservation is claimed inside the same critical section
+            # as the capacity check above, so no other concurrent issue()
+            # call can observe stale room and also claim it.
+            self._pending_reservations += 1
+        reserved = True
         try:
-            capability = self.ephemeral.create_context_capability(
-                specs,
-                caller_scope=caller_scope,
-                ttl_seconds=self.ttl_seconds,
-            )
-        except TypeError:
-            # Compatibility is limited to old capability-construction fakes;
-            # mixed fingerprints are never collapsed to one global value.
-            fingerprints = {(b.source_hash, b.source_version) for b in exact}
-            if len(fingerprints) > 1:
-                raise
-            if exact:
-                source_hash, source_version = next(iter(fingerprints))
+            specs = [
+                {
+                    "locator": str(binding.locator),
+                    "entity_id": binding.entity_id,
+                    "locator_range": str(binding.locator),
+                    "source_hash": binding.source_hash,
+                    "source_version": binding.source_version,
+                    "source_class": binding.source_class,
+                }
+                for binding in exact
+            ]
+            try:
                 capability = self.ephemeral.create_context_capability(
-                    [str(binding.locator) for binding in exact],
-                    caller_scope,
-                    self.ttl_seconds,
-                    source_hash,
-                    source_version,
+                    specs,
+                    caller_scope=caller_scope,
+                    ttl_seconds=self.ttl_seconds,
                 )
-            else:
-                capability = self.ephemeral.create_context_capability(
-                    [], caller_scope, self.ttl_seconds, "empty", 1
-                )
-        self._decorate_allowed_locators(capability, exact)
-        self._bindings[capability.context_id] = exact
-        self._followups[capability.context_id] = 0
-        return capability
+            except TypeError:
+                # Compatibility is limited to old capability-construction fakes;
+                # mixed fingerprints are never collapsed to one global value.
+                fingerprints = {(b.source_hash, b.source_version) for b in exact}
+                if len(fingerprints) > 1:
+                    raise
+                if exact:
+                    source_hash, source_version = next(iter(fingerprints))
+                    capability = self.ephemeral.create_context_capability(
+                        [str(binding.locator) for binding in exact],
+                        caller_scope,
+                        self.ttl_seconds,
+                        source_hash,
+                        source_version,
+                    )
+                else:
+                    capability = self.ephemeral.create_context_capability(
+                        [], caller_scope, self.ttl_seconds, "empty", 1
+                    )
+            self._decorate_allowed_locators(capability, exact)
+            with self._lock:
+                self._bindings[capability.context_id] = exact
+                self._followups[capability.context_id] = 0
+                # The reservation is now backed by a real binding; release
+                # it in the same statement so the total active-or-reserved
+                # count never dips or double-counts between the two.
+                self._pending_reservations -= 1
+                reserved = False
+            return capability
+        finally:
+            if reserved:
+                # Creation failed (or raised) after the slot was claimed;
+                # release it so a failed issuance never permanently shrinks
+                # capacity.
+                with self._lock:
+                    self._pending_reservations -= 1
 
     @staticmethod
     def _decorate_allowed_locators(
@@ -193,7 +308,8 @@ class CapabilityManager:
         return self.issue(bindings, caller_scope=caller_scope)
 
     def bindings_for(self, context_id: str) -> tuple[CapabilityBinding, ...] | None:
-        return self._bindings.get(context_id)
+        with self._lock:
+            return self._bindings.get(context_id)
 
     def authorize(
         self,
@@ -212,6 +328,9 @@ class CapabilityManager:
         if role_validator is None and validator is None:
             raise LocatorNotAllowedError("role_validator is required for source authorization")
         if self.ephemeral.get_context_capability(context_id) is None:
+            with self._lock:
+                self._bindings.pop(context_id, None)
+                self._followups.pop(context_id, None)
             raise ContextExpiredError(
                 "Context capability is missing or expired",
                 details={"context_id": context_id},
@@ -222,7 +341,8 @@ class CapabilityManager:
             raise LocatorNotAllowedError("requested locator is malformed") from exc
         if not isinstance(parsed, (PageLocator, TimeLocator)):
             raise LocatorNotAllowedError("requested locator is malformed")
-        bindings = self._bindings.get(context_id)
+        with self._lock:
+            bindings = self._bindings.get(context_id)
         if bindings is None:
             raise LocatorNotAllowedError(
                 "context has no source-class binding",
@@ -315,7 +435,7 @@ class CapabilityManager:
                 "locator capability policy denied the request",
                 details={"context_id": context_id, "locator": str(parsed)},
             )
-        with self._followup_lock:
+        with self._lock:
             count = self._followups.get(context_id, 0)
             if count >= self.max_followup_chunks:
                 raise LocatorNotAllowedError(

@@ -7,5 +7,6 @@
 - [CLI](cli.ko.md)
 - [상태 모델](statuses.ko.md)
 - [MCP 도구](mcp-tools.ko.md)
+- [기능 상태](feature-status.ko.md)
 
 설정 개념과 예시는 [운영자 설정 가이드](../operator-guide/configuration.ko.md)를 사용하세요. 레퍼런스가 오래된 경우 canonical source code와 frozen specification이 우선합니다.

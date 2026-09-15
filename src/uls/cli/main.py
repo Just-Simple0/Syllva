@@ -77,22 +77,131 @@ def status(config: Any) -> dict[str, Any]:
     from uls.state.reader import ReadOnlyState
     path = state_path(config)
     if not path.exists():
-        return {'status': 'not_initialized', 'worker_enabled': config.worker.enabled}
+        return {'status': 'not_initialized',
+                'readiness_funnel': _readiness_funnel({}),
+                'worker_enabled': config.worker.enabled}
     state = ReadOnlyState(path)
     counts = {row[0]: row[1] for row in state._rows('SELECT status, COUNT(*) FROM jobs GROUP BY status')}
     return {'status': 'ok' if state.health() else 'unhealthy', 'jobs': counts,
+            'readiness_funnel': _readiness_funnel(counts, state=state),
             'worker_enabled': config.worker.enabled, 'remote_enabled': config.remote_mcp.enabled,
             'remote_running': 'unknown; use authenticated /health',
             'availability': 'Primary PC must be awake and online'}
 
 
+def _readiness_funnel(job_counts: dict[str, int], *, state: Any = None) -> dict[str, Any]:
+    """Compute a readiness funnel from state store evidence and job status counts.
+
+    Each stage reports only what durable provenance evidence can actually prove.
+    Labels are deliberately conservative to avoid overclaiming readiness.
+
+    Stage semantics:
+    - source_archival: confirmed durable source registration and version record
+      (source_files joined with current source_versions). Job status alone is
+      insufficient because a job can be created or marked PARTIAL/READY without
+      durable source bytes having been received and hashed.
+    - text_extraction: confirmed normalization completion evidenced by a
+      durable processing record with valid output derivative reference linked
+      to a matching source_file and READY normalization job (excluding
+      enrichment operations like enrich_session and enrich_material).
+    - retrieval_credentials: always 'not_checked_here' — credential presence
+      is reported by 'uls doctor', not by the job-count-based status command.
+    - ai_client: always 'not_proven' — requires a human to confirm through
+      actual use; cannot be proven programmatically.
+    """
+    has_archival = False
+    has_extraction = False
+    if state is not None:
+        try:
+            from uls.state.reader import parse_derivative_ref
+
+            archival_rows = state._rows("""
+                SELECT COUNT(*) AS count
+                FROM source_files sf
+                JOIN source_versions sv ON sv.source_file_id = sf.source_file_id
+                  AND sv.source_hash = sf.current_hash
+            """)
+            has_archival = archival_rows[0]['count'] > 0
+
+            norm_rows = state._rows("""
+                SELECT pr.output_ref_json
+                FROM source_files sf
+                JOIN jobs j ON j.source_file_id = sf.source_file_id
+                JOIN processing_records pr ON pr.job_id = j.id
+                WHERE j.source_hash = sf.current_hash
+                  AND pr.operation = j.operation
+                  AND pr.operation NOT IN ('enrich_session', 'enrich_material')
+                  AND pr.input_hash = sf.current_hash
+                  AND j.status = 'READY'
+                  AND pr.status = 'READY'
+                  AND pr.output_ref_json IS NOT NULL
+            """)
+            for row in norm_rows:
+                try:
+                    parse_derivative_ref(row['output_ref_json'])
+                    has_extraction = True
+                    break
+                except (ValueError, TypeError):
+                    pass
+        except Exception:
+            pass
+
+    total = sum(job_counts.values())
+    pending_or_active = job_counts.get('PENDING', 0) + job_counts.get('PROCESSING', 0)
+
+    if has_archival:
+        source_archival = 'done'
+    elif total == 0 or pending_or_active > 0:
+        source_archival = 'not_started'
+    else:
+        source_archival = 'not_proven'
+
+    if has_extraction:
+        text_extraction = 'done'
+    elif total == 0 or pending_or_active > 0:
+        text_extraction = 'not_started'
+    else:
+        text_extraction = 'not_proven'
+    return {
+        'source_archival': source_archival,
+        'text_extraction': text_extraction,
+        'retrieval_credentials': 'not_checked_here',
+        'retrieval_credentials_note': 'run uls doctor to check credential readiness',
+        'ai_client': 'not_proven',
+        'ai_client_note': 'requires human confirmation through actual AI client use',
+    }
+
+
+def _credential_ready(key: str) -> bool:
+    value = os.environ.get(key, '')
+    return bool(value) and (Path(value).expanduser().is_file() if key.endswith('_FILE') else True)
+
+
 def doctor(config: Any, *, live: bool = False) -> dict[str, Any]:
     checks: dict[str, Any] = {'behavior_contract': not lint_behavior(Path(config.behavior_contract.path)),
                               'state': status(config)['status'] == 'ok'}
-    for key in ('GOOGLE_WORKER_CREDENTIALS_FILE', 'NOTION_WORKER_TOKEN',
-                'GOOGLE_MCP_CREDENTIALS_FILE', 'NOTION_MCP_TOKEN', 'GITHUB_READ_TOKEN'):
-        value = os.environ.get(key, '')
-        checks[key] = bool(value) and (Path(value).expanduser().is_file() if key.endswith('_FILE') else True)
+    optional_checks: dict[str, Any] = {}
+    # The intake worker's Google/Notion write credentials are only relevant
+    # when the worker is actually enabled; requiring them for a read-only,
+    # MCP-search-only deployment would fail an otherwise complete minimal
+    # configuration (contradicting docs/operator-guide/installation.md,
+    # which promises doctor reports only the credentials a selected feature
+    # actually needs).
+    worker_credential_keys = ('GOOGLE_WORKER_CREDENTIALS_FILE', 'NOTION_WORKER_TOKEN')
+    if config.worker.enabled:
+        for key in worker_credential_keys:
+            checks[key] = _credential_ready(key)
+    else:
+        for key in worker_credential_keys:
+            optional_checks[key] = _credential_ready(key)
+    # The read-only MCP search surface is the system's core deliverable and
+    # is required regardless of whether the intake worker is enabled.
+    for key in ('GOOGLE_MCP_CREDENTIALS_FILE', 'NOTION_MCP_TOKEN'):
+        checks[key] = _credential_ready(key)
+    # GitHub is an optional supplemental source: GitHubAPIReader accepts an
+    # empty token and simply serves no GitHub content, so a missing token
+    # must never fail an otherwise complete minimal configuration.
+    optional_checks['GITHUB_READ_TOKEN'] = _credential_ready('GITHUB_READ_TOKEN')
     try:
         require_mcp_credentials(os.environ)
         checks['credential_separation'] = True
@@ -114,6 +223,8 @@ def doctor(config: Any, *, live: bool = False) -> dict[str, Any]:
                                            (config.remote_mcp.tls_certfile, config.remote_mcp.tls_keyfile))
         except (UlsError, ValueError):
             checks['remote_profile'] = False
+    else:
+        optional_checks['remote_profile'] = 'not_configured'
     if live:
         try:
             from uls.runtime import google_service
@@ -125,7 +236,8 @@ def doctor(config: Any, *, live: bool = False) -> dict[str, Any]:
         except Exception:  # noqa: BLE001 - health checks report booleans, never provider payloads
             checks['live_provider_read'] = False
     return {'status': 'ok' if all(checks.values()) else 'needs_configuration',
-            'checks': checks, 'client_e2e': 'not_proven_by_doctor'}
+            'checks': checks, 'optional_checks': optional_checks,
+            'client_e2e': 'not_proven_by_doctor'}
 
 
 def dispatch(args: argparse.Namespace) -> Any:
