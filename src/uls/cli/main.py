@@ -94,27 +94,39 @@ def _readiness_funnel(job_counts: dict[str, int]) -> dict[str, Any]:
     Labels are deliberately conservative to avoid overclaiming readiness.
 
     Stage semantics:
-    - source_archival: at least one job reached READY or PARTIAL (source bytes
-      fetched, hashed, and a normalized derivative was produced or attempted).
+    - source_archival: at least one job reached READY.  PARTIAL alone is
+      insufficient because a PARTIAL job may result from a pre-download failure
+      (e.g. SourcePartialError raised before any bytes were fetched), which
+      provides no evidence that source bytes were actually received and hashed.
     - text_extraction: at least one job reached READY (full text extracted
-      without page-level gaps; PARTIAL jobs do not qualify).
+      without page-level gaps); PARTIAL alone is 'not_proven' for the same
+      reason — the job count aggregate cannot distinguish a successful partial
+      extraction from a download-before-read failure.
     - retrieval_credentials: always 'not_checked_here' — credential presence
       is reported by 'uls doctor', not by the job-count-based status command.
     - ai_client: always 'not_proven' — requires a human to confirm through
       actual use; cannot be proven programmatically.
     """
     ready = job_counts.get('READY', 0)
-    partial = job_counts.get('PARTIAL', 0)
-    archived = ready + partial
-    if archived > 0 and ready > 0:
+    pending_or_active = job_counts.get('PENDING', 0) + job_counts.get('PROCESSING', 0)
+    if ready > 0:
         source_archival = 'done'
         text_extraction = 'done'
-    elif archived > 0:
-        source_archival = 'done'
-        text_extraction = 'partial'
-    else:
+    elif pending_or_active > 0:
         source_archival = 'not_started'
         text_extraction = 'not_started'
+    else:
+        total = sum(job_counts.values())
+        if total == 0:
+            # No jobs at all: fresh install or empty state — not yet started.
+            source_archival = 'not_started'
+            text_extraction = 'not_started'
+        else:
+            # Some jobs exist but none reached READY.  PARTIAL/FAILED/NEEDS_REVIEW
+            # alone cannot prove that source bytes were received and hashed, so we
+            # stay conservative rather than claiming 'done'.
+            source_archival = 'not_proven'
+            text_extraction = 'not_proven'
     return {
         'source_archival': source_archival,
         'text_extraction': text_extraction,

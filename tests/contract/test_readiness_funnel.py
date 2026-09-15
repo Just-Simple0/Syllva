@@ -5,6 +5,11 @@ conservative, evidence-backed progression of what has actually been verified
 in this deployment. Each stage is derived from job status counts and deliberately
 avoids overclaiming readiness at stages that cannot be proven from job counts alone.
 
+Key design constraint: PARTIAL alone must NOT advance source_archival to done.
+A PARTIAL job may result from a pre-download failure (e.g. SourcePartialError
+raised before any source bytes were fetched), which provides no evidence that
+source bytes were actually received and hashed. Only READY provides that proof.
+
 The fixed/unfixed boundary is verified with the revert-test-restore method
 applied to _readiness_funnel directly (no SQLite required).
 """
@@ -36,10 +41,17 @@ def test_only_pending_jobs_reports_not_started():
     assert funnel["text_extraction"] == "not_started"
 
 
-def test_only_partial_reports_done_archival_and_partial_extraction():
+def test_partial_alone_does_not_prove_source_archival():
+    """Regression: PARTIAL alone must not advance source_archival to done.
+
+    A PARTIAL job may result from SourcePartialError raised before any source
+    bytes are fetched (e.g. file size limit exceeded before download starts).
+    The job-count aggregate cannot distinguish this from a genuine partial
+    extraction, so PARTIAL alone must stay not_proven, not done.
+    """
     funnel = _readiness_funnel({"PARTIAL": 2})
-    assert funnel["source_archival"] == "done"
-    assert funnel["text_extraction"] == "partial"
+    assert funnel["source_archival"] == "not_proven"
+    assert funnel["text_extraction"] == "not_proven"
 
 
 def test_ready_jobs_report_done_for_both_stages():
@@ -49,13 +61,22 @@ def test_ready_jobs_report_done_for_both_stages():
 
 
 def test_mixed_ready_and_partial_reports_done_for_both():
+    """READY is sufficient to prove both stages regardless of other statuses."""
     funnel = _readiness_funnel({"READY": 1, "PARTIAL": 3, "FAILED": 2})
     assert funnel["source_archival"] == "done"
     assert funnel["text_extraction"] == "done"
 
 
-def test_failed_jobs_alone_do_not_advance_funnel():
+def test_failed_jobs_alone_report_not_proven():
+    """FAILED/NEEDS_REVIEW alone cannot prove source bytes were received."""
     funnel = _readiness_funnel({"FAILED": 10, "NEEDS_REVIEW": 2})
+    assert funnel["source_archival"] == "not_proven"
+    assert funnel["text_extraction"] == "not_proven"
+
+
+def test_pending_with_partial_reports_not_started():
+    """Active work in progress: still not_started (pending takes priority)."""
+    funnel = _readiness_funnel({"PENDING": 1, "PARTIAL": 3})
     assert funnel["source_archival"] == "not_started"
     assert funnel["text_extraction"] == "not_started"
 
@@ -100,7 +121,7 @@ def test_status_includes_readiness_funnel_key(tmp_path):
     assert funnel["ai_client"] == "not_proven"
 
 
-def test_status_funnel_updates_after_ready_and_partial_jobs(tmp_path):
+def test_status_funnel_ready_job_advances_both_stages(tmp_path):
     from uls.orchestration.jobs import derive_job_key
     from uls.runtime import state_path
     from uls.state.sqlite import SQLiteStateStore
@@ -122,7 +143,13 @@ def test_status_funnel_updates_after_ready_and_partial_jobs(tmp_path):
     assert funnel["ai_client"] == "not_proven"
 
 
-def test_status_funnel_partial_only_no_ready(tmp_path):
+def test_status_funnel_partial_only_stays_not_proven(tmp_path):
+    """Regression: pre-download PARTIAL must not advance source_archival.
+
+    This is the concrete scenario from the C2 review: a file that exceeds the
+    size limit causes SourcePartialError before any bytes are fetched, which
+    records job status PARTIAL. The funnel must not interpret this as done.
+    """
     from uls.orchestration.jobs import derive_job_key
     from uls.runtime import state_path
     from uls.state.sqlite import SQLiteStateStore
@@ -136,5 +163,5 @@ def test_status_funnel_partial_only_no_ready(tmp_path):
 
     result = status(config)
     funnel = result["readiness_funnel"]
-    assert funnel["source_archival"] == "done"
-    assert funnel["text_extraction"] == "partial"
+    assert funnel["source_archival"] == "not_proven"
+    assert funnel["text_extraction"] == "not_proven"
