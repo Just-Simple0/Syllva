@@ -9,9 +9,14 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from uls.adapters.drive.worker import DRIVE_FOLDER_MIME, DriveMetadata, DriveWorkerPort
+from uls.adapters.drive.worker import (
+    DRIVE_FOLDER_MIME,
+    DriveMetadata,
+    DriveWorkerPort,
+    require_private_ownership,
+)
 from uls.config.intake import ResolvedSemesterWorkspace
-from uls.domain.errors import PolicyDeniedError, SourceUnavailableError, UlsError
+from uls.domain.errors import SourceUnavailableError, UlsError
 
 
 class StaticLayoutReconcileRequired(UlsError):
@@ -51,20 +56,7 @@ def validate_registered_drive_layout(
             raise StaticLayoutReconcileRequired("registered Drive static ID is not a folder")
         if metadata.trashed:
             raise SourceUnavailableError("registered Drive static folder is trashed")
-        if metadata.owned_by_me is not True:
-            raise PolicyDeniedError("registered Drive static folder is not USER owned")
-        if metadata.drive_id is not None:
-            raise PolicyDeniedError("registered Drive static folder is in a shared drive")
-        if metadata.permission_count is None or metadata.owner_only is None:
-            raise SourceUnavailableError("registered Drive static folder lacks owner permission readback")
-        if metadata.owner_only is not True:
-            raise PolicyDeniedError("registered Drive static folder is not solely USER owned")
-        if metadata.is_publicly_shared is None:
-            raise SourceUnavailableError("registered Drive static folder lacks privacy readback")
-        if metadata.is_publicly_shared:
-            raise PolicyDeniedError("registered Drive static folder has broad sharing")
-        if metadata.can_edit is not True or metadata.can_move is not True:
-            raise SourceUnavailableError("registered Drive static folder lacks worker capabilities")
+        require_private_ownership(metadata, context="registered Drive static folder")
         if parent_id is not None and metadata.parents != (parent_id,):
             raise StaticLayoutReconcileRequired(
                 "registered Drive static folder has an unexpected parent"

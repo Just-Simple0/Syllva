@@ -27,6 +27,9 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, NoReturn, TextIO
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _lms_platform as fsplat
+
 ORIGIN = "https://canvas.knu.ac.kr"
 ANNOUNCEMENT_WINDOW_DAYS = 31
 KST = dt.timezone(dt.timedelta(hours=9), name="Asia/Seoul")
@@ -336,14 +339,15 @@ def _atomic_json_write(path: Path, value: dict[str, Any], mode: int) -> None:
         raise SyncError("state_path_invalid")
     try:
         RUNTIME_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-        os.chmod(RUNTIME_DIR, 0o700)
+        fsplat.chmod_if_supported(RUNTIME_DIR, 0o700)
         runtime_info = RUNTIME_DIR.stat()
-        if runtime_info.st_uid != os.getuid() or stat.S_IMODE(runtime_info.st_mode) != 0o700:
+        if (not fsplat.owns_path(RUNTIME_DIR, posix_stat=runtime_info)
+                or (not fsplat.IS_WINDOWS and stat.S_IMODE(runtime_info.st_mode) != 0o700)):
             raise SyncError("runtime_dir_invalid")
         fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=RUNTIME_DIR)
         temporary: Path | None = Path(temporary_name)
         try:
-            os.fchmod(fd, mode)
+            fsplat.fchmod_if_supported(fd, mode)
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
                 json.dump(value, stream, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
                 stream.write("\n")
@@ -354,14 +358,7 @@ def _atomic_json_write(path: Path, value: dict[str, Any], mode: int) -> None:
             if temporary is None:
                 raise SyncError("state_write_failed")
             os.replace(temporary, path)
-            directory_fd = os.open(
-                RUNTIME_DIR,
-                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-            )
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            fsplat.sync_directory(RUNTIME_DIR)
             temporary = None
         finally:
             # Keep a failed temporary for diagnosis.  It is in the private runtime
@@ -381,12 +378,13 @@ def _read_json_file(
         raise SyncError("state_path_invalid")
     fd: int | None = None
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = fsplat.open_nofollow(path, os.O_RDONLY)
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_size > max_bytes:
             raise SyncError("state_too_large")
-        if info.st_uid != os.getuid() or (
-            expected_mode is not None and stat.S_IMODE(info.st_mode) != expected_mode
+        if not fsplat.owns_path(path, posix_stat=info) or (
+            not fsplat.IS_WINDOWS and expected_mode is not None
+            and stat.S_IMODE(info.st_mode) != expected_mode
         ):
             raise SyncError("state_permissions_invalid")
         with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as stream:
@@ -1305,7 +1303,8 @@ def bind_bootstrap(registry_path: str, candidate_path: str) -> dict[str, Any]:
         raise SyncError("registry_path_invalid")
     try:
         info = registry_file.stat()
-        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+        if (not fsplat.owns_path(registry_file, posix_stat=info)
+                or (not fsplat.IS_WINDOWS and stat.S_IMODE(info.st_mode) != 0o600)):
             raise SyncError("registry_permissions_invalid")
     except SyncError:
         raise
@@ -1354,14 +1353,10 @@ def bind_bootstrap(registry_path: str, candidate_path: str) -> dict[str, Any]:
             json.dump(document, stream, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             stream.write("\n")
             stream.flush()
-            os.fchmod(stream.fileno(), 0o600)
+            fsplat.fchmod_if_supported(stream.fileno(), 0o600)
             os.fsync(stream.fileno())
         os.replace(temporary_name, registry_file)
-        directory_fd = os.open(registry_file.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        fsplat.sync_directory(registry_file.parent)
     except SyncError:
         raise
     except (OSError, TypeError, ValueError) as exc:
@@ -2210,11 +2205,7 @@ def _write_json_path(path_value: str | None, value: Any, output: TextIO) -> None
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary_name, path)
-        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        fsplat.sync_directory(path.parent)
     except SyncError:
         raise
     except (OSError, TypeError, ValueError) as exc:
@@ -2224,6 +2215,21 @@ def _write_json_path(path_value: str | None, value: Any, output: TextIO) -> None
 def main(argv: list[str] | None = None, *, output: TextIO | None = None, error: TextIO | None = None) -> int:
     output_stream = sys.stdout if output is None else output
     error_stream = sys.stderr if error is None else error
+    # _write_json/_write_json_path use ensure_ascii=False, so non-ASCII
+    # content (e.g. a Korean course name) is written verbatim. Windows'
+    # default stdout/stderr encoding is the legacy console codepage, not
+    # UTF-8, so writing that content there raises UnicodeEncodeError
+    # otherwise -- which _write_json's own except (TypeError, ValueError)
+    # clause (UnicodeEncodeError is a ValueError subclass) turns into a
+    # misleading output_serialization SyncError. Reconfigure to UTF-8
+    # where supported; injected test doubles without reconfigure() (e.g.
+    # io.StringIO) are left untouched.
+    for stream in (output_stream, error_stream):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8")
+            except (OSError, ValueError):
+                pass
     try:
         args = _parser().parse_args(argv)
         if args.command == "hold-lock":

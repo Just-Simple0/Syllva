@@ -554,7 +554,10 @@ def test_failed_atomic_state_write_keeps_private_temporary(monkeypatch: pytest.M
         sync._atomic_json_write(target, {"state": "pending"}, 0o600)
     temporary_files = list(runtime.glob(".auth-manifest.json.*"))
     assert len(temporary_files) == 1
-    assert temporary_files[0].stat().st_mode & 0o777 == 0o600
+    if not sync.fsplat.IS_WINDOWS:
+        # Windows has no fchmod; POSIX 0600 mode bits are not meaningful
+        # there (see fsplat.fchmod_if_supported).
+        assert temporary_files[0].stat().st_mode & 0o777 == 0o600
 
 
 def test_auth_manifest_preflight_blocks_pending_and_expired_before_keychain(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -918,7 +921,7 @@ def test_cli_snapshot_and_project_are_executable(tmp_path: Path) -> None:
         "--input",
         str(raw_path),
     ]
-    captured = subprocess.run(command, check=True, capture_output=True, text=True)
+    captured = subprocess.run(command, check=True, capture_output=True, text=True, encoding="utf-8")
     canonical_path.write_text(captured.stdout, encoding="utf-8")
     readback_path.write_text(
         json.dumps({"rows": [], "course_pages": [], "course_parent_verified": True, "private_root_verified": True}),
@@ -929,6 +932,7 @@ def test_cli_snapshot_and_project_are_executable(tmp_path: Path) -> None:
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     result = json.loads(projected.stdout)
     assert result["datasource_count"] == 1
@@ -1092,7 +1096,7 @@ def test_bootstrap_binds_identity_candidate_with_private_atomic_registry(tmp_pat
     }}), encoding="utf-8")
     result = sync.bind_bootstrap(str(registry_path), str(candidate_path))
     assert result["status"] == "bound"
-    assert sync.registry_from_document(json.loads(registry_path.read_text())).courses[0].expected_code == "NEW-001"
+    assert sync.registry_from_document(json.loads(registry_path.read_text(encoding="utf-8"))).courses[0].expected_code == "NEW-001"
 
 
 def test_registry_project_cli_requires_prior_and_observed_on(tmp_path: Path) -> None:
@@ -1119,3 +1123,43 @@ def test_registry_project_cli_requires_prior_and_observed_on(tmp_path: Path) -> 
     assert json.loads(completed.stdout) == {
         "status": "failed", "error": "semester_runtime_binding_required"
     }
+
+
+def test_read_enrolled_token_full_path_on_simulated_windows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Exercise the entire config/manifest read plus ownership-boundary path
+    (not just keyring backend selection) with the process's own os.name
+    branch simulated as Windows, so a Unix-only primitive anywhere in this
+    call chain (os.getuid/O_NOFOLLOW/O_DIRECTORY/fchmod) fails this test
+    instead of only failing on a real Windows runner much later."""
+    monkeypatch.setattr(sync.sys, "platform", "win32")
+    monkeypatch.setattr(sync.fsplat, "IS_WINDOWS", True)
+    monkeypatch.setattr(sync.fsplat, "_windows_owner_sid", lambda path: "S-1-5-21-SAME")
+    monkeypatch.setattr(sync.fsplat, "_windows_default_owner_sid", lambda: "S-1-5-21-SAME")
+    # _windows_open_no_follow needs real ctypes.WinDLL/msvcrt, which do not
+    # exist on this test host; the real CreateFileW-based implementation
+    # has its own dedicated fake-kernel32 coverage in test_lms_platform.py,
+    # so this end-to-end flow test only needs a working real POSIX open
+    # here to exercise everything around it (config/manifest reads).
+    monkeypatch.setattr(
+        sync.fsplat, "_windows_open_no_follow",
+        lambda path, flags, mode: sync.os.open(path, flags, mode or 0o666),
+    )
+    issued = dt.datetime(2026, 9, 1, tzinfo=dt.UTC)
+    now = dt.datetime(2026, 9, 13, tzinfo=dt.UTC)
+    document = _auth_document(issued=issued, expires=dt.datetime(2026, 9, 30, tzinfo=dt.UTC))
+    scope_hash = _install_auth_files(monkeypatch, tmp_path, document)
+    enrolled = sync._fixed_auth_document(document, "enrolled", scope_hash)
+    sync.AUTH_MANIFEST_PATH.write_text(json.dumps(enrolled), encoding="utf-8")
+    sync.AUTH_MANIFEST_PATH.chmod(0o600)
+
+    class WindowsBackend:
+        def get_password(self, _service: str, _account: str) -> str:
+            return "windows-token"
+
+    monkeypatch.setattr(sync, "_explicit_os_keyring", lambda: WindowsBackend())
+    token, config, returned_scope_hash = sync.read_enrolled_token(now=now)
+    assert token == "windows-token"
+    assert config.course_id == 12345
+    assert returned_scope_hash == scope_hash

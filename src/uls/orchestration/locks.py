@@ -18,10 +18,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-if os.name == "nt":
-    import msvcrt
-else:
-    import fcntl
+# A module-level constant, rather than repeated inline os.name checks, lets
+# tests simulate the Windows branch by monkeypatching one attribute without
+# touching the real os module, which pathlib itself also reads dynamically
+# on every path operation on this Python version.
+_IS_WINDOWS = os.name == "nt"
 
 
 DEFAULT_LOCK_TIMEOUT_SECONDS = 0.0
@@ -143,7 +144,19 @@ class LocalWorkerLock:
                 if snapshot is not None:
                     metadata = snapshot.metadata
                     if metadata.get("token") == token and metadata.get("pid") == os.getpid():
-                        _unlink_path_if_fd_matches(self.path, fd)
+                        if _IS_WINDOWS:
+                            # Windows will not delete a file while this
+                            # process still holds fd open (os.open has no
+                            # FILE_SHARE_DELETE), even for its own handle.
+                            # Release and close first, then unlink using the
+                            # (dev, ino, size, mtime) identity already
+                            # captured above instead of a live fd comparison.
+                            _unlock_advisory_lock(fd)
+                            os.close(fd)
+                            fd = None
+                            _unlink_path_if_signature_matches(self.path, snapshot.signature)
+                        else:
+                            _unlink_path_if_fd_matches(self.path, fd)
         finally:
             if fd is not None:
                 _unlock_advisory_lock(fd)
@@ -221,6 +234,7 @@ class LocalWorkerLock:
             fd = os.open(self.path, os.O_RDWR)
         except (FileNotFoundError, OSError):
             return False
+        closed = False
         try:
             if not _try_advisory_lock(fd):
                 return False
@@ -229,10 +243,19 @@ class LocalWorkerLock:
                 return False
             if current.signature != snapshot.signature or current.metadata != snapshot.metadata:
                 return False
+            if _IS_WINDOWS:
+                # Same Windows own-handle delete restriction as release():
+                # unlock and close before unlinking, verifying identity via
+                # the already-captured signature instead of a live fd.
+                _unlock_advisory_lock(fd)
+                os.close(fd)
+                closed = True
+                return _unlink_path_if_signature_matches(self.path, current.signature)
             return _unlink_path_if_fd_matches(self.path, fd)
         finally:
-            _unlock_advisory_lock(fd)
-            os.close(fd)
+            if not closed:
+                _unlock_advisory_lock(fd)
+                os.close(fd)
 
 
 def _snapshot_from_fd(fd: int) -> _LockSnapshot | None:
@@ -290,11 +313,37 @@ def _unlink_path_if_fd_matches(path: Path, fd: int) -> bool:
     return True
 
 
+def _unlink_path_if_signature_matches(path: Path, signature: tuple[int, int, int, int]) -> bool:
+    """Unlink ``path`` only when a fresh stat still matches ``signature``.
+
+    Used on Windows in place of ``_unlink_path_if_fd_matches``: Windows will
+    not delete a file while this process still holds an open handle to it
+    (``os.open`` provides no ``FILE_SHARE_DELETE`` there), so the caller has
+    already released and closed its descriptor before calling this. The
+    (dev, ino, size, mtime_ns) signature captured while the descriptor was
+    still open stands in for the live-fd identity check.
+    """
+
+    try:
+        path_stat = path.stat()
+    except (FileNotFoundError, OSError):
+        return False
+    if _stat_signature(path_stat) != signature:
+        return False
+    try:
+        os.unlink(path)
+    except (FileNotFoundError, OSError):
+        return False
+    return True
+
+
 def _try_advisory_lock(fd: int) -> bool:
     """Acquire a non-blocking descriptor lock on macOS/POSIX or Windows."""
 
     try:
-        if os.name == "nt":
+        if _IS_WINDOWS:
+            import msvcrt
+
             # ``msvcrt.locking`` locks bytes, so ensure byte zero exists even
             # for a freshly-created empty file.
             if os.fstat(fd).st_size == 0:
@@ -302,6 +351,8 @@ def _try_advisory_lock(fd: int) -> bool:
             os.lseek(fd, 0, os.SEEK_SET)
             msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
         else:
+            import fcntl
+
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except (BlockingIOError, OSError):
         return False
@@ -310,10 +361,14 @@ def _try_advisory_lock(fd: int) -> bool:
 
 def _unlock_advisory_lock(fd: int) -> None:
     try:
-        if os.name == "nt":
+        if _IS_WINDOWS:
+            import msvcrt
+
             os.lseek(fd, 0, os.SEEK_SET)
             msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
         else:
+            import fcntl
+
             fcntl.flock(fd, fcntl.LOCK_UN)
     except OSError:
         pass

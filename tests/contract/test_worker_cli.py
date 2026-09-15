@@ -76,17 +76,17 @@ def test_reprocess_is_explicit_and_preserves_job_identity(tmp_path):
 
 
 def test_cli_init_status_jobs_and_disabled_worker_no_credentials(tmp_path, capsys):
-    raw = yaml.safe_load((asset_root() / 'config.example.yaml').read_text())
+    raw = yaml.safe_load((asset_root() / 'config.example.yaml').read_text(encoding='utf-8'))
     raw['system']['workspace_dir'] = 'state'
     raw['behavior_contract']['path'] = str(asset_root() / 'contracts/study-behavior.md')
     raw['worker']['enabled'] = False
     path = tmp_path / 'config.yaml'
-    path.write_text(yaml.safe_dump(raw))
+    path.write_text(yaml.safe_dump(raw), encoding='utf-8')
     original = path.read_bytes()
     assert main(['--config', str(path), 'init']) == 0
     assert path.read_bytes() == original
     assert (tmp_path / 'state/state.sqlite3').is_file()
-    assert json.loads((tmp_path / 'state/sources.json').read_text()) == []
+    assert json.loads((tmp_path / 'state/sources.json').read_text(encoding='utf-8')) == []
     assert main(['--config', str(path), 'status']) == 0
     assert main(['--config', str(path), 'jobs']) == 0
     assert main(['--config', str(path), 'run']) == 0

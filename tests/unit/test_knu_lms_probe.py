@@ -10,7 +10,7 @@ import time
 import warnings
 from email.message import Message
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
 
@@ -741,6 +741,132 @@ def test_aside_nonzero_exit_rejected_even_with_valid_frame(monkeypatch: pytest.M
         probe.AsideReplTransport(tab_id="tab", origin=probe.CANVAS_ORIGIN).run(
             [], start_date="2026-09-01", end_date="2026-09-13"
         )
+
+
+def test_aside_reader_bounds_queued_bytes_with_fast_producer_slow_consumer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: an earlier thread-based reader queued every chunk
+    unconditionally and only checked the MAX_ASIDE_OUTPUT_BYTES budget
+    after the consumer dequeued it, so a fast producer paired with a
+    slow-to-start consumer could pile arbitrarily more than the budget
+    into memory before the overflow was ever detected. The reader must
+    enforce the per-stream byte budget itself, before queuing, so the
+    queue can never hold much more than one budget's worth of chunks
+    regardless of how slowly the consumer drains it."""
+    payload_size = probe.MAX_ASIDE_OUTPUT_BYTES * 20
+    code = f"import sys; sys.stdout.buffer.write(b'x' * {payload_size}); sys.stdout.flush()"
+    real_popen = subprocess.Popen
+
+    def fake_popen(_args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
+        return real_popen([sys.executable, "-c", code], **kwargs)
+
+    monkeypatch.setattr(probe.subprocess, "Popen", fake_popen)
+
+    class _TrackingQueue(probe.queue.Queue):
+        bytes_enqueued: ClassVar[dict[str, int]] = {}
+        _delayed_once = False
+
+        def put(self, item: Any, *args: Any, **kwargs: Any) -> None:
+            super().put(item, *args, **kwargs)
+            name, kind, chunk = item
+            if kind == "data":
+                totals = type(self).bytes_enqueued
+                totals[name] = totals.get(name, 0) + len(chunk)
+
+        def get(self, *args: Any, **kwargs: Any) -> Any:
+            if not type(self)._delayed_once:
+                type(self)._delayed_once = True
+                # Simulate a consumer that has not started draining yet,
+                # matching the review's repro (delay the first dequeue).
+                time.sleep(0.3)
+            return super().get(*args, **kwargs)
+
+    monkeypatch.setattr(probe.queue, "Queue", _TrackingQueue)
+    with pytest.raises(probe.ProbeError, match="browser_output_too_large"):
+        probe._run_bounded_aside_repl("synthetic", 5.0)
+    # Byte totals, not event/chunk counts: os.read() may return less than
+    # READ_CHUNK_BYTES per call (a smaller pipe buffer, a different OS,
+    # etc.), so a chunk-count budget is not a valid proxy for the actual
+    # byte limit the reader is supposed to enforce.
+    for name, total in _TrackingQueue.bytes_enqueued.items():
+        assert total <= probe.MAX_ASIDE_OUTPUT_BYTES, (
+            f"{name} reader enqueued {total} bytes, more than the "
+            f"{probe.MAX_ASIDE_OUTPUT_BYTES}-byte budget it should enforce"
+        )
+
+
+def test_aside_reader_error_on_stderr_fails_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: an earlier thread-based reader converted any os.read()
+    OSError into the same b"" event as a clean end of stream, so a read
+    failure on one stream could be reported as a successful transport
+    result whenever the other stream and exit code looked fine."""
+    real_popen = subprocess.Popen
+    child_holder: dict[str, subprocess.Popen[bytes]] = {}
+
+    def fake_popen(_args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
+        proc = real_popen([sys.executable, "-c", "import time; time.sleep(2)"], **kwargs)
+        child_holder["proc"] = proc
+        return proc
+
+    monkeypatch.setattr(probe.subprocess, "Popen", fake_popen)
+    real_read = probe.os.read
+
+    def fake_read(fd: int, count: int) -> bytes:
+        proc = child_holder.get("proc")
+        if proc is not None and proc.stderr is not None and fd == proc.stderr.fileno():
+            raise OSError("synthetic stderr read failure")
+        return real_read(fd, count)
+
+    monkeypatch.setattr(probe.os, "read", fake_read)
+    with pytest.raises(probe.ProbeError, match="browser_transport_unavailable"):
+        probe._run_bounded_aside_repl("synthetic", 5.0)
+    proc = child_holder["proc"]
+    proc.wait(timeout=5)
+    assert proc.poll() is not None
+
+
+def test_aside_reader_error_on_stdout_after_valid_frame_fails_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a read failure after a valid frame was already
+    buffered must still fail the whole transport, not return the partial
+    result as if the run had completed cleanly."""
+    real_popen = subprocess.Popen
+    frame = {"version": 1, "provenance": "aside-readonly", "origin": probe.CANVAS_ORIGIN,
+             "request_url": probe.CANVAS_ORIGIN, "final_url": probe.CANVAS_ORIGIN,
+             "headers": {"content_type": "application/json"}, "courses": {}}
+    encoded = base64.b64encode(json.dumps(frame, separators=(",", ":")).encode()).decode()
+    child_holder: dict[str, subprocess.Popen[bytes]] = {}
+
+    def fake_popen(_args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
+        code = (
+            "import sys, time; "
+            f"sys.stdout.write('ULS_ASIDE_FRAME:{encoded}\\n'); sys.stdout.flush(); "
+            "time.sleep(2)"
+        )
+        proc = real_popen([sys.executable, "-c", code], **kwargs)
+        child_holder["proc"] = proc
+        return proc
+
+    monkeypatch.setattr(probe.subprocess, "Popen", fake_popen)
+    real_read = probe.os.read
+    stdout_reads = {"count": 0}
+
+    def fake_read(fd: int, count: int) -> bytes:
+        proc = child_holder.get("proc")
+        if proc is not None and proc.stdout is not None and fd == proc.stdout.fileno():
+            stdout_reads["count"] += 1
+            if stdout_reads["count"] >= 2:
+                raise OSError("synthetic stdout read failure")
+        return real_read(fd, count)
+
+    monkeypatch.setattr(probe.os, "read", fake_read)
+    with pytest.raises(probe.ProbeError, match="browser_transport_unavailable"):
+        probe._run_bounded_aside_repl("synthetic", 5.0)
+    proc = child_holder["proc"]
+    proc.wait(timeout=5)
+    assert proc.poll() is not None
 
 
 @pytest.mark.parametrize(

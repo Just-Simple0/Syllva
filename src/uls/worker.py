@@ -14,6 +14,11 @@ from pathlib import Path
 from typing import Any
 
 from uls.adapters.drive.google import GoogleDriveReader
+from uls.adapters.drive.worker import (
+    DRIVE_FOLDER_MIME,
+    GoogleDriveWorkerAdapter,
+    require_private_ownership,
+)
 from uls.adapters.notion.api import NotionAPIReader
 from uls.adapters.notion.base import AutomationActor, enforce_write_policy
 from uls.config.errors import ConfigurationError
@@ -64,13 +69,21 @@ class DerivedDriveWriter:
     """Create immutable staged derivatives; never overwrite an originating file."""
     def __init__(self, service: Any, reader: GoogleDriveReader, folder_id: str) -> None:
         self._files, self.reader, self.folder_id = service.files(), reader, folder_id
+        # A separate metadata-only adapter reuses the exact same field list and
+        # parsing/ownership boundary enforced for the semester intake layout,
+        # instead of duplicating a second, looser Drive metadata read here.
+        self._metadata_port = GoogleDriveWorkerAdapter(service)
 
     def write_staged_derived(self, source_ref: SourceRef, entity_id: str, content: str) -> SourceRef:
         from googleapiclient.http import MediaIoBaseUpload  # type: ignore[import-untyped]
-        # The configured destination must be an existing private Derived folder.
-        folder = self._files.get(fileId=self.folder_id, fields='id,mimeType,trashed', supportsAllDrives=True).execute()
-        if folder.get('id') != self.folder_id or folder.get('mimeType') != 'application/vnd.google-apps.folder' or folder.get('trashed') is not False:
+        # The configured destination must be an existing, exclusively
+        # USER-owned, non-shared Derived folder. Ownership/sharing can drift
+        # after initial setup (or the configured ID can simply be wrong), so
+        # this is re-verified on every write rather than assumed once.
+        folder = self._metadata_port.read_metadata(self.folder_id)
+        if folder.mime_type != DRIVE_FOLDER_MIME:
             raise SourceUnavailableError('Derived folder is unavailable')
+        require_private_ownership(folder, context='Derived folder')
         result = self._files.create(body={
             'name': entity_id + '.staged.md', 'parents': [self.folder_id],
             'mimeType': 'text/markdown', 'appProperties': {'uls_entity': entity_id, 'uls_source': source_ref.file_id},

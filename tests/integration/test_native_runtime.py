@@ -71,18 +71,25 @@ class NotionService:
 
 
 class DriveService:
-    def __init__(self):
+    def __init__(self, derived_metadata_overrides=None):
         self.contents = {'raw1': b'[00:00:00] CPU scheduling starts here.\n[00:00:10] Round robin scheduling.\n'}
         self.uploads = []
+        self.derived_metadata_overrides = derived_metadata_overrides or {}
 
     def files(self):
         return self
 
     def get(self, fileId, **kwargs):
         if fileId == 'derived-folder':
-            data = {'id': fileId, 'mimeType': 'application/vnd.google-apps.folder', 'trashed': False}
+            data = {
+                'id': fileId, 'name': 'Derived', 'mimeType': 'application/vnd.google-apps.folder',
+                'trashed': False, 'ownedByMe': True,
+                'permissions': [{'type': 'user', 'role': 'owner'}],
+                'capabilities': {'canEdit': True, 'canMoveItemWithinDrive': True},
+            }
+            data.update(self.derived_metadata_overrides)
         else:
-            data = {'id': fileId, 'size': len(self.contents[fileId]), 'mimeType': 'text/plain', 'trashed': False}
+            data = {'id': fileId, 'name': fileId, 'size': len(self.contents[fileId]), 'mimeType': 'text/plain', 'trashed': False}
         return SimpleNamespace(execute=lambda: data)
 
     def get_media(self, **kwargs):
@@ -234,3 +241,43 @@ def test_worker_preserves_user_replaced_transcript_pointer(tmp_path, monkeypatch
         assert result['failed'] == 1
         assert notion.writes == previous_writes
         assert session['properties']['Normalized Transcript']['url'].endswith('/user-owned/view')
+
+
+@pytest.mark.parametrize(
+    'overrides',
+    [
+        pytest.param({'driveId': 'shared-drive-1'}, id='shared_drive'),
+        pytest.param({'ownedByMe': False}, id='not_owned_by_me'),
+        pytest.param(
+            {'permissions': [{'type': 'user', 'role': 'owner'}, {'type': 'user', 'role': 'writer'}]},
+            id='not_solely_owned',
+        ),
+        pytest.param(
+            {'permissions': [{'type': 'anyone', 'role': 'reader'}]},
+            id='publicly_shared',
+        ),
+        pytest.param({'capabilities': {'canEdit': False, 'canMoveItemWithinDrive': True}}, id='cannot_edit'),
+        pytest.param({'permissions': None}, id='missing_permission_readback'),
+        pytest.param({'trashed': None}, id='trashed_missing_readback_null'),
+        pytest.param({'trashed': 'true'}, id='trashed_malformed_string'),
+        pytest.param({'trashed': 1}, id='trashed_malformed_integer'),
+    ],
+)
+def test_native_worker_rejects_unsafe_derived_folder(tmp_path, monkeypatch, overrides):
+    """The legacy transcript writer must reject the same ownership/sharing
+    problems the semester intake layout validator already rejects, instead of
+    trusting a folder ID solely because it exists and is untrashed."""
+    pytest.importorskip('googleapiclient')
+    notion = NotionService()
+    drive = DriveService(derived_metadata_overrides=overrides)
+    cfg = config()
+    monkeypatch.setattr(GoogleDriveReader, 'download', lambda self, file_id: drive.contents[file_id])
+    registration = {'file_id': 'raw1', 'course_key': COURSE, 'kind': 'transcript',
+                    'derived_folder_id': 'derived-folder', 'title': 'Scheduling',
+                    'date': '2026-09-10', 'status': 'Not started'}
+    with SQLiteStateStore(tmp_path / 'state.db') as state:
+        worker = NativeWorker(cfg, state, drive, notion, [registration])
+        result = worker.runner.run_once()
+        assert result['processed'] == 0 and result['failed'] == 1
+        assert drive.uploads == []
+        assert notion.writes == []

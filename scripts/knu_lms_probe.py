@@ -16,12 +16,13 @@ import importlib.util
 import json
 import math
 import os
+import queue
 import re
-import selectors
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unicodedata
 import warnings
@@ -29,7 +30,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
-from typing import Any, NoReturn, TextIO, cast
+from typing import Any, NoReturn, TextIO
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -830,7 +831,17 @@ class AsideReplTransport:
 
 
 def _run_bounded_aside_repl(script: str, timeout: float) -> tuple[bytes, bytes]:
-    """Run Aside while bounding both stdout and stderr before buffering them."""
+    """Run Aside while bounding both stdout and stderr before buffering them.
+
+    Uses one blocking-read reader thread per stream instead of selectors
+    plus a non-blocking fd. Windows selector backends only support sockets
+    (not arbitrary pipe/file objects) and Windows has no os.set_blocking(),
+    so the prior selectors-based implementation crashed immediately with
+    AttributeError there. A reader thread per stream works identically on
+    every platform: each thread only ever blocks on its own stream, and
+    the main thread enforces the overall deadline and byte budget by
+    polling a queue those threads push chunks onto.
+    """
     try:
         process = subprocess.Popen(
             ["aside", "repl", script], stdin=subprocess.DEVNULL,
@@ -840,8 +851,6 @@ def _run_bounded_aside_repl(script: str, timeout: float) -> tuple[bytes, bytes]:
         raise ProbeError("browser_transport_unavailable") from exc
     if process.stdout is None or process.stderr is None:
         raise ProbeError("browser_transport_unavailable")
-    streams = {process.stdout: bytearray(), process.stderr: bytearray()}
-    selector = selectors.DefaultSelector()
     deadline = time.monotonic() + timeout
 
     def kill_and_reap() -> None:
@@ -855,28 +864,66 @@ def _run_bounded_aside_repl(script: str, timeout: float) -> tuple[bytes, bytes]:
         except (OSError, subprocess.TimeoutExpired):
             pass
 
+    # Event kind is one of "data" (chunk is non-empty), "eof" (the stream
+    # ended cleanly, a real zero-length read), "overflow" (this stream
+    # alone would exceed MAX_ASIDE_OUTPUT_BYTES), or "error" (os.read()
+    # raised OSError). "eof" and "error" are kept distinct on purpose: an
+    # earlier version conflated a read failure with a clean stream close
+    # (both put a b"" chunk), which let an incomplete/corrupted read
+    # return a "successful" result whenever the other stream and the exit
+    # code looked fine. The byte budget is enforced inside the reader
+    # thread itself, before anything is queued, not only by the consumer
+    # after dequeuing -- a fast producer paired with a slow consumer could
+    # otherwise queue arbitrarily more than MAX_ASIDE_OUTPUT_BYTES before
+    # the consumer-side check ever ran.
+    events: queue.Queue[tuple[str, str, bytes]] = queue.Queue()
+
+    def reader(name: str, stream: TextIO) -> None:
+        total = 0
+        try:
+            while True:
+                chunk = os.read(stream.fileno(), READ_CHUNK_BYTES)
+                if not chunk:
+                    events.put((name, "eof", b""))
+                    return
+                if total + len(chunk) > MAX_ASIDE_OUTPUT_BYTES:
+                    events.put((name, "overflow", b""))
+                    return
+                total += len(chunk)
+                events.put((name, "data", chunk))
+        except OSError:
+            events.put((name, "error", b""))
+
+    readers = {"stdout": process.stdout, "stderr": process.stderr}
+    threads = [
+        threading.Thread(target=reader, args=(name, stream), daemon=True)
+        for name, stream in readers.items()
+    ]
+    for thread in threads:
+        thread.start()
+
+    buffers: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
+    open_streams = set(readers)
     try:
-        for stream in streams:
-            os.set_blocking(stream.fileno(), False)
-            selector.register(stream, selectors.EVENT_READ)
-        while selector.get_map():
+        while open_streams:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 kill_and_reap()
                 raise ProbeError("browser_timeout", incomplete=True)
-            events = selector.select(min(remaining, 0.1))
-            for key, _ in events:
-                stream = cast(TextIO, key.fileobj)
-                chunk = os.read(key.fd, READ_CHUNK_BYTES)
-                if not chunk:
-                    selector.unregister(stream)
-                    stream.close()
-                    continue
-                buffer = streams[stream]
-                if len(buffer) + len(chunk) > MAX_ASIDE_OUTPUT_BYTES:
-                    kill_and_reap()
-                    raise ProbeError("browser_output_too_large")
-                buffer.extend(chunk)
+            try:
+                name, kind, chunk = events.get(timeout=min(remaining, 0.1))
+            except queue.Empty:
+                continue
+            if kind == "eof":
+                open_streams.discard(name)
+                continue
+            if kind == "overflow":
+                kill_and_reap()
+                raise ProbeError("browser_output_too_large")
+            if kind == "error":
+                kill_and_reap()
+                raise ProbeError("browser_transport_unavailable")
+            buffers[name].extend(chunk)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             kill_and_reap()
@@ -888,19 +935,20 @@ def _run_bounded_aside_repl(script: str, timeout: float) -> tuple[bytes, bytes]:
             raise ProbeError("browser_timeout", incomplete=True) from exc
         if returncode != 0:
             raise ProbeError("browser_transport_failed")
-        return bytes(streams[process.stdout]), bytes(streams[process.stderr])
+        return bytes(buffers["stdout"]), bytes(buffers["stderr"])
     except ProbeError:
         raise
     except (OSError, ValueError) as exc:
         kill_and_reap()
         raise ProbeError("browser_transport_unavailable") from exc
     finally:
-        for stream in streams:
+        for stream in readers.values():
             try:
                 stream.close()
             except OSError:
                 pass
-        selector.close()
+        for thread in threads:
+            thread.join(timeout=1.0)
 
 
 def _frame_text(value: Any, *, nullable: bool = False) -> str | None:
