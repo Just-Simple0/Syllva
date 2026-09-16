@@ -4,10 +4,19 @@ Covers the fail-closed test matrix from the reviewed plan: source
 resolution, the environment-vs-keyring absent/error split, snapshot
 immutability (rev3 Blocker A), and the non-raising diagnose()/require()/
 select() contract (rev3 Blocker B).
+
+Platform selection for these tests uses CredentialResolver's explicit
+platform= constructor override, never monkeypatch.setattr(sys, 'platform',
+...). The latter mutates the single process-global sys module and would
+also change the behavior of unrelated platform-branching code elsewhere
+(for example orchestration/locks.py's fcntl/msvcrt selection), which is
+exactly what caused a real Windows CI failure during this feature's
+development: a test that forced sys.platform to 'darwin' made SQLite
+locking code running on a real Windows CI runner try to select POSIX
+locking primitives.
 """
 from __future__ import annotations
 
-import sys
 import types
 
 import pytest
@@ -83,7 +92,8 @@ def test_no_credentials_section_matches_environment_default():
 def _install_fake_macos_keyring(monkeypatch, *, password_by_account=None, call_counter=None):
     """Install a fake keyring.backends.macOS.Keyring module the resolver's
     explicit_os_keyring() will import, without requiring the real keyring
-    package."""
+    package. Does NOT touch sys.platform; callers pass platform='darwin'
+    explicitly to CredentialResolver instead."""
 
     password_by_account = password_by_account or {}
     call_counter = call_counter if call_counter is not None else []
@@ -100,8 +110,7 @@ def _install_fake_macos_keyring(monkeypatch, *, password_by_account=None, call_c
 
     module = types.ModuleType('keyring.backends.macOS')
     module.Keyring = FakeMacKeyring
-    monkeypatch.setitem(sys.modules, 'keyring.backends.macOS', module)
-    monkeypatch.setattr(sys, 'platform', 'darwin')
+    monkeypatch.setitem(__import__('sys').modules, 'keyring.backends.macOS', module)
     return call_counter
 
 
@@ -113,7 +122,7 @@ def _install_fake_macos_keyring(monkeypatch, *, password_by_account=None, call_c
 def test_keyring_source_ready(monkeypatch):
     service, account = KEYRING_BINDINGS['NOTION_MCP_TOKEN']
     _install_fake_macos_keyring(monkeypatch, password_by_account={(service, account): 'kr-tok'})
-    resolver = CredentialResolver({'NOTION_MCP_TOKEN': 'keyring'}, environ={})
+    resolver = CredentialResolver({'NOTION_MCP_TOKEN': 'keyring'}, environ={}, platform='darwin')
     snap = resolver.resolve(required=frozenset({'NOTION_MCP_TOKEN'}))
     assert snap['NOTION_MCP_TOKEN'] == 'kr-tok'
 
@@ -122,7 +131,7 @@ def test_keyring_source_missing_entry_is_configuration_error(monkeypatch):
     _install_fake_macos_keyring(monkeypatch, password_by_account={})
     resolver = CredentialResolver({'NOTION_MCP_TOKEN': 'keyring'}, environ={
         'NOTION_MCP_TOKEN': 'should-not-be-read',
-    })
+    }, platform='darwin')
     with pytest.raises(ConfigurationError):
         resolver.resolve(required=frozenset({'NOTION_MCP_TOKEN'}))
 
@@ -133,7 +142,7 @@ def test_keyring_source_never_falls_back_to_environment_even_when_optional(monke
     _install_fake_macos_keyring(monkeypatch, password_by_account={})
     resolver = CredentialResolver({'GITHUB_READ_TOKEN': 'keyring'}, environ={
         'GITHUB_READ_TOKEN': 'ignored-env-value',
-    })
+    }, platform='darwin')
     with pytest.raises(ConfigurationError):
         resolver.resolve(required=frozenset(), optional={'GITHUB_READ_TOKEN': ''})
 
@@ -142,14 +151,13 @@ def test_keyring_backend_called_exactly_once_per_resolve(monkeypatch):
     service, account = KEYRING_BINDINGS['NOTION_MCP_TOKEN']
     counter = _install_fake_macos_keyring(
         monkeypatch, password_by_account={(service, account): 'kr-tok'})
-    resolver = CredentialResolver({'NOTION_MCP_TOKEN': 'keyring'}, environ={})
+    resolver = CredentialResolver({'NOTION_MCP_TOKEN': 'keyring'}, environ={}, platform='darwin')
     resolver.resolve(required=frozenset({'NOTION_MCP_TOKEN'}))
     assert counter == [(service, account)]
 
 
-def test_keyring_unsupported_platform_is_configuration_error(monkeypatch):
-    monkeypatch.setattr(sys, 'platform', 'linux')
-    resolver = CredentialResolver({'NOTION_MCP_TOKEN': 'keyring'}, environ={})
+def test_keyring_unsupported_platform_is_configuration_error():
+    resolver = CredentialResolver({'NOTION_MCP_TOKEN': 'keyring'}, environ={}, platform='linux')
     with pytest.raises(ConfigurationError):
         resolver.resolve(required=frozenset({'NOTION_MCP_TOKEN'}))
 
@@ -169,18 +177,16 @@ def test_keyring_backend_identity_spoof_rejected(monkeypatch):
 
     module = types.ModuleType('keyring.backends.macOS')
     module.Keyring = SpoofedKeyring
-    monkeypatch.setitem(sys.modules, 'keyring.backends.macOS', module)
-    monkeypatch.setattr(sys, 'platform', 'darwin')
-    resolver = CredentialResolver({'NOTION_MCP_TOKEN': 'keyring'}, environ={})
+    monkeypatch.setitem(__import__('sys').modules, 'keyring.backends.macOS', module)
+    resolver = CredentialResolver({'NOTION_MCP_TOKEN': 'keyring'}, environ={}, platform='darwin')
     with pytest.raises(ConfigurationError):
         resolver.resolve(required=frozenset({'NOTION_MCP_TOKEN'}))
 
 
 def test_keyring_dependency_missing_is_configuration_error(monkeypatch):
-    monkeypatch.setattr(sys, 'platform', 'darwin')
-    monkeypatch.delitem(sys.modules, 'keyring.backends.macOS', raising=False)
-    monkeypatch.delitem(sys.modules, 'keyring', raising=False)
-    resolver = CredentialResolver({'NOTION_MCP_TOKEN': 'keyring'}, environ={})
+    monkeypatch.delitem(__import__('sys').modules, 'keyring.backends.macOS', raising=False)
+    monkeypatch.delitem(__import__('sys').modules, 'keyring', raising=False)
+    resolver = CredentialResolver({'NOTION_MCP_TOKEN': 'keyring'}, environ={}, platform='darwin')
     with pytest.raises(ConfigurationError):
         resolver.resolve(required=frozenset({'NOTION_MCP_TOKEN'}))
 
@@ -211,9 +217,8 @@ def test_keyring_alternate_keychain_override_is_forced_and_reverified(monkeypatc
 
     module = types.ModuleType('keyring.backends.macOS')
     module.Keyring = ResistantKeyring
-    monkeypatch.setitem(sys.modules, 'keyring.backends.macOS', module)
-    monkeypatch.setattr(sys, 'platform', 'darwin')
-    resolver = CredentialResolver({'NOTION_MCP_TOKEN': 'keyring'}, environ={})
+    monkeypatch.setitem(__import__('sys').modules, 'keyring.backends.macOS', module)
+    resolver = CredentialResolver({'NOTION_MCP_TOKEN': 'keyring'}, environ={}, platform='darwin')
     with pytest.raises(ConfigurationError):
         resolver.resolve(required=frozenset({'NOTION_MCP_TOKEN'}))
 
@@ -251,7 +256,7 @@ def test_diagnose_environment_absent_never_raises():
 
 def test_diagnose_keyring_error_never_raises(monkeypatch):
     _install_fake_macos_keyring(monkeypatch, password_by_account={})
-    resolver = CredentialResolver({'GITHUB_READ_TOKEN': 'keyring'}, environ={})
+    resolver = CredentialResolver({'GITHUB_READ_TOKEN': 'keyring'}, environ={}, platform='darwin')
     diagnostic = resolver.diagnose(frozenset({'GITHUB_READ_TOKEN'}))
     assert diagnostic.results['GITHUB_READ_TOKEN'].status == 'error'
 
@@ -278,7 +283,7 @@ def test_require_performs_no_new_keyring_read(monkeypatch):
     service, account = KEYRING_BINDINGS['NOTION_MCP_TOKEN']
     counter = _install_fake_macos_keyring(
         monkeypatch, password_by_account={(service, account): 'kr-tok'})
-    resolver = CredentialResolver({'NOTION_MCP_TOKEN': 'keyring'}, environ={})
+    resolver = CredentialResolver({'NOTION_MCP_TOKEN': 'keyring'}, environ={}, platform='darwin')
     diagnostic = resolver.diagnose(frozenset({'NOTION_MCP_TOKEN'}))
     assert counter == [(service, account)]
     diagnostic.require(frozenset({'NOTION_MCP_TOKEN'}))
@@ -322,13 +327,11 @@ def test_snapshot_from_earlier_resolve_unaffected_by_later_backend_mutation(monk
 
     module = types.ModuleType('keyring.backends.macOS')
     module.Keyring = MutableFakeKeyring
-    monkeypatch.setitem(sys.modules, 'keyring.backends.macOS', module)
-    monkeypatch.setattr(sys, 'platform', 'darwin')
+    monkeypatch.setitem(__import__('sys').modules, 'keyring.backends.macOS', module)
 
-    resolver = CredentialResolver({'NOTION_MCP_TOKEN': 'keyring'}, environ={})
+    resolver = CredentialResolver({'NOTION_MCP_TOKEN': 'keyring'}, environ={}, platform='darwin')
     snap = resolver.resolve(required=frozenset({'NOTION_MCP_TOKEN'}))
     assert snap['NOTION_MCP_TOKEN'] == 'first-value'
 
     store[(service, account)] = 'second-value'
     assert snap['NOTION_MCP_TOKEN'] == 'first-value', 'earlier snapshot must not observe the later value'
-

@@ -24,20 +24,35 @@ from typing import Any
 from uls.config.errors import ConfigurationError
 
 
-def expected_backend_module() -> str:
-    """Return the required backend dotted path for the current OS, or raise."""
+def expected_backend_module(platform: str | None = None) -> str:
+    """Return the required backend dotted path for the current OS, or raise.
 
-    if sys.platform == "darwin":
+    platform accepts an explicit override for tests. It must never be used
+    to change real platform-dependent behavior anywhere else in the
+    process; unlike monkeypatching the global sys.platform attribute (which
+    would also affect unrelated platform-branching code, such as
+    orchestration/locks.py's fcntl/msvcrt selection), this parameter is
+    scoped to only this function's own decision.
+    """
+
+    current = platform if platform is not None else sys.platform
+    if current == "darwin":
         return "keyring.backends.macOS.Keyring"
-    if sys.platform == "win32":
+    if current == "win32":
         return "keyring.backends.Windows.WinVaultKeyring"
     raise ConfigurationError("keyring_platform_unsupported")
 
 
-def explicit_os_keyring() -> Any:
-    """Return a freshly constructed, verified OS-native keyring backend."""
+def explicit_os_keyring(platform: str | None = None) -> Any:
+    """Return a freshly constructed, verified OS-native keyring backend.
 
-    if sys.platform == "darwin":
+    platform accepts an explicit override for tests (see
+    expected_backend_module's docstring for why this must not be done via
+    global sys.platform monkeypatching).
+    """
+
+    current = platform if platform is not None else sys.platform
+    if current == "darwin":
         try:
             module = __import__("keyring.backends.macOS", fromlist=["Keyring"])
         except ImportError as exc:
@@ -53,7 +68,7 @@ def explicit_os_keyring() -> Any:
             raise
         except Exception as exc:
             raise ConfigurationError("keyring_backend_unavailable") from exc
-    if sys.platform == "win32":
+    if current == "win32":
         try:
             module = __import__("keyring.backends.Windows", fromlist=["WinVaultKeyring"])
         except ImportError as exc:
@@ -71,10 +86,15 @@ def explicit_os_keyring() -> Any:
     raise ConfigurationError("keyring_platform_unsupported")
 
 
-def read_keyring_credential(service: str, account: str) -> str:
-    """Read one credential value through the explicit, verified backend."""
+def read_keyring_credential(service: str, account: str, *, platform: str | None = None) -> str:
+    """Read one credential value through the explicit, verified backend.
 
-    backend = explicit_os_keyring()
+    platform accepts an explicit override for tests (see
+    expected_backend_module's docstring for why this must not be done via
+    global sys.platform monkeypatching).
+    """
+
+    backend = explicit_os_keyring(platform)
     if hasattr(backend, "keychain"):
         backend.keychain = None
         if backend.keychain is not None:

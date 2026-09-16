@@ -164,7 +164,8 @@ class CredentialResolver:
     """
 
     def __init__(self, declared_sources: Mapping[str, str] | None = None, *,
-                 environ: Mapping[str, str] | None = None) -> None:
+                 environ: Mapping[str, str] | None = None,
+                 platform: str | None = None) -> None:
         sources = dict(declared_sources or {})
         for name, source in sources.items():
             if name not in ALLOWED_SOURCES:
@@ -176,6 +177,13 @@ class CredentialResolver:
                 )
         self._declared_sources: Mapping[str, str] = MappingProxyType(sources)
         self._environ: Mapping[str, str] = environ if environ is not None else os.environ
+        # platform: an explicit test-only override for which OS-native
+        # keyring backend to target. None means "use the real sys.platform".
+        # This must never be done by monkeypatching the global sys.platform
+        # attribute instead, since that would also change the behavior of
+        # unrelated platform-branching code elsewhere in the process (for
+        # example orchestration/locks.py's fcntl/msvcrt selection).
+        self._platform: str | None = platform
 
     def _source_for(self, name: str) -> str:
         if name not in ALLOWED_SOURCES:
@@ -192,7 +200,7 @@ class CredentialResolver:
         # source == 'keyring'
         service, account = KEYRING_BINDINGS[name]
         try:
-            value = read_keyring_credential(service, account)
+            value = read_keyring_credential(service, account, platform=self._platform)
             return CredentialDiagnostic('ready'), value
         except ConfigurationError as exc:
             code = exc.args[0] if exc.args else None
