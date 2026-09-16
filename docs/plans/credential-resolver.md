@@ -293,8 +293,12 @@ class CredentialDiagnostic:
       disabled", not an error).
     - "error": source is "keyring" and the entry/backend could not produce
       a value (missing entry, unsupported platform, backend identity
-      mismatch, missing keyring package, etc.), OR source is "environment"
-      but was explicitly required and is unset. A keyring-declared
+      mismatch, missing keyring package, etc.). An unset "environment"
+      source is always "absent", never "error", regardless of whether
+      resolve() later treats that name as required or optional -- required-
+      vs-optional is resolve()'s concern when turning a diagnosis into a
+      raise/default decision, not diagnose()'s concern when producing the
+      diagnosis itself. A keyring-declared
       credential is never reported "absent"; opting into keyring is an
       explicit statement that this credential is expected to be
       keyring-backed, so a failure there is always surfaced as an error,
