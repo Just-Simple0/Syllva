@@ -1,11 +1,11 @@
 """Composition roots. MCP never loads worker adapters or credentials."""
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from uls.config.credentials import ResolvedCredentials
 from uls.config.errors import ConfigurationError
 from uls.config.schema import UlsConfig
 from uls.intake.identity import provider_binding_id
@@ -17,7 +17,12 @@ def state_path(config: UlsConfig) -> Path:
     return Path(config.system.workspace_dir).expanduser().resolve() / 'state.sqlite3'
 
 
-def require_mcp_credentials(secrets: Mapping[str, str]) -> None:
+def require_mcp_credentials(secrets: ResolvedCredentials) -> None:
+    # Takes an already-resolved ResolvedCredentials snapshot, not a raw
+    # Mapping/os.environ, per the single-read composition-root contract in
+    # docs/plans/credential-resolver.md: the caller resolved this snapshot
+    # exactly once, and this function reads from that same snapshot
+    # instead of triggering a second resolution.
     for name in ('GOOGLE_MCP_CREDENTIALS_FILE', 'NOTION_MCP_TOKEN'):
         if not secrets.get(name):
             raise ConfigurationError(name + ' is required; worker credentials are never a fallback')
@@ -85,7 +90,7 @@ def _credential_oauth_app_id(credentials: Any) -> str:
 
 
 def worker_provider_binding(
-    values: Mapping[str, str],
+    values: ResolvedCredentials,
     *,
     provider: str = 'google_drive',
     explicit_binding: str | None = None,
@@ -108,7 +113,7 @@ def worker_provider_binding(
 
 def build_intake_worker(
     config: UlsConfig,
-    secrets: Mapping[str, str] | None = None,
+    credentials: ResolvedCredentials,
     *,
     state: Any | None = None,
     drive: Any | None = None,
@@ -122,6 +127,11 @@ def build_intake_worker(
     uses the separately configured worker credentials and the SDK adapters;
     retrieval credentials are never reused.  A missing identity attestation or
     marker-capable port leaves intake activation unavailable.
+
+    credentials is a required ResolvedCredentials snapshot produced by
+    exactly one CredentialResolver.resolve() call at this composition's
+    root (see docs/plans/credential-resolver.md); this function must never
+    read os.environ or construct its own resolver.
     """
 
     from uls.adapters.drive.worker import GoogleDriveWorkerAdapter
@@ -129,22 +139,21 @@ def build_intake_worker(
     from uls.intake.worker import IntakeWorker
     from uls.state.sqlite import SQLiteStateStore
 
-    values = os.environ if secrets is None else secrets
     injected_ports = drive is not None or notion is not None
     if injected_ports and (drive is None or notion is None):
         raise ConfigurationError('injected Drive and Notion worker ports must be supplied together')
     if injected_ports:
-        binding = worker_provider_binding(values, explicit_binding=provider_account_binding_id)
+        binding = worker_provider_binding(credentials, explicit_binding=provider_account_binding_id)
     else:
         for key in ('GOOGLE_WORKER_CREDENTIALS_FILE', 'NOTION_WORKER_TOKEN'):
-            if not values.get(key):
+            if not credentials.get(key):
                 raise ConfigurationError(key + ' is required for intake worker activation')
-        service, binding = google_worker_service(values['GOOGLE_WORKER_CREDENTIALS_FILE'])
+        service, binding = google_worker_service(credentials['GOOGLE_WORKER_CREDENTIALS_FILE'])
         drive = GoogleDriveWorkerAdapter(service)
         from notion_client import Client
 
         notion = NotionAPIWorker(
-            Client(auth=values['NOTION_WORKER_TOKEN'], notion_version='2025-09-03', timeout_ms=20_000)
+            Client(auth=credentials['NOTION_WORKER_TOKEN'], notion_version='2025-09-03', timeout_ms=20_000)
         )
     if state is None:
         state = SQLiteStateStore(state_path(config))
@@ -158,7 +167,11 @@ def build_intake_worker(
     )
 
 
-def build_retrieval(config: UlsConfig, secrets: Mapping[str, str] | None = None) -> Any:
+def build_retrieval(config: UlsConfig, credentials: ResolvedCredentials) -> Any:
+    # credentials is a required ResolvedCredentials snapshot produced by
+    # exactly one CredentialResolver.resolve() call at this composition's
+    # root; this function must never read os.environ or construct its own
+    # resolver.
     from notion_client import Client
 
     from uls.adapters.drive.binding import ValidatedSourceBindingResolver
@@ -169,12 +182,11 @@ def build_retrieval(config: UlsConfig, secrets: Mapping[str, str] | None = None)
     from uls.retrieval.engine import RetrievalEngine
     from uls.state.reader import ReadOnlyState
 
-    values = os.environ if secrets is None else secrets
-    require_mcp_credentials(values)
+    require_mcp_credentials(credentials)
     state = ReadOnlyState(state_path(config))
-    drive = GoogleDriveReader(google_service(values['GOOGLE_MCP_CREDENTIALS_FILE'], read_only=True), state)
-    notion = NotionAPIReader(Client(auth=values['NOTION_MCP_TOKEN'], notion_version='2025-09-03',
+    drive = GoogleDriveReader(google_service(credentials['GOOGLE_MCP_CREDENTIALS_FILE'], read_only=True), state)
+    notion = NotionAPIReader(Client(auth=credentials['NOTION_MCP_TOKEN'], notion_version='2025-09-03',
                                      timeout_ms=20_000), config.notion)
     return RetrievalEngine(notion, drive, state, MemoryEphemeralStore(), config,
                            source_binding_resolver=ValidatedSourceBindingResolver(state),
-                           github_reader=GitHubAPIReader(values.get('GITHUB_READ_TOKEN', '')))
+                           github_reader=GitHubAPIReader(credentials.get('GITHUB_READ_TOKEN', '')))

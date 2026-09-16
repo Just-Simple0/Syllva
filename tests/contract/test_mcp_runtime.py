@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from uls.config.credentials import ResolvedCredentials
 from uls.config.errors import ConfigurationError
 from uls.config.schema import UlsConfig
 from uls.mcp.server import ReadOnlyMCP
@@ -50,7 +51,7 @@ def test_errors_do_not_echo_provider_secrets_or_bodies(caplog):
 ])
 def test_mcp_credentials_never_fall_back_to_worker(secrets):
     with pytest.raises(ConfigurationError):
-        require_mcp_credentials(secrets)
+        require_mcp_credentials(ResolvedCredentials(secrets))
 
 
 def remote_fixture():

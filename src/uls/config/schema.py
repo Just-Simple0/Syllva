@@ -162,6 +162,11 @@ class UlsConfig:
     remote_mcp: RemoteMcpCfg = field(default_factory=RemoteMcpCfg)
     behavior_contract: BehaviorContractCfg = field(default_factory=BehaviorContractCfg)
     courses: list[CourseCfg] = field(default_factory=list)
+    # Credential name -> declared source ("environment" | "keyring").
+    # Parsed by config/loader.py's _credentials_section(); missing entries
+    # default to "environment" at CredentialResolver construction time, not
+    # here. See docs/plans/credential-resolver.md.
+    credentials: dict[str, str] = field(default_factory=dict)
 
     @property
     def drive(self) -> DriveCfg:
