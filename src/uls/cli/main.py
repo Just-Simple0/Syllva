@@ -322,7 +322,8 @@ def dispatch(args: argparse.Namespace) -> Any:
         # and REMOTE_MCP_EXPIRES_AT are simply unused when mode == 'local'.
         credentials = CredentialResolver(config.credentials).resolve(
             required=frozenset({'GOOGLE_MCP_CREDENTIALS_FILE', 'NOTION_MCP_TOKEN'}),
-            optional={'GITHUB_READ_TOKEN': '', 'REMOTE_MCP_SECRET': '', 'REMOTE_MCP_EXPIRES_AT': '0'},
+            optional={'GITHUB_READ_TOKEN': '', 'REMOTE_MCP_SECRET': '', 'REMOTE_MCP_EXPIRES_AT': '0',
+                      'NOTION_WORKER_TOKEN': '', 'GOOGLE_WORKER_CREDENTIALS_FILE': ''},
         )
         from uls.mcp.server import ReadOnlyMCP
         registry = ReadOnlyMCP(build_retrieval(config, credentials))

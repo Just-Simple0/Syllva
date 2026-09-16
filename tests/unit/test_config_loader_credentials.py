@@ -48,6 +48,24 @@ def test_credentials_not_a_mapping_rejected(tmp_path):
         load_config_unvalidated(_write(tmp_path, "credentials: not-a-mapping\n"))
 
 
+@pytest.mark.parametrize("null_value", ["null", "~", ""])
+def test_credentials_null_or_empty_rejected(tmp_path, null_value):
+    """Regression: credentials: null must fail closed as a malformed mapping,
+    never silently downgrade to absent/empty {}.
+    """
+    with pytest.raises(ValueError):
+        load_config_unvalidated(_write(tmp_path, f"credentials: {null_value}\n"))
+
+
+def test_credentials_non_string_source_rejected(tmp_path):
+    """Regression: credentials.<name>.source must be a string; a list/dict must
+    be rejected with ValueError, not TypeError."""
+    with pytest.raises(ValueError):
+        load_config_unvalidated(_write(tmp_path, (
+            "credentials:\n  NOTION_MCP_TOKEN:\n    source: [keyring]\n"
+        )))
+
+
 def test_unknown_credential_name_rejected(tmp_path):
     with pytest.raises(ValueError):
         load_config_unvalidated(_write(tmp_path, (
@@ -95,4 +113,3 @@ def test_unrelated_unknown_top_level_key_still_silently_ignored(tmp_path):
         "some_unrelated_future_section:\n  foo: bar\n"
     )))
     assert cfg.credentials == {}
-

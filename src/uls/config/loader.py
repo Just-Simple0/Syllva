@@ -162,27 +162,23 @@ def _levenshtein(left: str, right: str) -> int:
 
 
 def _check_top_level_typos(raw: Mapping[str, Any]) -> None:
-    """Reject a top-level key that is a near-miss typo of a known section.
+    """Reject a top-level key that is a near-miss typo of 'credentials'.
 
-    Scoped narrowly (edit-distance <= 2, case-insensitive) so this does not
-    change the pre-existing behavior of silently ignoring unrelated unknown
-    top-level keys; it only prevents a new section (in practice,
-    "credentials") from being silently downgraded to "absent" by a typo
-    like "credentails".
+    Scoped strictly to 'credentials' (edit-distance <= 2, case-insensitive)
+    so this does not change the pre-existing repository-wide behavior of
+    silently ignoring unrelated unknown top-level keys; it only prevents
+    the 'credentials' section from being silently downgraded to 'absent' by a
+    typo like 'credentails'.
     """
 
+    target = "credentials"
     for key in raw:
-        if not isinstance(key, str) or key in _KNOWN_TOP_LEVEL_KEYS:
-            # Exact, case-sensitive match to a recognized section: legitimate.
+        if not isinstance(key, str) or key == target:
             continue
-        for known in _KNOWN_TOP_LEVEL_KEYS:
-            # A case-only variant (e.g. "Credentials") is also a near-miss:
-            # it would otherwise silently fail to match raw.get("credentials")
-            # and be treated as an absent section.
-            if key.lower() == known or 0 < _levenshtein(key.lower(), known) <= 2:
-                raise ValueError(
-                    f"unknown top-level key {key!r} looks like a typo of {known!r}"
-                )
+        if key.lower() == target or 0 < _levenshtein(key.lower(), target) <= 2:
+            raise ValueError(
+                f"unknown top-level key {key!r} looks like a typo of {target!r}"
+            )
 
 
 def _credentials_section(raw: Mapping[str, Any]) -> dict[str, str]:
@@ -197,8 +193,6 @@ def _credentials_section(raw: Mapping[str, Any]) -> dict[str, str]:
     if "credentials" not in raw:
         return {}
     section = raw["credentials"]
-    if section is None:
-        return {}
     if not isinstance(section, Mapping):
         raise ValueError("credentials must be a YAML mapping")
     result: dict[str, str] = {}
@@ -210,6 +204,10 @@ def _credentials_section(raw: Mapping[str, Any]) -> dict[str, str]:
                 f"credentials.{name} must be a mapping with exactly the key 'source'"
             )
         source = entry["source"]
+        if not isinstance(source, str):
+            raise ValueError(
+                f"credentials.{name}.source must be a string"
+            )
         if source not in ALLOWED_SOURCES[name]:
             raise ValueError(
                 f"credentials.{name}.source must be one of "

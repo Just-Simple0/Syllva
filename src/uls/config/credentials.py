@@ -170,6 +170,8 @@ class CredentialResolver:
         for name, source in sources.items():
             if name not in ALLOWED_SOURCES:
                 raise ConfigurationError(f'unknown credential name: {name}')
+            if not isinstance(source, str):
+                raise ConfigurationError(f'source for {name} must be a string')
             if source not in ALLOWED_SOURCES[name]:
                 raise ConfigurationError(
                     f'source {source!r} is not allowed for {name}; allowed: '
