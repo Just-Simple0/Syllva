@@ -78,7 +78,8 @@ macOS에서는 수정한 plist를 `plutil -lint`로 검증한 뒤 등록합니�
 위해서는 계정 비밀번호를 Task Scheduler에 등록해야 하며, 저장소에 포함된 XML 자체에는 비밀번호가
 없고 있어서도 안 됩니다. 프로세스 생성 감사 로깅(Windows Event ID 4688 등)에 명령줄 인수가 평문으로
 기록될 수 있으므로, 명령줄에 비밀번호를 직접 평문으로 넘기지 마세요. `/rp *` (또는 `/rp` 생략)을
-사용해 등록 시점에 비밀번호를 안전하게 프롬프트로 입력하세요:
+기록될 수 있으므로, 명령줄에 비밀번호를 직접 평문으로 넘기지 마세요. 등록 시점에 비밀번호를
+안전하게 프롬프트로 입력하려면 `/rp *`를 사용하세요:
 
 ```powershell
 schtasks /create /tn "ULS" /xml "windows\uls-task.xml" /ru "DOMAIN\ServiceUser" /rp * /f

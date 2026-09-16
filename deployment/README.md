@@ -78,8 +78,8 @@ interactively logged on (unlike `InteractiveToken`, which only runs during an ac
 session on that console). This requires the account password to be registered with Task
 Scheduler; the checked-in XML intentionally does not (and must not) contain a password. Never
 pass plaintext passwords directly on the command line, as process creation audit logging
-(such as Windows Event ID 4688) can record command-line arguments in plain text. Instead, use
-`/rp *` (or omit `/rp`) to prompt securely for the password at registration time:
+(such as Windows Event ID 4688) can record command-line arguments in plain text. Instead,
+use `/rp *` to prompt securely for the password at registration time:
 
 ```powershell
 schtasks /create /tn "ULS" /xml "windows\uls-task.xml" /ru "DOMAIN\ServiceUser" /rp * /f
