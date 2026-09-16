@@ -1,6 +1,58 @@
-# Credential Resolver — design plan (rev2, revising rev1 REVISE)
+# Credential Resolver — design plan (rev3, revising rev2 REVISE)
 
 Status: draft for independent plan review. No implementation yet.
+
+## rev3 changelog (response to rev2 REVISE, 2 blockers)
+
+1. **BLOCKER A (`ResolvedCredentials` not actually immutable)** — `frozen=True`
+   only blocks reassigning the `_values` attribute; it does nothing to the
+   dict object that attribute points at, so a caller-held reference to the
+   original dict (including rev2's own suggested
+   `ResolvedCredentials({...})` test-construction pattern) could still
+   mutate an already-returned snapshot. Fixed by defensive-copying into a
+   `MappingProxyType` inside `__post_init__` (using `object.__setattr__`,
+   the standard pattern for a frozen dataclass normalizing its own field),
+   so every `ResolvedCredentials` is immune both to later mutation of the
+   caller's original dict and to direct mutation of its own internal
+   mapping. Added both aliasing cases to the test matrix.
+2. **BLOCKER B (single-read ownership not operationally defined for
+   `doctor`/nested composition)** — Replaced the raising-only `resolve()`
+   as the sole API with a non-raising `diagnose()` that reads each
+   credential's declared source exactly once and records success/absence/
+   error per key without ever raising, plus a non-reading `.require()` that
+   builds a `ResolvedCredentials` from already-diagnosed values (no new
+   source read). `doctor()` now has an operational contract: call
+   `diagnose()` once, derive every `checks`/`optional_checks` boolean from
+   its per-key results (replacing `_credential_ready()`'s raw
+   `os.environ.get`), and reuse `.require(...)` on that same diagnostic
+   object — never a second `diagnose()`/`resolve()` call — for the
+   separation check and for `--live` provider construction. `resolve()` is
+   now implemented internally as a filter over one `diagnose()` call, so
+   there is exactly one code path that ever touches a backing source, used
+   by both APIs. Added an explicit composition-root ownership table naming
+   the one function per entry point (`dispatch()`'s `sync|process|run`
+   branch, its `mcp local|remote` branch, and `doctor()`) that is allowed
+   to call `.resolve()`/`.diagnose()`, with every downstream function
+   (`worker.build_worker`, `runtime.build_intake_worker`,
+   `runtime.build_retrieval`) taking `credentials: ResolvedCredentials` as
+   a required (non-defaulted) parameter, so there is no code path left where
+   a nested function could construct its own resolver or call resolve again.
+   Confirmed `worker.build_worker`'s two branches (delegating to
+   `runtime.build_intake_worker` for the intake-preview path, or building
+   `NativeWorker` directly) against current `main`; both now receive the
+   same caller-supplied snapshot instead of either branch reading
+   `os.environ`/`secrets` itself.
+
+Also fixed per rev2 review's two documentation notes: the top-level typo
+guard's example list no longer claims `"creds"` is within edit-distance 2 of
+`"credentials"` (it is not; removed from the example, kept `credentails`/
+`credential`/case-only variants which genuinely are); and the "redundant"
+description of an explicit `source: environment` entry is now grounded in
+the concrete semantic split introduced by Blocker B's `diagnose()`/
+`resolve()` unification (environment-sourced absence is optional-friendly,
+keyring-sourced failure is always an error) rather than in any
+declared-vs-undeclared distinction, which removes the ambiguity the review
+flagged and makes the redundancy claim actually correct.
 
 ## rev2 changelog (response to rev1 REVISE, 5 blockers)
 
@@ -197,9 +249,23 @@ class ResolvedCredentials:
     """Immutable single-read snapshot. Not a Mapping subclass on purpose —
     it deliberately does not support arbitrary repeated re-lookup semantics
     beyond what one composition needs, so callers cannot accidentally treat
-    it as a live, re-readable view of the backing sources."""
+    it as a live, re-readable view of the backing sources.
+
+    rev3 fix (Blocker A): frozen=True alone only stops `_values` from being
+    *reassigned*; it does nothing to protect the dict object `_values`
+    points at. __post_init__ defensively copies into a MappingProxyType so
+    the snapshot is immune to (a) later mutation of whatever mapping the
+    caller originally passed in, and (b) any attempt to mutate _values
+    directly on the returned object itself.
+    """
 
     _values: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        # object.__setattr__ is the standard escape hatch a frozen
+        # dataclass uses to normalize its own field in __post_init__; this
+        # does not weaken frozen-ness for any external caller.
+        object.__setattr__(self, "_values", MappingProxyType(dict(self._values)))
 
     def __getitem__(self, name: str) -> str:
         return self._values[name]
@@ -210,18 +276,69 @@ class ResolvedCredentials:
     def __contains__(self, name: str) -> bool:
         return name in self._values
 
+
+@dataclass(frozen=True)
+class CredentialDiagnostic:
+    """One credential's non-raising diagnostic result from diagnose().
+
+    status is one of "ready" | "absent" | "error":
+    - "ready": the declared source produced a non-empty value; that value
+      is available (only) via the DiagnosticResolution.require(...) path
+      below, never exposed directly on this dataclass, so a diagnostic
+      object itself never carries a secret value into wherever doctor's
+      JSON output gets logged/printed.
+    - "absent": source is "environment" and the variable is unset. This is
+      the existing "optional feature not configured" case
+      (e.g. GITHUB_READ_TOKEN unset today already means "GitHub reading
+      disabled", not an error).
+    - "error": source is "keyring" and the entry/backend could not produce
+      a value (missing entry, unsupported platform, backend identity
+      mismatch, missing keyring package, etc.), OR source is "environment"
+      but was explicitly required and is unset. A keyring-declared
+      credential is never reported "absent"; opting into keyring is an
+      explicit statement that this credential is expected to be
+      keyring-backed, so a failure there is always surfaced as an error,
+      never silently treated as "not configured"."""
+
+    status: str
+    detail: str | None = None  # fixed short error class only; never a
+                                # provider payload or credential value
+
+
+@dataclass(frozen=True)
+class DiagnosticResolution:
+    """Result of one diagnose() call: per-key status plus the subset of
+    successfully-resolved values, ready to be sliced into a
+    ResolvedCredentials via require() without touching any backing source
+    again."""
+
+    results: Mapping[str, CredentialDiagnostic]
+    _ready_values: Mapping[str, str]  # internal; only "ready" names appear here
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "results", MappingProxyType(dict(self.results)))
+        object.__setattr__(self, "_ready_values", MappingProxyType(dict(self._ready_values)))
+
+    def require(self, names: frozenset[str]) -> ResolvedCredentials:
+        """Build a ResolvedCredentials restricted to names, sourced only
+        from this diagnose() call's already-obtained values. Performs no
+        new environment/keyring read. Raises ConfigurationError naming
+        every requested name whose status was not "ready" (a name absent
+        from this diagnostic entirely is treated the same as "error": it
+        was never diagnosed, so it cannot be required)."""
+
+
 class CredentialResolver:
     """Fail-closed credential lookup honoring per-credential declared source.
 
-    Never falls back across sources. A missing/unreadable declared source is
-    a ConfigurationError raised from resolve(), not an empty string and not a
-    silent environment fallback. Each declared source (environment variable,
-    keyring entry) is read at most once per resolve() call. Callers MUST
-    reuse the single ResolvedCredentials object returned by one resolve()
-    call for every consumer within one composition (one 'uls' command
-    invocation, one MCP-server build, one worker build) instead of calling
-    resolve() again, so a distinctness/validity check and the value actually
-    used by a provider client are guaranteed to be the same read.
+    Never falls back across sources. Each declared source (environment
+    variable, keyring entry) is read at most once per diagnose()/resolve()
+    call — resolve() is implemented internally as a thin filter over one
+    diagnose() call, so there is exactly one code path that ever touches a
+    backing source. Callers MUST reuse the single ResolvedCredentials or
+    DiagnosticResolution object returned by one diagnose()/resolve() call
+    for every consumer within one composition (see "Composition root
+    ownership" below) instead of calling either method again.
     """
 
     def __init__(self, declared_sources: Mapping[str, str], *,
@@ -232,27 +349,67 @@ class CredentialResolver:
     # ALLOWED_SOURCES and raises ConfigurationError on a disallowed source
     # for that name; it does not defer that check to resolve() time.
 
+    def diagnose(self, names: frozenset[str]) -> DiagnosticResolution:
+        """Read each name's declared source exactly once. Never raises.
+        Every name gets exactly one CredentialDiagnostic (see status
+        semantics above)."""
+
     def resolve(self, *, required: frozenset[str],
                 optional: Mapping[str, str] = MappingProxyType({})
                 ) -> ResolvedCredentials:
-        """Read each name in required/optional exactly once through its
-        declared source. required entries raise ConfigurationError when
-        their declared source cannot produce a non-empty value; optional
-        entries fall back to the given per-key default ONLY when the
-        credential is entirely undeclared in config AND unset in the
-        environment — a *declared* keyring source that fails to resolve
-        still raises, even for an "optional" name, because declaring a
-        source is an explicit statement that this credential is expected
-        to be backed by it."""
+        """Convenience wrapper: internally calls
+        self.diagnose(required | frozenset(optional)) exactly once, then:
+        - every required name with status != "ready" raises
+          ConfigurationError (collecting all such names into one message,
+          not just the first);
+        - every optional name with status == "absent" is filled from the
+          given per-key default;
+        - every optional name with status == "error" ALSO raises
+          ConfigurationError (a keyring-declared credential's failure is
+          never treated as "optional and unconfigured" — see
+          CredentialDiagnostic.status docs);
+        - every "ready" name (required or optional) uses its diagnosed
+          value.
+        Returns a ResolvedCredentials over exactly required | optional's
+        keys."""
 ```
+
+### Composition root ownership (Blocker B)
+
+Exactly one function per CLI/MCP entry point is the "composition root" that
+is allowed to construct a `CredentialResolver` and call
+`.diagnose()`/`.resolve()`. Every function it calls into receives the
+resulting `ResolvedCredentials` as a required (non-defaulted) parameter,
+never reads `os.environ`/`secrets` itself, and never constructs its own
+resolver — this is enforced by the parameter being required, not by
+convention alone.
+
+| Composition root | Reads sources | Passes `ResolvedCredentials` into |
+| --- | --- | --- |
+| `cli/main.py: dispatch()`, `sync|process|run` branch | `resolve(required={GOOGLE_WORKER_CREDENTIALS_FILE, NOTION_WORKER_TOKEN})` once | `worker.build_worker(config, credentials)` |
+| `worker.py: build_worker(config, credentials)` | never | either `runtime.build_intake_worker(config, credentials, ...)` (intake-preview branch) or reads `credentials[...]` directly for its own `NativeWorker` branch — confirmed against current `main`: these are two mutually exclusive branches of the same function, not a nested call chain, so one snapshot covers both |
+| `runtime.py: build_intake_worker(config, credentials, ...)` | never | reads `credentials[...]` directly when not using injected test ports; injected-port test callers pass a trivial `ResolvedCredentials({})` since that branch never reads a credential value (confirmed: `worker_provider_binding` discards its `values` argument today) |
+| `cli/main.py: dispatch()`, `mcp local|remote` branch | `resolve(required={GOOGLE_MCP_CREDENTIALS_FILE, NOTION_MCP_TOKEN}, optional={GITHUB_READ_TOKEN: '', REMOTE_MCP_SECRET: '', REMOTE_MCP_EXPIRES_AT: '0'})` once, covering both the retrieval build and (for the `remote` sub-branch) `BearerCredential` construction | `runtime.build_retrieval(config, credentials)`; `BearerCredential(credentials['REMOTE_MCP_SECRET'], float(credentials['REMOTE_MCP_EXPIRES_AT']))` from the SAME snapshot |
+| `runtime.py: build_retrieval(config, credentials)` | never | reads `credentials[...]` directly |
+| `cli/main.py: doctor(config, live=False)` | `diagnose(ALL_CREDENTIAL_NAMES)` once | `.require(...)` on that SAME `DiagnosticResolution` (no new read) for the separation check and, when `live=True`, for `build_retrieval(config, credentials=snapshot)` / `google_service(snapshot['GOOGLE_MCP_CREDENTIALS_FILE'], ...)` |
+
+`doctor()`'s `checks`/`optional_checks` booleans are derived directly from
+`DiagnosticResolution.results[name].status` (`"ready"` → `True`, anything
+else → `False`), replacing today's `_credential_ready()` raw
+`os.environ.get` read. This keeps `doctor()`'s existing behavior of
+reporting per-credential readiness without raising for a merely-unconfigured
+optional credential, while a broken keyring-declared credential now
+surfaces as `False` from a real diagnostic `"error"` status rather than
+being indistinguishable from "not configured".
 
 `CredentialResolver` is intentionally NOT a `Mapping` drop-in (rev1's
 attempt to fake that shape produced the `get(name)` vs `get(key, default)`
 conflict this review flagged). Every current
 `values = os.environ if secrets is None else secrets` call site instead
-becomes: call `resolve()` exactly once at the top of that composition,
-bind the result to one local name, and pass that same `ResolvedCredentials`
-object into every function in that composition that previously read
+becomes: the composition root named in the table above calls
+`resolve()`/`diagnose()` exactly once, binds the result to one local name,
+and passes that same `ResolvedCredentials`/`DiagnosticResolution` into
+every function in that composition that previously read
 `os.environ`/`secrets` directly (`require_mcp_credentials`,
 `google_service`, the Notion `Client(...)` constructor call, etc.).
 `require_mcp_credentials`'s signature changes from `Mapping[str, str]` to
@@ -267,7 +424,10 @@ that need no resolver machinery at all.
 ```yaml
 credentials:
   GOOGLE_WORKER_CREDENTIALS_FILE:
-    source: environment   # unchanged default; explicit entries are legal but redundant here
+    source: environment   # legal but redundant: omitting this entry defaults to
+                           # "environment" too, and both are "absent -> optional
+                           # default / required -> error" -- never "error always"
+                           # the way source: keyring is (see Blocker B fix below)
   NOTION_MCP_TOKEN:
     source: keyring
   GITHUB_READ_TOKEN:
@@ -281,6 +441,19 @@ must be a member of `ALLOWED_SOURCES[<credential name>]` for that specific
 credential. There is no `keyring_service`, `keyring_account`, or
 `file_path` field anywhere in this schema — those are entirely code-owned
 per Blocker 2.
+
+`source: environment` is genuinely redundant with omitting the entry
+entirely — both mean exactly the same thing to `CredentialResolver`,
+because "environment" is defined by `CredentialDiagnostic.status`
+semantics (see Proposed API) to behave identically whether it was
+explicitly declared or defaulted: an unset environment variable is
+`"absent"` (optional names fall back to their default, required names
+error), never `"error"`. `source: keyring`, by contrast, is never
+redundant with anything — declaring it is what makes a failed lookup
+`"error"` instead of `"absent"`, for both required and optional names.
+That is the one axis rev3 uses to decide fail-open-friendly-when-absent vs.
+always-fail-closed-on-failure; there is no separate "was this credential
+explicitly declared in YAML" axis anywhere in the resolver.
 
 Parsing rules (in `src/uls/config/loader.py`, new `_credentials_section()`,
 plus `src/uls/config/validation.py`):
@@ -304,7 +477,9 @@ plus `src/uls/config/validation.py`):
   after parsing the known top-level sections, if the raw YAML root contains
   a key that is not exactly `"credentials"` but is within edit-distance 2
   of `"credentials"` case-insensitively (catches `credentails`,
-  `credential`, `Credentials`, `creds`, etc.), raise `ValueError` naming
+  `credential`, `Credentials`, etc. -- NOT `creds`, whose edit distance to
+  `credentials` is far greater than 2 and is not caught by this guard),
+  raise `ValueError` naming
   both the offending key and the expected `credentials`. This does not
   change the pre-existing repository-wide behavior of silently ignoring
   unrelated unknown top-level keys; it only prevents this plan's own new
@@ -332,6 +507,18 @@ plus `src/uls/config/validation.py`):
 | Keyring value changes between a `resolve()` call and a later, separate `resolve()` call | The already-returned `ResolvedCredentials` snapshot from the first call is unaffected (TOCTOU regression guard: build one snapshot, mutate the backend, assert the snapshot's values are unchanged) |
 | `require_mcp_credentials`-style worker/MCP distinctness check | Still enforced when both resolve through `CredentialResolver`, regardless of whether they use the same or different sources |
 | `require_mcp_credentials` and the actual provider `Client(...)` construction in the same command invocation | Both read from the same `ResolvedCredentials` object, not two separate `resolve()` calls |
+| **rev3 additions (Blocker A: snapshot immutability)** | |
+| Build `ResolvedCredentials` from a plain dict, then mutate the original dict afterward | The snapshot's values are unchanged (defensive copy, not an alias) |
+| Attempt to write to `resolved._values` directly (e.g. `resolved._values['X'] = 'Y'`) | Raises (`MappingProxyType` rejects item assignment) |
+| Same two cases for `DiagnosticResolution.results`/`_ready_values` | Same immutability guarantees |
+| **rev3 additions (Blocker B: diagnose()/composition-root ownership)** | |
+| `diagnose()` on a name whose declared source is `environment` and unset | Returns status `"absent"`, never raises |
+| `diagnose()` on a name whose declared source is `keyring` and the entry is missing/backend broken | Returns status `"error"`, never raises |
+| `diagnose()` call count against the backend per declared keyring name | Exactly 1 `get_password` call per name, matching `resolve()`'s existing guarantee, since `resolve()` is implemented in terms of `diagnose()` |
+| `DiagnosticResolution.require({name})` where `name`'s status was `"absent"` or `"error"` | `ConfigurationError` naming `name`; no new backend/environment read occurs (assert call count unchanged from before `require()` was called) |
+| `doctor()` with `GITHUB_READ_TOKEN: {source: keyring}` and the entry missing | `optional_checks['GITHUB_READ_TOKEN'] is False`; `doctor()` does not raise and does not report `status: 'failed'` merely because one optional keyring-declared credential errored (matches current "GitHub optional" behavior, generalized to keyring source) |
+| `doctor(live=True)` | `build_retrieval`/`google_service` receive the exact `ResolvedCredentials` produced by `.require(...)` on `doctor()`'s one `diagnose()` call; assert no second `diagnose()`/`resolve()` call happens anywhere in the `doctor(live=True)` call path (mock/spy the resolver and assert call count == 1) |
+| `worker.build_worker`'s two branches (intake-preview delegate vs. `NativeWorker`) | Both receive the composition root's one `ResolvedCredentials`; assert neither branch constructs a `CredentialResolver` or reads `os.environ` itself |
 
 ## keyring dependency (Blocker 5)
 
@@ -392,7 +579,7 @@ requires an independent web ChatGPT review for both plan and final review.
 
 Before any implementation of this plan lands:
 
-1. This plan document (rev2) requires an independent web ChatGPT review
+1. This plan document (rev3) requires an independent web ChatGPT review
    (insane-review Pro, or the user-authorized 매우 높음 fallback if Pro
    quota is exhausted).
 2. This coding session's exec sandbox blocks outbound network including
