@@ -71,6 +71,25 @@ template:
 
 macOS에서는 수정한 plist를 `plutil -lint`로 검증한 뒤 등록합니다. Windows에서는 import된 Task Scheduler 설정과 Last Run Result를 확인합니다. scheduler에는 business logic이 없으며 Syllva가 local process lock을 계속 강제합니다.
 
+### Windows: 로그아웃 상태에서의 무인 실행
+
+`windows/uls-task.xml`은 `LogonType=Password`를 사용합니다. 이는 해당 계정이 로그아웃 상태여도
+실행되는 방식으로, 콘솔에 활성 로그온 세션이 있을 때만 도는 `InteractiveToken`과 다릅니다. 이를
+위해서는 계정 비밀번호를 Task Scheduler에 등록해야 하며, 저장소에 포함된 XML 자체에는 비밀번호가
+없고 있어서도 안 됩니다. `DOMAIN\ServiceUser`를 실제 계정으로 바꾼 뒤, 등록 시점에 한 번만
+비밀번호를 함께 제공하세요. 예시:
+
+```powershell
+schtasks /create /tn "ULS" /xml "windows\uls-task.xml" /ru "DOMAIN\ServiceUser" /rp "PASSWORD" /f
+```
+
+Task Scheduler는 해당 계정의 DPAPI/LSA secret으로 credential을 저장하며 XML 파일에 저장하지
+않습니다. 개인 로그인 계정보다는 이 용도의 전용 low-privilege 로컬 계정을 권장하며, 비밀번호
+교체도 XML을 직접 수정하지 말고 같은 `schtasks /create ... /rp` 단계(또는 동등한 Task Scheduler
+UI/`Register-ScheduledTask -Password` 흐름)로 수행하세요. 사용자가 로그인해 있을 때만 실행해도
+되는 환경이라면 `InteractiveToken`을 유지하고 `UserId`/`Password` 필드를 제거한 뒤, 그 제약을
+운영자에게 문서로 명시하세요.
+
 선택적 LMS scheduling은 별도 credential/connection/application gate 통과 전 paused로 유지하세요. [운영자: LMS 동기화](../docs/operator-guide/lms-sync.ko.md)를 참고하세요.
 
 ## MCP profile
