@@ -24,6 +24,7 @@ from uls.adapters.notion.intake import (
     NotionAPIWorker,
     NotionIntakeWriter,
 )
+from uls.config.credentials import ResolvedCredentials
 from uls.config.schema import (
     CourseCfg,
     CourseStaticFolderCfg,
@@ -196,6 +197,7 @@ def _system(
     with SQLiteStateStore(tmp_path / "state.sqlite3") as state:
         worker = build_intake_worker(
             config,
+            ResolvedCredentials({}),
             state=state,
             drive=drive,
             notion=notion,
@@ -689,9 +691,11 @@ def test_cli_routes_preview_commands_to_one_bounded_run(
         runner = _Runner()
         state = SimpleNamespace(close=lambda: calls.append({"closed": True}))
 
-    config = SimpleNamespace(worker=SimpleNamespace(enabled=True))
+    config = SimpleNamespace(worker=SimpleNamespace(enabled=True), credentials={})
+    monkeypatch.setenv("GOOGLE_WORKER_CREDENTIALS_FILE", "/worker.json")
+    monkeypatch.setenv("NOTION_WORKER_TOKEN", "worker-token")
     monkeypatch.setattr(cli_main, "_config", lambda _: config)
-    monkeypatch.setattr("uls.worker.build_worker", lambda _: _Worker())
+    monkeypatch.setattr("uls.worker.build_worker", lambda _config, _credentials: _Worker())
     result = cli_main.dispatch(Namespace(command=command, config=Path("config.yaml"), max_jobs=7))
     assert result["status"] == "ok"
     assert calls == [{"sync": sync, "process": process, "max_jobs": 7}, {"closed": True}]

@@ -8,7 +8,6 @@ from __future__ import annotations
 import hashlib
 import io
 import json
-import os
 import re
 from pathlib import Path
 from typing import Any
@@ -21,6 +20,7 @@ from uls.adapters.drive.worker import (
 )
 from uls.adapters.notion.api import NotionAPIReader
 from uls.adapters.notion.base import AutomationActor, enforce_write_policy
+from uls.config.credentials import ResolvedCredentials
 from uls.config.errors import ConfigurationError
 from uls.domain.course_identity import resolve_course_relation, validate_course_record
 from uls.domain.errors import PolicyDeniedError, ProviderUnavailableError, SourceUnavailableError
@@ -222,18 +222,24 @@ class NativeWorker:
                                                  frozenset(previous_pointers)))
 
 
-def build_worker(config: Any, secrets: Any = None) -> Any:
+def build_worker(config: Any, credentials: ResolvedCredentials) -> Any:
+    # credentials is a required ResolvedCredentials snapshot produced by
+    # exactly one CredentialResolver.resolve() call at this composition's
+    # root (cli/main.py's dispatch(), sync|process|run branch); this
+    # function must never read os.environ or construct its own resolver.
+    # Its two branches below are mutually exclusive within this one
+    # function call, not a nested resolve chain, so one snapshot covers
+    # both.
     if config.google_drive.semester_registries and config.notion.semester_workspaces:
         from uls.runtime import build_intake_worker
 
-        return build_intake_worker(config, secrets=secrets)
+        return build_intake_worker(config, credentials)
     from notion_client import Client
-    values = os.environ if secrets is None else secrets
     for key in ('GOOGLE_WORKER_CREDENTIALS_FILE', 'NOTION_WORKER_TOKEN'):
-        if not values.get(key):
+        if not credentials.get(key):
             raise ConfigurationError(key + ' is required for worker commands')
     sources = load_sources(Path(config.system.workspace_dir).expanduser() / 'sources.json',
                            {course.course_key for course in config.courses})
-    service = google_service(values['GOOGLE_WORKER_CREDENTIALS_FILE'], read_only=False)
-    client = Client(auth=values['NOTION_WORKER_TOKEN'], notion_version='2025-09-03', timeout_ms=20_000)
+    service = google_service(credentials['GOOGLE_WORKER_CREDENTIALS_FILE'], read_only=False)
+    client = Client(auth=credentials['NOTION_WORKER_TOKEN'], notion_version='2025-09-03', timeout_ms=20_000)
     return NativeWorker(config, SQLiteStateStore(state_path(config)), service, client, sources)

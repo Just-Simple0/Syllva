@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -12,6 +11,7 @@ from typing import Any
 import yaml  # type: ignore[import-untyped]
 
 from uls.behavior import asset_root, lint_behavior
+from uls.config.credentials import ALLOWED_SOURCES, CredentialResolver
 from uls.config.errors import ConfigurationError
 from uls.domain.errors import UlsError
 from uls.runtime import build_retrieval, require_mcp_credentials, state_path
@@ -172,12 +172,24 @@ def _readiness_funnel(job_counts: dict[str, int], *, state: Any = None) -> dict[
     }
 
 
-def _credential_ready(key: str) -> bool:
-    value = os.environ.get(key, '')
-    return bool(value) and (Path(value).expanduser().is_file() if key.endswith('_FILE') else True)
-
-
 def doctor(config: Any, *, live: bool = False) -> dict[str, Any]:
+    # doctor() is a composition root (see docs/plans/credential-resolver.md):
+    # it builds one CredentialResolver from config.credentials and calls
+    # diagnose() exactly once, over every known credential name. Every
+    # check below, including the separation check and the --live provider
+    # calls, slices values out of that same DiagnosticResolution via
+    # select()/require() instead of diagnosing or resolving again.
+    resolver = CredentialResolver(config.credentials)
+    diagnostic = resolver.diagnose(frozenset(ALLOWED_SOURCES))
+
+    def _ready(key: str) -> bool:
+        result = diagnostic.results.get(key)
+        if result is None or result.status != 'ready':
+            return False
+        if key.endswith('_FILE'):
+            return Path(diagnostic._ready_values[key]).expanduser().is_file()
+        return True
+
     checks: dict[str, Any] = {'behavior_contract': not lint_behavior(Path(config.behavior_contract.path)),
                               'state': status(config)['status'] == 'ok'}
     optional_checks: dict[str, Any] = {}
@@ -190,20 +202,24 @@ def doctor(config: Any, *, live: bool = False) -> dict[str, Any]:
     worker_credential_keys = ('GOOGLE_WORKER_CREDENTIALS_FILE', 'NOTION_WORKER_TOKEN')
     if config.worker.enabled:
         for key in worker_credential_keys:
-            checks[key] = _credential_ready(key)
+            checks[key] = _ready(key)
     else:
         for key in worker_credential_keys:
-            optional_checks[key] = _credential_ready(key)
+            optional_checks[key] = _ready(key)
     # The read-only MCP search surface is the system's core deliverable and
     # is required regardless of whether the intake worker is enabled.
     for key in ('GOOGLE_MCP_CREDENTIALS_FILE', 'NOTION_MCP_TOKEN'):
-        checks[key] = _credential_ready(key)
+        checks[key] = _ready(key)
     # GitHub is an optional supplemental source: GitHubAPIReader accepts an
     # empty token and simply serves no GitHub content, so a missing token
     # must never fail an otherwise complete minimal configuration.
-    optional_checks['GITHUB_READ_TOKEN'] = _credential_ready('GITHUB_READ_TOKEN')
+    optional_checks['GITHUB_READ_TOKEN'] = _ready('GITHUB_READ_TOKEN')
     try:
-        require_mcp_credentials(os.environ)
+        separation_snapshot = diagnostic.select(
+            required=frozenset({'GOOGLE_MCP_CREDENTIALS_FILE', 'NOTION_MCP_TOKEN'}),
+            optional={'NOTION_WORKER_TOKEN': '', 'GOOGLE_WORKER_CREDENTIALS_FILE': ''},
+        )
+        require_mcp_credentials(separation_snapshot)
         checks['credential_separation'] = True
     except ConfigurationError:
         checks['credential_separation'] = False
@@ -217,8 +233,12 @@ def doctor(config: Any, *, live: bool = False) -> dict[str, Any]:
         try:
             from uls.mcp.transports.remote import BearerCredential, validate_remote_profile
             validate_remote_profile(config)
-            BearerCredential(os.environ.get('REMOTE_MCP_SECRET', ''),
-                             float(os.environ.get('REMOTE_MCP_EXPIRES_AT', '0'))).validate()
+            remote_snapshot = diagnostic.select(
+                required=frozenset(),
+                optional={'REMOTE_MCP_SECRET': '', 'REMOTE_MCP_EXPIRES_AT': '0'},
+            )
+            BearerCredential(remote_snapshot['REMOTE_MCP_SECRET'],
+                             float(remote_snapshot['REMOTE_MCP_EXPIRES_AT'])).validate()
             checks['remote_profile'] = all(Path(p).is_file() for p in
                                            (config.remote_mcp.tls_certfile, config.remote_mcp.tls_keyfile))
         except (UlsError, ValueError):
@@ -228,9 +248,13 @@ def doctor(config: Any, *, live: bool = False) -> dict[str, Any]:
     if live:
         try:
             from uls.runtime import google_service
-            engine = build_retrieval(config)
+            live_snapshot = diagnostic.select(
+                required=frozenset({'GOOGLE_MCP_CREDENTIALS_FILE', 'NOTION_MCP_TOKEN'}),
+                optional={'GITHUB_READ_TOKEN': ''},
+            )
+            engine = build_retrieval(config, live_snapshot)
             checks['live_notion_read'] = engine.notion_reader.get_course_by_alias(config.courses[0].course_key) is not None
-            service = google_service(os.environ['GOOGLE_MCP_CREDENTIALS_FILE'], read_only=True)
+            service = google_service(live_snapshot['GOOGLE_MCP_CREDENTIALS_FILE'], read_only=True)
             root = service.files().get(fileId=config.google_drive.university_root_id, fields='id,trashed').execute()
             checks['live_drive_read'] = root.get('id') == config.google_drive.university_root_id and root.get('trashed') is False
         except Exception:  # noqa: BLE001 - health checks report booleans, never provider payloads
@@ -255,7 +279,10 @@ def dispatch(args: argparse.Namespace) -> Any:
         if not config.worker.enabled:
             return {'status': 'disabled', 'processed': 0}
         from uls.worker import build_worker
-        worker = build_worker(config)
+        credentials = CredentialResolver(config.credentials).resolve(
+            required=frozenset({'GOOGLE_WORKER_CREDENTIALS_FILE', 'NOTION_WORKER_TOKEN'})
+        )
+        worker = build_worker(config, credentials)
         try:
             return worker.runner.run_once(sync=args.command != 'process', process=args.command != 'sync',
                                            max_jobs=args.max_jobs)
@@ -291,15 +318,22 @@ def dispatch(args: argparse.Namespace) -> Any:
     if args.command == 'mcp':
         if args.mode == 'status':
             return status(config)
+        # One resolve() covers both local and remote modes; REMOTE_MCP_SECRET
+        # and REMOTE_MCP_EXPIRES_AT are simply unused when mode == 'local'.
+        credentials = CredentialResolver(config.credentials).resolve(
+            required=frozenset({'GOOGLE_MCP_CREDENTIALS_FILE', 'NOTION_MCP_TOKEN'}),
+            optional={'GITHUB_READ_TOKEN': '', 'REMOTE_MCP_SECRET': '', 'REMOTE_MCP_EXPIRES_AT': '0',
+                      'NOTION_WORKER_TOKEN': '', 'GOOGLE_WORKER_CREDENTIALS_FILE': ''},
+        )
         from uls.mcp.server import ReadOnlyMCP
-        registry = ReadOnlyMCP(build_retrieval(config))
+        registry = ReadOnlyMCP(build_retrieval(config, credentials))
         if args.mode == 'local':
             from uls.mcp.transports.local import run_local
             run_local(registry)
         else:
             from uls.mcp.transports.remote import BearerCredential, run_remote
-            credential = BearerCredential(os.environ.get('REMOTE_MCP_SECRET', ''),
-                                           float(os.environ.get('REMOTE_MCP_EXPIRES_AT', '0')))
+            credential = BearerCredential(credentials['REMOTE_MCP_SECRET'],
+                                           float(credentials['REMOTE_MCP_EXPIRES_AT']))
             run_remote(registry, config, credential)
         return None
     raise ValueError('Unsupported command')

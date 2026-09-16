@@ -10,6 +10,8 @@ from typing import Any, TypeVar
 
 import yaml
 
+from .credentials import ALLOWED_SOURCES
+from .errors import ConfigurationError
 from .schema import (
     BehaviorContractCfg,
     CourseCfg,
@@ -20,16 +22,14 @@ from .schema import (
     NotionCfg,
     RemoteMcpCfg,
     RetrievalCfg,
-    StorageCfg,
     SemesterRegistryCfg,
     SemesterWorkspaceCfg,
+    StorageCfg,
     SystemCfg,
     UlsConfig,
     WorkerCfg,
 )
-from .errors import ConfigurationError
 from .validation import validate_config
-
 
 SECRET_KEYS = (
     "GOOGLE_WORKER_CREDENTIALS_FILE",
@@ -41,6 +41,16 @@ SECRET_KEYS = (
     "REMOTE_MCP_SECRET",
     "REMOTE_MCP_EXPIRES_AT",
 )
+
+# Every top-level YAML section name this loader recognizes. Used only by the
+# typo guard below; adding "credentials" here does not change the
+# pre-existing behavior of silently ignoring other unrelated unknown
+# top-level keys (see docs/plans/credential-resolver.md, Blocker 4).
+_KNOWN_TOP_LEVEL_KEYS = frozenset({
+    "system", "worker", "storage", "google_drive", "drive", "notion",
+    "normalization", "retrieval", "mcp", "remote_mcp", "behavior_contract",
+    "courses", "credentials",
+})
 
 _CfgT = TypeVar("_CfgT")
 
@@ -65,6 +75,8 @@ def load_config_unvalidated(path: str | os.PathLike[str]) -> UlsConfig:
         raw = {}
     if not isinstance(raw, Mapping):
         raise ValueError("configuration root must be a YAML mapping")
+
+    _check_top_level_typos(raw)
 
     courses_raw = raw.get("courses", [])
     if courses_raw is None:
@@ -105,6 +117,7 @@ def load_config_unvalidated(path: str | os.PathLike[str]) -> UlsConfig:
             BehaviorContractCfg, _section(raw, "behavior_contract")
         ),
         courses=courses,
+        credentials=_credentials_section(raw),
     )
 
 
@@ -129,6 +142,79 @@ def _section(raw: Mapping[str, Any], name: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError(f"{name} must be a YAML mapping")
     return value
+
+
+def _levenshtein(left: str, right: str) -> int:
+    if left == right:
+        return 0
+    previous = list(range(len(right) + 1))
+    for i, lchar in enumerate(left, start=1):
+        current = [i] + [0] * len(right)
+        for j, rchar in enumerate(right, start=1):
+            cost = 0 if lchar == rchar else 1
+            current[j] = min(
+                previous[j] + 1,       # deletion
+                current[j - 1] + 1,    # insertion
+                previous[j - 1] + cost,  # substitution
+            )
+        previous = current
+    return previous[-1]
+
+
+def _check_top_level_typos(raw: Mapping[str, Any]) -> None:
+    """Reject a top-level key that is a near-miss typo of 'credentials'.
+
+    Scoped strictly to 'credentials' (edit-distance <= 2, case-insensitive)
+    so this does not change the pre-existing repository-wide behavior of
+    silently ignoring unrelated unknown top-level keys; it only prevents
+    the 'credentials' section from being silently downgraded to 'absent' by a
+    typo like 'credentails'.
+    """
+
+    target = "credentials"
+    for key in raw:
+        if not isinstance(key, str) or key == target:
+            continue
+        if key.lower() == target or 0 < _levenshtein(key.lower(), target) <= 2:
+            raise ValueError(
+                f"unknown top-level key {key!r} looks like a typo of {target!r}"
+            )
+
+
+def _credentials_section(raw: Mapping[str, Any]) -> dict[str, str]:
+    """Parse the optional credentials: section (rev3 PLAN GO design).
+
+    Absent entirely -> {} (every credential defaults to "environment" at
+    CredentialResolver construction time; observably behavior-equivalent to
+    today for every existing deployment). Present but malformed in any way
+    -> ValueError fail-closed, never a silent partial parse.
+    """
+
+    if "credentials" not in raw:
+        return {}
+    section = raw["credentials"]
+    if not isinstance(section, Mapping):
+        raise ValueError("credentials must be a YAML mapping")
+    result: dict[str, str] = {}
+    for name, entry in section.items():
+        if name not in ALLOWED_SOURCES:
+            raise ValueError(f"credentials.{name} is not a recognized credential name")
+        if not isinstance(entry, Mapping) or set(entry) != {"source"}:
+            raise ValueError(
+                f"credentials.{name} must be a mapping with exactly the key 'source'"
+            )
+        source = entry["source"]
+        if not isinstance(source, str):
+            raise ValueError(
+                f"credentials.{name}.source must be a string"
+            )
+        if source not in ALLOWED_SOURCES[name]:
+            raise ValueError(
+                f"credentials.{name}.source must be one of "
+                + ", ".join(sorted(ALLOWED_SOURCES[name]))
+            )
+        result[name] = source
+    return result
 
 
 def _from_mapping(cls: type[_CfgT], value: Any) -> _CfgT:
