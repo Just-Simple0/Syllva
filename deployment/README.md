@@ -76,20 +76,22 @@ On macOS, validate the edited plist with `plutil -lint` before registering it. O
 `windows/uls-task.xml` uses `LogonType=Password`, which runs whether or not the account is
 interactively logged on (unlike `InteractiveToken`, which only runs during an active logon
 session on that console). This requires the account password to be registered with Task
-Scheduler; the checked-in XML intentionally does not (and must not) contain a password. Replace
-`DOMAIN\ServiceUser` with the actual account, then import and supply the password once at
-registration time, for example:
+Scheduler; the checked-in XML intentionally does not (and must not) contain a password. Never
+pass plaintext passwords directly on the command line, as process creation audit logging
+(such as Windows Event ID 4688) can record command-line arguments in plain text. Instead, use
+`/rp *` (or omit `/rp`) to prompt securely for the password at registration time:
 
 ```powershell
-schtasks /create /tn "ULS" /xml "windows\uls-task.xml" /ru "DOMAIN\ServiceUser" /rp "PASSWORD" /f
+schtasks /create /tn "ULS" /xml "windows\uls-task.xml" /ru "DOMAIN\ServiceUser" /rp * /f
 ```
 
-Task Scheduler stores the credential using DPAPI/LSA secrets under that account, not in the XML
-file. Prefer a dedicated low-privilege local account over a personal login for this purpose, and
-rotate the password through the same `schtasks /create ... /rp` step (or the equivalent
-Task Scheduler UI/`Register-ScheduledTask -Password` flow) rather than editing the XML. If your
-environment truly only needs the task to run while a user is logged on, keep `InteractiveToken`
-and remove the `UserId`/`Password` fields instead; document that constraint for your operators.
+Task Scheduler stores the configured task credential as an encrypted LSA secret on disk, not
+in the XML file. Prefer a dedicated low-privilege local account over a personal login for this
+purpose, and rotate the password through the same secure prompt (or the equivalent Task
+Scheduler UI / PowerShell `Register-ScheduledTask` credential prompt) rather than editing
+the XML. If your environment truly only needs the task to run while a user is logged on,
+keep `InteractiveToken` and remove the `UserId`/`Password` fields instead; document that
+constraint for your operators.
 
 Keep optional LMS scheduling paused until the separate LMS credential/connection/application gates pass. See [Operator: LMS Sync](../docs/operator-guide/lms-sync.md).
 
