@@ -112,3 +112,31 @@ def test_both_scheduler_definitions_invoke_identical_run_command():
     ns = {'s': 'http://schemas.microsoft.com/windows/2004/02/mit/task'}
     assert task.find('.//s:Arguments', ns).text.endswith(' run')
     assert task.find('.//s:MultipleInstancesPolicy', ns).text == 'IgnoreNew'
+
+
+def test_windows_task_scheduler_runs_unattended_while_logged_out():
+    """Regression: InteractiveToken only runs during an active console logon session.
+
+    A prior template shipped LogonType=InteractiveToken, which silently fails to
+    satisfy "runs whenever the PC is on" for a worker meant to run while the
+    configured account is logged out. Password logon type runs regardless of
+    logon state once the account password is registered with Task Scheduler
+    (out of band, never checked into this XML).
+    """
+    import xml.etree.ElementTree as ET
+
+    root = Path(__file__).resolve().parents[2]
+    task = ET.parse(root / 'deployment/windows/uls-task.xml')
+    ns = {'s': 'http://schemas.microsoft.com/windows/2004/02/mit/task'}
+    logon_type = task.find('.//s:Principal/s:LogonType', ns)
+    assert logon_type is not None
+    assert logon_type.text == 'Password'
+    assert logon_type.text != 'InteractiveToken'
+    # UserId must be present for Password logon type, and must never carry a
+    # real credential in the checked-in template.
+    user_id = task.find('.//s:Principal/s:UserId', ns)
+    assert user_id is not None and user_id.text
+    # Password logon type never stores the secret in the XML itself; only an
+    # out-of-band registration step (schtasks /rp or Register-ScheduledTask
+    # -Password) may supply it. No <Password> element should exist here.
+    assert task.find('.//s:Principal/s:Password', ns) is None
