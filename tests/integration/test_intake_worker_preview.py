@@ -676,6 +676,7 @@ def test_public_claim_and_process_entrypoints_refuse_an_existing_worker_lock(tmp
 )
 def test_cli_routes_preview_commands_to_one_bounded_run(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     command: str,
     sync: bool,
     process: bool,
@@ -692,7 +693,10 @@ def test_cli_routes_preview_commands_to_one_bounded_run(
         state = SimpleNamespace(close=lambda: calls.append({"closed": True}))
 
     config = SimpleNamespace(worker=SimpleNamespace(enabled=True), credentials={})
-    monkeypatch.setenv("GOOGLE_WORKER_CREDENTIALS_FILE", "/worker.json")
+    from uls.config._secure_file import write_secure_file
+    worker_file = tmp_path / "worker.json"
+    write_secure_file(worker_file, b"{}")
+    monkeypatch.setenv("GOOGLE_WORKER_CREDENTIALS_FILE", str(worker_file))
     monkeypatch.setenv("NOTION_WORKER_TOKEN", "worker-token")
     monkeypatch.setattr(cli_main, "_config", lambda _: config)
     monkeypatch.setattr("uls.worker.build_worker", lambda _config, _credentials: _Worker())

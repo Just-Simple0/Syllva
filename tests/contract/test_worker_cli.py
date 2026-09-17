@@ -107,9 +107,11 @@ def test_both_scheduler_definitions_invoke_identical_run_command():
     import xml.etree.ElementTree as ET
     root = Path(__file__).resolve().parents[2]
     plist = plistlib.loads((root / 'deployment/macos/com.syllva.uls.plist').read_bytes())
+    assert plist['ProgramArguments'][0].endswith('/uls')
     assert plist['ProgramArguments'][-1] == 'run'
     task = ET.parse(root / 'deployment/windows/uls-task.xml')
     ns = {'s': 'http://schemas.microsoft.com/windows/2004/02/mit/task'}
+    assert task.find('.//s:Command', ns).text.endswith('uls.exe')
     assert task.find('.//s:Arguments', ns).text.endswith(' run')
     assert task.find('.//s:MultipleInstancesPolicy', ns).text == 'IgnoreNew'
 
@@ -140,3 +142,69 @@ def test_windows_task_scheduler_runs_unattended_while_logged_out():
     # out-of-band registration step (schtasks /rp or Register-ScheduledTask
     # -Password) may supply it. No <Password> element should exist here.
     assert task.find('.//s:Principal/s:Password', ns) is None
+
+
+def test_google_credentials_substitution_race_prevention(tmp_path, monkeypatch):
+    """Contract: verifying and loading Google credentials binds to the
+    in-memory payload acquired at diagnosis time (docs/plans/credential-secret-file-launcher.md rev5 §8.2).
+    If the file on disk is replaced or tampered with immediately after diagnose(),
+    downstream provider consumption uses only the payload verified at diagnosis time.
+    """
+    import json
+
+    import google.auth
+
+    from uls.config._secure_file import write_secure_file
+    from uls.config.credentials import CredentialResolver
+    from uls.runtime import google_service
+
+    captured_info = []
+    def fake_load_dict(info, scopes=None, **kwargs):
+        captured_info.append(info)
+        return None, None
+
+    monkeypatch.setattr(google.auth, 'load_credentials_from_dict', fake_load_dict)
+    import googleapiclient.discovery
+    monkeypatch.setattr(googleapiclient.discovery, 'build', lambda *args, **kwargs: 'fake_service')
+
+    creds_file = tmp_path / 'credentials.json'
+    original_payload = {'type': 'service_account', 'client_email': 'original@example.com'}
+    write_secure_file(creds_file, json.dumps(original_payload).encode('utf-8'))
+
+    # Diagnose once through CredentialResolver
+    resolver = CredentialResolver({}, environ={'GOOGLE_MCP_CREDENTIALS_FILE': str(creds_file)})
+    snapshot = resolver.resolve(required=frozenset({'GOOGLE_MCP_CREDENTIALS_FILE'}))
+    payload = snapshot.get_google_payload('GOOGLE_MCP_CREDENTIALS_FILE')
+    assert payload is not None
+
+    # Disk file is now replaced with an attacker file / deleted / modified
+    attacker_payload = {'type': 'service_account', 'client_email': 'attacker@example.com'}
+    creds_file.write_text(json.dumps(attacker_payload), encoding='utf-8')
+    creds_file.chmod(0o644)  # world readable
+
+    # Provider consumption must use the payload captured at diagnosis time
+    google_service(payload, read_only=True)
+    assert len(captured_info) == 1
+    assert captured_info[0]['client_email'] == 'original@example.com'
+
+
+def test_cli_credential_set_guidance_and_execution(tmp_path, monkeypatch, capsys):
+    """Contract: uls credential set NAME returns guidance when undeclared,
+    and does not accept a --value CLI argument.
+    """
+    raw = yaml.safe_load((asset_root() / 'config.example.yaml').read_text(encoding='utf-8'))
+    raw['system']['workspace_dir'] = 'state'
+    raw['behavior_contract']['path'] = str(asset_root() / 'contracts/study-behavior.md')
+    path = tmp_path / 'config.yaml'
+    path.write_text(yaml.safe_dump(raw), encoding='utf-8')
+
+    # When undeclared, outputs guidance only and exits 0
+    assert main(['--config', str(path), 'credential', 'set', 'NOTION_WORKER_TOKEN']) == 0
+    out = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert out['status'] == 'guidance_only'
+    assert 'credentials:' in out['add_to_config']
+
+    # Attempting to pass --value fails with CLI parse error (SystemExit 2)
+    with pytest.raises(SystemExit) as exc_info:
+        main(['--config', str(path), 'credential', 'set', 'NOTION_WORKER_TOKEN', '--value', 'leak'])
+    assert exc_info.value.code == 2

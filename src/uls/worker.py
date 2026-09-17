@@ -240,6 +240,9 @@ def build_worker(config: Any, credentials: ResolvedCredentials) -> Any:
             raise ConfigurationError(key + ' is required for worker commands')
     sources = load_sources(Path(config.system.workspace_dir).expanduser() / 'sources.json',
                            {course.course_key for course in config.courses})
-    service = google_service(credentials['GOOGLE_WORKER_CREDENTIALS_FILE'], read_only=False)
+    worker_payload = credentials.get_google_payload('GOOGLE_WORKER_CREDENTIALS_FILE')
+    if worker_payload is None:
+        raise ConfigurationError('GOOGLE_WORKER_CREDENTIALS_FILE payload is missing')
+    service = google_service(worker_payload, read_only=False)
     client = Client(auth=credentials['NOTION_WORKER_TOKEN'], notion_version='2025-09-03', timeout_ms=20_000)
     return NativeWorker(config, SQLiteStateStore(state_path(config)), service, client, sources)

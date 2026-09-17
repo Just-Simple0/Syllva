@@ -9,6 +9,7 @@ from uls.config.validation import validate_config
 
 
 def test_valid_example_shape_loads_and_validates(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("NOTION_WORKER_TOKEN", raising=False)
     contract = tmp_path / "study-behavior.md"
     contract.write_text("# contract\n", encoding="utf-8")
     config = tmp_path / "config.yaml"

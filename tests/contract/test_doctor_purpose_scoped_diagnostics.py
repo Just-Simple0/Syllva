@@ -39,6 +39,7 @@ def _write_config(tmp_path, *, worker_enabled: bool):
 def _set_mcp_credentials(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     google_mcp_file = tmp_path / "google-mcp-credentials.json"
     google_mcp_file.write_text("{}", encoding="utf-8")
+    google_mcp_file.chmod(0o600)
     monkeypatch.setenv("GOOGLE_MCP_CREDENTIALS_FILE", str(google_mcp_file))
     monkeypatch.setenv("NOTION_MCP_TOKEN", "mcp-token-value")
 

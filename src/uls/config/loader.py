@@ -49,7 +49,7 @@ SECRET_KEYS = (
 _KNOWN_TOP_LEVEL_KEYS = frozenset({
     "system", "worker", "storage", "google_drive", "drive", "notion",
     "normalization", "retrieval", "mcp", "remote_mcp", "behavior_contract",
-    "courses", "credentials",
+    "courses", "credentials", "google_worker_credentials_path", "google_mcp_credentials_path",
 })
 
 _CfgT = TypeVar("_CfgT")
@@ -98,6 +98,10 @@ def load_config_unvalidated(path: str | os.PathLike[str]) -> UlsConfig:
     semester_registries = _semester_registries(drive_raw.get("semester_registries", []))
     drive_values = dict(drive_raw)
     drive_values["semester_registries"] = semester_registries
+    worker_cred_path = str(raw.get("google_worker_credentials_path", drive_raw.get("worker_credentials_path", "")) or "")
+    mcp_cred_path = str(raw.get("google_mcp_credentials_path", drive_raw.get("mcp_credentials_path", "")) or "")
+    drive_values["worker_credentials_path"] = worker_cred_path
+    drive_values["mcp_credentials_path"] = mcp_cred_path
     notion_raw = _section(raw, "notion")
     notion_values = dict(notion_raw)
     notion_values["semester_workspaces"] = _semester_workspaces(
@@ -118,6 +122,8 @@ def load_config_unvalidated(path: str | os.PathLike[str]) -> UlsConfig:
         ),
         courses=courses,
         credentials=_credentials_section(raw),
+        google_worker_credentials_path=worker_cred_path,
+        google_mcp_credentials_path=mcp_cred_path,
     )
 
 

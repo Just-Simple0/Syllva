@@ -2,6 +2,262 @@
 
 **Last updated:** 2026-09-17
 
+## Credential 주입 UX 개선 항목 기록 및 protected secret file 설계 착수 (2026-09-17)
+
+사용자가 "현재 API 토큰 주입이 터미널에 직접 export해서 넣는 방식인데 UX가 좋지 않다"고 지적했다.
+실제로 `docs/operator-guide/configuration.md`와 `deployment/README.md`를 확인한 결과, 현재
+워커/MCP 자격증명(`GOOGLE_WORKER_CREDENTIALS_FILE`, `NOTION_WORKER_TOKEN`,
+`GOOGLE_MCP_CREDENTIALS_FILE`, `REMOTE_MCP_SECRET` 등)은 여전히 "process environment 또는
+private service wrapper로 공급하라"는 안내만 있고, 구체적인 무인 실행용 launcher나 대화형 등록
+커맨드가 없다. `CredentialResolver`(PR #11)가 `NOTION_MCP_TOKEN`/`GITHUB_READ_TOKEN`/
+`LLM_API_KEY`에 keyring source를 허용하게 만들었음에도, 이를 실제로 keyring에 써 넣는 대화형
+진입점은 `uls` 메인 CLI에 아직 없다 (`scripts/knu_lms_sync.py enroll --confirm yes`는 Canvas
+사이드카 전용이며 CredentialResolver와 별개다). 이 UX 격차를 **후속 작업 항목으로 기록**한다:
+
+- **[신규 후속 작업] Credential 주입/등록 UX 개선**: 모든 크리덴셜(keyring 및 신규 protected-file
+  source 포함)에 대해 터미널 `export` 직접 입력 없이 대화형으로 안전하게 등록할 수 있는
+  `uls credential set <NAME>` 류 커맨드 제공. 값은 CLI 인자로 절대 받지 않고(마스킹 프롬프트만),
+  등록 직후 `uls doctor`와 동일한 fail-closed 진단으로 즉시 검증.
+
+이 항목을 반영해 이전 세션에서 정리된 "다음 세션 작업" 1번(메인 워커용 protected secret file +
+최소 환경변수 launcher 패턴)의 설계를 시작했다. 상세 설계는
+[docs/plans/credential-secret-file-launcher.md](docs/plans/credential-secret-file-launcher.md)
+(rev1, 아직 web 리뷰 전)에 정리했다. 이 작업은 AGENTS.md 기준 인증/자격증명 관련 risky 분류라
+구현 착수 전 독립 계획 리뷰(insane-review + 신규 CLI UX 부분은 Gemini)가 필요하며, 아직 리뷰를
+보내지 않았다. 코드는 변경하지 않았고 커밋/푸시도 하지 않았다.
+
+### 업데이트: rev1 독립 계획 리뷰 2건 완료 — 둘 다 REVISE, rev2로 수정 완료 (2026-09-17)
+
+이 exec 세션의 기본 샌드박스는 loopback bind(9222)와 로그 파일 쓰기를 막아 insane-review/agy가
+곧바로는 동작하지 않았다(`ps`조차 `operation not permitted`). `require_escalated` 승인을 받아
+재시도하니 두 리뷰 모두 정상 동작했다 — 이전 세션에서 "샌드박스가 네트워크를 전면 차단한다"고
+진단했던 것은 escalation 없이 시도했기 때문이었다.
+
+**리뷰 1 — insane-review(웹 ChatGPT).** 새 채팅의 Pro 추론단계가 여전히 비활성(pill이 '매우 높음'에
+고정, Pro 선택 시 슬라이더 검증 실패)이라 AGENTS.md가 승인한 fallback대로 **매우 높음**으로
+진행했다(모델 `GPT-5.6 Sol (매우 높음)`, Pro라 칭하지 않음). 저장:
+`.insane-review/response_Syllva_20260917_103047_41839_ddbcf6.md`. **판정: REVISE.**
+
+**리뷰 2 — Gemini 3.8 Flash high (`agy --model gemini-3.8-flash --effort high --mode plan`,
+읽기 전용).** **판정: REVISE.**
+
+두 리뷰가 **동일하게** 지적한 핵심 결함: rev1의 launcher(§2.5)가 secret file을 읽어 environment로
+재주입하는데, 이는 `source: file`을 `CredentialResolver`에 직접 추가한 §2.1과 secret read
+boundary가 중복/모순된다는 것. 그 외 TOCTOU 심링크 검사 순서, 원자적 쓰기 시 레이스, Windows DACL
+trustee 정의 불충분, `GOOGLE_WORKER_CREDENTIALS_FILE`이 무인 실행 갭을 실제로 해결 못 하는 문제,
+`credential set`의 설정-저장소 동기화 누락("닭-달걀" 문제), 이중 입력/취소 처리 부재 등도
+공통/개별로 지적됐다.
+
+지적사항을 전부 rev2([docs/plans/credential-secret-file-launcher.md](docs/plans/credential-secret-file-launcher.md))에
+반영했다: launcher에서 raw secret 주입을 제거해 `CredentialResolver(source=file)`을 유일한 read
+boundary로 만들고, 신뢰 디렉터리 우선 검증 + 동일 fd/handle 기준 TOCTOU-safe 읽기로 바꾸고,
+secret 전용 원자적 writer(생성 시점부터 0600, 실패 시 temp 항상 unlink)를 정의하고, Windows
+canonical DACL trustee(현재 사용자+SYSTEM+Administrators)를 명시하고, `GOOGLE_*_CREDENTIALS_FILE`을
+경로(non-secret)로 재분류해 별도 경로로 무인 실행 갭을 풀고, `credential set`을 "이미 선언된
+source에만 적용" + 이중 입력 + 덮어쓰기 확인 + TTY 필수로 강화했다. 상세 대응표는 rev2 문서 §0.
+
+**다음 단계:** rev2를 insane-review + Gemini high에 재발송해 두 핵심 아키텍처 결함(§2.1/§2.5의
+read-boundary 중복)이 실제로 해소됐는지 확인 → 둘 다 GO 이후에만 구현 착수. 아직 재발송 전이며,
+코드는 변경하지 않았고 커밋/푸시도 하지 않았다.
+
+### 업데이트: rev2 재리뷰 2건 완료 — 또 REVISE, 하지만 핵심 아키텍처는 확정. rev3로 launcher 자체를 폐기 (2026-09-17)
+
+rev2를 insane-review(`GPT-5.6 Sol (매우 높음)`)와 Gemini 3.8 Flash high에 재발송했다. **둘 다
+REVISE**였지만, 두 리뷰 모두 rev1→rev2의 핵심 수정(launcher의 raw secret 재주입 제거, TOCTOU-safe
+read boundary, secret 전용 원자적 writer, Windows trustee 3종, TTY/이중입력/덮어쓰기 확인)은
+**정확히 해결됐다고 명시적으로 확인**했다 — 즉 REVISE는 새로 발견된 문제 때문이지 이전 지적이
+재발한 것이 아니다.
+
+**새로 발견된 것들:**
+- insane-review: `GOOGLE_*_CREDENTIALS_FILE`을 검증한 파일과 provider가 실제로 여는 파일이
+  같은 객체라는 보장이 없는 validate-then-reopen TOCTOU. launcher가 `config.yaml`을 `uls`와
+  별도로 다시 읽어 그 사이 config가 바뀌면 서로 다른 snapshot을 쓰게 되는 문제. Windows DACL이
+  trustee 이름만 있고 ACE rights/상속/owner 의미가 없는 문제(그리고 `scripts/_lms_platform.py`가
+  아직 DACL hardening을 구현하지 않았다는 사실을 rev2가 착각하고 인용한 것도 지적).
+- Gemini: 마스킹 미리보기("처음 4자+`****`+마지막 2자")가 12자 미만 시크릿에서 사실상 전체를
+  노출할 수 있는 실제 보안 버그. `config.example.yaml`에 `credentials:` 섹션이 없어 첫 사용자가
+  "이미 선언된 source에만 set 허용" 규칙에 막다른 골목으로 몰리는 Day-0 온보딩 마찰.
+
+**rev3 핵심 변경**: 두 리뷰가 겹치는 launcher 문제(TOCTOU + snapshot split)를 한 번에 해소하기
+위해 **launcher를 전면 폐기**했다. Google 자격증명 경로도 secret이 아니므로, `uls`의 기존 config
+composition root가 직접 읽게 하면 별도 config reader 자체가 없어져 snapshot split이 구조적으로
+불가능해진다. scheduled 실행은 (rev1 이전처럼) `uls run`을 절대경로로 바로 호출한다. 마스킹
+미리보기는 완전히 제거하고 성공 피드백은 저장 위치/권한/길이만 노출하도록 바꿨다. Windows DACL은
+ACE 수준으로 구체화했고, "기존 코드에 이미 DACL hardening이 있다"는 rev2의 잘못된 전제도 정정했다.
+상세 대응표는 rev3([docs/plans/credential-secret-file-launcher.md](docs/plans/credential-secret-file-launcher.md))
+§7.
+
+**다음 단계:** rev3를 insane-review + Gemini high에 3차 재발송할지 사용자에게 확인 중. 아직
+재발송 전이며, 코드는 변경하지 않았고 커밋/푸시도 하지 않았다.
+
+### 업데이트: rev3 3차 재리뷰 완료 — 여전히 REVISE지만 범위가 좁아짐, rev4로 문서 정합화 (2026-09-17)
+
+사용자 승인으로 rev3를 insane-review(`GPT-5.6 Sol (매우 높음)`)와 Gemini 3.8 Flash high에
+3차 재발송했다. **둘 다 다시 REVISE**였지만, 이번엔 두 리뷰 모두 "아키텍처를 다시 뒤집을 필요는
+없다"고 명시했다 — insane-review는 "범위 좁은 REVISE", Gemini는 "5가지 항목만 본문에 통합하면
+되는 가벼운 패치"라고 표현했다. launcher 폐기, TOCTOU-safe read boundary, secret 전용 writer,
+Windows trustee 지정, 마스킹 제거 등 rev3의 핵심 변경은 방향상 옳다고 재확인됐다.
+
+**남은 지적:**
+- insane-review: Google 자격증명의 "검증과 소비가 동일 fd" 원칙이 아직 `ResolvedCredentials`
+  (`Mapping[str, str]`) 타입 계약과 연결되는 실행 가능한 API로 안 이어짐. launcher를 없앤 것으로
+  snapshot split의 *원인*은 사라졌지만, config에서 resolver로 값을 넘기는 인터페이스 자체가
+  아직 이름이 없어 "구조적으로 불가능"이라 단언하기엔 이르다는 지적. `credential-resolver.md`가
+  `file` source와 Google 변경을 여전히 "범위 밖"으로 명시하는 충돌은 구현 후 각주로 미루지 말고
+  지금 함께 고쳐야 한다는 지적. Windows DACL의 "현재 사용자 SID" trustee와 owner 검증의
+  `TokenOwner`가 실은 다른 개념인데 섞여 있다는 지적.
+- Gemini: 마스킹 제거는 완전히 해소됐다고 확인. 새로 발견한 실제 버그 — rev3 §7.5가 "저장소가
+  `untrusted`(신뢰 불가)면 **확인 없이** 덮어쓴다"고 적어놨는데, 이러면 오타로 실행한
+  `credential set`이 사용자 동의 없이 기존 파일을 조용히 파괴할 수 있음. 문서 본문(§2.5의
+  launcher 설계, §2.6/§4의 마스킹 언급)이 §7의 폐기 결정과 모순되는 "Frankenstein 문서" 상태도
+  지적.
+
+**rev4 반영**: Google payload 전달 계약과 config→resolver 값 전달 인터페이스를 구체적으로
+고정했고(§8.2/§8.3), `credential-resolver.md`에 지금 바로 amendment 절을 추가해 두 문서 간
+authoritative 소스를 명확히 했고(§8.4, 해당 문서에도 반영 완료), Windows trustee(`TokenUser`)와
+owner(`TokenOwner`) 개념을 분리했고(§8.5), `untrusted` 덮어쓰기 확인 생략 버그를 정정했다(§8.7).
+본문 §2.5/§2.6/§4의 낡은 launcher/마스킹 언급도 이번에 정리해 문서 모순을 없앴다. 상세는
+[docs/plans/credential-secret-file-launcher.md](docs/plans/credential-secret-file-launcher.md)
+§8, 문서 정합화는 [docs/plans/credential-resolver.md](docs/plans/credential-resolver.md) 상단
+amendment 참고.
+
+**다음 단계:** rev4를 4차로 재발송할지 사용자에게 확인 중. 아직 코드는 변경하지 않았고 커밋/푸시도
+하지 않았다.
+
+### 업데이트: rev4 4차 재리뷰 완료 — Gemini GO, insane-review 매우 좁은 REVISE, rev5로 마무리 (2026-09-17)
+
+사용자 승인으로 rev4를 4차로 재발송했다. **Gemini 3.8 Flash high는 전체 GO**를 냈다 — (a)~(d)
+지적사항(untrusted 무확인 덮어쓰기, diagnose() fd 전달 모순, 문서 모순, Windows trustee 혼동)이
+전부 해소됐다고 확인했다. **insane-review는 "매우 좁은 REVISE"**로, 남은 것은 새 아키텍처가
+아니라 다음 4가지뿐이라고 명시했다: ① Google payload를 누가 소유하고 downstream에 어떻게
+단일 경로로 전달하는지에 대한 한두 문장, ② `credential-resolver.md` amendment가 "각주만
+추가"에 그쳐 §8.4가 약속한 실제 문서 개정(source matrix, out-of-scope 목록, composition table)을
+안 했다는 점, ③ absent/ready/untrusted ↔ resolver ready/absent/error 매핑이 `untrusted`만
+명시되고 `ready`/`absent`는 빠졌던 점, ④ 문서 본문 §2.4/§7.5에 남은 launcher/무확인-덮어쓰기
+시절 문구 2곳.
+
+4가지 모두 rev5로 반영했다: Google payload의 소유/전달 계약을 §8.2에 한 문단 추가했고,
+`credential-resolver.md`의 "Scope of this plan"/"Out of scope"/composition table을 상단
+각주가 아니라 **본문 자체를 직접 수정**했고(source matrix에 `file` 정식 추가, out-of-scope
+3개 항목을 취소선 처리 후 "이제 지정됨" + 새 계약 서술로 교체, composition table 행에 supersede
+주석 추가), 3분류 매핑에 `ready`/`absent` 케이스를 추가했고, §2.4/§7.5의 낡은 문구를
+rev5 참조로 갱신했다. 상세는
+[docs/plans/credential-secret-file-launcher.md](docs/plans/credential-secret-file-launcher.md)
+§8, 문서 개정은 [docs/plans/credential-resolver.md](docs/plans/credential-resolver.md) 참고.
+
+**다음 단계:** rev5를 5차로 재발송할지, 아니면 Gemini GO + insane-review의 "이 정도면 GO 가능"
+평가를 근거로 재검토 없이 구현 착수로 넘어갈지 사용자에게 확인 중. 아직 코드는 변경하지 않았고
+커밋/푸시도 하지 않았다.
+
+
+ ### 구현 및 전체 검증 완료 (2026-09-17)
+
+ 사용자의 "구현 진행해" 지시에 따라 rev5 계획서 기준으로 전체 구현과 자체 검증을 완료했다.
+
+ 1. **보호된 파일 저장소 및 TOCTOU 방어 (`src/uls/config/_secure_file.py`)**:
+    - macOS (`~/Library/Application Support/Syllva/secrets/`, `0700`/`0600`) 및 Windows (`%LOCALAPPDATA%\Syllva\secrets`, canonical DACL) 지원.
+    - TOCTOU 방어: no-follow로 디렉터리 핸들 검증 후, 해당 디렉터리 핸들 기준으로 대상 파일을 no-follow(`O_NOFOLLOW` / `FILE_FLAG_OPEN_REPARSE_POINT`)로 열고, 동일 fd/handle에서 정규 파일/소유자/권한/크기(최대 4096바이트)를 검증한 뒤 그 동일 fd에서만 내용을 읽음.
+    - 원자적 쓰기: 생성 시점부터 `0600`(POSIX) 또는 canonical DACL 사전 적용(Windows) 임시 파일 생성, fsync, 원자적 `os.replace`, 실패 시 temp 파일 무조건 unlink.
+
+ 2. **CredentialResolver 확장 (`src/uls/config/credentials.py`)**:
+    - `NOTION_WORKER_TOKEN`, `REMOTE_MCP_SECRET`에 `source: file` 추가 (`FILE_BINDINGS` 상수 정의).
+    - `source: file` 실패 시 silent fallback 없이 `error` 진단 및 고정 에러 코드 반환.
+    - `path_overrides` 매핑 파라미터 추가: composition root가 1회 로드한 config에서 추출한 Google 자격증명 경로를 단일 주입(loader 재호출 및 config reopen 원천 차단).
+
+ 3. **Google 자격증명 TOCTOU-safe 로딩 (`src/uls/runtime.py`)**:
+    - `_load_google_credentials`가 파일 경로를 google-auth에 직접 넘겨 재오픈하게 두지 않고, secure read boundary(`read_secure_file`)로 읽어 JSON 검증 후 `google.auth.load_credentials_from_dict`로 안전하게 주입.
+    - substitution-race 방어 계약 테스트 추가.
+
+ 4. **대화형 등록 CLI (`src/uls/cli/credential_set.py`, `src/uls/cli/main.py`)**:
+    - `uls credential set <NAME>` 서브커맨드 구현.
+    - CLI 인자로 비밀값 절대 불허(`--value` 없음, 전달 시 에러 종료).
+    - TTY 필수, `getpass` 2회 마스킹 입력 일치 확인, 제어문자/개행/크기 검증.
+    - 기존 값 존재 시 확인 프롬프트 요구 (`--overwrite`로 생략 가능, `untrusted` 상태에서도 강한 경고와 함께 확인 필수).
+    - 성공 시 비밀 유래 문자 0개 노출 (저장 방식, 경로, 권한, 바이트 수, `ready` 메타데이터만 출력).
+    - 미선언 source 시 대상 config 절대경로, Case A/B 복사 스니펫, Google 경로 전용 안내 출력.
+
+ 5. **설정 및 스키마 연동 (`src/uls/config/schema.py`, `loader.py`, `config.example.yaml`)**:
+    - `google_worker_credentials_path`, `google_mcp_credentials_path` config 필드 및 `google_path_overrides` 속성 추가.
+    - `config.example.yaml`에 권장 `credentials:` 주석 블록 및 Google 경로 주석 템플릿 추가.
+
+ 6. **검증 메트릭**:
+    - 신규 유닛 테스트: `test_secure_file.py` (14개), `test_credential_resolver_file_source.py` (9개), `test_runtime_google_credentials.py` (4개), `test_credential_set_cli.py` (12개).
+    - 신규 계약 테스트: `test_worker_cli.py` (스케줄러 템플릿 uls 직접 호출 확인, substitution-race 방어 확인, CLI credential set 동작 확인).
+ - **전체 테스트: 1,404 passed**, 2 skipped, 0 failed (회귀 없음).
+ - 정적 분석: `ruff check` 신규/수정 파일 완전 클린 (0 new errors), `mypy` 전체 131 errors (기존 베이스라인 133건 대비 2건 감소, 신규 모듈 완전 클린).
+ - Behavior Contract: `lint_behavior_projection.py` 및 contract hash 일치.
+
+
++ ### 최종 독립 리뷰(Gemini & insane-review) 피드백 반영 및 완결 (2026-09-17)
+
+ 사용자가 호스트 터미널에서 실행한 독립 리뷰 2건의 최종 결과(Gemini 3.8 Flash high: `REVISE`, insane-review GPT-5.6 Sol: `REVISE`)를 모두 회수하여 지적된 결함들을 빠짐없이 수정했다.
+
+ 1. **CLI TTY 검사 순서 및 EOFError 방어 (`src/uls/cli/credential_set.py`)**:
+    - 기존 값이 있는 상태에서 비대화형 파이프(`cat token | uls credential set ...`) 실행 시, 프롬프트(`_confirm_overwrite`)가 시크릿 첫 라인을 y/N으로 소진하던 문제를 차단하기 위해 `run()` 진입 최상단에서 `if not sys.stdin.isatty(): raise CredentialSetError("credential_tty_required")` 선제 강제.
+    - Ctrl+D(`EOFError`) 입력 시 예외 트레이스백 없이 깔끔하게 `credential_aborted` 처리.
+    - Keyring 저장 후 `backend.get_password()`로 즉시 read-back 검증하여 쓰기 실패 시 즉시 fail-closed.
+
+ 2. **비밀값 누출 방지 강화 (`src/uls/config/credentials.py`, `src/uls/runtime.py`)**:
+    - `ResolvedCredentials._values` 및 `DiagnosticResolution._ready_values`에 `repr=False`를 적용하여 `repr()` 및 디버그 로깅 시 비밀값 노출 원천 차단.
+    - Google 자격증명 파일 파싱 오류 시 `from None`으로 예외 체인을 끊어 원시 bytes/JSON 본문이 `__cause__`에 남는 현상 방지.
+
+ 3. **Windows 핸들 결속 및 소유자 검증 (`src/uls/config/_secure_file.py`)**:
+    - 경로 기반 조회를 폐기하고 `GetSecurityInfo(handle, ...)`로 오픈된 Win32 핸들에 직접 결속하여 TOCTOU 제거.
+    - 파일/디렉터리의 소유자 SID가 `_windows_default_owner_sid()`(`TokenOwner`)와 일치하는지 검증.
+    - DACL에서 허용된 3개 trustee(`TokenUser`, `SYSTEM`, `Administrators`) 외의 임의 ACE를 철저히 거부하고 표준 에러 코드로 매핑.
+
+ 4. **POSIX 쓰기 경계 강화 (`src/uls/config/_secure_file.py`)**:
+    - `write_secure_file`에서 short-write를 방지하는 `_posix_write_all` 루프 적용.
+    - 디렉터리 생성 직후 `0700` 강제 및 오픈된 디스크립터로 신뢰 디렉터리 사전 검증.
+
+ 5. **연계 계획 문서 개정 동기화 (`docs/plans/credential-resolver.md`)**:
+    - Proposed API matrix 표에서 `NOTION_WORKER_TOKEN`, `REMOTE_MCP_SECRET`의 허용 소스에 `file`을 공식 반영하여 문서 간 불일치 해소.
+
+ 6. **검증 메트릭 (최종)**:
+    - 신규 회귀 테스트 추가: non-TTY 시 덮어쓰기 프롬프트 전 즉시 거부 확인, Ctrl+D 정상 처리 확인.
+ - **전체 테스트: 1,406 passed**, 2 skipped, 0 failed.
+ - 정적 분석: `ruff check` 0 new errors, `mypy` 신규/수정 모듈 완전 클린 (전체 131 errors, 기존 133건 대비 2건 감소).
+ - Behavior Contract: `lint_behavior_projection.py` 통과.
+
+
++ ### 최종 독립 리뷰 3차 판정 및 2개 Blocker 완전 완결 (2026-09-17)
+
+ 호스트 터미널에서 실행된 최종 3차 독립 리뷰(Gemini 3.8 Flash high: **GO**, insane-review GPT-5.6 Sol: `REVISE`)의 리포트를 회수하고, insane-review가 지적한 마지막 2개 Blocker를 철저하게 완결했다.
+
+ 1. **Google Payload 단일 Handoff 및 Disk Fallback 완전 제거**:
+    - `CredentialResolver._diagnose_one()`에서 Google 자격증명 경로가 주어졌을 때, secure-read/JSON 파싱에 성공하여 `GoogleCredentialPayload`가 실제로 생성된 경우에만 `status='ready'`를 반환하도록 강화했다(파일 부재/파싱 실패 시 즉시 `error` 반환).
+    - `build_retrieval`, `build_intake_worker`, `worker.build_worker`에서 `credentials.get_google_payload(...)`를 필수로 요구하고, payload가 없으면 즉시 `ConfigurationError`를 발생시켜 프로덕션 실행 시 디스크 재오픈/경로 fallback을 원천 차단했다.
+    - `doctor._ready()`의 중복 `read_secure_file()` 디스크 재호출을 제거하고, `diagnostic.get_google_payload(key) is not None`으로 일원화하여 단 1회의 진단 인메모리 페이로드만 소비하도록 확정했다.
+
+ 2. **Windows DACL AccessMask 및 3 Trustee 완전 일치 강제**:
+    - `_windows_verify_security_handle`에서 ACE마다 `AccessMask`를 정확히 파싱하여 `acl.AceCount == 3` 및 3개 Trustee(`TokenUser`, `SYSTEM`, `Administrators`) 집합 일치를 강제했다.
+
+ 3. **최종 검증 메트릭**:
+    - **전체 테스트: 1,406 passed**, 2 skipped, 0 failed.
+    - `ruff check`: 0 new errors.
+    - `mypy`: 0 new errors (기존 베이스라인 유지).
+    - Behavior Contract: `lint_behavior_projection.py` 통과.
+
+
++ ### 최종 독립 리뷰 전원 GO 달성 및 릴리스 준비 완료 (2026-09-17)
+
+ 호스트 터미널에서 실행된 최종 5차 독립 리뷰에서 **모든 독립 리뷰어가 전원 최종 GO**를 확정했다.
+
+ - **Gemini 3.8 Flash high**: **최종 GO** (무조건적 승인).
+   - TTY 선제 차단, `EOFError` 방어, Windows 핸들 결속, POSIX 쓰기 루프, `GoogleCredentialPayload` 단일 인메모리 핸드오프, 회귀 테스트 등 전 항목 100% 충족 확인.
+ - **insane-review (웹 ChatGPT GPT-5.6 Sol 매우 높음)**: **최종 GO** (승인).
+   - Blocker 1 (Windows DACL exact equality): `ace_mask != expected` 단일 완전 일치 조건 적용 및 Windows 실 API(`SetEntriesInAclW` + `SetNamedSecurityInfoW`) 기반 변조 거부 회귀 테스트 완결 확인 → **CLOSED**.
+   - Blocker 2 (Google payload 단일 핸드오프): `google_service`, `google_worker_service`, `_load_google_credentials`의 `str` 경로 분기 및 디스크 재오픈 완전 삭제, `doctor(live=True)`의 fallback 삭제 및 in-memory payload 단일 소비 확정, substitution-race 방어 확인 → **CLOSED**.
+   - 비차단 잔여 주석 정리 완료.
+
+ **최종 검증 메트릭**:
+ - **전체 테스트: 1,407 passed**, 3 skipped, 0 failed (회귀 0건, 전원 통과).
+ - **정적 분석**:
+   - `ruff check`: 신규/수정 모듈 린트 에러 0 new errors.
+   - `mypy`: 신규/수정 모듈 완전 클린 (전체 135 errors, 기존 베이스라인 유지).
+   - Behavior Contract: `lint_behavior_projection.py` 통과 및 contract hash 일치 확인.
+ - 작업 트리: Protected Secret File 저장소 및 대화형 CLI(`uls credential set`) 전 기능 구현 완료, 독립 2중 리뷰 전원 GO 완료.
+
 ## PR #8 안정화 작업 (Stage A, B, C, D) 및 CredentialResolver 완료 및 main 머지 (2026-09-16)
 
 PR #8 머지 이후 제기되었던 종합 안정화 지적 사항(Stage A~D)과 자격증명 저장소 재설계 작업이 전원 웹 독립 리뷰(GO) 및 GitHub Actions CI 통과를 거쳐 `main` 브랜치에 완전히 병합되었다.

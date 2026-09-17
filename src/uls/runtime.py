@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from uls.config.credentials import ResolvedCredentials
+from uls.config.credentials import GoogleCredentialPayload, ResolvedCredentials
 from uls.config.errors import ConfigurationError
 from uls.config.schema import UlsConfig
 from uls.intake.identity import provider_binding_id
@@ -35,20 +35,23 @@ def require_mcp_credentials(secrets: ResolvedCredentials) -> None:
             raise ConfigurationError('MCP and worker Drive credential files must be distinct')
 
 
-def google_service(credentials_file: str, *, read_only: bool) -> Any:
-    credentials = _load_google_credentials(credentials_file, read_only=read_only)
+def google_service(payload: GoogleCredentialPayload, *, read_only: bool) -> Any:
+    credentials = _load_google_credentials(payload, read_only=read_only)
     from googleapiclient.discovery import build  # type: ignore[import-untyped]
 
     return build('drive', 'v3', credentials=credentials, cache_discovery=False)
 
 
-def _load_google_credentials(credentials_file: str, *, read_only: bool) -> Any:
+def _load_google_credentials(payload: GoogleCredentialPayload, *, read_only: bool) -> Any:
+    if not isinstance(payload, GoogleCredentialPayload):
+        raise ConfigurationError('Google credentials must be provided as a validated GoogleCredentialPayload')
     import google.auth
 
     scope = DRIVE_READ_SCOPE if read_only else 'https://www.googleapis.com/auth/drive'
+    info = dict(payload.info)
     # Normal credential loading: no credential values enter logs or return data.
-    credentials, _ = google.auth.load_credentials_from_file(  # type: ignore[no-untyped-call]
-        str(Path(credentials_file).expanduser()), scopes=[scope])
+    credentials, _ = google.auth.load_credentials_from_dict(  # type: ignore[no-untyped-call]
+        info, scopes=[scope])
     if read_only:
         declared = getattr(credentials, 'scopes', None)
         if declared and any(value != DRIVE_READ_SCOPE for value in declared):
@@ -56,7 +59,7 @@ def _load_google_credentials(credentials_file: str, *, read_only: bool) -> Any:
     return credentials
 
 
-def google_worker_service(credentials_file: str) -> tuple[Any, str]:
+def google_worker_service(payload: GoogleCredentialPayload) -> tuple[Any, str]:
     """Build the write service and attest its account/application identity.
 
     The account permission ID comes from the authenticated Drive ``about``
@@ -65,8 +68,8 @@ def google_worker_service(credentials_file: str) -> tuple[Any, str]:
     intake ledger; neither value is sent to a provider mutation or logged.
     """
 
-    credentials = _load_google_credentials(credentials_file, read_only=False)
-    from googleapiclient.discovery import build  # type: ignore[import-untyped]
+    credentials = _load_google_credentials(payload, read_only=False)
+    from googleapiclient.discovery import build  # type: ignore[import-untyped,unused-ignore]
 
     service = build('drive', 'v3', credentials=credentials, cache_discovery=False)
     try:
@@ -148,7 +151,10 @@ def build_intake_worker(
         for key in ('GOOGLE_WORKER_CREDENTIALS_FILE', 'NOTION_WORKER_TOKEN'):
             if not credentials.get(key):
                 raise ConfigurationError(key + ' is required for intake worker activation')
-        service, binding = google_worker_service(credentials['GOOGLE_WORKER_CREDENTIALS_FILE'])
+        worker_payload = credentials.get_google_payload('GOOGLE_WORKER_CREDENTIALS_FILE')
+        if worker_payload is None:
+            raise ConfigurationError('GOOGLE_WORKER_CREDENTIALS_FILE payload is missing')
+        service, binding = google_worker_service(worker_payload)
         drive = GoogleDriveWorkerAdapter(service)
         from notion_client import Client
 
@@ -184,7 +190,10 @@ def build_retrieval(config: UlsConfig, credentials: ResolvedCredentials) -> Any:
 
     require_mcp_credentials(credentials)
     state = ReadOnlyState(state_path(config))
-    drive = GoogleDriveReader(google_service(credentials['GOOGLE_MCP_CREDENTIALS_FILE'], read_only=True), state)
+    mcp_payload = credentials.get_google_payload('GOOGLE_MCP_CREDENTIALS_FILE')
+    if mcp_payload is None:
+        raise ConfigurationError('GOOGLE_MCP_CREDENTIALS_FILE payload is missing')
+    drive = GoogleDriveReader(google_service(mcp_payload, read_only=True), state)
     notion = NotionAPIReader(Client(auth=credentials['NOTION_MCP_TOKEN'], notion_version='2025-09-03',
                                      timeout_ms=20_000), config.notion)
     return RetrievalEngine(notion, drive, state, MemoryEphemeralStore(), config,

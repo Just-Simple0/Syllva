@@ -11,7 +11,11 @@ from typing import Any
 import yaml  # type: ignore[import-untyped]
 
 from uls.behavior import asset_root, lint_behavior
-from uls.config.credentials import ALLOWED_SOURCES, CredentialResolver
+from uls.config.credentials import (
+    ALLOWED_SOURCES,
+    GOOGLE_CREDENTIAL_PATH_NAMES,
+    CredentialResolver,
+)
 from uls.config.errors import ConfigurationError
 from uls.domain.errors import UlsError
 from uls.runtime import build_retrieval, require_mcp_credentials, state_path
@@ -32,6 +36,13 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser('reprocess').add_argument('entity_id')
     commands.add_parser('mcp').add_argument('mode', choices=('local', 'remote', 'status'))
     commands.add_parser('behavior').add_argument('action', choices=('lint',))
+    credential_parser = commands.add_parser('credential', help='Manage stored credentials')
+    credential_sub = credential_parser.add_subparsers(dest='credential_action', required=True)
+    credential_set_parser = credential_sub.add_parser(
+        'set', help='Interactively register a credential value (never accepted as a CLI argument)')
+    credential_set_parser.add_argument('name', help='Credential name (see uls doctor for the list)')
+    credential_set_parser.add_argument('--overwrite', action='store_true',
+                                       help='Skip the confirmation prompt when a value already exists')
     return result
 
 
@@ -45,6 +56,12 @@ def _config(path: Path) -> Any:
         if value:
             candidate = Path(value).expanduser()
             setattr(obj, name, str((path.resolve().parent / candidate).resolve()
+                                  if not candidate.is_absolute() else candidate))
+    for name in ('google_worker_credentials_path', 'google_mcp_credentials_path'):
+        value = getattr(config, name, None)
+        if value:
+            candidate = Path(value).expanduser()
+            setattr(config, name, str((path.resolve().parent / candidate).resolve()
                                   if not candidate.is_absolute() else candidate))
     errors = validate_config(config)
     if errors:
@@ -179,13 +196,15 @@ def doctor(config: Any, *, live: bool = False) -> dict[str, Any]:
     # check below, including the separation check and the --live provider
     # calls, slices values out of that same DiagnosticResolution via
     # select()/require() instead of diagnosing or resolving again.
-    resolver = CredentialResolver(config.credentials)
+    resolver = CredentialResolver(config.credentials, path_overrides=getattr(config, 'google_path_overrides', {}))
     diagnostic = resolver.diagnose(frozenset(ALLOWED_SOURCES))
 
     def _ready(key: str) -> bool:
         result = diagnostic.results.get(key)
         if result is None or result.status != 'ready':
             return False
+        if key in GOOGLE_CREDENTIAL_PATH_NAMES:
+            return diagnostic.get_google_payload(key) is not None
         if key.endswith('_FILE'):
             return Path(diagnostic._ready_values[key]).expanduser().is_file()
         return True
@@ -215,9 +234,14 @@ def doctor(config: Any, *, live: bool = False) -> dict[str, Any]:
     # must never fail an otherwise complete minimal configuration.
     optional_checks['GITHUB_READ_TOKEN'] = _ready('GITHUB_READ_TOKEN')
     try:
+        opt_separation: dict[str, str] = {}
+        for w_key in ('NOTION_WORKER_TOKEN', 'GOOGLE_WORKER_CREDENTIALS_FILE'):
+            res = diagnostic.results.get(w_key)
+            if res is not None and res.status != 'error':
+                opt_separation[w_key] = ''
         separation_snapshot = diagnostic.select(
             required=frozenset({'GOOGLE_MCP_CREDENTIALS_FILE', 'NOTION_MCP_TOKEN'}),
-            optional={'NOTION_WORKER_TOKEN': '', 'GOOGLE_WORKER_CREDENTIALS_FILE': ''},
+            optional=opt_separation,
         )
         require_mcp_credentials(separation_snapshot)
         checks['credential_separation'] = True
@@ -254,7 +278,10 @@ def doctor(config: Any, *, live: bool = False) -> dict[str, Any]:
             )
             engine = build_retrieval(config, live_snapshot)
             checks['live_notion_read'] = engine.notion_reader.get_course_by_alias(config.courses[0].course_key) is not None
-            service = google_service(live_snapshot['GOOGLE_MCP_CREDENTIALS_FILE'], read_only=True)
+            live_mcp = live_snapshot.get_google_payload('GOOGLE_MCP_CREDENTIALS_FILE')
+            if live_mcp is None:
+                raise ConfigurationError('GOOGLE_MCP_CREDENTIALS_FILE payload is missing')
+            service = google_service(live_mcp, read_only=True)
             root = service.files().get(fileId=config.google_drive.university_root_id, fields='id,trashed').execute()
             checks['live_drive_read'] = root.get('id') == config.google_drive.university_root_id and root.get('trashed') is False
         except Exception:  # noqa: BLE001 - health checks report booleans, never provider payloads
@@ -279,7 +306,7 @@ def dispatch(args: argparse.Namespace) -> Any:
         if not config.worker.enabled:
             return {'status': 'disabled', 'processed': 0}
         from uls.worker import build_worker
-        credentials = CredentialResolver(config.credentials).resolve(
+        credentials = CredentialResolver(config.credentials, path_overrides=getattr(config, 'google_path_overrides', {})).resolve(
             required=frozenset({'GOOGLE_WORKER_CREDENTIALS_FILE', 'NOTION_WORKER_TOKEN'})
         )
         worker = build_worker(config, credentials)
@@ -315,15 +342,31 @@ def dispatch(args: argparse.Namespace) -> Any:
                 return {'status': 'queued', 'job_id': updated.id}
             finally:
                 state.release_local_worker_lock()
+    if args.command == 'credential':
+        from uls.cli.credential_set import CredentialSetError, _remediation_for
+        from uls.cli.credential_set import run as run_credential_set
+        if args.credential_action != 'set':
+            raise ValueError('Unsupported credential action')
+        try:
+            return run_credential_set(config=config, config_path=args.config,
+                                      name=args.name, overwrite=args.overwrite)
+        except KeyboardInterrupt:
+            print('Aborted.', file=sys.stderr)
+            raise SystemExit(130) from None
+        except CredentialSetError as exc:
+            code = exc.args[0] if exc.args else 'credential_set_failed'
+            return {'status': 'failed',
+                   'error': {'code': code, 'message': _remediation_for(code)}}
     if args.command == 'mcp':
         if args.mode == 'status':
             return status(config)
-        # One resolve() covers both local and remote modes; REMOTE_MCP_SECRET
-        # and REMOTE_MCP_EXPIRES_AT are simply unused when mode == 'local'.
-        credentials = CredentialResolver(config.credentials).resolve(
+        optional_creds = {'GITHUB_READ_TOKEN': '', 'NOTION_WORKER_TOKEN': '', 'GOOGLE_WORKER_CREDENTIALS_FILE': ''}
+        if args.mode == 'remote':
+            optional_creds['REMOTE_MCP_SECRET'] = ''
+            optional_creds['REMOTE_MCP_EXPIRES_AT'] = '0'
+        credentials = CredentialResolver(config.credentials, path_overrides=getattr(config, 'google_path_overrides', {})).resolve(
             required=frozenset({'GOOGLE_MCP_CREDENTIALS_FILE', 'NOTION_MCP_TOKEN'}),
-            optional={'GITHUB_READ_TOKEN': '', 'REMOTE_MCP_SECRET': '', 'REMOTE_MCP_EXPIRES_AT': '0',
-                      'NOTION_WORKER_TOKEN': '', 'GOOGLE_WORKER_CREDENTIALS_FILE': ''},
+            optional=optional_creds,
         )
         from uls.mcp.server import ReadOnlyMCP
         registry = ReadOnlyMCP(build_retrieval(config, credentials))

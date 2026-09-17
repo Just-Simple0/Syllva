@@ -120,3 +120,26 @@ courses:
 # config/manifest under .review/knu-lms-hourly/. See
 # docs/operator-guide/lms-sync.md for its credential model and safety rules.
 # It stays paused by default and is never activated merely by editing config.yaml.
+
+# ==============================================================================
+# Credentials Storage Configuration (docs/plans/credential-secret-file-launcher.md)
+# ==============================================================================
+# Non-secret path configuration for background workers (unattended schedule):
+# google_worker_credentials_path: "/path/to/worker-service-account.json"
+# google_mcp_credentials_path: "/path/to/mcp-service-account.json"
+#
+# Secret storage declarations (file mode 0600 or OS keyring):
+# credentials:
+#   # Main worker unattended secrets (file-backed, mode 0600)
+#   NOTION_WORKER_TOKEN:
+#     source: file
+#   REMOTE_MCP_SECRET:
+#     source: file
+#
+#   # Interactive CLI & MCP tools (OS keyring-backed)
+#   NOTION_MCP_TOKEN:
+#     source: keyring
+#   GITHUB_READ_TOKEN:
+#     source: keyring
+#   LLM_API_KEY:
+#     source: keyring
