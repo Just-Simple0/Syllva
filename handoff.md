@@ -1,6 +1,48 @@
 # Syllva (ULS v1.2) — Handoff
 
-**Last updated:** 2026-09-14
+**Last updated:** 2026-09-17
+
+## PR #8 안정화 작업 (Stage A, B, C, D) 및 CredentialResolver 완료 및 main 머지 (2026-09-16)
+
+PR #8 머지 이후 제기되었던 종합 안정화 지적 사항(Stage A~D)과 자격증명 저장소 재설계 작업이 전원 웹 독립 리뷰(GO) 및 GitHub Actions CI 통과를 거쳐 `main` 브랜치에 완전히 병합되었다.
+
+### 1. Stage A: 보안, 이식성 및 CI 의존성 안정화 (PR #9, commit `f694b74`)
+- **Drive 파생본 출력 폴더 비공개 검증 (`src/uls/worker.py`)**: `DerivedDriveWriter`에서 기존 전사 출력 대상 폴더의 비공개 여부, 소유권, 등록 경로 검증을 강화하여 공유 폴더 업로드 위험 차단.
+- **Windows LMS 사이드카 크로스플랫폼 이식성 (`scripts/_lms_platform.py`)**: `os.getuid()`, `os.O_NOFOLLOW` 등 Unix 전용 호출을 Windows `CreateFileW(FILE_FLAG_OPEN_REPARSE_POINT)`와 `GetFileInformationByHandle` 기반의 reparse-point 링크 방어로 교체.
+- **Aside REPL 스트림 파이프 바운딩 (`scripts/knu_lms_probe.py`)**: 큐 크기/바이트 상한 보장 및 읽기 에러와 EOF 분리 처리.
+- **CI 환경 복구 (`.github/workflows/ci.yml`)**: `pyproject.toml`의 `pdf` extra(`pypdf`)를 CI 설치 단계에 추가하여 테스트 수집 실패 해결.
+
+### 2. Stage B & C: 정합성, 자원 상한 및 관측성 진단 (PR #10, commit `ad7a6fd`)
+- **B1 (`src/uls/intake/registry.py`)**: Drive 폴더 ID 캐시 히트 시에도 부모 관계(`parent_id`)를 재검증하도록 하여 루트/학기/업로드 폴더 중복 지정 우회 방지.
+- **B2 (`src/uls/retrieval/capabilities.py`)**: `CapabilityManager`의 만료 컨텍스트 누수 해결 및 동시 발급 시 `max_active_contexts` 초과를 원자적 예약 카운트(`_pending_reservations`)로 방어.
+- **B3 (`src/uls/normalization/pdf.py`)**: PDF 추출 시 페이지 수(`max_pages`), 추출 문자 수(`max_extracted_chars`) 상한 및 손상/암호화 PDF 예외 변환 보강.
+- **C1 (`src/uls/cli/main.py`)**: `uls doctor`의 자격증명 진단을 목적별(Worker vs MCP Search)로 스코핑 분리하여 최소 권한 구성 시 오탐 방지.
+- **C2 (`src/uls/cli/main.py`, `src/uls/state/reader.py`)**: `uls status`에 보수적 준비도 깔때기(`readiness_funnel`) 추가. `source_archival`과 `text_extraction` 판정 시 단순 잡 카운트가 아닌 실제 지속성 레코드(`source_files`, `source_versions`, `processing_records` 및 `parse_derivative_ref` 산출물 참조 검증)를 확인하도록 구현.
+- **C3 (`docs/reference/feature-status.md`, `.ko.md`)**: 구현된 학기 intake 슬라이스와 미래 설계 기능을 명확히 분리 표기.
+
+### 3. Stage D: 자격증명 저장소 재설계 및 Windows 스케줄러 보완 (PR #11, PR #12)
+- **CredentialResolver 아키텍처 (PR #11, commit `476b284`)**:
+  - `src/uls/config/credentials.py`: `CredentialResolver`를 도입하여 자격증명별 `environment | keyring` 명시적 선언 허용. 선언된 소스 실패 시 다른 소스로 조용히 넘어가지 않는 Fail-Closed 단일 스냅샷(`ResolvedCredentials`) 계약 적용.
+  - `KEYRING_BINDINGS` 및 `ALLOWED_SOURCES`를 코드 레벨 상수로 고정하여 YAML을 통한 임의 키체인 항목 탈취 공격 차단.
+  - `diagnose()`와 `require()`/`select()`의 단일 읽기/비파괴 진단 분리로 TOCTOU 및 `doctor()` 진단 정합성 확보.
+  - `src/uls/config/_keyring_backend.py`: OS-native keyring(`keyring.backends.macOS.Keyring`, `WinVaultKeyring`) 명시적 백엔드 검증, 위조 방지 및 macOS `keychain = None` 강제.
+  - `pyproject.toml`에 `keyring>=25.0` optional extra 추가.
+  - MCP dispatch 시 worker/MCP 자격증명 분리 검증 유지 및 `credentials: null` 거부.
+- **Windows 스케줄러 로그아웃 무인 실행 보장 (PR #12, commit `6176ab7`)**:
+  - `deployment/windows/uls-task.xml`: `LogonType`을 `InteractiveToken`에서 `Password`로 변경하고 템플릿용 `UserId` 지정.
+  - `deployment/README.md`, `README.ko.md`: Event ID 4688 명령줄 평문 노출을 방지하기 위해 `/rp *` 대화형 안전 프롬프트 절차 및 LSA secret 암호화 저장 사양 명시.
+  - `tests/contract/test_worker_cli.py`: 스케줄러 XML 템플릿 내 비밀번호 미포함 및 `LogonType=Password` 계약 테스트 추가.
+
+### 4. 현재 상태 및 메트릭
+- **로컬 main 브랜치**: `6176ab7` (PR #12 merge commit).
+- **전체 테스트**: **1,363 passed**, 2 skipped (경고 1건: starlette testclient anyio deprecation).
+- **정적 분석**: `ruff` 226건(기존 베이스라인 유지), `mypy` 107건(기존 베이스라인 유지, 신규 모듈 완전 클린), `compileall` 통과, `lint_behavior_projection.py` 일치.
+- **GitHub Actions**: PR #9, #10, #11, #12 모두 macOS/Windows × Python 3.11/3.14 전 환경 PASS.
+
+### 5. 향후 후속 작업 안내
+- 메인 워커용 보호된 비밀 파일 + 최소 환경변수 런처 패턴 설계 (macOS `~/Library/Application Support/Syllva/secrets/` 0700/0600, Windows NTFS DACL).
+- `REMOTE_MCP_SECRET`의 장기 토큰을 OAuth/OIDC 기반 인증 흐름으로 전환.
+- 실제 운영 환경(Notion / Google Drive)에서의 라이브 엔드투엔드 연동 확인.
 
 ## Credential 저장소 아키텍처 재설계 — GPT Pro 리뷰 완료, 구현은 다음 세션 (2026-09-14)
 
