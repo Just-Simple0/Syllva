@@ -125,6 +125,16 @@ class McpCfg:
 
 
 @dataclass
+class OidcCfg:
+    issuer: str = ""
+    audience: str = ""
+    authorized_subject: str = ""
+    authorized_email: str = ""
+    jwks_uri: str = ""
+    leeway_seconds: int = 60
+
+
+@dataclass
 class RemoteMcpCfg:
     enabled: bool = False
     auth_mode: str = "oauth_or_bearer"
@@ -134,6 +144,7 @@ class RemoteMcpCfg:
     port: int = 8765
     tls_certfile: str = ""
     tls_keyfile: str = ""
+    oidc: OidcCfg = field(default_factory=OidcCfg)
 
 
 @dataclass

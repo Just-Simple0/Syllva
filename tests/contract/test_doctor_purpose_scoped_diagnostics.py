@@ -123,3 +123,149 @@ def test_remote_mcp_disabled_is_optional_not_a_status_blocker(
 
     assert "remote_profile" not in result["checks"]
     assert result["optional_checks"]["remote_profile"] == "not_configured"
+
+
+def test_remote_mcp_enabled_oidc_mode_does_not_require_remote_secret(tmp_path, monkeypatch):
+    _clear_all_credentials(monkeypatch)
+    raw = yaml.safe_load((asset_root() / "config.example.yaml").read_text(encoding="utf-8"))
+    raw["system"]["workspace_dir"] = "state"
+    raw["behavior_contract"]["path"] = str(asset_root() / "contracts/study-behavior.md")
+    raw["worker"]["enabled"] = False
+    cert = tmp_path / "cert.pem"
+    key = tmp_path / "key.pem"
+    cert.write_text("cert", encoding="utf-8")
+    key.write_text("key", encoding="utf-8")
+    raw["remote_mcp"] = {
+        "enabled": True,
+        "auth_mode": "oidc",
+        "public_unauthenticated": False,
+        "public_url": "https://uls.example/mcp",
+        "tls_certfile": str(cert),
+        "tls_keyfile": str(key),
+        "oidc": {
+            "issuer": "https://accounts.google.com",
+            "audience": "client-123",
+            "authorized_subject": "sub-student",
+        },
+    }
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    initialize(cfg_path)
+    config = _config(cfg_path)
+    _set_mcp_credentials(monkeypatch, tmp_path)
+
+    result = doctor(config)
+    assert result["checks"]["remote_profile"] is True
+    assert result["status"] == "ok"
+
+
+def test_remote_mcp_enabled_bearer_mode_missing_secret_fails_remote_profile(tmp_path, monkeypatch):
+    _clear_all_credentials(monkeypatch)
+    raw = yaml.safe_load((asset_root() / "config.example.yaml").read_text(encoding="utf-8"))
+    raw["system"]["workspace_dir"] = "state"
+    raw["behavior_contract"]["path"] = str(asset_root() / "contracts/study-behavior.md")
+    raw["worker"]["enabled"] = False
+    cert = tmp_path / "cert.pem"
+    key = tmp_path / "key.pem"
+    cert.write_text("cert", encoding="utf-8")
+    key.write_text("key", encoding="utf-8")
+    raw["remote_mcp"] = {
+        "enabled": True,
+        "auth_mode": "bearer",
+        "public_unauthenticated": False,
+        "public_url": "https://uls.example/mcp",
+        "tls_certfile": str(cert),
+        "tls_keyfile": str(key),
+    }
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    initialize(cfg_path)
+    config = _config(cfg_path)
+    _set_mcp_credentials(monkeypatch, tmp_path)
+
+    result = doctor(config)
+    assert result["checks"]["remote_profile"] is False
+    assert result["status"] == "needs_configuration"
+
+
+def test_remote_mcp_hybrid_mode_requires_every_configured_lane_to_be_valid(tmp_path, monkeypatch):
+    """rev3 plan section 3.1 state machine: in oauth_or_bearer, a lane that
+    IS configured must be fully valid -- "any lane valid" is not enough.
+    Before this fix, doctor used `bearer_ok or oidc_ok`, so a configured
+    but invalid Bearer secret could hide behind a valid OIDC lane and
+    report remote_profile=True even though AuthenticatedApp.__init__()
+    would actually reject the invalid Bearer credential at runtime.
+    """
+    _clear_all_credentials(monkeypatch)
+    raw = yaml.safe_load((asset_root() / "config.example.yaml").read_text(encoding="utf-8"))
+    raw["system"]["workspace_dir"] = "state"
+    raw["behavior_contract"]["path"] = str(asset_root() / "contracts/study-behavior.md")
+    raw["worker"]["enabled"] = False
+    cert = tmp_path / "cert.pem"
+    key = tmp_path / "key.pem"
+    cert.write_text("cert", encoding="utf-8")
+    key.write_text("key", encoding="utf-8")
+    raw["remote_mcp"] = {
+        "enabled": True,
+        "auth_mode": "oauth_or_bearer",
+        "public_unauthenticated": False,
+        "public_url": "https://uls.example/mcp",
+        "tls_certfile": str(cert),
+        "tls_keyfile": str(key),
+        "oidc": {
+            "issuer": "https://accounts.google.com",
+            "audience": "client-123",
+            "authorized_subject": "sub-student",
+        },
+    }
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    initialize(cfg_path)
+    config = _config(cfg_path)
+    _set_mcp_credentials(monkeypatch, tmp_path)
+    # A REMOTE_MCP_SECRET is configured (non-empty) but fails BearerCredential
+    # validation because it is far too short. The OIDC lane above is fully
+    # configured and would independently pass. The configured-but-invalid
+    # Bearer lane must still fail the whole hybrid check.
+    monkeypatch.setenv("REMOTE_MCP_SECRET", "too-short")
+    monkeypatch.setenv("REMOTE_MCP_EXPIRES_AT", "0")
+
+    result = doctor(config)
+    assert result["checks"]["remote_profile"] is False
+    assert result["status"] == "needs_configuration"
+
+
+def test_remote_mcp_hybrid_mode_valid_bearer_only_still_passes(tmp_path, monkeypatch):
+    """Companion to the test above: when only the Bearer lane is
+    configured (oidc.issuer empty) and it is valid, hybrid mode must
+    still pass -- the fix must not turn into an over-strict regression
+    that now requires both lanes.
+    """
+    _clear_all_credentials(monkeypatch)
+    raw = yaml.safe_load((asset_root() / "config.example.yaml").read_text(encoding="utf-8"))
+    raw["system"]["workspace_dir"] = "state"
+    raw["behavior_contract"]["path"] = str(asset_root() / "contracts/study-behavior.md")
+    raw["worker"]["enabled"] = False
+    cert = tmp_path / "cert.pem"
+    key = tmp_path / "key.pem"
+    cert.write_text("cert", encoding="utf-8")
+    key.write_text("key", encoding="utf-8")
+    raw["remote_mcp"] = {
+        "enabled": True,
+        "auth_mode": "oauth_or_bearer",
+        "public_unauthenticated": False,
+        "public_url": "https://uls.example/mcp",
+        "tls_certfile": str(cert),
+        "tls_keyfile": str(key),
+    }
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    initialize(cfg_path)
+    config = _config(cfg_path)
+    _set_mcp_credentials(monkeypatch, tmp_path)
+    monkeypatch.setenv("REMOTE_MCP_SECRET", "v" * 40)
+    monkeypatch.setenv("REMOTE_MCP_EXPIRES_AT", str(__import__("time").time() + 600))
+
+    result = doctor(config)
+    assert result["checks"]["remote_profile"] is True
+    assert result["status"] == "ok"

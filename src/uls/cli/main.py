@@ -196,8 +196,11 @@ def doctor(config: Any, *, live: bool = False) -> dict[str, Any]:
     # check below, including the separation check and the --live provider
     # calls, slices values out of that same DiagnosticResolution via
     # select()/require() instead of diagnosing or resolving again.
+    diagnose_names = frozenset(ALLOWED_SOURCES)
+    if config.remote_mcp.enabled and config.remote_mcp.auth_mode == 'oidc':
+        diagnose_names = diagnose_names - {'REMOTE_MCP_SECRET', 'REMOTE_MCP_EXPIRES_AT'}
     resolver = CredentialResolver(config.credentials, path_overrides=getattr(config, 'google_path_overrides', {}))
-    diagnostic = resolver.diagnose(frozenset(ALLOWED_SOURCES))
+    diagnostic = resolver.diagnose(diagnose_names)
 
     def _ready(key: str) -> bool:
         result = diagnostic.results.get(key)
@@ -255,16 +258,70 @@ def doctor(config: Any, *, live: bool = False) -> dict[str, Any]:
         checks['mcp_startable'] = False
     if config.remote_mcp.enabled:
         try:
-            from uls.mcp.transports.remote import BearerCredential, validate_remote_profile
+            from uls.mcp.transports.remote import validate_remote_profile
             validate_remote_profile(config)
-            remote_snapshot = diagnostic.select(
-                required=frozenset(),
-                optional={'REMOTE_MCP_SECRET': '', 'REMOTE_MCP_EXPIRES_AT': '0'},
-            )
-            BearerCredential(remote_snapshot['REMOTE_MCP_SECRET'],
-                             float(remote_snapshot['REMOTE_MCP_EXPIRES_AT'])).validate()
-            checks['remote_profile'] = all(Path(p).is_file() for p in
-                                           (config.remote_mcp.tls_certfile, config.remote_mcp.tls_keyfile))
+            tls_ok = all(Path(p).is_file() for p in (config.remote_mcp.tls_certfile, config.remote_mcp.tls_keyfile))
+            if not tls_ok:
+                checks['remote_profile'] = False
+            elif config.remote_mcp.auth_mode == 'oidc':
+                oidc = config.remote_mcp.oidc
+                oidc_ok = bool(oidc.issuer and oidc.audience and (oidc.authorized_subject or oidc.authorized_email))
+                if live and oidc_ok:
+                    from uls.mcp.transports.oidc import JwksKeyManager
+                    try:
+                        JwksKeyManager(oidc.issuer, oidc.jwks_uri).live_check_sync()
+                    except (ConfigurationError, OSError, ValueError):
+                        oidc_ok = False
+                checks['remote_profile'] = oidc_ok
+            elif config.remote_mcp.auth_mode == 'bearer':
+                from uls.mcp.transports.remote import BearerCredential
+                remote_snapshot = diagnostic.select(
+                    required=frozenset(),
+                    optional={'REMOTE_MCP_SECRET': '', 'REMOTE_MCP_EXPIRES_AT': '0'},
+                )
+                BearerCredential(remote_snapshot['REMOTE_MCP_SECRET'],
+                                 float(remote_snapshot['REMOTE_MCP_EXPIRES_AT'])).validate()
+                checks['remote_profile'] = True
+            else:  # oauth_or_bearer
+                from uls.mcp.transports.remote import BearerCredential
+                remote_snapshot = diagnostic.select(
+                    required=frozenset(),
+                    optional={'REMOTE_MCP_SECRET': '', 'REMOTE_MCP_EXPIRES_AT': '0'},
+                )
+                # rev3 plan section 3.1 state machine: a lane that is not
+                # configured at all is simply absent from the requirement;
+                # a lane that *is* configured (a Bearer secret is present,
+                # or oidc.issuer is set) must be fully valid, and at least
+                # one lane must end up configured-and-valid. "any lane
+                # valid" (the previous `bearer_ok or oidc_ok`) let an
+                # invalid configured lane hide behind a valid unrelated
+                # one, which could diverge from the runtime dispatch path.
+                bearer_configured = bool(remote_snapshot['REMOTE_MCP_SECRET'])
+                bearer_valid = False
+                if bearer_configured:
+                    try:
+                        BearerCredential(remote_snapshot['REMOTE_MCP_SECRET'],
+                                         float(remote_snapshot['REMOTE_MCP_EXPIRES_AT'])).validate()
+                        bearer_valid = True
+                    except (ConfigurationError, ValueError):
+                        bearer_valid = False
+                oidc = config.remote_mcp.oidc
+                oidc_configured = bool(oidc.issuer)
+                oidc_valid = False
+                if oidc_configured:
+                    oidc_valid = bool(oidc.audience and (oidc.authorized_subject or oidc.authorized_email))
+                    if live and oidc_valid:
+                        from uls.mcp.transports.oidc import JwksKeyManager
+                        try:
+                            JwksKeyManager(oidc.issuer, oidc.jwks_uri).live_check_sync()
+                        except (ConfigurationError, OSError, ValueError):
+                            oidc_valid = False
+                configured_lanes_valid = [
+                    valid for configured, valid in
+                    ((bearer_configured, bearer_valid), (oidc_configured, oidc_valid))
+                    if configured
+                ]
+                checks['remote_profile'] = bool(configured_lanes_valid) and all(configured_lanes_valid)
         except (UlsError, ValueError):
             checks['remote_profile'] = False
     else:
@@ -361,7 +418,12 @@ def dispatch(args: argparse.Namespace) -> Any:
         if args.mode == 'status':
             return status(config)
         optional_creds = {'GITHUB_READ_TOKEN': '', 'NOTION_WORKER_TOKEN': '', 'GOOGLE_WORKER_CREDENTIALS_FILE': ''}
-        if args.mode == 'remote':
+        if args.mode == 'remote' and config.remote_mcp.auth_mode != 'oidc':
+            # auth_mode == 'oidc' must resolve zero REMOTE_MCP_SECRET /
+            # REMOTE_MCP_EXPIRES_AT credentials (rev3 plan section 5.1):
+            # the OIDC-only lane never consults CredentialResolver for
+            # them, so they must not even enter this resolve() call's
+            # input set.
             optional_creds['REMOTE_MCP_SECRET'] = ''
             optional_creds['REMOTE_MCP_EXPIRES_AT'] = '0'
         credentials = CredentialResolver(config.credentials, path_overrides=getattr(config, 'google_path_overrides', {})).resolve(
@@ -375,9 +437,25 @@ def dispatch(args: argparse.Namespace) -> Any:
             run_local(registry)
         else:
             from uls.mcp.transports.remote import BearerCredential, run_remote
-            credential = BearerCredential(credentials['REMOTE_MCP_SECRET'],
-                                           float(credentials['REMOTE_MCP_EXPIRES_AT']))
-            run_remote(registry, config, credential)
+            credential: BearerCredential | None = None
+            verifier = None
+            if config.remote_mcp.auth_mode in ('bearer', 'oauth_or_bearer') and credentials.get('REMOTE_MCP_SECRET'):
+                credential = BearerCredential(credentials['REMOTE_MCP_SECRET'],
+                                               float(credentials['REMOTE_MCP_EXPIRES_AT']))
+            if config.remote_mcp.auth_mode in ('oidc', 'oauth_or_bearer'):
+                oidc = config.remote_mcp.oidc
+                if oidc.issuer:
+                    from uls.mcp.transports.oidc import JwksKeyManager, OidcTokenVerifier
+                    km = JwksKeyManager(oidc.issuer, oidc.jwks_uri)
+                    verifier = OidcTokenVerifier(
+                        issuer=oidc.issuer,
+                        audience=oidc.audience,
+                        authorized_subject=oidc.authorized_subject,
+                        authorized_email=oidc.authorized_email,
+                        leeway_seconds=oidc.leeway_seconds,
+                        key_manager=km,
+                    )
+            run_remote(registry, config, credential=credential, oidc_verifier=verifier)
         return None
     raise ValueError('Unsupported command')
 

@@ -89,9 +89,35 @@ def validate_config(cfg: UlsConfig) -> list[str]:
     remote_enabled = type(cfg.remote_mcp.enabled) is bool and cfg.remote_mcp.enabled
     if remote_enabled and (
         not isinstance(cfg.remote_mcp.auth_mode, str)
-        or cfg.remote_mcp.auth_mode not in {"oauth_or_bearer"}
+        or cfg.remote_mcp.auth_mode not in {"oauth_or_bearer", "oidc", "bearer"}
     ):
         problems.append("remote_mcp.auth_mode is not allowed when remote_mcp.enabled")
+    if remote_enabled:
+        oidc = cfg.remote_mcp.oidc
+        should_validate_oidc = cfg.remote_mcp.auth_mode == "oidc" or (
+            cfg.remote_mcp.auth_mode == "oauth_or_bearer" and bool(oidc.issuer)
+        )
+        if should_validate_oidc:
+            if (
+                not isinstance(oidc.issuer, str)
+                or not oidc.issuer.startswith("https://")
+                or oidc.issuer.endswith("/")
+            ):
+                # Must mirror JwksKeyManager.__init__'s trailing-slash
+                # rejection exactly: otherwise validate_config()/doctor()
+                # (without --live) can call a trailing-slash issuer
+                # "valid" while the actual mcp remote dispatch path
+                # unconditionally constructs a JwksKeyManager and fails
+                # immediately, a doctor/runtime readiness divergence.
+                problems.append("remote_mcp.oidc.issuer must be a valid HTTPS URL")
+            if not isinstance(oidc.audience, str) or not oidc.audience:
+                problems.append("remote_mcp.oidc.audience is required when OIDC is configured")
+            if not (oidc.authorized_subject or oidc.authorized_email):
+                problems.append("remote_mcp.oidc requires at least authorized_subject or authorized_email")
+            if oidc.jwks_uri and (not isinstance(oidc.jwks_uri, str) or not oidc.jwks_uri.startswith("https://")):
+                problems.append("remote_mcp.oidc.jwks_uri must be a valid HTTPS URL")
+            if isinstance(oidc.leeway_seconds, bool) or not isinstance(oidc.leeway_seconds, int) or not (0 <= oidc.leeway_seconds <= 120):
+                problems.append("remote_mcp.oidc.leeway_seconds must be an integer between 0 and 120")
 
     _validate_ttl(
         cfg.retrieval.context_ttl_seconds,

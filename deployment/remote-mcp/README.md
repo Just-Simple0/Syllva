@@ -2,9 +2,9 @@
 
 [한국어](README.ko.md)
 
-The built-in remote profile is for **development validation**, not a production OAuth deployment.
+Syllva supports both **OIDC JWT Bearer authentication** (OIDC Resource Server mode) and a **short-lived bearer credential profile** for development.
 
-It uses a short-lived bearer credential over direct TLS. A target client that requires OAuth/OIDC or another gateway must remain deployment-deferred until that external auth layer and client E2E have been configured and validated separately.
+In OIDC mode, incoming requests present standard OIDC ID Tokens (or RFC 9068 JWTs) signed by a trusted identity provider (Google, GitHub, Auth0, Cloudflare Access). Tokens are cryptographically validated against the IdP's JWKS and authorized against the single owner's `authorized_subject` (or `authorized_email` with `email_verified=true`). No static long-lived secrets are stored on disk or needed at runtime.
 
 ## Configuration
 
@@ -13,13 +13,18 @@ Representative `remote_mcp` configuration:
 ```yaml
 remote_mcp:
   enabled: true
-  auth_mode: oauth_or_bearer
+  auth_mode: oidc  # "oidc" (recommended) | "bearer" | "oauth_or_bearer"
   public_unauthenticated: false
   public_url: https://uls.example/mcp
   host: 127.0.0.1
   port: 8765
   tls_certfile: /private/path/fullchain.pem
   tls_keyfile: /private/path/privkey.pem
+  oidc:
+    issuer: https://accounts.google.com
+    audience: your-client-id.apps.googleusercontent.com
+    authorized_subject: your-sub-id
+    authorized_email: your-email@example.com
 ```
 
 Use a certificate trusted by the target client and an explicitly configured network route. The listener remains loopback unless you deliberately configure a different bind address. Syllva does not create DNS, firewall rules, tunnels, or a public endpoint for you.

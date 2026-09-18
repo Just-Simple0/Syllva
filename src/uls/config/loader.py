@@ -20,6 +20,7 @@ from .schema import (
     McpCfg,
     NormalizationCfg,
     NotionCfg,
+    OidcCfg,
     RemoteMcpCfg,
     RetrievalCfg,
     SemesterRegistryCfg,
@@ -107,6 +108,14 @@ def load_config_unvalidated(path: str | os.PathLike[str]) -> UlsConfig:
     notion_values["semester_workspaces"] = _semester_workspaces(
         notion_raw.get("semester_workspaces", [])
     )
+    remote_raw = _section(raw, "remote_mcp")
+    remote_values = dict(remote_raw)
+    oidc_raw = remote_raw.get("oidc", {})
+    if oidc_raw is None:
+        oidc_raw = {}
+    if not isinstance(oidc_raw, Mapping):
+        raise ValueError("remote_mcp.oidc must be a YAML mapping")
+    remote_values["oidc"] = _from_mapping(OidcCfg, oidc_raw)
     return UlsConfig(
         system=_from_mapping(SystemCfg, _section(raw, "system")),
         worker=_from_mapping(WorkerCfg, _section(raw, "worker")),
@@ -116,7 +125,7 @@ def load_config_unvalidated(path: str | os.PathLike[str]) -> UlsConfig:
         normalization=_from_mapping(NormalizationCfg, _section(raw, "normalization")),
         retrieval=_from_mapping(RetrievalCfg, _section(raw, "retrieval")),
         mcp=_from_mapping(McpCfg, _section(raw, "mcp")),
-        remote_mcp=_from_mapping(RemoteMcpCfg, _section(raw, "remote_mcp")),
+        remote_mcp=_from_mapping(RemoteMcpCfg, remote_values),
         behavior_contract=_from_mapping(
             BehaviorContractCfg, _section(raw, "behavior_contract")
         ),

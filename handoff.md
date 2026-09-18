@@ -1,6 +1,6 @@
 # Syllva (ULS v1.2) — Handoff
 
-**Last updated:** 2026-09-17
+**Last updated:** 2026-09-18
 
 ## Credential 주입 UX 개선 항목 기록 및 protected secret file 설계 착수 (2026-09-17)
 
@@ -256,7 +256,118 @@ rev5 참조로 갱신했다. 상세는
    - `ruff check`: 신규/수정 모듈 린트 에러 0 new errors.
    - `mypy`: 신규/수정 모듈 완전 클린 (전체 135 errors, 기존 베이스라인 유지).
    - Behavior Contract: `lint_behavior_projection.py` 통과 및 contract hash 일치 확인.
- - 작업 트리: Protected Secret File 저장소 및 대화형 CLI(`uls credential set`) 전 기능 구현 완료, 독립 2중 리뷰 전원 GO 완료.
+- 작업 트리: Protected Secret File 저장소 및 대화형 CLI(`uls credential set`) 전 기능 구현 완료, 독립 2중 리뷰 전원 GO 완료.
+
+
++ ## Remote MCP OAuth 2.0 / OIDC 인증 전환 설계 착수 (2026-09-17)
+
+ 향후 후속 작업 2번("`REMOTE_MCP_SECRET`의 장기 토큰을 OAuth/OIDC 기반 인증 흐름으로 전환")의 상세 설계 계획서([docs/plans/remote-mcp-oauth-oidc.md](docs/plans/remote-mcp-oauth-oidc.md), rev1) 작성을 완료했다.
+
+ 1. **설계 배경 및 핵심 가치**:
+    - 기존의 1시간 만료 단기 수동 비밀값(`REMOTE_MCP_SECRET`, `REMOTE_MCP_EXPIRES_AT`)을 완전히 걷어내고, 표준 OIDC IdP(Google, GitHub, Auth0 등)가 서명한 JWT Bearer 토큰을 비대칭 공개키(JWKS)로 검증하는 **OIDC Resource Server** 모드를 도입한다.
+    - 단일 사용자 개인 시스템 원칙을 철저히 준수: 유효한 IdP 토큰이라도 소유자(`authorized_subject` / `authorized_email`)와 일치하지 않으면 즉시 거부(fail-closed).
+    - 하위 호환성 유지: 기존 개발용 `auth_mode: bearer` 및 전환용 `oauth_or_bearer`를 보존.
+
+ 2. **계획 문서**:
+    - 상세 설계: [docs/plans/remote-mcp-oauth-oidc.md](docs/plans/remote-mcp-oauth-oidc.md)
+    - 다음 단계: AGENTS.md 워크플로에 따른 독립 계획 리뷰(insane-review 및 Gemini 3.8 Flash high) 진행.
+
+
+## Remote MCP OAuth 2.0 / OIDC 인증 전환 — rev3 계획, 구현, 3라운드 REVISE 수정, 최종 dual GO 완료 (2026-09-18)
+
+이전 세션에서 rev1 -> rev5까지 계획서 리비전을 거쳤으나(위 항목 참고), 실제로는 rev3 단계에서
+담당자가 rev3 자체의 독립 계획 리뷰를 기다리지 않고 바로 구현에 착수해 사용량 제한으로 중단됐다.
+이번 세션은 그 중단 지점(미검증 rev3 구현: `src/uls/mcp/transports/oidc.py`,
+`remote.py`/`main.py`/`config/{schema,loader,validation}.py` 변경, 신규 테스트, 미커밋)을
+이어받아 정식 검증 게이트를 완주했다.
+
+### 1. 최초 통합 리뷰(rev3 계획 + 구현) — insane-review REVISE, 6개 blocker
+
+rev3 계획서와 실제 구현을 함께 insane-review(`GPT-5.6 Sol 매우 높음`, Pro는 quota로 여전히
+비활성)에 보냈다. rev3 계획 자체의 핵심 수정 사항(하위호환 상태 머신, doctor 시크릿 격리,
+JWKS trust bootstrap, sub 필수화, asyncio.Lock 지연 생성, 범위 명시)은 계획서 본문 기준으로는
+해소된 것으로 판정됐지만, **실제 구현**에서 다음 6개 blocker가 발견됐다:
+
+1. JWKS redirect trust boundary 미구현 (HTTP redirect를 차단하지 않음).
+2. Discovery issuer exact-match 미구현 (양쪽 rstrip("/")으로 정규화해 비교).
+3. auth_mode=oidc에서도 dispatch()가 REMOTE_MCP_SECRET/REMOTE_MCP_EXPIRES_AT을
+   CredentialResolver.resolve() 입력에 넣고 있어 0-resolve 계약 위반.
+4. doctor --live가 JWKS 엔드포인트에 실제 네트워크 핑을 하지 않음(explicit jwks_uri일 때
+   _discover_jwks_uri_sync()만 호출해 0회 I/O).
+5. hybrid(oauth_or_bearer) doctor 상태 머신이 bearer_ok or oidc_ok라서 configured된
+   invalid lane이 valid한 다른 lane 뒤에 숨을 수 있었음.
+6. 보안 핵심 회귀 테스트(redirect, issuer exactness, JWKS cache/cooldown/single-flight,
+   runtime secret isolation, hybrid 호환성) 부재.
+
+전문: .insane-review/response_Syllva_20260918_192735_76404_954125.md.
+
+### 2. 수정 및 2차 재검증 — 5/6 CLOSED, 신규 발견 2건
+
+6개 중 1~5를 수정했다(oidc.py에 _NoRedirectHandler/_NO_REDIRECT_OPENER 추가,
+issuer trailing-slash 거부로 정규화 없는 exact-match 구현, JwksKeyManager.live_check_sync()
+신설, dispatch()의 조건을 auth_mode != "oidc"로 바꿔 0-resolve 보장, doctor hybrid 판정을
+configured_lanes_valid로 재작성)하고 재검증을 보냈다.
+
+2차 리뷰에서 1~5는 CLOSED로 확인됐으나, 새로 2건이 지적됐다:
+- Blocker A: redirect 테스트가 handler 단독 동작만 확인하고 실제 production opener
+  (_NO_REDIRECT_OPENER)에 장착됐다는 wiring을 고정하지 못함. JWKS cache hit/expiry/cooldown
+  회귀 테스트 전무.
+- Blocker B: JwksKeyManager가 issuer trailing slash를 거부하도록 고쳤는데 validate_config()에는
+  동일 규칙이 없어 trailing-slash issuer가 config 검증을 통과하고 non-live doctor에서도
+  valid로 보일 수 있었음(반면 실제 mcp remote dispatch는 즉시 실패) — doctor/runtime divergence.
+
+전문: .insane-review/response_Syllva_20260918_194442_77110_df702b.md.
+
+### 3. 3차/4차 재검증 — 전원 CLOSED, insane-review 최종 GO
+
+Blocker B는 validate_config()에 oidc.issuer.endswith("/") 거부를 추가하고 회귀 테스트로
+고정해 3차 재검증에서 CLOSED로 확인됐다. Blocker A는 (a) production 전역 _NO_REDIRECT_OPENER
+객체 자체의 .handlers를 검사해 _NoRedirectHandler가 실제로 장착됐고 기본
+urllib.request.HTTPRedirectHandler가 없음을 검증하는 wiring 테스트, (b) cache hit/만료/
+쿨다운(known/unknown kid)/refresh 실패 fail-closed를 각각 고정하는 5개 테스트로 대응했다.
+
+3차 재검증에서 single-flight(동시 cache-miss 경합 시 lock 내부 double-check로 정확히 1회만
+refresh) 회귀 테스트가 없다는 마지막 1건이 남았다. asyncio.gather로 동일 kid를 동시 요청하고,
+REFRESH_COOLDOWN_SECONDS를 0으로 monkeypatch해 쿨다운 분기가 double-check 분기를 가리지
+못하게 만든 뒤 call_count == 1을 확인하는 테스트를 추가했다. 이 테스트가 실제로 double-check
+분기(191-195줄)에 의존하는지 직접 뮤테이션 테스트로 검증했다: 해당 분기를 주석 처리하면
+테스트가 2 == 1로 실패하고, 복원하면 통과함을 확인한 뒤 원본을 복구했다.
+
+4차 재검증에서 insane-review가 이 마지막 blocker도 CLOSED로 확인하고 GO를 냈다.
+전문: .insane-review/response_Syllva_20260918_195714_77682_313d5a.md (그 사이 라운드:
+response_Syllva_20260918_195238_77471_60214b.md).
+
+### 4. 독립 Gemini 리뷰 — 전체 GO, 불일치 0건
+
+agy --model gemini-3.8-flash-high --effort high --mode plan --sandbox로 별도 컨텍스트에서
+전체 구현(핵심 10개 항목: 알고리즘 제한, JWKS trust bootstrap, sub 필수화, 단일 소유자 인가,
+0-resolve, doctor --live 핑, hybrid 상태 머신, config/runtime 일치, lazy lock, cache/single-flight)을
+재검증했다. JWT->Bearer 다운그레이드 불가, doctor/dispatch 판정 일치, 4개 테스트 파일의 회귀
+유효성, rev3 계획과의 1:1 대조까지 확인하고 불일치 0건, 무조건 GO로 결론지었다.
+
+### 5. 최종 검증 메트릭
+
+- Python 3.14 전체 테스트: 1,442 passed, 3 skipped, 0 failed.
+- Python 3.11 전체 테스트: 1,442 passed, 3 skipped, 0 failed (별도 venv
+  /private/tmp/uls-py311-venv에 .[dev,mcp,keyring,remote-mcp-oidc,pdf,drive,notion,github]
+  설치 후 검증; 두 버전 결과 일치).
+- ruff: 신규/수정 파일(oidc.py, remote.py, main.py의 변경분, validation.py의 변경분,
+  신규 테스트) 전부 클린. 남아있는 ruff/mypy 경고는 이번 변경과 무관한 기존 베이스라인(예:
+  schema.py의 SemesterWorkspaceCfg/SemesterRegistryCfg 관련 기존 mypy 오류, main.py의
+  기존 try/except Exception: pass)임을 diff로 직접 확인했다.
+- python -m compileall, scripts/lint_behavior_projection.py 통과.
+- pyproject.toml에 PyJWT[crypto]>=2.8,<3을 remote-mcp-oidc extra 및 dev extra에 정식
+  선언(이전 세션에서 venv에만 수동 설치되고 선언이 빠져 있던 gap을 닫음).
+
+### 6. 상태
+
+- rev3 계획서 + 구현 모두 insane-review와 Gemini 양쪽 독립 리뷰 GO 완료. 작업 트리는 아직
+  미커밋이며 이번 세션에서 커밋까지 진행한다(브랜치
+  codex/protected-secret-file-and-credential-set, push는 사용자 명시 지시 전까지 하지 않음).
+- 후속 작업 2번("REMOTE_MCP_SECRET 장기 토큰의 OAuth/OIDC 전환")은 이 커밋으로 완결된다.
+- 남은 후속 작업: 실제 운영 환경(Google/GitHub/Auth0 등 실제 IdP)과의 라이브 E2E 연동 확인은
+  범위 밖으로 남아 있다(계획서 rev3 1.2절 범위 = JWT OIDC Resource Server 검증/인가이며 실제
+  IdP 등록/배포는 운영자 몫).
 
 ## PR #8 안정화 작업 (Stage A, B, C, D) 및 CredentialResolver 완료 및 main 머지 (2026-09-16)
 

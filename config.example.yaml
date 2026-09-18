@@ -94,8 +94,18 @@ mcp:
 
 remote_mcp:
   enabled: false
-  auth_mode: oauth_or_bearer
+  auth_mode: oauth_or_bearer  # "oauth_or_bearer" | "oidc" | "bearer"
   public_unauthenticated: false
+  # public_url: https://uls.example/mcp
+  # host: 127.0.0.1
+  # port: 8765
+  # tls_certfile: /path/to/fullchain.pem
+  # tls_keyfile: /path/to/privkey.pem
+  # oidc:
+  #   issuer: "https://accounts.google.com"
+  #   audience: "your-client-id.apps.googleusercontent.com"
+  #   authorized_subject: "your-sub-id"
+  #   authorized_email: "your-email@example.com"
 
 behavior_contract:
   version: 2

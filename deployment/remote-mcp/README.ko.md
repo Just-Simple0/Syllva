@@ -2,9 +2,9 @@
 
 [English](README.md)
 
-내장 remote profile은 production OAuth 배포가 아니라 **development validation**용입니다.
+Syllva는 **OIDC JWT Bearer 인증**(OIDC Resource Server 모드)과 개발용 **단기 bearer credential 프로필**을 모두 지원합니다.
 
-direct TLS 위에서 짧게 살아 있는 bearer credential을 사용합니다. 대상 client가 OAuth/OIDC 또는 다른 gateway를 요구하면 해당 외부 auth layer와 client E2E를 별도로 구성/검증할 때까지 deployment-deferred로 유지해야 합니다.
+OIDC 모드에서는 신뢰할 수 있는 IdP(Google, GitHub, Auth0 등)가 서명한 표준 OIDC ID Token(또는 RFC 9068 JWT)을 검증하여 인증합니다. IdP의 JWKS 공개키 세트로 서명을 검증하고, 단일 소유자의 `authorized_subject`(또는 `email_verified=true`인 `authorized_email`)와 일치할 때만 인가됩니다. 런타임에 디스크에 정적 장기 시크릿을 저장할 필요가 전혀 없습니다.
 
 ## 설정
 
@@ -13,13 +13,18 @@ direct TLS 위에서 짧게 살아 있는 bearer credential을 사용합니다. 
 ```yaml
 remote_mcp:
   enabled: true
-  auth_mode: oauth_or_bearer
+  auth_mode: oidc  # "oidc" (권장) | "bearer" | "oauth_or_bearer"
   public_unauthenticated: false
   public_url: https://uls.example/mcp
   host: 127.0.0.1
   port: 8765
   tls_certfile: /private/path/fullchain.pem
   tls_keyfile: /private/path/privkey.pem
+  oidc:
+    issuer: https://accounts.google.com
+    audience: your-client-id.apps.googleusercontent.com
+    authorized_subject: your-sub-id
+    authorized_email: your-email@example.com
 ```
 
 target client가 신뢰하는 certificate와 명시적으로 구성한 network route를 사용하세요. 다른 bind address를 직접 구성하지 않으면 listener는 loopback에 유지됩니다. Syllva가 DNS, firewall rule, tunnel, public endpoint를 자동 생성하지 않습니다.

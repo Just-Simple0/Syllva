@@ -1,8 +1,11 @@
-"""Development-only, short-lived bearer MCP profile over direct TLS.
+"""MCP remote transport: OIDC JWT Bearer and/or short-lived bearer, over direct TLS.
 
-OAuth/OIDC deployments can use a separately validated auth gateway. This built-in
-profile does not advertise OAuth support. A credential grants the single user's
-corpus subject to retrieval policy; it is not a per-course authorization scheme.
+Supports three auth_mode profiles (docs/plans/remote-mcp-oauth-oidc.md rev3):
+``oidc`` (standard OIDC ID Token / RFC 9068 JWT verified against IdP JWKS,
+recommended), ``bearer`` (development-only short-lived static secret), and
+``oauth_or_bearer`` (hybrid; each configured lane must independently be valid).
+A credential grants the single user's corpus subject to retrieval policy; it is
+not a per-course authorization scheme.
 """
 from __future__ import annotations
 
@@ -18,6 +21,7 @@ from urllib.parse import urlsplit
 
 from uls.config.errors import ConfigurationError
 from uls.mcp.server import caller_identity
+from uls.mcp.transports.oidc import OidcTokenVerifier, classify_token_lane
 
 
 @dataclass(frozen=True)
@@ -53,11 +57,17 @@ def validate_remote_profile(config: Any) -> tuple[str, str]:
 
 
 class AuthenticatedApp:
-    def __init__(self, app: Any, credential: BearerCredential, host: str, origin: str,
-                 *, clock: Any = time.time) -> None:
-        credential.validate(clock())
+    def __init__(self, app: Any, host: str, origin: str,
+                 *, credential: BearerCredential | None = None,
+                 oidc_verifier: OidcTokenVerifier | None = None,
+                 clock: Any = time.time) -> None:
+        if credential is None and oidc_verifier is None:
+            raise ConfigurationError('remote MCP requires either BearerCredential or OidcTokenVerifier')
+        if credential is not None:
+            credential.validate(clock())
         self.app = app
         self._credential = credential
+        self._oidc_verifier = oidc_verifier
         self.host, self.origin, self.clock = host, origin, clock
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
@@ -72,18 +82,39 @@ class AuthenticatedApp:
         def values(name: bytes) -> list[str]:
             return [value.decode('latin-1') for key, value in raw if key.lower() == name]
         auth = values(b'authorization')
-        valid = (scope.get('scheme') == 'https'
-                 and values(b'host') == [self.host]
-                 and (not values(b'origin') or values(b'origin') == [self.origin])
-                 and self.clock() < self._credential.expires_at
-                 and len(auth) == 1
-                 and hmac.compare_digest(auth[0].encode(), ('Bearer ' + self._credential.token).encode()))
-        if not valid:
+        transport_valid = (
+            scope.get('scheme') == 'https'
+            and values(b'host') == [self.host]
+            and (not values(b'origin') or values(b'origin') == [self.origin])
+            and len(auth) == 1
+            and auth[0].startswith('Bearer ')
+        )
+        if not transport_valid:
             response = JSONResponse({'error': 'unauthorized'}, status_code=401,
                                     headers={'WWW-Authenticate': 'Bearer', 'Cache-Control': 'no-store'})
             await response(scope, receive, send)
             return
-        token = caller_identity.set(self._credential.identity)
+
+        raw_token = auth[0][7:]
+        lane = classify_token_lane(raw_token)
+        identity: str | None = None
+
+        if lane == 'oidc' and self._oidc_verifier is not None:
+            try:
+                identity = await self._oidc_verifier.verify_token(raw_token)
+            except ConfigurationError:
+                identity = None
+        elif (lane == 'bearer' and self._credential is not None
+                and self.clock() < self._credential.expires_at
+                and hmac.compare_digest(auth[0].encode(), ('Bearer ' + self._credential.token).encode())):
+            identity = self._credential.identity
+
+        if identity is None:
+            response = JSONResponse({'error': 'unauthorized'}, status_code=401,
+                                    headers={'WWW-Authenticate': 'Bearer', 'Cache-Control': 'no-store'})
+            await response(scope, receive, send)
+            return
+        token = caller_identity.set(identity)
         try:
             if scope.get('path') == '/health':
                 await JSONResponse({'ok': True, 'service': 'uls', 'read_only': True})(scope, receive, send)
@@ -93,27 +124,28 @@ class AuthenticatedApp:
             caller_identity.reset(token)
 
 
-def create_remote_app(registry: Any, config: Any, credential: BearerCredential,
-                      *, clock: Any = time.time) -> AuthenticatedApp:
+def create_remote_app(registry: Any, config: Any, credential: BearerCredential | None = None,
+                      *, oidc_verifier: OidcTokenVerifier | None = None,
+                      clock: Any = time.time) -> AuthenticatedApp:
     from mcp.server.transport_security import TransportSecuritySettings
     host, origin = validate_remote_profile(config)
-    credential.validate(clock())
     app = registry.sdk_server().streamable_http_app(
         json_response=True, stateless_http=True, max_request_body_size=64_000,
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=True, allowed_hosts=[host], allowed_origins=[origin]),
     )
-    return AuthenticatedApp(app, credential, host, origin, clock=clock)
+    return AuthenticatedApp(app, host, origin, credential=credential, oidc_verifier=oidc_verifier, clock=clock)
 
 
-def run_remote(registry: Any, config: Any, credential: BearerCredential) -> None:
+def run_remote(registry: Any, config: Any, credential: BearerCredential | None = None,
+               *, oidc_verifier: OidcTokenVerifier | None = None) -> None:
     import uvicorn
     cfg = config.remote_mcp
     validate_remote_profile(config)
     for path in (cfg.tls_certfile, cfg.tls_keyfile):
         if not path or not Path(path).expanduser().is_file():
             raise ConfigurationError('direct remote TLS requires certificate and private-key files')
-    app = create_remote_app(registry, config, credential)
+    app = create_remote_app(registry, config, credential, oidc_verifier=oidc_verifier)
     uvicorn.run(app, host=cfg.host, port=cfg.port, workers=1, proxy_headers=False,
                 ssl_certfile=str(Path(cfg.tls_certfile).expanduser()),
                 ssl_keyfile=str(Path(cfg.tls_keyfile).expanduser()),

@@ -7,7 +7,10 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
+import jwt
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 from uls.config.credentials import ResolvedCredentials
 from uls.config.errors import ConfigurationError
@@ -148,3 +151,176 @@ def test_context_is_bound_to_transport_identity():
     assert 'error' in registry.invoke('uls.get_source_chunk', args, caller_scope='local')
     assert 'error' in registry.invoke('uls.get_source_chunk', args, caller_scope='remote:user-b')
     assert 'error' not in registry.invoke('uls.get_source_chunk', args, caller_scope='remote:user-a')
+
+
+def test_remote_app_with_oidc_verifier_authenticates_health_and_mcp_tools():
+    pytest.importorskip('starlette')
+    from starlette.testclient import TestClient
+    from test_get_activity_context import _engine
+
+    from uls.mcp.transports.oidc import JwksKeyManager, OidcTokenVerifier
+
+    engine, _, _ = _engine()
+    config = UlsConfig()
+    config.remote_mcp = replace(config.remote_mcp, enabled=True, public_url='https://uls.example/mcp')
+
+    priv = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pub = priv.public_key()
+    pem_priv = priv.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+
+    km = JwksKeyManager('https://accounts.google.com', 'https://accounts.google.com/jwks')
+    km._cached_keys = {'key-rsa': pub}
+    km._cache_expires_at = time.time() + 3600
+
+    verifier = OidcTokenVerifier(
+        issuer='https://accounts.google.com',
+        audience='my-client',
+        authorized_subject='student-owner',
+        key_manager=km,
+    )
+
+    app = create_remote_app(ReadOnlyMCP(engine), config, credential=None, oidc_verifier=verifier)
+
+    valid_token = jwt.encode(
+        {'sub': 'student-owner', 'iss': 'https://accounts.google.com', 'aud': 'my-client', 'iat': int(time.time()), 'exp': int(time.time()) + 300},
+        pem_priv, algorithm='RS256', headers={'kid': 'key-rsa'},
+    )
+
+    with TestClient(app, base_url='https://uls.example') as client:
+        # Missing auth -> 401
+        assert client.get('/health').status_code == 401
+
+        # Valid OIDC token -> 200
+        resp = client.get('/health', headers={'Authorization': 'Bearer ' + valid_token})
+        assert resp.status_code == 200
+        assert resp.json()['read_only'] is True
+
+        # MCP tools list -> 11 tools
+        rpc_headers = {
+            'Authorization': 'Bearer ' + valid_token,
+            'Accept': 'application/json, text/event-stream',
+            'Content-Type': 'application/json',
+            'MCP-Protocol-Version': '2025-11-25',
+        }
+        mcp_resp = client.post('/mcp', headers=rpc_headers, json={'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list', 'params': {}})
+        assert mcp_resp.status_code == 200
+        assert len(mcp_resp.json()['result']['tools']) == 11
+
+        # Tampered / attacker subject -> 401
+        attacker_token = jwt.encode(
+            {'sub': 'attacker', 'iss': 'https://accounts.google.com', 'aud': 'my-client', 'iat': int(time.time()), 'exp': int(time.time()) + 300},
+            pem_priv, algorithm='RS256', headers={'kid': 'key-rsa'},
+        )
+        assert client.get('/health', headers={'Authorization': 'Bearer ' + attacker_token}).status_code == 401
+
+
+def test_remote_app_hybrid_prevents_jwt_downgrade_to_bearer():
+    pytest.importorskip('starlette')
+    from starlette.testclient import TestClient
+    from test_get_activity_context import _engine
+
+    from uls.mcp.transports.oidc import JwksKeyManager, OidcTokenVerifier
+
+    engine, _, _ = _engine()
+    config = UlsConfig()
+    config.remote_mcp = replace(config.remote_mcp, enabled=True, public_url='https://uls.example/mcp')
+
+    bearer = BearerCredential('b' * 40, time.time() + 600)
+    km = JwksKeyManager('https://accounts.google.com', 'https://accounts.google.com/jwks')
+    verifier = OidcTokenVerifier(
+        issuer='https://accounts.google.com',
+        audience='my-client',
+        authorized_subject='student-owner',
+        key_manager=km,
+    )
+
+    app = create_remote_app(ReadOnlyMCP(engine), config, credential=bearer, oidc_verifier=verifier)
+
+    with TestClient(app, base_url='https://uls.example') as client:
+        # Valid bearer -> 200
+        assert client.get('/health', headers={'Authorization': 'Bearer ' + bearer.token}).status_code == 200
+
+        # Fake JWT with 3 parts but invalid signature -> must fail with 401, never fall back to bearer
+        fake_jwt = 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxIn0.invalidsig'
+        assert client.get('/health', headers={'Authorization': 'Bearer ' + fake_jwt}).status_code == 401
+
+
+def test_dispatch_oidc_mode_never_resolves_remote_bearer_credentials(tmp_path, monkeypatch):
+    """rev3 plan section 5.1: auth_mode=='oidc' must resolve zero
+    REMOTE_MCP_SECRET / REMOTE_MCP_EXPIRES_AT credentials -- they must
+    never even enter the CredentialResolver.resolve() input set for the
+    'uls mcp remote' dispatch path, matching the doctor()-side exclusion.
+    """
+    import yaml
+
+    from uls.behavior import asset_root
+    from uls.cli.main import dispatch, initialize, parser
+    from uls.config.credentials import CredentialResolver
+
+    raw = yaml.safe_load((asset_root() / 'config.example.yaml').read_text(encoding='utf-8'))
+    raw['system']['workspace_dir'] = 'state'
+    raw['behavior_contract']['path'] = str(asset_root() / 'contracts/study-behavior.md')
+    raw['worker']['enabled'] = False
+    cert = tmp_path / 'cert.pem'
+    key = tmp_path / 'key.pem'
+    cert.write_text('cert', encoding='utf-8')
+    key.write_text('key', encoding='utf-8')
+    raw['remote_mcp'] = {
+        'enabled': True,
+        'auth_mode': 'oidc',
+        'public_unauthenticated': False,
+        'public_url': 'https://uls.example/mcp',
+        'tls_certfile': str(cert),
+        'tls_keyfile': str(key),
+        'oidc': {
+            'issuer': 'https://accounts.google.com',
+            'audience': 'client-123',
+            'authorized_subject': 'sub-student',
+        },
+    }
+    cfg_path = tmp_path / 'config.yaml'
+    cfg_path.write_text(yaml.safe_dump(raw), encoding='utf-8')
+    initialize(cfg_path)
+
+    captured_optional: dict = {}
+
+    def fake_resolve(self, *, required, optional):
+        captured_optional.update(optional)
+        values = {name: '' for name in required}
+        values.update(optional)
+        values['GOOGLE_MCP_CREDENTIALS_FILE'] = str(tmp_path / 'google-mcp.json')
+        (tmp_path / 'google-mcp.json').write_text('{}', encoding='utf-8')
+        values['NOTION_MCP_TOKEN'] = 'mcp-token'
+        return values
+
+    monkeypatch.setattr(CredentialResolver, 'resolve', fake_resolve)
+
+    class _FakeRegistry:
+        def __init__(self, engine):
+            self.engine = engine
+
+    def fake_read_only_mcp(engine):
+        return _FakeRegistry(engine)
+
+    monkeypatch.setattr('uls.mcp.server.ReadOnlyMCP', fake_read_only_mcp)
+    monkeypatch.setattr('uls.cli.main.build_retrieval', lambda cfg, creds: object())
+
+    captured_run_remote: dict = {}
+
+    def fake_run_remote(registry, cfg, credential=None, *, oidc_verifier=None):
+        captured_run_remote['credential'] = credential
+        captured_run_remote['oidc_verifier'] = oidc_verifier
+
+    monkeypatch.setattr('uls.mcp.transports.remote.run_remote', fake_run_remote)
+
+    args = parser().parse_args(['--config', str(cfg_path), 'mcp', 'remote'])
+    dispatch(args)
+
+    assert 'REMOTE_MCP_SECRET' not in captured_optional
+    assert 'REMOTE_MCP_EXPIRES_AT' not in captured_optional
+    assert captured_run_remote['credential'] is None
+    assert captured_run_remote['oidc_verifier'] is not None

@@ -150,3 +150,42 @@ courses:
     assert any("remote_mcp.auth_mode" in problem for problem in problems)
     with pytest.raises(ConfigurationError):
         load_config(config)
+
+
+def test_oidc_issuer_with_trailing_slash_is_rejected_at_config_load(tmp_path) -> None:
+    """The validator must mirror JwksKeyManager's trailing-slash rejection
+    exactly. Otherwise a trailing-slash issuer could load as "valid"
+    config and be reported ready by 'uls doctor' (which never constructs
+    a JwksKeyManager without --live), while the actual 'uls mcp remote'
+    dispatch path unconditionally builds one and fails immediately --
+    a doctor/runtime readiness divergence.
+    """
+    contract = tmp_path / "study-behavior.md"
+    contract.write_text("# contract\n", encoding="utf-8")
+    cert = tmp_path / "cert.pem"
+    key = tmp_path / "key.pem"
+    cert.write_text("cert", encoding="utf-8")
+    key.write_text("key", encoding="utf-8")
+    config = tmp_path / "trailing-slash.yaml"
+    config.write_text(
+        f"""
+remote_mcp:
+  enabled: true
+  auth_mode: oidc
+  tls_certfile: {cert}
+  tls_keyfile: {key}
+  oidc:
+    issuer: https://accounts.google.com/
+    audience: client-123
+    authorized_subject: sub-student
+behavior_contract:
+  path: {contract}
+courses:
+  - course_key: 2026-1_COMP319-002
+""",
+        encoding="utf-8",
+    )
+    problems = validate_config(load_config_unvalidated(config))
+    assert any("remote_mcp.oidc.issuer" in problem for problem in problems)
+    with pytest.raises(ConfigurationError):
+        load_config(config)
