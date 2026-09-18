@@ -160,7 +160,24 @@ def render_normalized_transcript(transcript: NormalizedTranscript) -> str:
     return transcript.to_markdown()
 
 
+def contains_timestamp_marker(content: str) -> bool:
+    """Return whether content has at least one valid two/three-part timestamp marker.
+
+    Delegates to extract_timestamp_marks so this classification-candidate signal
+    and the normalizer's own marker extraction can never use a different
+    bracket/timestamp grammar. This is the single source of truth for what
+    counts as a timestamp marker across ingestion classification and
+    normalization.
+    """
+
+    if not isinstance(content, str):
+        raise TypeError("content must be a string")
+    marks, _had_failure = extract_timestamp_marks(content)
+    return bool(marks)
+
+
 __all__ = [
+    "contains_timestamp_marker",
     "extract_marks",
     "extract_timestamp_marks",
     "normalize",
