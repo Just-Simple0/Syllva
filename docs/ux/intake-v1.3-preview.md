@@ -2,9 +2,10 @@
 
 This additive status note describes the implemented semester intake slice. The frozen v1.2 design, `file-intake.md`, and `intake-execution-contract.md` remain the authorities for behavior and wording.
 
-The current slice adopts the intake portions of C1, C2, C3, and C4:
+The current slice adopts the intake portions of C1, C2, C3, and C4, plus the rev10 C1 durable study-note state/storage contract:
 
 - C1-intake: durable observations, requests, plans, jobs, provider write attempts, stage events, source versions, and source-to-derivative provenance.
+- C1-study-note state/storage: reservation history and reconciliation evidence, durable Session heads, note jobs and attempts, request-to-attempt references, artifact metadata, and atomic restart/idempotency/concurrency guards. This is storage/state API support only; study-note generation, publishing, and user-facing status projection remain deferred to C6.
 - C2: explicit current-semester Drive roots and course subtrees, compact private markers where the worker port supports them, metadata/privacy readback, recovery, and file-ID-preserving move.
 - C3-intake: the five operational data sources, exact relation targets and option sets, ownership guards, and `Partial`/`Unavailable` status propagation.
 - C4: pre-canonical upload discovery, explicit course/kind/date routing, and ambiguity requests before a file can be organized.
@@ -29,4 +30,4 @@ All three worker paths share the local single-active-worker lock. A normal `uls 
 
 The worker performs deterministic transcript normalization and bounded PDF text extraction. It preserves `Ready`, `Partial`, and unavailable outcomes, writes normalized source pointers only after full readback, and records processing provenance for the existing read-only MCP retrieval contract. It does not generate study notes or claim AI output when no AI provider is configured.
 
-C5 note tables and C6 proposal-envelope/note generation are deferred from this implementation slice. Human `Verified` and `Scope Confirmed` approvals remain human-owned, and the MCP search surface remains read-only.
+C5 proposal/envelope and HumanApprovalApplier work, plus C6 study-note generation, Drive staging, Notion AI-region writing, cancellation wiring, and user-facing status projection, remain deferred from this implementation slice. Human `Verified` and `Scope Confirmed` approvals remain human-owned, and the MCP search surface remains read-only.

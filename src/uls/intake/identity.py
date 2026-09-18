@@ -175,6 +175,39 @@ def derive_job_key(operation: str, *identity_values: Any) -> str:
     return "sha256:" + derive_operation_key(operation, *identity_values)
 
 
+def derive_study_note_key(
+    *,
+    course_key: str,
+    session_id: str,
+    evidence_manifest_hash: str,
+    learner_request_hash: str,
+    template_version: str,
+    generator_config_version: str,
+) -> str:
+    """Derive the rev10 study-note container identity."""
+
+    for value, name in (
+        (course_key, "course_key"),
+        (session_id, "session_id"),
+        (evidence_manifest_hash, "evidence_manifest_hash"),
+        (learner_request_hash, "learner_request_hash"),
+        (template_version, "template_version"),
+        (generator_config_version, "generator_config_version"),
+    ):
+        _require_text(value, name)
+    return sha256_hex(
+        [
+            "study-note.v1",
+            course_key,
+            session_id,
+            evidence_manifest_hash,
+            learner_request_hash,
+            template_version,
+            generator_config_version,
+        ]
+    )
+
+
 def folder_marker_key(
     *,
     provider: str,
@@ -287,13 +320,14 @@ def _require_text(value: Any, name: str) -> None:
 
 __all__ = [
     "canonical_json",
+    "derivative_marker",
     "derive_job_key",
     "derive_operation_key",
     "derive_plan_revision",
     "derive_request_key",
     "derive_request_revision",
     "derive_status_revision",
-    "derivative_marker",
+    "derive_study_note_key",
     "folder_marker_key",
     "provider_binding_id",
     "sha256_hex",
