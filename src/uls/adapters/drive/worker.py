@@ -572,12 +572,22 @@ def ensure_marked_folder(
         item = matches[0]
         if item.mime_type != DRIVE_FOLDER_MIME or item.parents != (parent_id,) or item.app_properties != marker:
             raise SourceUnavailableError("Drive marker match failed exact parent/MIME readback")
-        if item.owned_by_me is not True:
-            raise PolicyDeniedError("Drive marker item is not USER owned")
+        require_private_ownership(item, context="Drive marker folder")
         return item
     if create_attempted:
         raise SourceUnavailableError("Drive create response was lost; marker lookup is indeterminate")
-    return port.create_folder_with_marker(parent_id, name, marker)
+    created = port.create_folder_with_marker(parent_id, name, marker)
+    # Apply the exact same postcondition as the reuse branch above, at this
+    # port-level abstraction rather than relying on each DriveWorkerPort
+    # implementation's own internal validation (which may not check every
+    # field identically -- for example a folder create's internal readback
+    # validation may skip the move-capability check that reuse always
+    # enforces). This keeps a freshly created marker folder and a
+    # later-recovered one held to one identical private-ownership boundary.
+    if created.mime_type != DRIVE_FOLDER_MIME or created.parents != (parent_id,) or created.app_properties != marker:
+        raise SourceUnavailableError("Drive create readback failed exact parent/MIME/marker check")
+    require_private_ownership(created, context="Drive marker folder")
+    return created
 
 
 def _metadata(value: Any) -> DriveMetadata:
