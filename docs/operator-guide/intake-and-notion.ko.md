@@ -57,6 +57,24 @@ write 활성화 전 다음을 검증합니다.
 
 provider 응답이 유실되거나 결과가 모호하면 외부 상태를 다시 읽고 reconcile하세요. 결과가 불명확한 mutation을 무작정 반복하거나 중복 page를 만들지 않습니다.
 
+## 다음 버전 준비 사항: Automation Queue `Proposal Envelope`
+
+수용된 다음 버전 설계(`docs/ux/intake-execution-contract.md`, rev10, §5.3)는 v1.2 §14.7 현재
+스키마(`implementation-spec-frozen.md`)에 없는 새 SYSTEM 소유 Notion 속성 하나를 `Automation Queue`
+데이터베이스에 추가한다:
+
+| 속성 | 타입 | 소유 |
+|---|---|---|
+| Proposal Envelope | Rich text | SYSTEM |
+
+이 속성은 rev10의 C5(v2 proposal identity/envelope)가 읽고 쓰기 전에 실제 `Automation Queue`
+데이터베이스에 미리 존재해야 한다. 이 저장소는 Notion 데이터베이스 스키마를 자동 생성·프로비저닝하지
+않으며, `Automation Queue`에는 현재 `INTAKE_SCHEMAS`에 해당하는 선언형 schema/validator가 없다 --
+기존 `Proposal ID`/`Proposed Action` 속성과 함께 Notion에서 수동으로 만든다.
+기존 Queue `Proposal Type`/`State`/`Decision` enum 값과 현재 쓰기 권한 규칙(§15.1)은 그대로 유지되며,
+이는 추가적인 schema 변경일 뿐이며 기존 Queue 속성·enum·권한은 전혀 변경되지 않는다. 실제 v2 envelope
+읽기/쓰기/내용 검증과 Reader/HAA guard 로직은 C5가 담당한다.
+
 ## 대시보드 UX
 
 학기 대시보드의 의도된 순서는 다음과 같습니다.

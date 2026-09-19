@@ -57,6 +57,25 @@ Before enabling writes, validate:
 
 If a provider response is lost or ambiguous, re-read external state and reconcile. Do not blindly create a duplicate page or repeat a mutation whose outcome is unknown.
 
+## Next-version prerequisite: Automation Queue `Proposal Envelope`
+
+The accepted next-version design (`docs/ux/intake-execution-contract.md`, rev10, §5.3) adds one new
+SYSTEM-owned Notion property to the `Automation Queue` database, beyond the current v1.2 schema in
+implementation-spec-frozen.md §14.7:
+
+| Property | Type | Owner |
+|---|---|---|
+| Proposal Envelope | Rich text | SYSTEM |
+
+This property must exist in the live `Automation Queue` database before rev10's C5 slice (v2 proposal
+identity/envelope) can read or write it. No code in this repository provisions Notion database schemas,
+and `Automation Queue` currently has no declarative schema/validator equivalent to `INTAKE_SCHEMAS` --
+create the property manually in the Notion database alongside the existing `Proposal ID` /
+`Proposed Action` properties. Existing Queue `Proposal Type`, `State`, `Decision` enum
+values and all current write-permission rules (§15.1) are unchanged; this is an additive schema
+change only -- no existing Queue properties, enums, or permissions are changed. C5 owns the actual
+v2 envelope read/write/content validation and Reader/HAA guard logic for its contents.
+
 ## Dashboard UX
 
 The intended semester dashboard order is:
