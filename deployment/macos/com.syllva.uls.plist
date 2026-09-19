@@ -8,7 +8,7 @@
     <string>run</string>
   </array>
   <key>WorkingDirectory</key><string>/ABSOLUTE/PATH/TO/Syllva</string>
-  <key>StartInterval</key><integer>600</integer>
+  <key>StartInterval</key><integer>60</integer>
   <key>RunAtLoad</key><true/>
   <key>ProcessType</key><string>Background</string>
   <key>StandardOutPath</key><string>/ABSOLUTE/PATH/TO/uls-status.log</string>

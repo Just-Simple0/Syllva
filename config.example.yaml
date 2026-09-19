@@ -10,7 +10,7 @@ system:
 
 worker:
   enabled: true
-  poll_interval_minutes: 10
+  poll_interval_minutes: 1
 
 storage:
   normalized_derivatives: google_drive

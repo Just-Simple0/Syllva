@@ -16,7 +16,7 @@ class SystemCfg:
 @dataclass
 class WorkerCfg:
     enabled: bool = True
-    poll_interval_minutes: int = 10
+    poll_interval_minutes: int = 1
 
 
 @dataclass
