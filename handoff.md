@@ -118,6 +118,8 @@ address every point below and gets a GO on a resubmitted plan review.
 Reviewer's overall framing: architecture doesn't need to be scrapped, but the plan must explicitly cover
 all 11 points above before the next plan-review round is GO-able. Do not start implementation until then.
 
+Confirmed this session: `_validate_phase4_queue_identity()` has 17 call sites in base.py (rg -n '_validate_phase4_queue_identity\(' src/uls/adapters/notion/base.py), spanning queue read/upsert/apply/retry/ambiguous-recovery paths -- the dispatcher fix in point 1 above touches all of them, not a small edit.
+
 Files to actually re-read in full before revising the plan (do not rely on this summary alone): the
 exact bodies of `_validate_phase4_queue_identity()`, `upsert_proposal()`, `_upsert_phase4_proposal()`,
 `_create_phase4_queue_once()`, `_apply_phase4()` in src/uls/adapters/notion/base.py, and the
