@@ -30,100 +30,55 @@ a "Live status" note in the same two operator-guide files, carefully scoped to N
 applied section order equals the current rev10 §7 order (they differ), and NOT claim the future
 worker-mapping gap is closed. Zero src/ code required or changed for this contract row.
 
-## C5 [ACTIVE -- large, mid-plan] PageRange/Usage producer v2 envelope + generation-bound proposal identity
-Contract: docs/ux/intake-execution-contract.md §5.3 (full text quoted in .review/c5-plan-review-prompt.md).
-Confirmed genuinely unimplemented: `rg -n 'usage_slot_key|range_intent_heads|intent_generation' src`
--> zero matches.
+## C5 [ACTIVE -- large, plan round 3 pending] PageRange/Usage producer v2 envelope + generation-bound proposal identity
+Contract: docs/ux/intake-execution-contract.md section 5.2-5.3. Confirmed genuinely unimplemented.
 
-**Status: plan round 1 sent to insane-review (GPT-5.6 Sol/매우 높음, ~132k token pack of
-approval_identity.py + material_usage.py + base.py + sqlite.py) -> REVISE with substantial, specific,
-code-grounded structural findings.** Full response saved at
-.insane-review/response_src_20260919_131516_9401_a16c06.md (also in the review platform thread; see
-manifest_src_20260919_131516_9401_a16c06.json for chat_url). Draft plan (needs revision before
-resubmitting) at .review/c5-plan.md. Do NOT write implementation code before the plan is revised to
-address every point below and gets a GO on a resubmitted plan review.
+**Plan history**: round 1 (.review/c5-plan.md) -> REVISE, 11 findings (response:
+.insane-review/response_src_20260919_131516_9401_a16c06.md). Round 2 (.review/c5-plan-v2.md,
+addressing all 11) -> REVISE, 6 remaining blockers, most prior fixes confirmed correct (response:
+.insane-review/response_src_20260919_151421_11240_fa3b08.md). Round 3 plan written
+(.review/c5-plan-v3.md) addressing all 6 round-2 blockers -- **submission to review round 3 is the
+next action** (not yet sent/confirmed as of this handoff write). Do NOT write implementation code
+before a plan round gets GO.
 
-### Exact findings to fix in the plan before resubmitting (all reviewer-verified against real code):
-1. **Shared identity dispatcher is required, not optional.** `_validate_phase4_queue_identity()` in
-   base.py currently recomputes ALL of MATERIAL_USAGE/PAGE_RANGE/EXAM_SCOPE via the v1
-   `derive_proposal_id()` unconditionally -- a v2 Queue row would be rejected by this EXISTING check
-   before ever reaching a new v2 guard. Same problem in `upsert_proposal()` ->
-   `_upsert_phase4_proposal()` (used for create input, existing-row retry, AND ambiguous-create
-   recovery) and `_create_phase4_queue_once()`. All of these need to become one dispatcher: EXAM_SCOPE
-   stays v1; MATERIAL_USAGE/PAGE_RANGE use v2 when `Proposal Envelope` is present, v1 integrity-only
-   when absent (legacy row). Producer, HAA, and ApprovalReader must share this one dispatcher -- do not
-   write three separate copies.
-2. **Producer has no receipt/request context at all today.** `MaterialUsageProposalProducer`'s
-   constructor takes no state store; `produce`/`run`/`propose()` take no request_id/receipt_id. C1's
-   `study_note_heads` pattern (the thing this plan explicitly mirrors) stores `current_receipt_id` +
-   `receipt_hash` too, not just `current_request_id`, and only bumps generation on a genuinely
-   different receipt (same receipt = return existing generation), inside one `BEGIN IMMEDIATE`
-   transaction. The plan must add this receipt/request wiring explicitly, matching that exact pattern,
-   with "same receipt but producer output changed" as fail-closed conflict (not silently overwritten).
-3. **"current Usage exists -> UPDATE" is semantically wrong.** The current producer's `create_usage`
-   operation is NOT "no Usage exists yet" -- it's used even when a matching (unverified) Usage row
-   already exists; `create_usage` means "approval will write Verified=True", `update_range` means
-   "approval will change Start/End Page". A separate `is_new_usage`/row-creation flag governs whether a
-   new row is actually created. The head's `current_usage_app_id` must be an identity/reconciliation
-   guard, NOT an operation selector -- keep the existing operation-selection logic untouched and layer
-   the head check alongside it.
-4. **usage_slot_key excludes page range, but existing duplicate-identity logic includes it** (session,
-   material, role, page_range). The plan needs an explicit slot-adoption step: when a head is first
-   created for a slot, query the live graph for that (session, material, role) tuple only, and handle
-   0 matches (create allowed), exactly 1 (adopt into head), or >1 (fail-closed as reconciliation-
-   required, no arbitrary pick). Each new generation must re-verify the head's current Usage ID still
-   matches the live graph.
-5. **HAA needs a final pre-write generation re-check, not just an initial one**, to close a generation
-   race: HAA already re-reads the Queue and re-verifies the exact physical row immediately before
-   `_guarded_update()` (because graph/source/marker work can be slow) -- the new v2 generation-binding
-   guard must run at that SAME final checkpoint, not only at the initial read, or a stale generation N
-   proposal can still win a race against a newer N+1 that already updated the head.
-6. **HAA needs an injected read-only state dependency.** Current HAA constructor only takes
-   adapter/graph/source/config -- no state store today. Add a narrow read-only Protocol (e.g.
-   `UsageProposalStateReader`), not a concrete SQLite coupling, to preserve base.py's provider-neutral
-   boundary. Validation must chain: envelope.usage_slot_key == derive_slot(action's session/material/
-   role) -> envelope.request_id/generation == head's current -> head's current proposal/target/
-   operation == action -> outbox action/envelope bytes == Queue's stored bytes -> outbox published
-   state.
-7. **Add `Proposal Envelope` to the Queue immutable-field deny list** (base.py's existing immutable
-   field list currently covers `Proposed Action` etc. but not yet this new property -- it needs the
-   same "no post-creation caller mutation" protection).
-8. **Do not reuse the existing `_sha256`/`_canonical_json_value` helpers as-is for v2.** They call
-   `json.dumps()` without `allow_nan=False` today (contract requires "no non-finite numbers" but the
-   CURRENT v1 helper doesn't enforce it) -- changing the shared v1 helper risks a v1 compat break. Add a
-   separate strict v2 canonical serializer with `allow_nan=False` instead of modifying the shared one.
-9. **2-table design (range_intent_heads + usage_proposal_outbox) confirmed correct** -- different
-   lifecycles (mutable current-pointer vs. immutable per-generation publication history), don't merge.
-   Closest existing precedent for the outbox half is `provider_write_attempts` (UNIQUE operation_key,
-   PREPARED-before-external-write pattern) -- read that table's actual schema/usage before finalizing
-   the outbox table. Add `UNIQUE(usage_slot_key, intent_generation)` too (not just the 3-column unique).
-   `published` should mean "authoritative Queue readback confirmed the exact row", matching the
-   existing strict-create pattern elsewhere (not "write call returned success") -- consider
-   PREPARED/PUBLISHED/RECONCILE_REQUIRED instead of a boolean for clarity. HAA must require
-   published=PUBLISHED only.
-10. **Refine the "deny all envelope-less v1" rule.** `_apply_phase4()` already treats an APPLIED row as
-    a terminal idempotent replay (no re-mutation, just returns). Split the rule: non-APPLIED legacy v1
-    (no envelope) -> deny, "new proposal required" (as planned); already-APPLIED legacy v1 -> allow
-    through EXISTING v1 identity validation as a terminal replay only (preserves both "APPLIED v1
-    preserved" and existing idempotency -- don't accidentally break replay of already-done work).
-11. **Test plan additions** (beyond what's already listed): same receipt + changed producer output =>
-    fail-closed conflict, not silent overwrite; two concurrent new receipts => distinct monotonic
-    generations; an old generation's retry after a newer head exists => never becomes current again;
-    head advances between HAA's initial read and final pre-write checkpoint => zero target mutation;
-    slot has 0/1/>1 live Usage rows at first head creation; existing-unverified-Usage + create_usage
-    stays create_usage (not reinterpreted as update); published != PUBLISHED => deny; envelope
-    slot/action cross-binding mismatch => deny; legacy APPROVED v1 => deny, APPLIED v1 => replay only;
-    EXAM_SCOPE identity completely unchanged; NaN/Infinity strictly rejected by the new v2 serializer.
+**Round 2's 6 blockers, now addressed in c5-plan-v3.md as Blockers A-G** (read c5-plan-v3.md in full
+before continuing -- this is a condensed pointer, not a substitute):
+- A: envelope parsing must be tri-state (absent / present-valid / present-INVALID), not a boolean --
+  present-but-malformed must NEVER be treated as legacy v1, on any Queue state including APPLIED.
+- B: the v2 plan targeted the wrong immutable-field location. Real fix needs 3 sites: the Phase4-only
+  comparison loop at base.py ~1084-1090 (not the generic tuple near 1134, which MATERIAL_USAGE/
+  PAGE_RANGE never reaches), enforce_write_policy()'s immutable_queue_fields set (~base.py:533-542),
+  and material_usage.py's _validate_queue_properties() allowed/required sets (~1643-1717).
+- C: HAA's _read_current() (base.py:2280, the FIRST entry point) also needs the v2 generation check,
+  not just the final _phase4_approved_queue() checkpoint -- HAA can mutate Queue (clear markers, arm
+  PREPARED marker) between those two points.
+- D: BEGIN IMMEDIATE generation-claim alone doesn't stop a stale generation from overwriting a head
+  after a newer one already finalized -- needs a second finalize_generation() step doing a conditional
+  UPDATE ... WHERE intent_generation=? with rowcount==1 required (C1's attach_note_request() pattern).
+  Also: "same receipt, different output" must be detected by comparing actual outbox action/envelope
+  BYTES, not receipt_hash (receipt_hash only proves same input, not same producer output).
+- E: legacy-vs-v2 split is 4-way not 3-way: envelope-absent+non-APPLIED=deny,
+  envelope-absent+APPLIED=unchanged v1 replay, envelope-present-valid=full v2 check,
+  envelope-present-INVALID=unconditional deny regardless of state (ties to A).
+- F: read-time dispatch (legacy-tolerant, envelope absence OK) and create-time dispatch (v2 MANDATORY
+  for new MATERIAL_USAGE/PAGE_RANGE, envelope absence is an error) must be two separate functions, not
+  one reused dispatcher -- otherwise new envelope-less rows could keep being created forever.
+- G: real, contract-mandated behavior gap found independent of C5: material_usage.py's duplicate-Usage
+  check (candidate_identity ~line 848) includes page_range, so a second Usage for the same session/
+  material/role but a DIFFERENT range currently creates a brand new Usage with zero warning today. The
+  contract itself (§5.2: "같은 slot에 이미 여러 Usage가 있으면 ... 관계 정리 확인 대상으로 둔다",
+  "CREATE: 현재 slot의 Usage가 없을 때만 허용한다") mandates the fix: before material_usage.py's
+  create_usage/is_new_usage branch (~line 919), check for ANY existing Usage in the (session, material,
+  role) slot regardless of range; if one exists and doesn't exactly match the candidate, return the
+  existing reconciliation-required warning shape instead of creating a second Usage.
 
-Reviewer's overall framing: architecture doesn't need to be scrapped, but the plan must explicitly cover
-all 11 points above before the next plan-review round is GO-able. Do not start implementation until then.
-
-Confirmed this session: `_validate_phase4_queue_identity()` has 17 call sites in base.py (rg -n '_validate_phase4_queue_identity\(' src/uls/adapters/notion/base.py), spanning queue read/upsert/apply/retry/ambiguous-recovery paths -- the dispatcher fix in point 1 above touches all of them, not a small edit.
-
-Files to actually re-read in full before revising the plan (do not rely on this summary alone): the
-exact bodies of `_validate_phase4_queue_identity()`, `upsert_proposal()`, `_upsert_phase4_proposal()`,
-`_create_phase4_queue_once()`, `_apply_phase4()` in src/uls/adapters/notion/base.py, and the
-`provider_write_attempts` table schema in src/uls/state/sqlite.py.
+**Next action**: submit .review/c5-plan-v3.md for insane-review round 3 (same pattern as rounds 1-2 --
+--target src --include the same uls/domain/approval_identity.py,uls/proposal/material_usage.py,
+uls/adapters/notion/base.py,uls/state/sqlite.py list, paste the round-2 disposition + full v3 plan
+into --prompt-file since .review/*.md is gitignored). Expect ~130k token pack, 5-7+ minute wait at
+"매우 높음" effort based on rounds 1-2's timing. Once GO, implement exactly per the final plan, write
+the tests already listed across all three plan versions, get a FINAL review (not just plan review),
+then commit.
 
 ## C6 [not started, depends only on C1 which is done] Study note generation/storage/dashboard
 C1 built the durable storage substrate only. Still missing entirely: study-request input
