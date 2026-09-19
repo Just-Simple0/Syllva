@@ -87,6 +87,18 @@ provider 응답이 유실되거나 결과가 모호하면 외부 상태를 다�
 
 수업은 전역 navigation이 아니라 각 과목 아래에 둡니다.
 
+현재 상태(rev10 C7): C7의 개인 일정/할 일 연결 뷰 부분은 2026-09-13에 사용자의 실제 Notion
+워크스페이스에 이미 native로 적용됐다 -- 기존 개인 일정 DB를 재사용해(새 전용 스키마가 아님) To
+DO/캘린더 뷰를 구성했다. `docs/ux/dashboard-native-application.md`, readback 증거는
+`dashboard-native-readback.md`, GO 판정(독립 웹 리뷰 + Gemini)은 `review-20260913-native-dashboard.md`
+참고. 그 2026-09-13 적용이 기록한 섹션 순서(내 과목 → 이어서 공부 → To DO → 캘린더 → 파일 확인)는
+현재 rev10 계약 §7의 순서(오늘 할 일/마감 → 과목 → 이어서 공부 → 학사 일정 → 파일 확인)보다 앞서고
+그와 다르다. 이 상태 메모는 C7 행의 연결 뷰 요구만 다루며, 별도인 §7 대시보드 순서 요구까지
+충족됐다고 주장하지 않는다. 계약 §2 저장소 표에 따르면 이 일정 DB는 전부 사용자 편집이며
+시스템은 그 내용을 자동으로 변경하지 않는다. 인용된 native 적용은 이 DB에 대한 worker/product
+writer 연동을 요구하거나 주장하지 않으며, 이 재사용 일정 DB에 대한 미래 worker 매핑을 명시적으로
+미완료로 남겨둔다(자동 최근 방문 순위, 자동 파일 접수 연결도 이번 적용이 연결하지 않은 것과 함께).
+
 ## 암묵적 lane fallback 금지
 
 intake-preview identity가 불완전하면 다른 retrieval/legacy write 경로로 조용히 fallback한 뒤 성공으로 표시하지 않습니다. intake readiness와 read-only retrieval readiness를 별도 사실로 유지하세요.

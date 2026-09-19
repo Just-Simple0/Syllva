@@ -88,6 +88,21 @@ The intended semester dashboard order is:
 
 Sessions remain under their course rather than becoming global navigation items.
 
+Live status (rev10 C7): the personal-schedule/todo linked-view portion of C7 was already applied
+natively in the user's Notion workspace on 2026-09-13 -- reusing the existing personal schedule
+database for the To DO/Calendar views (not a fresh dedicated schema), see
+`docs/ux/dashboard-native-application.md`, readback evidence in `dashboard-native-readback.md`, and
+the GO disposition (independent web review + Gemini) in `review-20260913-native-dashboard.md`. The
+section order recorded by that 2026-09-13 application (My Courses -> Continue Studying -> To DO ->
+Calendar -> Check Files) predates and differs from the current rev10 contract §7 order (today's
+tasks/deadlines -> courses -> continue studying -> academic schedule -> check files); this status note
+covers only the linked-view requirement in the C7 row and does not claim the separate §7 dashboard-
+order requirement is satisfied. Per the contract's §2 storage table, this schedule database is
+entirely user-edited, and the system never auto-modifies its content; the cited native application does
+not depend on or claim any worker/product-writer integration with this database, and explicitly leaves
+a future worker mapping to it open (for this reused schedule database specifically -- along with
+automatic recent-visit ranking and automatic file intake, neither of which this application connects).
+
 ## No implicit lane fallback
 
 If intake-preview identities are incomplete, do not silently fall back to a different retrieval or legacy write path and call the result successful. Keep readiness for intake and readiness for read-only retrieval as separate facts.
