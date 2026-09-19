@@ -30,73 +30,41 @@ a "Live status" note in the same two operator-guide files, carefully scoped to N
 applied section order equals the current rev10 §7 order (they differ), and NOT claim the future
 worker-mapping gap is closed. Zero src/ code required or changed for this contract row.
 
-## C5 [ACTIVE -- large, plan round 4 needed] PageRange/Usage producer v2 envelope + generation-bound proposal identity
-Contract: docs/ux/intake-execution-contract.md section 5.2-5.3. Confirmed genuinely unimplemented.
-Do NOT write implementation code before a plan round gets GO -- this touches the approval/identity
-guard chain and every round so far has found real correctness gaps only visible by reading actual code.
+## C5 [ACTIVE -- large, plan round 5 submitted] PageRange/Usage producer v2 envelope + generation-bound proposal identity
+Contract: docs/ux/intake-execution-contract.md section 5.2-5.3. Do NOT write implementation code
+before a plan round gets GO.
 
-**Plan history** (all in .review/, gitignored; responses in .insane-review/, gitignored):
-- Round 1 (c5-plan.md) -> REVISE, 11 findings.
-- Round 2 (c5-plan-v2.md, addressed all 11) -> REVISE, 6 remaining blockers (A-F below), most round-1
-  fixes confirmed correct.
-- Round 3 (c5-plan-v3.md, addressed all 6 as Blockers A-G, G is a bonus contract-grounded finding) ->
-  REVISE. **3 of 7 blockers now CLOSED (A, C, E). 4 remain, each narrower than before:**
-  - **B (partial)**: adding "Proposal Envelope" to the Phase4 comparison tuple in
-    `_assert_supplied_matches_current()` (base.py ~1074-1090) does NOT actually compare it -- that
-    function's real equality check is `canonical_semantics_from_queue(candidate) != expected`, and
-    `_validate_mirrors()` (the function that actually decides what's compared) does not look at
-    Envelope at all. Real fix: when `supplied` has an Envelope, directly compare
-    `parse_usage_proposal_envelope(supplied)` against `parse_usage_proposal_envelope(current)` for
-    canonical equality (absent-in-supplied = allow partial-record calls as today; present-and-invalid =
-    immediate PolicyViolation; present-but-current-is-legacy-absent = mismatch/deny). The other 2 B
-    sites (enforce_write_policy's immutable set, producer's _validate_queue_properties allowed/required)
-    were confirmed correct as planned.
-  - **D (partial)**: the head CAS (conditional UPDATE ... WHERE intent_generation=?, rowcount==1) is
-    confirmed correct and DOES stop a stale generation from overwriting a newer head. Two remaining
-    gaps: (1) the plan's order (upsert outbox PREPARED, then CAS, return False on CAS failure) lets a
-    stale PREPARED outbox row commit permanently, since a normal (non-exception) return from this
-    codebase's SQLite transaction helper commits -- CAS must run first, or CAS failure must raise
-    inside the transaction to force a rollback, and a test must assert "no new PREPARED row exists
-    after a failed CAS". (2) Bigger: after a successful finalize, a newer generation can be claimed and
-    the actual provider-side Usage creation (producer's real `self._create_usage()` call, confirmed to
-    happen AFTER a comment that explicitly says its pre-check is done "without claiming CAS") can still
-    run using the now-stale generation's data -- the head/outbox CAS protects the Queue/HAA layer but
-    not the actual Drive/Notion Usage-row mutation itself. A durable slot-level reservation/ownership
-    mechanism spanning PREPARED-through-provider-mutation is needed, not just a head-read-again pattern
-    (which the reviewer flagged would just create another TOCTOU window).
-  - **F (revise)**: call-site classification in `_upsert_phase4_proposal()` was wrong -- ALL THREE
-    direct `derive_proposal_id()` calls there (expected-ID for the new candidate, existing stored row,
-    and exception-recovered row) are actually candidate-vs-stored comparisons; only the FIRST is truly
-    create-time-mandatory, the other two are legitimately read-time-tolerant (they're validating
-    something already in the Queue). Sending all three to the create dispatcher re-breaks legacy-row
-    reads. Additionally, `_create_phase4_queue_once()` (its own docstring: "guards every public Phase4
-    Queue create") was missed entirely -- it calls `_validate_phase4_queue_identity(properties)` on the
-    NEW candidate (must become create-time-mandatory) but also calls it again inside its internal
-    `read_matching()` on an EXISTING found row (must stay read-time-tolerant) -- needs to split into two
-    different calls, not one shared one. Also flagged as an open design decision (not yet a blocker):
-    the public `Proposal` dataclass/`upsert_proposal()` convenience API doesn't have an Envelope field
-    yet -- decide whether to add one or mark MATERIAL_USAGE/PAGE_RANGE unsupported through that path.
-  - **G (revise, bigger than planned)**: the "any existing Usage in slot blocks create_usage" fix is
-    correct AS FAR AS IT GOES but insufficient alone. Confirmed: `update_range` targets one EXPLICIT
-    Usage ID and never checks whether OTHER Usage rows exist in the same (session, material, role) slot
-    with a different range -- so a slot can still end up with 2+ live Usages via update_range even with
-    the create-side fix in place. HAA's own sibling-duplicate check is ALSO exact-range-keyed (same gap,
-    separately in base.py), so a same-slot-different-range Usage inserted between proposal creation and
-    human approval isn't caught as a slot conflict by HAA either. Producer's slot query also must not
-    rely on `_eligible_usage_scopes()` alone, since that function silently drops malformed/ambiguous raw
-    rows from scope -- those must still count as "slot occupied, needs reconciliation", not be ignored.
-    The real fix needs a SHARED (session, material, role) cardinality invariant enforced in: the create
-    branch (as planned), the update_range branch (new), HAA's sibling check (new), and using raw rows
-    for slot detection (not just eligible scopes).
+**Plan history** (.review/, gitignored; responses in .insane-review/, gitignored):
+Round 1 (c5-plan.md) REVISE 11 findings -> Round 2 (c5-plan-v2.md) REVISE 6 blockers (A-G) -> Round 3
+(c5-plan-v3.md) REVISE, CLOSED A/C/E, narrowed B/D/F/G -> Round 4 (c5-plan-v4.md) REVISE, CLOSED
+B/D1/F, only D2 and G remain -> Round 5 (c5-plan-v5.md, addresses exactly D2+G) submitted, awaiting
+result as of this handoff write.
 
-**Next action**: write plan round 4 addressing exactly these 4 refinements (not a full rewrite -- A/C/E
-are locked in, do not relitigate them), resubmit via the same insane-review pattern (--target src,
---include uls/domain/approval_identity.py,uls/proposal/material_usage.py,uls/adapters/notion/base.py,
-uls/state/sqlite.py, paste the full round-3 disposition + revised plan into --prompt-file). Each round
-so far has taken ~7-8 minutes end to end (132k-token pack + 매우 높음 reasoning) and found real,
-non-cosmetic correctness gaps -- budget for at least one more round, possibly two, before this is
-safe to implement. Full round 3 response saved at
-.insane-review/response_src_20260919_152535_11474_6e21bf.md for exact wording if needed.
+**Only 2 items remain open, both narrow and well-scoped now:**
+- **D2**: the local head/generation-claim design must durably RESERVE the slot (new
+  `reservation_state`/`reserved_target_id`/`reserved_generation` columns on `range_intent_heads`,
+  state machine NONE->RESERVED->BOUND or ->RECONCILE_REQUIRED->NONE) BEFORE calling
+  `self._create_usage()` (material_usage.py:992) -- not just record `current_usage_app_id` after
+  success. Mirrors the existing `provider_write_attempts`/`entity_reservations` PREPARED-before-
+  external-call pattern already in this codebase (do not hold a SQLite write transaction open across
+  the network call -- reviewer explicitly rejected that as a worse failure mode).
+- **G**: the local head/reservation check alone cannot catch a Usage that entered the same
+  (session, material, role) slot through a path the head never recorded (out-of-band edit, pre-C5
+  Usage, etc.). Needs a SEPARATE, range-agnostic `_phase4_has_slot_sibling()` check (same shape as the
+  existing exact-range `_phase4_has_sibling_duplicate()` at base.py:4603, but keyed on
+  (session_id, material_id, role) only, using RAW rows not `_eligible_usage_scopes()`) added ALONGSIDE
+  the existing exact-range check at THREE sites: `_apply_phase4()`'s initial check (base.py:3494),
+  `_phase4_reconcile_target()`'s final pre-write re-check (base.py:3989-3990 -- confirmed this round,
+  a distinct site from 3494), and the producer's create/update candidate path (already covered by v3's
+  original Blocker G, now clarified as the same concept).
+
+**Next action**: check the result of round 5 (session_id / manifest in .insane-review/ dated around
+2026-09-19 16:0x). If GO, move to implementation (write the code exactly per the final plan --
+v1 base scope + v2/v3/v4/v5's Blockers A-G -- then the full accumulated test list from all 5 plan
+rounds, then a FINAL review, then commit). If REVISE again, the remaining gap will be narrower still;
+keep iterating the same way (round 6 addressing only whatever's still open). Every round so far has
+found genuinely real, non-cosmetic correctness issues by reading actual code -- this rigor is
+appropriate for approval/identity-guard logic and should not be shortcut.
 
 ## C6 [not started, depends only on C1 which is done] Study note generation/storage/dashboard
 C1 built the durable storage substrate only. Still missing entirely: study-request input
