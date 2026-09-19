@@ -30,48 +30,45 @@ a "Live status" note in the same two operator-guide files, carefully scoped to N
 applied section order equals the current rev10 §7 order (they differ), and NOT claim the future
 worker-mapping gap is closed. Zero src/ code required or changed for this contract row.
 
-## C5 [ACTIVE -- large, plan round 8 submitted, final precision items] PageRange/Usage producer v2 envelope
+## C5 [ACTIVE -- large, plan round 9 submitted, near-final] PageRange/Usage producer v2 envelope
 Contract: docs/ux/intake-execution-contract.md section 5.2-5.3. Do NOT write implementation code
 before a plan round gets GO.
 
-**Plan history**: rounds 1-7 closed A, B, C, D1, E, F, G, and D2's core structure (points 1-3: no
-BOUND state, CAS loser never writes shared state, terminal-CAS idempotency -- all CONFIRMED CLOSED,
-round 7 response: .insane-review/response_src_20260919_161217_12615_b4164a.md). Round 7 found exactly
-3 remaining precision items (R7-1/R7-2/R7-3), explicitly characterized as refinements within D2, NOT
-new design categories -- round 7 found no additional `_create_usage()` call sites or concurrency
-categories beyond these. **Round 8 (c5-plan-v8.md) addresses exactly R7-1/R7-2/R7-3, submitted,
-awaiting result as of this handoff write.**
+**Plan history**: rounds 1-8 closed A, B, C, D1, E, F, G, D2 points 1-3, and R7-1 (all CONFIRMED
+CLOSED, round 8 response: .insane-review/response_src_20260919_161958_12832_4032ca.md). Round 8
+EXPLICITLY CONFIRMED no additional `_create_usage()` call sites or concurrency categories exist in the
+reviewed code -- remaining work is exactly 2 small precision items. **Round 9 (c5-plan-v9.md)
+addresses both, submitted, awaiting result as of this handoff write.**
 
-**Round 8's 3 fixes:**
-1. **R7-1**: `dispatch_attempt_key` needs a SEPARATE `dispatch_attempt_no` field (not derivable from
-   generation+target alone), because `provider_write_attempts.operation_key` is UNIQUE and a legitimate
-   clean-release-then-retry within the same generation would otherwise collide with the first attempt's
-   row. Mirrors the ALREADY-EXISTING split in `study_note_heads`(generation)/`note_attempts`
-   (attempt_no).
-2. **R7-2**: needs a concrete durable schema for BOTH the pre-dispatch baseline snapshot AND the later
-   reconciliation readback (confirmed: `provider_write_attempts` currently has only one payload field,
-   `readback_json`, which reconciliation overwrites) -- fix adds a new
-   `pre_dispatch_snapshot_json` column, written once at dispatch time in the SAME transaction as the
-   head's `RESERVED->DISPATCHED` CAS, never overwritten afterward.
-3. **R7-3**: v7 incorrectly merged "release proof" (matches HAA's real `ProviderWriteNotAppliedError`+
-   exact-old-readback standard) with "external row appeared, adopt as success" into one rule --
-   confirmed these are genuinely different: HAA's real precedent treats
-   `ProviderWriteNotAppliedError`+observed-DESIRED (not old) as UNRESOLVED reconciliation, not success.
-   Split into two explicit policies: (1) release-to-NONE only on the exact HAA-matching proof; (2) a
-   SEPARATE, C5-specific "external exact-row adoption" rule requiring the producer's own EXISTING full
-   (session, material, role, page_range) identity-match standard (not just target_id match) before
-   adopting an externally-appeared row as success.
+**Round 9's 2 fixes:**
+(a) **R7-2 plumbing**: explicit `ALTER TABLE provider_write_attempts ADD COLUMN
+pre_dispatch_snapshot_json TEXT` migration step (mirroring the existing `reservation_id`/`stage`
+migration precedent), the `ProviderWriteAttempt` row-model gains a matching field (needs verification
+against `uls/state/models.py`, not in the reviewed file set), and `pre_dispatch_snapshot_json` is
+explicitly write-once -- NOT added to `update_provider_write_attempt()`'s allowed-fields set.
+(b) **R7-3 predicate overlap**: release-proof and external-row-adoption were redefined against the
+DURABLE `pre_dispatch_snapshot_json` baseline vs. current readback (not against "does my original
+target_id exist"), because the producer already accepts an externally-appeared exact-identity row's
+OWN id as the effective target even when it differs from the originally-derived deterministic
+`target_id` -- meaning "my target_id is absent" doesn't exclude "a different-ID eligible row exists"
+under the old wording. Fixed: (1) readback identical to baseline + ProviderWriteNotAppliedError =>
+release NONE; (2) readback differs by exactly one full-identity-eligible new row => adopt that row's
+actual ID as `current_usage_app_id`, NONE; (3) anything else => RECONCILE_REQUIRED. Mutually exclusive
+by construction. One v8 test corrected to match (split into two precise cases instead of one that
+conflicted with the adoption path).
 
-**Everything else (A, B, C, D1, E, F, G, D2 points 1-3) is closed and unchanged across rounds 1-8.**
+**Everything else (A, B, C, D1, E, F, G, D2 points 1-3, R7-1) is closed and unchanged across rounds
+1-9.**
 
-**Next action**: check round 8's result (.insane-review/, dated ~2026-09-19 16:2x+). This has been an
-8-round plan-review cycle, each round finding genuinely real, narrowing, non-repeated correctness
-issues in the concurrency design around one function (`_create_usage()`). If round 8 closes it with
-explicit GO, move straight to implementation: write the code per the FULL accumulated plan (v1 base
-scope + Blockers A-G as closed across all rounds + D2's complete final state machine), the complete
-accumulated test list (v1 through v8, dozens of specific regression tests), then a separate FINAL
-review (not just plan review) before committing. If still REVISE, continue the same narrow-refinement
-pattern -- do not restart or broaden scope unless a genuinely new category of gap is found.
+**Next action**: check round 9's result (.insane-review/, dated ~2026-09-19 16:2x-16:3x). If GO, move
+straight to implementation using the FULL accumulated plan across all 9 rounds (v1 base scope + every
+closed blocker A-G + D2's complete final design including R7-1/R7-2/R7-3's resolved forms), then the
+complete accumulated test list, then a separate FINAL review (post-implementation, distinct from these
+plan reviews), then commit. This has been a 9-round plan-review cycle for one concurrency-safety design
+around `_create_usage()` -- every round found a real, narrowing, non-repeated correctness issue; round
+8 explicitly confirmed no further call sites/categories remain in the reviewed code, so round 9 or a
+very small round 10 should be the natural close of the PLAN stage. If REVISE again, the gap should be
+tiny (a wording/edge-case detail, not a new mechanism) -- keep the same narrow-fix pattern.
 
 ## C6 [not started, depends only on C1 which is done] Study note generation/storage/dashboard
 C1 built the durable storage substrate only. Still missing entirely: study-request input
