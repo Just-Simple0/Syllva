@@ -30,41 +30,49 @@ a "Live status" note in the same two operator-guide files, carefully scoped to N
 applied section order equals the current rev10 §7 order (they differ), and NOT claim the future
 worker-mapping gap is closed. Zero src/ code required or changed for this contract row.
 
-## C5 [ACTIVE -- large, plan round 5 submitted] PageRange/Usage producer v2 envelope + generation-bound proposal identity
+## C5 [ACTIVE -- large, plan round 6 submitted, only D2 open] PageRange/Usage producer v2 envelope
 Contract: docs/ux/intake-execution-contract.md section 5.2-5.3. Do NOT write implementation code
 before a plan round gets GO.
 
-**Plan history** (.review/, gitignored; responses in .insane-review/, gitignored):
-Round 1 (c5-plan.md) REVISE 11 findings -> Round 2 (c5-plan-v2.md) REVISE 6 blockers (A-G) -> Round 3
-(c5-plan-v3.md) REVISE, CLOSED A/C/E, narrowed B/D/F/G -> Round 4 (c5-plan-v4.md) REVISE, CLOSED
-B/D1/F, only D2 and G remain -> Round 5 (c5-plan-v5.md, addresses exactly D2+G) submitted, awaiting
-result as of this handoff write.
+**Plan history** (.review/, gitignored; responses in .insane-review/, gitignored): rounds 1-5
+progressively closed Blockers A, B, C, D1, E, F, G (all CONFIRMED CLOSED as of round 5's response,
+.insane-review/response_src_20260919_155733_12134_517f20.md). **Only Blocker D2 remains, now split
+into 3 precise sub-items, addressed in round 6 (c5-plan-v6.md), submitted, awaiting result as of this
+handoff write.**
 
-**Only 2 items remain open, both narrow and well-scoped now:**
-- **D2**: the local head/generation-claim design must durably RESERVE the slot (new
-  `reservation_state`/`reserved_target_id`/`reserved_generation` columns on `range_intent_heads`,
-  state machine NONE->RESERVED->BOUND or ->RECONCILE_REQUIRED->NONE) BEFORE calling
-  `self._create_usage()` (material_usage.py:992) -- not just record `current_usage_app_id` after
-  success. Mirrors the existing `provider_write_attempts`/`entity_reservations` PREPARED-before-
-  external-call pattern already in this codebase (do not hold a SQLite write transaction open across
-  the network call -- reviewer explicitly rejected that as a worse failure mode).
-- **G**: the local head/reservation check alone cannot catch a Usage that entered the same
-  (session, material, role) slot through a path the head never recorded (out-of-band edit, pre-C5
-  Usage, etc.). Needs a SEPARATE, range-agnostic `_phase4_has_slot_sibling()` check (same shape as the
-  existing exact-range `_phase4_has_sibling_duplicate()` at base.py:4603, but keyed on
-  (session_id, material_id, role) only, using RAW rows not `_eligible_usage_scopes()`) added ALONGSIDE
-  the existing exact-range check at THREE sites: `_apply_phase4()`'s initial check (base.py:3494),
-  `_phase4_reconcile_target()`'s final pre-write re-check (base.py:3989-3990 -- confirmed this round,
-  a distinct site from 3494), and the producer's create/update candidate path (already covered by v3's
-  original Blocker G, now clarified as the same concept).
+**D2's 3 sub-items** (the durable slot-reservation-before-provider-write design from round 4/5):
+- **D2-1**: same-generation/same-target "idempotent retry" must NOT call `_create_usage()`
+  (material_usage.py:1022, confirmed to have zero existing-row/ID-collision checks of its own) a
+  second time -- needs a SEPARATE `RESERVED -> DISPATCHED` CAS so only one caller ever dispatches the
+  actual provider create; the loser does a readback instead of re-dispatching.
+- **D2-2**: `BOUND` must not permanently block a legitimate NEXT generation (e.g. update_range after a
+  successful create) -- v5's design conflated "permanent slot->Usage binding" with "transient
+  in-flight provider attempt state". Fix: `current_usage_app_id` is now explicitly PERMANENT (persists
+  across generations like C1's `current_receipt_id`), while `reservation_state` is explicitly
+  TRANSIENT (always returns to `NONE` once a create attempt reaches ANY terminal outcome). Also
+  clarified: `update_range`'s actual page-range provider mutation happens later in HAA's existing
+  marker/`_guarded_update` protocol (unchanged by D2) -- the producer-side reservation only ever
+  guards `_create_usage()` dispatch, never the range-change mutation itself.
+- **D2-3**: release-to-`NONE` criteria were too weak -- must match this codebase's existing strict
+  no-effect standard (only a trusted `ProviderWriteNotAppliedError` releases directly to `NONE`;
+  anything else -> `RECONCILE_REQUIRED`, matching HAA's existing `_guarded_update`/marker pattern and
+  the `entity_reservations`/`provider_write_attempts` precedent). A new range-intent-scoped
+  `resolve_range_intent_reconciliation()` function is needed (confirmed: the existing
+  `record_reservation_no_mutation_reconciliation()` is scoped specifically to `entity_reservations`
+  rows via an explicit `reservation_id` and cannot be reused unchanged for `range_intent_heads`).
 
-**Next action**: check the result of round 5 (session_id / manifest in .insane-review/ dated around
-2026-09-19 16:0x). If GO, move to implementation (write the code exactly per the final plan --
-v1 base scope + v2/v3/v4/v5's Blockers A-G -- then the full accumulated test list from all 5 plan
-rounds, then a FINAL review, then commit). If REVISE again, the remaining gap will be narrower still;
-keep iterating the same way (round 6 addressing only whatever's still open). Every round so far has
-found genuinely real, non-cosmetic correctness issues by reading actual code -- this rigor is
-appropriate for approval/identity-guard logic and should not be shortcut.
+**G is fully closed** (round 5) -- one implementation-detail note carried forward for whenever this is
+coded: the new `_phase4_has_slot_sibling()` helper must extract (session, material, role) from raw
+rows independently of page-range parsing, NOT via `material_usage_identity()`'s first three fields
+(which drops rows with malformed ranges entirely, defeating the point).
+
+**Next action**: check round 6's result (.insane-review/, dated ~2026-09-19 16:0x-16:1x). If GO, move
+to implementation: write the code per the fully-accumulated plan (v1 base scope + all of Blockers A-G
+as closed across rounds 1-6), the complete test list (also accumulated across all 6 plan rounds), then
+a FINAL review (separate from plan review), then commit. This has been an unusually long plan-review
+cycle (6 rounds) precisely because it touches the approval/identity guard chain and every round found
+real, non-cosmetic correctness gaps by reading actual code -- that rigor is appropriate here and should
+not be shortcut once implementation starts either (the FINAL review must be equally thorough).
 
 ## C6 [not started, depends only on C1 which is done] Study note generation/storage/dashboard
 C1 built the durable storage substrate only. Still missing entirely: study-request input
