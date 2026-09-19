@@ -30,49 +30,50 @@ a "Live status" note in the same two operator-guide files, carefully scoped to N
 applied section order equals the current rev10 §7 order (they differ), and NOT claim the future
 worker-mapping gap is closed. Zero src/ code required or changed for this contract row.
 
-## C5 [ACTIVE -- large, plan round 6 submitted, only D2 open] PageRange/Usage producer v2 envelope
+## C5 [ACTIVE -- large, plan round 7 submitted, D2 only] PageRange/Usage producer v2 envelope
 Contract: docs/ux/intake-execution-contract.md section 5.2-5.3. Do NOT write implementation code
 before a plan round gets GO.
 
-**Plan history** (.review/, gitignored; responses in .insane-review/, gitignored): rounds 1-5
-progressively closed Blockers A, B, C, D1, E, F, G (all CONFIRMED CLOSED as of round 5's response,
-.insane-review/response_src_20260919_155733_12134_517f20.md). **Only Blocker D2 remains, now split
-into 3 precise sub-items, addressed in round 6 (c5-plan-v6.md), submitted, awaiting result as of this
-handoff write.**
+**Plan history**: rounds 1-6 closed Blockers A, B, C, D1, E, F, G (all CONFIRMED CLOSED, round 6
+response: .insane-review/response_src_20260919_160522_12406_3981e1.md). Round 6 confirmed D2-2's core
+split (permanent current_usage_app_id vs transient reservation_state) matches the real code, but found
+6 precise state-machine wording/race gaps in D2-1/D2-3. **Round 7 (c5-plan-v7.md) addresses exactly
+those 6, submitted, awaiting result as of this handoff write.**
 
-**D2's 3 sub-items** (the durable slot-reservation-before-provider-write design from round 4/5):
-- **D2-1**: same-generation/same-target "idempotent retry" must NOT call `_create_usage()`
-  (material_usage.py:1022, confirmed to have zero existing-row/ID-collision checks of its own) a
-  second time -- needs a SEPARATE `RESERVED -> DISPATCHED` CAS so only one caller ever dispatches the
-  actual provider create; the loser does a readback instead of re-dispatching.
-- **D2-2**: `BOUND` must not permanently block a legitimate NEXT generation (e.g. update_range after a
-  successful create) -- v5's design conflated "permanent slot->Usage binding" with "transient
-  in-flight provider attempt state". Fix: `current_usage_app_id` is now explicitly PERMANENT (persists
-  across generations like C1's `current_receipt_id`), while `reservation_state` is explicitly
-  TRANSIENT (always returns to `NONE` once a create attempt reaches ANY terminal outcome). Also
-  clarified: `update_range`'s actual page-range provider mutation happens later in HAA's existing
-  marker/`_guarded_update` protocol (unchanged by D2) -- the producer-side reservation only ever
-  guards `_create_usage()` dispatch, never the range-change mutation itself.
-- **D2-3**: release-to-`NONE` criteria were too weak -- must match this codebase's existing strict
-  no-effect standard (only a trusted `ProviderWriteNotAppliedError` releases directly to `NONE`;
-  anything else -> `RECONCILE_REQUIRED`, matching HAA's existing `_guarded_update`/marker pattern and
-  the `entity_reservations`/`provider_write_attempts` precedent). A new range-intent-scoped
-  `resolve_range_intent_reconciliation()` function is needed (confirmed: the existing
-  `record_reservation_no_mutation_reconciliation()` is scoped specifically to `entity_reservations`
-  rows via an explicit `reservation_id` and cannot be reused unchanged for `range_intent_heads`).
+**Round 7's 6 fixes** (all narrow refinements of the SAME reservation-before-provider-write design, no
+new design categories):
+1. Drop `BOUND` as a stored `reservation_state` value entirely -- both success and positive
+   reconciliation go directly to `reservation_state='NONE'` + `current_usage_app_id=<target>` in one
+   CAS. "Bound" is descriptive prose only, never a stored enum value (round 6 found this contradicted
+   D2-2's own "terminal always returns to NONE" rule).
+2. The `RESERVED->DISPATCHED` CAS LOSER must make ZERO writes to the shared head row -- only the
+   dispatch OWNER may ever write `DISPATCHED -> RECONCILE_REQUIRED`. (Round 6's core race: a loser
+   seeing an empty readback while the owner's create is still in-flight must not poison the shared
+   state by flipping it to RECONCILE_REQUIRED.)
+3. Terminal-CAS idempotency: if `current_usage_app_id` is already the exact target this caller expected
+   (someone else's CAS already won), treat as success even if this caller's own CAS affects 0 rows.
+4. Direct release to `NONE` needs BOTH `ProviderWriteNotAppliedError` AND an authoritative exact-old/
+   no-row-exists re-read -- matching HAA's own existing "old"-confirmation standard exactly (round 6:
+   the exception alone is not proof; if the readback instead shows the row DOES exist, adopt it as
+   success instead of releasing empty).
+5. `resolve_range_intent_reconciliation()` needs the `verified_readback` durably persisted against a
+   `dispatch_attempt_key` FIRST (reusing `provider_write_attempts`'s actual PREPARED-ledger shape, not
+   just accepting a bare unpersisted argument) -- matching how
+   `record_reservation_no_mutation_reconciliation()` actually gates release in the real precedent.
+6. Crash recovery must use a DURABLY stored pre-dispatch baseline snapshot (written in the SAME
+   `RESERVED->DISPATCHED` CAS, before `_create_usage()` is called), not an in-memory `before_rows`
+   argument that a crash would lose -- `_capture_owned_usage_snapshot()`'s existing check stays but
+   needs a durable baseline to compare against after a real restart.
 
-**G is fully closed** (round 5) -- one implementation-detail note carried forward for whenever this is
-coded: the new `_phase4_has_slot_sibling()` helper must extract (session, material, role) from raw
-rows independently of page-range parsing, NOT via `material_usage_identity()`'s first three fields
-(which drops rows with malformed ranges entirely, defeating the point).
+**Everything else (A, B, C, D1, E, F, G, and D2-2's core split) is closed and unchanged across rounds
+1-7.**
 
-**Next action**: check round 6's result (.insane-review/, dated ~2026-09-19 16:0x-16:1x). If GO, move
-to implementation: write the code per the fully-accumulated plan (v1 base scope + all of Blockers A-G
-as closed across rounds 1-6), the complete test list (also accumulated across all 6 plan rounds), then
-a FINAL review (separate from plan review), then commit. This has been an unusually long plan-review
-cycle (6 rounds) precisely because it touches the approval/identity guard chain and every round found
-real, non-cosmetic correctness gaps by reading actual code -- that rigor is appropriate here and should
-not be shortcut once implementation starts either (the FINAL review must be equally thorough).
+**Next action**: check round 7's result (.insane-review/, dated ~2026-09-19 16:1x-16:2x). This has
+been a 7-round plan-review cycle for one function (`_create_usage()`'s concurrency safety) -- if round
+7 closes it, move straight to implementation (full plan v1 base + all of A-G across rounds, the
+complete accumulated test list, implement, self-test, a separate FINAL review, then commit). If still
+REVISE, the gap will almost certainly be even narrower (round 6 said "no new design categories needed,
+range does not need to grow") -- keep iterating the same way rather than restarting.
 
 ## C6 [not started, depends only on C1 which is done] Study note generation/storage/dashboard
 C1 built the durable storage substrate only. Still missing entirely: study-request input
