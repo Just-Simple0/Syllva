@@ -77,8 +77,16 @@ def test_unrelated_usage_id_defects_do_not_veto_target(operation, junk):
     if junk == "duplicate_id":
         rows.append(deepcopy(sibling))
     result = _apply(reader, writer, drive, resolver, proposal)
-    assert result.state is QueueState.APPLIED
-    assert writer.target_mutations == 1
+    if junk == "overlap":
+        # rev10 C5: a same (Session, Material, Role) sibling at a different
+        # range is a genuine slot conflict now (contract Sec 5.2 -- at most
+        # one live Usage per slot), not an unrelated defect to ignore.
+        assert result.state is QueueState.SUPERSEDED
+        assert writer.target_mutations == 0
+        assert "duplicate sibling" in result.reason
+    else:
+        assert result.state is QueueState.APPLIED
+        assert writer.target_mutations == 1
 
 
 @pytest.mark.parametrize("operation", ["create_usage", "update_range"])

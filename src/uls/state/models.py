@@ -210,6 +210,7 @@ class ProviderWriteAttempt:
     response_state: str = "PREPARED"
     readback_json: str | None = None
     error_class: str | None = None
+    pre_dispatch_snapshot_json: str | None = None
 
 
 @dataclass(frozen=True)
@@ -249,6 +250,56 @@ class StudyNoteHead:
     inactive_reason: str | None = None
     current_note_key: str | None = None
     current_attempt_no: int | None = None
+    created_at: str = ""
+    updated_at: str = ""
+
+
+@dataclass(frozen=True)
+class RangeIntentHead:
+    """Generation-bound slot state for one (Session, Material, Role) usage slot.
+
+    current_usage_app_id is the PERMANENT slot-to-Usage binding (persists across
+    generations, like current_receipt_id on StudyNoteHead). reservation_state,
+    reserved_generation, reserved_target_id, and dispatch_attempt_no are
+    TRANSIENT, scoped to one in-flight _create_usage() dispatch attempt, and
+    always return to NONE once that attempt reaches any terminal outcome.
+    """
+
+    usage_slot_key: str
+    session_app_id: str
+    material_app_id: str
+    usage_role: str
+    current_request_id: str
+    current_receipt_id: str
+    receipt_hash: str
+    current_operation: str
+    intent_generation: int
+    current_usage_app_id: str | None = None
+    current_target_entity_id: str | None = None
+    current_proposal_id: str | None = None
+    reservation_state: str = "NONE"
+    reserved_generation: int | None = None
+    reserved_target_id: str | None = None
+    dispatch_attempt_no: int = 0
+    apply_lease_expires_at: str | None = None
+    current_usage_provider: str | None = None
+    current_usage_provider_row_id: str | None = None
+    created_at: str = ""
+    updated_at: str = ""
+
+
+@dataclass(frozen=True)
+class UsageProposalOutboxEntry:
+    """One durable, immutable-per-generation v2 usage-proposal publication intent."""
+
+    proposal_id: str
+    usage_slot_key: str
+    request_id: str
+    intent_generation: int
+    action_json: str
+    envelope_json: str
+    publish_state: str = "PREPARED"
+    queue_page_id: str | None = None
     created_at: str = ""
     updated_at: str = ""
 
@@ -340,10 +391,12 @@ __all__ = [
     "NoteRequestReference",
     "ProcessingRecord",
     "ProviderWriteAttempt",
+    "RangeIntentHead",
     "RequestReceipt",
     "SemesterRegistration",
     "SessionSourceBinding",
     "SourceFile",
     "SourceVersion",
     "StudyNoteHead",
+    "UsageProposalOutboxEntry",
 ]

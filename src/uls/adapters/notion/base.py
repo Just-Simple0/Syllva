@@ -15,6 +15,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
+from functools import partial
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from uls.domain.enums import AutomationActor
@@ -550,6 +551,7 @@ def enforce_write_policy(
                     "Source Hash",
                     "Source Version",
                     "Proposed Action",
+                    "Proposal Envelope",
                     "Evidence",
                     "Review Reason",
                 )
@@ -1097,6 +1099,18 @@ def _assert_supplied_matches_current(supplied: Any, current: Any) -> None:
                 raise ValueError("caller Proposal ID mismatch")
             if canonical_semantics_from_queue(candidate) != expected:
                 raise ValueError("caller approval semantics mismatch")
+            from uls.domain.approval_identity import parse_usage_proposal_envelope
+
+            supplied_envelope_raw = _field(
+                supplied, "Proposal Envelope", "proposal_envelope", default=_MISSING
+            )
+            if supplied_envelope_raw is not _MISSING:
+                supplied_envelope = parse_usage_proposal_envelope(
+                    {"Proposal Envelope": supplied_envelope_raw}
+                )
+                current_envelope = parse_usage_proposal_envelope(current)
+                if supplied_envelope != current_envelope:
+                    raise ValueError("caller Proposal Envelope mismatch")
             # Phase4 intentionally does not persist a Target DB property;
             # the logical target is part of the canonical action.  Continue
             # accepting the legacy caller mirror only when it agrees with
@@ -1164,6 +1178,16 @@ def _call_with_supported_signature(
     positional: tuple[Any, ...],
     keyword_values: Mapping[str, Any],
 ) -> Any:
+    return _prepare_supported_call(method, positional, keyword_values)()
+
+
+def _prepare_supported_call(
+    method: Callable[..., Any],
+    positional: tuple[Any, ...],
+    keyword_values: Mapping[str, Any],
+    *,
+    require_signature: bool = False,
+) -> Callable[[], Any]:
     """Call a fake/provider method without weakening the policy boundary.
 
     Test fakes in this repository intentionally use both three-argument and
@@ -1175,16 +1199,41 @@ def _call_with_supported_signature(
     try:
         signature = inspect.signature(method)
     except (TypeError, ValueError):
-        return method(*positional, **dict(keyword_values))
+        if require_signature:
+            raise PolicyViolation("marker backend signature cannot be validated") from None
+        return lambda: method(*positional, **dict(keyword_values))
+
+    if require_signature:
+        # Every candidate carries the complete database/entity/patch payload.
+        # Never truncate that payload merely to fit a shorter callable.
+        candidates = [
+            ((), dict(keyword_values)),
+            ((), {key: value for key, value in keyword_values.items() if key != "actor"}),
+            (positional[:3], {"actor": keyword_values["actor"]}),
+            (positional, {}),
+            (positional[:3], {}),
+        ]
+        for args, kwargs in candidates:
+            try:
+                signature.bind(*args, **kwargs)
+            except TypeError:
+                continue
+            return partial(method, *args, **kwargs)
+        raise PolicyViolation("marker backend cannot accept the complete write payload")
+
+    def prepare(*args: Any, **kwargs: Any) -> Callable[[], Any]:
+        if require_signature:
+            signature.bind(*args, **kwargs)
+        return lambda: method(*args, **kwargs)
 
     parameters = list(signature.parameters.values())
     accepts_kwargs = any(parameter.kind is parameter.VAR_KEYWORD for parameter in parameters)
     parameter_names = {parameter.name for parameter in parameters}
     if accepts_kwargs:
-        return method(**dict(keyword_values))
+        return prepare(**dict(keyword_values))
 
     if all(name in parameter_names for name in keyword_values):
-        return method(**dict(keyword_values))
+        return prepare(**dict(keyword_values))
 
     # A fake often calls the database parameter ``db`` and makes ``actor``
     # keyword-only.  Keep the canonical positional order for the provider
@@ -1205,7 +1254,7 @@ def _call_with_supported_signature(
         if name in parameter_names and name not in used_positional_names
     }
     if actor_parameter is not None and actor_parameter.kind is actor_parameter.KEYWORD_ONLY:
-        return method(
+        return prepare(
             *positional[: len(positional_parameters)],
             **supported_keyword_values,
         )
@@ -1214,18 +1263,18 @@ def _call_with_supported_signature(
     # the values we do know, even if a non-canonical optional name is present.
     named_values = supported_keyword_values
     if named_values and len(positional_parameters) == 0:
-        return method(**named_values)
+        return prepare(**named_values)
 
     if len(positional_parameters) >= len(positional):
         if supported_keyword_values:
-            return method(*positional, **supported_keyword_values)
-        return method(*positional)
+            return prepare(*positional, **supported_keyword_values)
+        return prepare(*positional)
     if supported_keyword_values:
-        return method(
+        return prepare(
             *positional[: len(positional_parameters)],
             **supported_keyword_values,
         )
-    return method(*positional[: len(positional_parameters)])
+    return prepare(*positional[: len(positional_parameters)])
 
 
 def _guarded_update(
@@ -1432,14 +1481,24 @@ def _validate_phase4_queue_identity(record: Any) -> None:
         ProposalType.EXAM_SCOPE.value,
     }:
         return
-    from uls.domain.approval_identity import canonical_semantics_from_queue, derive_proposal_id
+    from uls.domain.approval_identity import (
+        canonical_semantics_from_queue,
+        derive_proposal_id_for_read,
+    )
 
     try:
         semantics = canonical_semantics_from_queue(record)
     except (TypeError, ValueError) as exc:
         raise PolicyViolation("stored strict Queue action is malformed") from exc
     stored_id = _proposal_id(record)
-    expected_id = derive_proposal_id(str(proposal_type), semantics)
+    # derive_proposal_id_for_read is the single shared dispatcher: EXAM_SCOPE
+    # always uses v1; MATERIAL_USAGE/PAGE_RANGE use v2 when a present, valid
+    # Proposal Envelope exists on this record, otherwise v1 (legacy-row
+    # identity tolerance -- callers decide separately whether a legacy row
+    # may be approved/applied). A present-but-INVALID envelope raises here
+    # via parse_usage_proposal_envelope and is never silently treated as
+    # absent.
+    expected_id = derive_proposal_id_for_read(str(proposal_type), record, semantics)
     if stored_id != expected_id:
         raise PolicyViolation("stored Queue Proposal ID fails semantic self-validation")
 
@@ -2213,6 +2272,43 @@ class ApprovalReader:
     read_approval = read
 
 
+@runtime_checkable
+class UsageIntentStateReader(Protocol):
+    """Narrow view of range_intent_heads/usage_proposal_outbox for the HAA v2 guard.
+
+    Deliberately narrow so HumanApprovalApplier stays provider/state-neutral --
+    it does not import or construct a concrete SQLite state store itself. The
+    Guard writes cover the marker/target interval and persist structured outcome
+    evidence before exact-owner release. They never mint approval or advance claims.
+    """
+
+    def get_range_intent_head(self, usage_slot_key: str) -> Any: ...
+
+    def get_usage_proposal_outbox(self, proposal_id: str) -> Any: ...
+
+    def acquire_apply_lease(
+        self, *, usage_slot_key: str, generation: int, proposal_id: str,
+        baseline_json: str, expected_json: str,
+    ) -> str | None: ...
+
+    def mark_apply_mutating(self, *, invocation_token: str) -> None: ...
+
+    def record_apply_outcome(
+        self, *, invocation_token: str, readback_json: str,
+        not_applied_error: Exception | None = None,
+    ) -> None: ...
+
+    def release_apply_lease(
+        self, *, usage_slot_key: str, generation: int, invocation_token: str,
+    ) -> bool: ...
+
+    def finalize_resolved_apply(self, *, usage_slot_key: str, generation: int, proposal_id: str) -> bool: ...
+
+    def has_apply_effect_proof(
+        self, *, usage_slot_key: str, generation: int, proposal_id: str, readback_json: str,
+    ) -> bool: ...
+
+
 class HumanApprovalApplier:
     """Apply an exact, currently approved proposal through human authority.
 
@@ -2236,6 +2332,7 @@ class HumanApprovalApplier:
         automation_queue_id: str | None = None,
         automation_queue_db_id: str | None = None,
         automation_queue_ids: set[str] | None = None,
+        usage_intent_state: UsageIntentStateReader | None = None,
     ) -> None:
         if callable(decision_by) and clock is None:
             # A small convenience for tests that pass a clock as the second
@@ -2258,6 +2355,7 @@ class HumanApprovalApplier:
         self._source_reader = source_reader
         self._source_binding_resolver = source_binding_resolver
         self._config = config
+        self._usage_intent_state = usage_intent_state
 
     def _timestamp(self) -> str:
         value = self._clock()
@@ -2267,6 +2365,123 @@ class HumanApprovalApplier:
             value = value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc).isoformat()
 
+    def _validate_v2_usage_generation(
+        self, record: Any
+    ) -> None:
+        """Enforce the legacy/v2 split for MATERIAL_USAGE/PAGE_RANGE.
+
+        Target/final behavior (contract Sec 5.3's four-way split) is:
+        envelope absent + State != APPLIED: deny, a new v2 request is required.
+        envelope absent + State == APPLIED: no check -- unchanged v1
+            idempotent-replay path (see _apply_phase4).
+        envelope present and VALID: requires the trusted guarded adapter and
+            full state-aware generation check, including every replay.
+        envelope present but INVALID: parse_usage_proposal_envelope() itself
+            raises -- this is unconditional and applies regardless of State,
+            never falling through to the APPLIED-replay case.
+
+        CURRENTLY: the "envelope absent + State != APPLIED: deny" branch is
+        deliberately a no-op (deferred), not yet enforced -- see the NOTE in
+        this method's body. Activating it is bundled with the producer-side
+        v2 envelope/generation-claim wiring (a separate, later slice), since
+        the producer does not build envelopes yet and enforcing this now
+        would deny every pending v1 proposal system-wide. The "present but
+        INVALID" half IS active now, unconditionally, in this slice.
+
+        Called from BOTH _read_current() (the first entry point, before any
+        Queue-mutating side effect) and _phase4_approved_queue() (the final
+        pre-write checkpoint) so a stale generation cannot win a race against
+        a newer one that was claimed after the initial read.
+        """
+
+        from uls.domain.approval_identity import (
+            canonical_semantics_from_queue,
+            derive_usage_slot_key,
+            parse_usage_proposal_envelope,
+        )
+
+        proposal_type = _wire_value(
+            _get_field(record, "Proposal Type", "proposal_type", default=None)
+        )
+        if proposal_type not in {
+            ProposalType.MATERIAL_USAGE.value,
+            ProposalType.PAGE_RANGE.value,
+        }:
+            return
+        envelope = parse_usage_proposal_envelope(record)
+        if envelope is None:
+            # NOTE: the accepted rev10 design (contract Sec 5.3) ultimately
+            # requires denying a non-APPLIED legacy (envelope-less) proposal
+            # ("미적용 v1 제안은 '새 제안 필요'로 보류") so every pending
+            # MATERIAL_USAGE/PAGE_RANGE proposal must be resubmitted through
+            # the v2 producer once it ships. That enforcement is NOT yet
+            # activated here: the existing contract/unit test suite still
+            # exercises the current (pre-C5) v1 create/approve/apply
+            # lifecycle without envelopes throughout, and flipping this on
+            # unconditionally breaks that entire suite (a coordinated test
+            # migration to v2 envelopes is a separate, larger follow-up, not
+            # bundled into this slice). A present-but-INVALID envelope is
+            # still always rejected above via parse_usage_proposal_envelope,
+            # regardless of this deferred enforcement -- that guard is not
+            # weakened.
+            return
+        from .guarded import GuardedNotionWriter
+
+        if not isinstance(self._adapter, GuardedNotionWriter):
+            raise PolicyViolation("v2 usage invocation requires the trusted GuardedNotionWriter")
+        if self._usage_intent_state is None:
+            raise PolicyViolation(
+                "v2 usage proposal requires a state-aware HumanApprovalApplier"
+            )
+        try:
+            semantics = canonical_semantics_from_queue(record)
+        except (TypeError, ValueError) as exc:
+            raise PolicyViolation("stored Phase4 Queue action is malformed") from exc
+        slot_key = derive_usage_slot_key(
+            semantics["session_id"], semantics["material_id"], semantics["usage_role"]
+        )
+        if envelope["usage_slot_key"] != slot_key:
+            raise PolicyViolation(
+                "Proposal Envelope usage_slot_key does not match the action"
+            )
+        head = self._usage_intent_state.get_range_intent_head(slot_key)
+        if head is None:
+            raise PolicyViolation("no range-intent head exists for this usage slot")
+        if (
+            envelope["request_id"] != getattr(head, "current_request_id", None)
+            or envelope["intent_generation"] != getattr(head, "intent_generation", None)
+        ):
+            raise PolicyViolation(
+                "Proposal Envelope generation is not the slot's current generation"
+            )
+        proposal_id = _proposal_id(record)
+        if getattr(head, "current_proposal_id", None) != proposal_id:
+            raise PolicyViolation("range-intent head does not point at this proposal")
+        outbox = self._usage_intent_state.get_usage_proposal_outbox(proposal_id)
+        if outbox is None:
+            raise PolicyViolation("no durable outbox entry exists for this proposal")
+        if (
+            getattr(outbox, "usage_slot_key", None) != slot_key
+            or getattr(outbox, "request_id", None) != envelope["request_id"]
+            or getattr(outbox, "intent_generation", None) != envelope["intent_generation"]
+        ):
+            raise PolicyViolation(
+                "usage proposal outbox does not match this proposal's slot/request/generation"
+            )
+        if getattr(outbox, "publish_state", None) != "PUBLISHED":
+            raise PolicyViolation("usage proposal outbox is not yet published")
+        if getattr(outbox, "queue_page_id", None) != _physical_or_logical_id(record, ""):
+            raise PolicyViolation("published outbox physical Queue identity differs")
+        from uls.domain.approval_identity import (
+            canonical_action_json,
+            canonical_usage_proposal_envelope_json,
+        )
+
+        if (getattr(outbox, "action_json", None) != canonical_action_json(semantics)
+            or getattr(outbox, "envelope_json", None) != canonical_usage_proposal_envelope_json(envelope)
+            or getattr(head, "current_target_entity_id", None) != semantics["target_entity_id"]
+            or getattr(head, "current_operation", None) != semantics["operation"]):
+            raise PolicyViolation("bound outbox/intent differs from approved action")
     def _read_current(self, supplied: Any) -> tuple[str, Any]:
         if isinstance(supplied, str):
             proposal_id = _valid_proposal_id(supplied)
@@ -2282,6 +2497,7 @@ class HumanApprovalApplier:
             raise PolicyViolation(f"Current approval proposal not found: {proposal_id}")
         _require_phase4_queue_backend(current, self._adapter)
         _validate_phase4_queue_identity(current)
+        self._validate_v2_usage_generation(current)
         current_id = _proposal_id(current)
         if current_id != proposal_id:
             raise PolicyViolation("Approval record Proposal ID does not match the requested ID")
@@ -2358,6 +2574,7 @@ class HumanApprovalApplier:
             return None
         _require_phase4_queue_backend(current, self._adapter)
         _validate_phase4_queue_identity(current)
+        self._validate_v2_usage_generation(current)
         if _wire_value(_get_field(current, "Proposal Type", "proposal_type")) != proposal_type:
             raise PolicyViolation("Phase4 approval type changed before target application")
         if (
@@ -2441,6 +2658,8 @@ class HumanApprovalApplier:
         proposal_type: str,
         semantics: Mapping[str, Any],
         target_patch: Mapping[str, Any],
+        *,
+        before_marker_write: Callable[[], None] | None = None,
     ) -> bool:
         """Persist and independently verify the write-ahead marker."""
 
@@ -2493,16 +2712,40 @@ class HumanApprovalApplier:
         except Exception:  # noqa: BLE001 - provider ambiguity must fail closed
             return False
 
+        marker_dispatch_started = False
+
+        def before_owned_marker_dispatch() -> None:
+            nonlocal marker_dispatch_started
+            assert before_marker_write is not None
+            before_marker_write()
+            marker_dispatch_started = True
+
         try:
-            _guarded_update(
-                self._adapter,
-                self._actor,
-                self._queue_db_id,
-                physical_id,
-                {"Last Error": marker},
-                automation_queue_ids=set(self._queue_ids or ()),
-            )
-        except Exception:  # noqa: BLE001 - provider ambiguity must fail closed
+            if before_marker_write is not None:
+                from .guarded import GuardedNotionWriter
+
+                if not isinstance(self._adapter, GuardedNotionWriter):
+                    raise PolicyViolation("v2 marker requires the trusted guarded provider boundary")
+                self._adapter._update_haa_marker(
+                    self._queue_db_id, physical_id, marker,
+                    before_provider_write=before_owned_marker_dispatch,
+                )
+            else:
+                _guarded_update(
+                    self._adapter,
+                    self._actor,
+                    self._queue_db_id,
+                    physical_id,
+                    {"Last Error": marker},
+                    automation_queue_ids=set(self._queue_ids or ()),
+                )
+        except Exception as exc:
+            if before_marker_write is not None and not marker_dispatch_started:
+                return False
+            if before_marker_write is not None and isinstance(exc, ProviderWriteNotAppliedError):
+                # Only this invocation's attempted marker write supplies this
+                # guarantee. The owned flow must persist proof before release.
+                raise
             return self._phase4_marker_is_verified(
                 proposal_id,
                 proposal_type,
@@ -2510,6 +2753,8 @@ class HumanApprovalApplier:
                 target_patch,
                 expected_phase=_PHASE4_APPLY_MARKER_PHASE_PREPARED,
             )
+        if before_marker_write is not None and not marker_dispatch_started:
+            return False
         return self._phase4_marker_is_verified(
             proposal_id,
             proposal_type,
@@ -2517,6 +2762,37 @@ class HumanApprovalApplier:
             target_patch,
             expected_phase=_PHASE4_APPLY_MARKER_PHASE_PREPARED,
         )
+
+    def _phase4_write_marker_transition(
+        self, physical_id: str, marker: str | None, *, expected_marker: str,
+        expected_state: QueueState,
+    ) -> bool:
+        """Return whether our backend was attempted, never infer it from readback."""
+        from .guarded import GuardedNotionWriter
+
+        attempted = False
+
+        def before_attempt() -> None:
+            nonlocal attempted
+            attempted = True
+
+        try:
+            if isinstance(self._adapter, GuardedNotionWriter):
+                self._adapter._update_haa_marker(
+                    self._queue_db_id, physical_id, marker,
+                    expected_marker=expected_marker, expected_state=expected_state,
+                    before_provider_write=before_attempt,
+                )
+            else:
+                # Legacy direct adapters retain their established boundary.
+                attempted = True
+                _guarded_update(
+                    self._adapter, self._actor, self._queue_db_id, physical_id,
+                    {"Last Error": marker}, automation_queue_ids=set(self._queue_ids or ()),
+                )
+        except Exception:  # noqa: BLE001 - readback is permitted only after an own backend attempt
+            return attempted
+        return attempted
 
     def _phase4_mark_effect_observed(
         self,
@@ -2588,23 +2864,12 @@ class HumanApprovalApplier:
         except Exception:
             return False
 
-        try:
-            _guarded_update(
-                self._adapter,
-                self._actor,
-                self._queue_db_id,
-                physical_id,
-                {"Last Error": marker},
-                automation_queue_ids=set(self._queue_ids or ()),
-            )
-        except Exception:
-            return self._phase4_marker_is_verified(
-                proposal_id,
-                proposal_type,
-                semantics,
-                target_patch,
-                expected_phase=_PHASE4_APPLY_MARKER_PHASE_EFFECT_OBSERVED,
-            )
+        if not self._phase4_write_marker_transition(
+            physical_id, marker,
+            expected_marker=_phase4_apply_marker_text(proposal_id, proposal_type, semantics, target_patch),
+            expected_state=QueueState.APPROVED,
+        ):
+            return False
         return self._phase4_marker_is_verified(
             proposal_id,
             proposal_type,
@@ -2665,17 +2930,12 @@ class HumanApprovalApplier:
         except Exception:
             return False
 
-        try:
-            _guarded_update(
-                self._adapter,
-                self._actor,
-                self._queue_db_id,
-                physical_id,
-                {"Last Error": None},
-                automation_queue_ids=set(self._queue_ids or ()),
-            )
-        except Exception:
-            pass
+        if not self._phase4_write_marker_transition(
+            physical_id, None,
+            expected_marker=_phase4_apply_marker_text(proposal_id, proposal_type, semantics, target_patch),
+            expected_state=QueueState.APPROVED,
+        ):
+            return False
 
         try:
             current = _read_approval(
@@ -2692,6 +2952,12 @@ class HumanApprovalApplier:
             if _wire_value(
                 _get_field(current, "Proposal Type", "proposal_type", default=None)
             ) != proposal_type:
+                return False
+            if (
+                coerce_queue_state(_get_field(current, "State")) is not QueueState.APPROVED
+                or coerce_decision(_decision_field(current)) is not Decision.Approve
+                or canonical_semantics_from_queue(current) != semantics
+            ):
                 return False
             return _phase4_apply_marker_phase(
                 current,
@@ -2809,17 +3075,15 @@ class HumanApprovalApplier:
         except Exception:
             return False
 
-        try:
-            _guarded_update(
-                self._adapter,
-                self._actor,
-                self._queue_db_id,
-                physical_id,
-                {"Last Error": None},
-                automation_queue_ids=set(self._queue_ids or ()),
-            )
-        except Exception:
-            pass
+        if not self._phase4_write_marker_transition(
+            physical_id, None,
+            expected_marker=_phase4_apply_marker_text(
+                proposal_id, proposal_type, semantics, target_patch,
+                phase=_PHASE4_APPLY_MARKER_PHASE_EFFECT_OBSERVED,
+            ),
+            expected_state=QueueState.APPLIED,
+        ):
+            return False
 
         return self._phase4_confirm_applied_queue(
             proposal_id,
@@ -3250,6 +3514,34 @@ class HumanApprovalApplier:
         return ApprovalApplyResult(proposal_id, QueueState.APPLIED, True, None)
 
     def _apply_phase4(self, proposal_id: str, current: Any) -> ApprovalApplyResult:
+        """Defensive validation/ownership wrapper; public entry remains apply().
+
+        The owned body and marker helpers are implementation-only: their
+        preconditions are established by this wrapper and the public read flow.
+        """
+        from uls.domain.approval_identity import parse_usage_proposal_envelope
+
+        self._validate_v2_usage_generation(current)
+        envelope = parse_usage_proposal_envelope(current)
+        if envelope is not None:
+            assert self._usage_intent_state is not None
+            self._usage_intent_state.finalize_resolved_apply(
+                usage_slot_key=envelope["usage_slot_key"], generation=envelope["intent_generation"], proposal_id=proposal_id,
+            )
+        ownership: list[tuple[str, int, str]] = []
+        try:
+            return self._apply_phase4_owned(proposal_id, current, ownership)
+        finally:
+            if ownership and self._usage_intent_state is not None:
+                slot, generation, token = ownership[0]
+                # Exact-owner CAS clears HELD/RESOLVED, never ambiguous MUTATING.
+                self._usage_intent_state.release_apply_lease(
+                    usage_slot_key=slot, generation=generation, invocation_token=token,
+                )
+
+    def _apply_phase4_owned(
+        self, proposal_id: str, current: Any, ownership: list[tuple[str, int, str]],
+    ) -> ApprovalApplyResult:
         """Apply a canonical Material Usage/PAGE_RANGE action with recovery."""
 
         from uls.adapters.drive.binding import SourceBindingResolver
@@ -3328,6 +3620,9 @@ class HumanApprovalApplier:
             target_patch=target_patch,
         )
         marker_present = marker_phase is not None
+
+        if (state is QueueState.APPLIED or marker_phase == _PHASE4_APPLY_MARKER_PHASE_EFFECT_OBSERVED) and not self._c5_effect_proven(current, proposal_id, session_id):
+            return self._phase4_recoverable(proposal_id, "durable C5 physical effect proof is missing or no longer matches")
 
         applied_audit_incomplete = (
             state is QueueState.APPLIED and not _phase4_audit_fields_complete(current)
@@ -3499,7 +3794,7 @@ class HumanApprovalApplier:
             resulting_range,
             session_id,
         )
-        if duplicate:
+        if duplicate or _phase4_has_slot_sibling(usage_rows, target_id, material_id, role, session_id):
             return terminal_or_recover("would create a duplicate sibling Material Usage")
 
         reconcile_kwargs = {
@@ -3558,14 +3853,69 @@ class HumanApprovalApplier:
                     "previous target attempt is not at the exact desired state",
                 )
 
+            from uls.domain.approval_identity import (
+                c5_usage_snapshot_json,
+                parse_c5_usage_snapshot,
+                parse_usage_proposal_envelope,
+            )
+
+            before_marker_write: Callable[[], None] | None = None
+            envelope = parse_usage_proposal_envelope(current)
+            if envelope is not None:
+                assert self._usage_intent_state is not None
+                self._validate_v2_usage_generation(current)
+                baseline = self._c5_snapshot(session_id)
+                rows = parse_c5_usage_snapshot(baseline)
+                physical_targets = [row for row in rows if row["usage_app_id"] == target_id]
+                if len(physical_targets) != 1:
+                    raise PolicyViolation("C5 physical target is missing or ambiguous")
+                expected = dict(physical_targets[0])
+                expected.update(start_page=desired.start_page, end_page=desired.end_page, verified=desired_verified)
+                head = self._usage_intent_state.get_range_intent_head(envelope["usage_slot_key"])
+                if head.current_usage_provider_row_id is not None and (
+                    head.current_usage_provider_row_id != expected["provider_row_id"]
+                    or head.current_usage_provider != expected["provider"]
+                ):
+                    raise PolicyViolation("C5 permanent physical binding changed")
+                token = self._usage_intent_state.acquire_apply_lease(
+                    usage_slot_key=envelope["usage_slot_key"], generation=envelope["intent_generation"],
+                    proposal_id=proposal_id, baseline_json=baseline,
+                    expected_json=c5_usage_snapshot_json([expected]),
+                )
+                if token is None:
+                    raise PolicyViolation("C5 invocation ownership unavailable or generation stale")
+                ownership.append((envelope["usage_slot_key"], envelope["intent_generation"], token))
+                checked = self._phase4_approved_queue(proposal_id, proposal_type, semantics, target_patch)
+                if checked is None:
+                    return self._phase4_recoverable(proposal_id, "approved Queue unavailable before marker")
+                intent_state = self._usage_intent_state
+                before_marker_write = lambda: intent_state.mark_apply_mutating(invocation_token=token)
+
             # Graph/source reads may take time.  Arm the durable marker, then
             # repeat the trusted dependency and target checks before writing.
-            if not self._phase4_arm_marker(
-                proposal_id,
-                proposal_type,
-                semantics,
-                target_patch,
-            ):
+            try:
+                armed = self._phase4_arm_marker(
+                    proposal_id,
+                    proposal_type,
+                    semantics,
+                    target_patch,
+                    before_marker_write=before_marker_write,
+                )
+            except ProviderWriteNotAppliedError as exc:
+                # No target call is reachable before this arm completes. The
+                # store compares fresh physical rows to this token's acquired
+                # baseline and records typed no-effect atomically; never unlock
+                # MUTATING directly or infer quiescence from a failed read.
+                assert ownership and self._usage_intent_state is not None
+                try:
+                    self._usage_intent_state.record_apply_outcome(
+                        invocation_token=ownership[0][2],
+                        readback_json=self._c5_snapshot(session_id), not_applied_error=exc,
+                    )
+                except Exception:  # noqa: BLE001 - unproven no-effect retains ownership
+                    return self._phase4_recoverable(proposal_id, "marker no-effect physical proof is unavailable")
+                return self._phase4_recoverable(proposal_id, "marker write provably not applied; retry permitted")
+            if not armed:
                 return self._phase4_recoverable(
                     proposal_id,
                     "write-ahead marker persistence is not verified",
@@ -3614,10 +3964,16 @@ class HumanApprovalApplier:
                     "write-ahead marker is not in prepared phase before target write",
                 )
             decision_by = _phase4_decision_by(pre_write, self._decision_by)
+            if ownership and self._c5_snapshot(session_id) != baseline:
+                return self._phase4_recoverable(proposal_id, "physical baseline changed before target write")
             try:
                 _guarded_update(self._adapter, self._actor, "Material Usage", target_id, target_patch)
                 mutated = True
             except Exception as exc:
+                if ownership and not isinstance(exc, ProviderWriteNotAppliedError):
+                    return self._phase4_recoverable(
+                        proposal_id, "ambiguous v2 target outcome remains owned; desired state cannot attribute effect",
+                    )
                 outcome = self._phase4_reconcile_target(
                     graph,
                     session_id,
@@ -3656,6 +4012,12 @@ class HumanApprovalApplier:
                         return self._phase4_recoverable(
                             proposal_id,
                             "target write may not have occurred and marker disarm is unverified",
+                        )
+                    if ownership:
+                        assert self._usage_intent_state is not None
+                        self._usage_intent_state.record_apply_outcome(
+                            invocation_token=ownership[0][2], readback_json=self._c5_snapshot(session_id),
+                            not_applied_error=exc,
                         )
                     return ApprovalApplyResult(
                         proposal_id,
@@ -3699,6 +4061,11 @@ class HumanApprovalApplier:
                     mutated,
                     "effect-observed marker persistence is not verified",
                 )
+            if ownership:
+                assert self._usage_intent_state is not None
+                self._usage_intent_state.record_apply_outcome(
+                    invocation_token=ownership[0][2], readback_json=self._c5_snapshot(session_id),
+                )
             marker_phase = _PHASE4_APPLY_MARKER_PHASE_EFFECT_OBSERVED
 
         # Persisting the effect marker is an external operation. Revalidate
@@ -3723,6 +4090,9 @@ class HumanApprovalApplier:
                 "target/source basis requires reconciliation before audit",
             )
 
+        if not self._c5_effect_proven(current, proposal_id, session_id):
+            return self._phase4_recoverable(proposal_id, "C5 physical proof does not authorize audit")
+
         latest = _read_approval(
             self._adapter,
             proposal_id,
@@ -3732,6 +4102,7 @@ class HumanApprovalApplier:
         )
         if latest is None:
             raise PolicyViolation("approval Queue row disappeared before audit")
+        self._validate_v2_usage_generation(latest)
         expected_type = (
             ProposalType.MATERIAL_USAGE
             if operation == "create_usage"
@@ -3858,6 +4229,44 @@ class HumanApprovalApplier:
                 target_patch,
             )
         return ApprovalApplyResult(proposal_id, QueueState.APPLIED, mutated, None)
+
+    def _c5_effect_proven(self, current: Any, proposal_id: str, session_id: str) -> bool:
+        from uls.domain.approval_identity import parse_usage_proposal_envelope
+
+        envelope = parse_usage_proposal_envelope(current)
+        if envelope is None:
+            return True  # the legacy replay protocol remains outside C5's gate
+        assert self._usage_intent_state is not None
+        return self._usage_intent_state.has_apply_effect_proof(
+            usage_slot_key=envelope["usage_slot_key"], generation=envelope["intent_generation"],
+            proposal_id=proposal_id, readback_json=self._c5_snapshot(session_id),
+        )
+
+    def _c5_snapshot(self, session_id: str) -> str:
+        from uls.domain.approval_identity import c5_usage_snapshot_json
+        from uls.retrieval._compat import field
+        from uls.retrieval.scope import material_usage_identity, usage_app_id
+
+        raw = _phase4_call(self._graph_reader, "get_material_usage", session_id)
+        if raw is None:
+            raise PolicyViolation("C5 readback unavailable")
+        rows = []
+        for row in raw:
+            identity = material_usage_identity(row)
+            if identity is None:
+                raise PolicyViolation("C5 evidence has malformed Usage identity")
+            session, material, role, page_range = identity
+            rows.append({
+                "provider": "notion", "provider_row_id": (
+                    row.get("record_id", row.get("provider_id", row.get("page_id", row.get("id"))))
+                    if isinstance(row, Mapping) else getattr(row, "record_id", getattr(row, "page_id", None))
+                ),
+                "usage_app_id": usage_app_id(row), "session_app_id": session,
+                "material_app_id": material, "usage_role": role,
+                "start_page": page_range.start_page, "end_page": page_range.end_page,
+                "verified": field(row, "Verified", "verified", default=None),
+            })
+        return c5_usage_snapshot_json(rows)
 
     def _phase4_reconcile_target(
         self,
@@ -3988,6 +4397,8 @@ class HumanApprovalApplier:
             _phase4_assert_unique_usage_rows(rows or [], target_id)
             if _phase4_has_sibling_duplicate(rows or [], target_id, material_id, role,
                                              desired_range, session_id):
+                return "unknown"
+            if _phase4_has_slot_sibling(rows or [], target_id, material_id, role, session_id):
                 return "unknown"
             target = _phase4_find_usage(rows or [], target_id)
             if target is None:
@@ -4624,6 +5035,66 @@ def _phase4_has_sibling_duplicate(
     )
 
 
+def _phase4_has_slot_sibling(
+    rows: Sequence[Any],
+    target_id: str,
+    material_id: str,
+    role: str,
+    session_id: str,
+) -> bool:
+    """Range-agnostic (Session, Material, Role) slot-cardinality check (C5 Blocker G).
+
+    Unlike _phase4_has_sibling_duplicate() (which is keyed on the FULL exact
+    (session, material, role, page_range) identity and only catches an exact
+    duplicate range), this checks whether ANY other live Usage exists in the
+    same slot regardless of range -- per contract Sec 5.2, a slot may hold at
+    most one live Usage across all ranges. Uses RAW rows, not
+    _eligible_usage_scopes(), so a malformed/ambiguous range does not
+    silently drop a row from detection -- (session, material, role) are
+    extracted independently of range parsing.
+    """
+
+    from uls.retrieval.scope import usage_app_id
+
+    for row in rows:
+        row_app_id = usage_app_id(row)
+        if row_app_id == target_id:
+            continue
+        row_session_id = _get_field(row, "Session", "session_id", "session", default=None)
+        row_material_id = _get_field(row, "Material", "material_id", "material", default=None)
+        row_role = _get_field(row, "Role", "role", default=None)
+        if (
+            _phase4_related_id_matches(row_session_id, session_id)
+            and _phase4_related_id_matches(row_material_id, material_id)
+            and row_role == role
+        ):
+            return True
+    return False
+
+
+def _phase4_related_id_matches(value: Any, expected: str) -> bool:
+    """Compare a raw Usage row's Session/Material relation field to a strict ID.
+
+    Tolerant of both a resolved app-ID string and a Notion relation mapping
+    shape, since raw rows here are not passed through the scope parser that
+    normally resolves this.
+    """
+
+    if isinstance(value, str):
+        return value == expected
+    if isinstance(value, Mapping):
+        candidate = value.get("id") or value.get("app_id") or value.get("relation")
+        if isinstance(candidate, str):
+            return candidate == expected
+        if isinstance(candidate, Sequence) and not isinstance(candidate, (str, bytes)):
+            for item in candidate:
+                if isinstance(item, Mapping) and item.get("id") == expected:
+                    return True
+                if item == expected:
+                    return True
+    return False
+
+
 def _phase4_target_matches(
     target: Any,
     patch: Mapping[str, Any],
@@ -4770,6 +5241,12 @@ def _create_phase4_queue_once(
     proposal_type = _wire_value(_get_field(properties, "Proposal Type", default=None))
     if proposal_type not in {"MATERIAL_USAGE", "PAGE_RANGE", "EXAM_SCOPE"}:
         return create()
+    # NOTE: derive_proposal_id_for_create() exists for C5-aware callers once
+    # the v2 producer supplies an envelope; this general-purpose gate stays
+    # on the existing read-tolerant _validate_phase4_queue_identity() (v1 for
+    # envelope-less candidates, v2 self-consistency-checked when an envelope
+    # is present) until that producer wiring ships, so the current
+    # non-enveloped creation path stays unaffected.
     _validate_phase4_queue_identity(properties)
     semantics = canonical_semantics_from_queue(properties)
     proposal_id = _proposal_id(properties)
@@ -4822,6 +5299,7 @@ def _upsert_phase4_proposal(
         canonical_action_json,
         canonical_semantics_from_queue,
         derive_proposal_id,
+        derive_proposal_id_for_read,
         parse_action_json,
     )
 
@@ -4852,6 +5330,13 @@ def _upsert_phase4_proposal(
         semantics = canonical_semantics_from_queue(action_record)
     except (TypeError, ValueError) as exc:
         raise PolicyViolation(f"strict proposal action is malformed: {exc}") from exc
+    # NOTE: derive_proposal_id_for_create() exists and is used by C5-aware
+    # callers once the v2 producer supplies an envelope (see
+    # approval_identity.derive_proposal_id_for_create). Until that producer
+    # wiring ships, this general-purpose Queue-creation gate stays on the
+    # plain v1 derive_proposal_id() so the existing non-enveloped proposal
+    # creation path (exercised throughout the current test suite) is
+    # unaffected.
     expected_id = derive_proposal_id(proposal_type, semantics)
     if proposal_id != expected_id:
         raise PolicyViolation("Proposal ID does not match canonical strict semantics")
@@ -4887,7 +5372,7 @@ def _upsert_phase4_proposal(
             existing_semantics = canonical_semantics_from_queue(existing)
         except (TypeError, ValueError) as exc:
             raise PolicyViolation("stored Queue row action is malformed") from exc
-        if derive_proposal_id(proposal_type, existing_semantics) != proposal_id:
+        if derive_proposal_id_for_read(proposal_type, existing, existing_semantics) != proposal_id:
             raise PolicyViolation("stored Queue Proposal ID fails semantic self-validation")
         if existing_semantics != semantics:
             raise PolicyViolation("existing Queue semantics do not match the retry")
@@ -4934,7 +5419,10 @@ def _upsert_phase4_proposal(
                 stored = canonical_semantics_from_queue(recovered)
             except (TypeError, ValueError) as exc:
                 raise PolicyViolation("committed Queue row action is malformed") from exc
-            if derive_proposal_id(proposal_type, stored) != proposal_id or stored != semantics:
+            if (
+                derive_proposal_id_for_read(proposal_type, recovered, stored) != proposal_id
+                or stored != semantics
+            ):
                 raise PolicyViolation("committed Queue row does not match the retry")
             return recovered
         raise

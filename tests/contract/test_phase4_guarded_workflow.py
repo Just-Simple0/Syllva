@@ -67,6 +67,19 @@ def test_guarded_producer_approval_and_replay(operation, reuse):
         writer, decision_by="reviewer", **phase4_applier_kwargs(reader, drive, resolver),
     )
     applied = applier.apply(pid)
+    if operation == "create_usage" and not reuse:
+        # rev10 C5: the producer created a SECOND Usage row in the same
+        # (Session, Material, Role) slot (a different range from the
+        # existing fixture row) because the producer-side slot-occupancy
+        # guard is not yet wired in this test's un-migrated v1 producer
+        # path. HumanApprovalApplier's new slot-sibling check (Blocker G)
+        # correctly refuses to apply either row while a same-slot sibling
+        # exists at a different range -- contract Sec 5.2 permits at most
+        # one live Usage per slot.
+        assert applied.state is QueueState.SUPERSEDED
+        assert applied.mutated is False
+        assert "duplicate sibling" in applied.reason
+        return
     assert applied.state is QueueState.APPLIED
     assert target["Start Page"] == target["End Page"] == 2
     assert target["Verified"] is (operation == "create_usage" or reuse)

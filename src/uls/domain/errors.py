@@ -113,6 +113,19 @@ class ProviderWriteNotAppliedError(ProviderUnavailableError):
     """
 
 
+class ProposalConflictError(UlsError):
+    """A same-generation retry produced different producer output bytes.
+
+    Raised by the range-intent outbox when a caller attempts to persist a
+    different action/envelope for a (usage_slot_key, intent_generation) pair
+    that already has a durably stored entry. This must never be silently
+    caught by broad producer error handling -- it is a fail-closed identity
+    conflict, not a skippable candidate warning.
+    """
+
+    code = "PROPOSAL_CONFLICT"
+
+
 # Short aliases mirror the taxonomy names while the *Error forms remain the
 # explicit exception names used by most Python callers.
 ParsingError = ParseError
@@ -143,16 +156,16 @@ __all__ = [
     "CourseKeyParseError",
     "EntityAmbiguous",
     "EntityAmbiguousError",
+    "EntityIdParseError",
     "EntityNotFound",
     "EntityNotFoundError",
-    "EntityIdParseError",
+    "IdParseError",
     "InvalidCandidate",
     "InvalidCandidateError",
     "InvalidCourseKey",
     "InvalidCourseKeyError",
     "InvalidEntityId",
     "InvalidEntityIdError",
-    "IdParseError",
     "InvalidSubmissionRef",
     "InvalidSubmissionRefError",
     "LocatorNotAllowed",
@@ -165,6 +178,7 @@ __all__ = [
     "PolicyDenied",
     "PolicyDeniedError",
     "PolicyViolation",
+    "ProposalConflictError",
     "ProviderRateLimited",
     "ProviderRateLimitedError",
     "ProviderUnavailable",

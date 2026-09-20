@@ -418,7 +418,13 @@ def test_applier_rechecks_malformed_verified_exact_sibling_added_during_reconcil
     assert reader.material_usage[_SESSION_ID][0]["Verified"] is False
 
 
-def test_applier_allows_a_legitimate_nonidentical_overlap() -> None:
+def test_applier_blocks_a_same_slot_nonidentical_overlap() -> None:
+    """rev10 C5: a same (Session, Material, Role) sibling at a DIFFERENT range
+    is no longer a legitimate independent overlap -- contract Sec 5.2 requires
+    at most one live Usage per slot, so this must now block as a duplicate
+    sibling (reconciliation-required) rather than apply silently alongside it.
+    """
+
     reader, backend, _drive, applier, proposal_id = _approved()
     reader.material_usage[_SESSION_ID].append(
         {
@@ -432,10 +438,10 @@ def test_applier_allows_a_legitimate_nonidentical_overlap() -> None:
 
     result = applier.apply(proposal_id)
 
-    assert result.state is QueueState.APPLIED
-    assert result.mutated is True
-    assert backend.target_mutations == 1
-    assert reader.material_usage[_SESSION_ID][0]["Verified"] is True
+    assert result.state is QueueState.SUPERSEDED
+    assert result.mutated is False
+    assert backend.target_mutations == 0
+    assert "duplicate sibling" in result.reason
 
 
 @pytest.mark.parametrize(

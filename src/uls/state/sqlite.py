@@ -12,14 +12,16 @@ import re
 import sqlite3
 import threading
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from uls.domain.enums import JobStatus, to_processing_status
+from uls.domain.errors import ProposalConflictError
 from uls.domain.ids import parse_course_key, parse_entity_id
 from uls.intake.identity import canonical_json, derive_study_note_key
 from uls.orchestration.jobs import derive_job_key
@@ -44,12 +46,14 @@ from .models import (
     NoteRequestReference,
     ProcessingRecord,
     ProviderWriteAttempt,
+    RangeIntentHead,
     RequestReceipt,
     SemesterRegistration,
     SessionSourceBinding,
     SourceFile,
     SourceVersion,
     StudyNoteHead,
+    UsageProposalOutboxEntry,
 )
 
 _TERMINAL_STATUSES = {
@@ -227,7 +231,8 @@ CREATE TABLE IF NOT EXISTS provider_write_attempts (
     dispatched_at TEXT,
     response_state TEXT NOT NULL,
     readback_json TEXT,
-    error_class TEXT
+    error_class TEXT,
+    pre_dispatch_snapshot_json TEXT
 );
 CREATE TABLE IF NOT EXISTS entity_reservations (
     reservation_id TEXT PRIMARY KEY,
@@ -292,6 +297,66 @@ CREATE TABLE IF NOT EXISTS study_note_heads (
     updated_at TEXT NOT NULL,
     PRIMARY KEY(provider, session_provider_page_id)
 );
+CREATE TABLE IF NOT EXISTS range_intent_heads (
+    usage_slot_key TEXT PRIMARY KEY,
+    session_app_id TEXT NOT NULL,
+    material_app_id TEXT NOT NULL,
+    usage_role TEXT NOT NULL,
+    current_usage_app_id TEXT,
+    current_request_id TEXT NOT NULL,
+    current_receipt_id TEXT NOT NULL,
+    receipt_hash TEXT NOT NULL,
+    current_proposal_id TEXT,
+    current_target_entity_id TEXT,
+    current_operation TEXT NOT NULL CHECK(current_operation IN ('create_usage', 'update_range')),
+    intent_generation INTEGER NOT NULL CHECK(intent_generation >= 1),
+    reservation_state TEXT NOT NULL DEFAULT 'NONE'
+        CHECK(reservation_state IN ('NONE', 'DISPATCHED', 'RECONCILE_REQUIRED')),
+    reserved_generation INTEGER,
+    reserved_target_id TEXT,
+    dispatch_attempt_no INTEGER NOT NULL DEFAULT 0,
+    apply_lease_expires_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS usage_proposal_outbox (
+    proposal_id TEXT PRIMARY KEY,
+    usage_slot_key TEXT NOT NULL REFERENCES range_intent_heads(usage_slot_key),
+    request_id TEXT NOT NULL,
+    intent_generation INTEGER NOT NULL CHECK(intent_generation >= 1),
+    action_json TEXT NOT NULL,
+    envelope_json TEXT NOT NULL,
+    publish_state TEXT NOT NULL DEFAULT 'PREPARED'
+        CHECK(publish_state IN ('PREPARED', 'PUBLISHED', 'RECONCILE_REQUIRED')),
+    queue_page_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(usage_slot_key, intent_generation)
+);
+CREATE TABLE IF NOT EXISTS range_intent_claims (
+    usage_slot_key TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    receipt_id TEXT NOT NULL,
+    intent_generation INTEGER NOT NULL,
+    identity_json TEXT NOT NULL,
+    PRIMARY KEY(usage_slot_key, request_id),
+    UNIQUE(usage_slot_key, receipt_id)
+);
+CREATE TABLE IF NOT EXISTS usage_apply_guards (
+    invocation_token TEXT PRIMARY KEY,
+    usage_slot_key TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    proposal_id TEXT NOT NULL,
+    phase TEXT NOT NULL CHECK(phase IN ('HELD','MUTATING','RESOLVED','RELEASED')),
+    baseline_json TEXT NOT NULL,
+    expected_json TEXT NOT NULL,
+    baseline_mode TEXT,
+    readback_json TEXT,
+    outcome TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS usage_apply_guard_owner
+    ON usage_apply_guards(usage_slot_key) WHERE phase != 'RELEASED';
 CREATE TABLE IF NOT EXISTS note_jobs (
     note_key TEXT PRIMARY KEY,
     course_key TEXT NOT NULL,
@@ -395,7 +460,7 @@ class SQLiteStateStore:
             self._worker_lock.release()
             self._connection.close()
 
-    def __enter__(self) -> "SQLiteStateStore":
+    def __enter__(self) -> SQLiteStateStore:
         return self
 
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
@@ -437,6 +502,13 @@ class SQLiteStateStore:
                     (version, _utc_now()),
                 )
             self._connection.executescript(_INTAKE_SCHEMA)
+            head_columns = {row[1] for row in self._connection.execute("PRAGMA table_info(range_intent_heads)")}
+            for column in ("apply_lease_expires_at", "current_usage_provider", "current_usage_provider_row_id"):
+                if column not in head_columns:
+                    self._connection.execute(f"ALTER TABLE range_intent_heads ADD COLUMN {column} TEXT")
+            guard_columns = {row[1] for row in self._connection.execute("PRAGMA table_info(usage_apply_guards)")}
+            if "baseline_mode" not in guard_columns:
+                self._connection.execute("ALTER TABLE usage_apply_guards ADD COLUMN baseline_mode TEXT")
             intake_columns = {
                 row[1]
                 for row in self._connection.execute("PRAGMA table_info(intake_items)").fetchall()
@@ -474,6 +546,10 @@ class SQLiteStateStore:
             if "stage" not in write_attempt_columns:
                 self._connection.execute(
                     "ALTER TABLE provider_write_attempts ADD COLUMN stage TEXT"
+                )
+            if "pre_dispatch_snapshot_json" not in write_attempt_columns:
+                self._connection.execute(
+                    "ALTER TABLE provider_write_attempts ADD COLUMN pre_dispatch_snapshot_json TEXT"
                 )
             self._migrate_c1_entity_reservations()
 
@@ -1189,6 +1265,7 @@ class SQLiteStateStore:
         values.setdefault("response_state", "PREPARED")
         values.setdefault("readback_json", None)
         values.setdefault("error_class", None)
+        values.setdefault("pre_dispatch_snapshot_json", None)
         if (
             values.get("stage") == _RESERVATION_RECONCILED_STAGE
             or values.get("response_state") == _RESERVATION_NO_MUTATION_RESPONSE
@@ -1201,6 +1278,11 @@ class SQLiteStateStore:
             # by the worker.  Normalize them at the StateStore boundary so
             # the durable TEXT column never receives a Python object.
             values["readback_json"] = _json_text(values["readback_json"])
+        if values["pre_dispatch_snapshot_json"] is not None:
+            # Written once at dispatch time; normalized the same way as
+            # readback_json so the durable column never receives a Python
+            # object. Never overwritten afterward (write-once contract).
+            values["pre_dispatch_snapshot_json"] = _json_text(values["pre_dispatch_snapshot_json"])
         for name in ("attempt_id", "operation", "operation_key", "provider", "response_state"):
             _require_text(values.get(name), name)
         with self._transaction(immediate=True) as connection:
@@ -1217,13 +1299,13 @@ class SQLiteStateStore:
                 INSERT INTO provider_write_attempts(
                     attempt_id, operation, operation_key, provider, target_id,
                     prewrite_committed_at, reservation_id, stage, dispatched_at,
-                    response_state, readback_json, error_class
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    response_state, readback_json, error_class, pre_dispatch_snapshot_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 tuple(values.get(name) for name in (
                     "attempt_id", "operation", "operation_key", "provider", "target_id",
                     "prewrite_committed_at", "reservation_id", "stage", "dispatched_at",
-                    "response_state", "readback_json", "error_class",
+                    "response_state", "readback_json", "error_class", "pre_dispatch_snapshot_json",
                 )),
             )
             return _provider_write_attempt_from_row(
@@ -1861,6 +1943,745 @@ class SQLiteStateStore:
                 (provider, session_provider_page_id),
             ).fetchone()
             return _study_note_head_from_row(row)
+
+
+    # -- range_intent_heads / usage_proposal_outbox (rev10 C5: v2 usage-proposal
+    # envelope + generation-bound identity) -------------------------------
+
+    def claim_range_intent_generation(
+        self,
+        *,
+        usage_slot_key: str,
+        session_app_id: str,
+        material_app_id: str,
+        usage_role: str,
+        request_id: str,
+        receipt_id: str,
+        receipt_hash: str,
+        operation: str,
+        target_entity_id: str,
+        adopted_usage_app_id: str | None,
+        slot_occupant_count: int,
+        adopted_usage_provider: str | None = None,
+        adopted_usage_provider_row_id: str | None = None,
+    ) -> RangeIntentHead:
+        """Claim (or idempotently re-return) the current generation for one usage slot.
+
+        This is PHASE 1 of a two-phase claim. It does NOT accept or store a
+        proposal_id -- the caller must compute the v2 proposal_id AFTER
+        seeing this call's returned intent_generation (proposal_id depends
+        on the confirmed generation), then persist it via
+        bind_range_intent_proposal(). Accepting a caller-precomputed
+        proposal_id here would create a race: two concurrent callers could
+        each predict a different "next generation" before either actually
+        wins the transaction, and the loser's precomputed ID (for a
+        generation it did not actually receive) could otherwise be written.
+
+        adopted_usage_app_id/slot_occupant_count describe the caller's OWN
+        live-graph slot-adoption read (range-agnostic (session, material, role)
+        query) and are only consulted when this slot has no existing head row
+        yet; they are not re-derived here. current_usage_app_id is the PERMANENT
+        slot binding and is never reset by this call once set.
+        """
+
+        for value, name in (
+            (usage_slot_key, "usage_slot_key"),
+            (session_app_id, "session_app_id"),
+            (material_app_id, "material_app_id"),
+            (usage_role, "usage_role"),
+            (request_id, "request_id"),
+            (receipt_id, "receipt_id"),
+            (receipt_hash, "receipt_hash"),
+            (target_entity_id, "target_entity_id"),
+        ):
+            _require_text(value, name)
+        if operation not in {"create_usage", "update_range"}:
+            raise ValueError("operation must be create_usage or update_range")
+        if type(slot_occupant_count) is not int or slot_occupant_count < 0:
+            raise ValueError("slot_occupant_count must be a non-negative integer")
+        from uls.domain.approval_identity import derive_usage_slot_key
+
+        if usage_slot_key != derive_usage_slot_key(session_app_id, material_app_id, usage_role):
+            raise ValueError("usage slot differs from derived semantic identity")
+        if slot_occupant_count > 1:
+            raise ValueError("slot has more than one live Usage; reconciliation required")
+        if adopted_usage_provider is not None or adopted_usage_provider_row_id is not None:
+            if (adopted_usage_app_id is None or adopted_usage_provider != "notion"
+                or not isinstance(adopted_usage_provider_row_id, str)
+                or re.fullmatch(r"[0-9a-f]{32}|[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}", adopted_usage_provider_row_id) is None):
+                raise ValueError("adoption requires strict physical provider identity")
+            adopted_usage_provider_row_id = adopted_usage_provider_row_id.replace("-", "")
+        now = _utc_now()
+        claim_identity = canonical_json({
+            "session_app_id": session_app_id, "material_app_id": material_app_id,
+            "usage_role": usage_role, "request_id": request_id, "receipt_id": receipt_id,
+            "receipt_hash": receipt_hash, "operation": operation,
+            "target_entity_id": target_entity_id,
+            "adopted_usage_app_id": adopted_usage_app_id,
+            "adopted_usage_provider": adopted_usage_provider,
+            "adopted_usage_provider_row_id": adopted_usage_provider_row_id,
+        })
+        with self._transaction(immediate=True) as connection:
+            current = connection.execute(
+                "SELECT * FROM range_intent_heads WHERE usage_slot_key=?",
+                (usage_slot_key,),
+            ).fetchone()
+            previous = connection.execute(
+                "SELECT * FROM range_intent_claims WHERE usage_slot_key=? "
+                "AND (request_id=? OR receipt_id=?)",
+                (usage_slot_key, request_id, receipt_id),
+            ).fetchall()
+            if previous:
+                if len(previous) != 1 or previous[0]["identity_json"] != claim_identity:
+                    raise ValueError("range-intent request/receipt identity conflicts")
+                if current is None or previous[0]["intent_generation"] != current["intent_generation"]:
+                    raise ValueError("historical range-intent claim is stale")
+                return _range_intent_head_from_row(current)
+            if current is not None and not connection.execute(
+                "SELECT 1 FROM range_intent_claims WHERE usage_slot_key=?",
+                (usage_slot_key,),
+            ).fetchone():
+                raise ValueError("legacy claim history is unavailable; explicit recovery required")
+            if current is not None and current["current_receipt_id"] == receipt_id:
+                for column, expected in (
+                    ("session_app_id", session_app_id),
+                    ("material_app_id", material_app_id),
+                    ("usage_role", usage_role),
+                    ("current_request_id", request_id),
+                    ("receipt_hash", receipt_hash),
+                    ("current_operation", operation),
+                    ("current_target_entity_id", target_entity_id),
+                ):
+                    if current[column] != expected:
+                        raise ValueError(
+                            f"same range-intent receipt has conflicting {column}"
+                        )
+                return _range_intent_head_from_row(current)
+
+            if current is None:
+                if operation == "create_usage":
+                    if adopted_usage_app_id is not None and (
+                        slot_occupant_count != 1 or adopted_usage_provider != "notion"
+                        or adopted_usage_provider_row_id is None or adopted_usage_app_id != target_entity_id
+                    ):
+                        raise ValueError("initial adoption requires one occupant and complete matching app/provider/physical target")
+                    if slot_occupant_count == 1 and adopted_usage_app_id is None:
+                        raise ValueError(
+                            "slot has an existing Usage that was not adopted"
+                        )
+                    if slot_occupant_count == 0 and adopted_usage_app_id is not None:
+                        raise ValueError(
+                            "adopted_usage_app_id supplied for an empty slot"
+                        )
+                else:
+                    if adopted_usage_app_id is None or slot_occupant_count != 1:
+                        raise ValueError(
+                            "update_range requires exactly one adopted existing Usage"
+                        )
+                    if adopted_usage_provider != "notion" or adopted_usage_provider_row_id is None:
+                        raise ValueError("initial UPDATE adoption requires complete provider/physical identity")
+                    if adopted_usage_app_id != target_entity_id:
+                        raise ValueError(
+                            "update_range target does not match the adopted Usage"
+                        )
+                connection.execute(
+                    """
+                    INSERT INTO range_intent_heads(
+                        usage_slot_key, session_app_id, material_app_id, usage_role,
+                        current_usage_app_id, current_request_id, current_receipt_id,
+                        receipt_hash, current_proposal_id, current_target_entity_id,
+                        current_operation, intent_generation, reservation_state,
+                        reserved_generation, reserved_target_id, dispatch_attempt_no,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 1, 'NONE', NULL, NULL, 0, ?, ?)
+                    """,
+                    (
+                        usage_slot_key,
+                        session_app_id,
+                        material_app_id,
+                        usage_role,
+                        adopted_usage_app_id,
+                        request_id,
+                        receipt_id,
+                        receipt_hash,
+                        target_entity_id,
+                        operation,
+                        now,
+                        now,
+                    ),
+                )
+            else:
+                if (
+                    current["session_app_id"] != session_app_id
+                    or current["material_app_id"] != material_app_id
+                    or current["usage_role"] != usage_role
+                ):
+                    raise ValueError("range-intent head slot identity is immutable")
+                bound = current["current_usage_app_id"]
+                binding = (bound, current["current_usage_provider"], current["current_usage_provider_row_id"])
+                if any(value is not None for value in binding) and (
+                    not all(binding) or current["current_usage_provider"] != "notion"
+                ):
+                    raise ValueError("permanent physical binding is incomplete; fresh generation refused")
+                if operation == "create_usage" and bound is not None:
+                    raise ValueError(
+                        "slot already has a permanently bound Usage; "
+                        "only update_range against it is allowed"
+                    )
+                if operation == "update_range" and bound != target_entity_id:
+                    raise ValueError(
+                        "update_range target does not match the slot's current binding"
+                    )
+                if current["reservation_state"] != "NONE":
+                    raise ValueError(
+                        "slot has an unresolved provider-write reservation; "
+                        "reconciliation required before a new generation may claim it"
+                    )
+                if current["apply_lease_expires_at"] is not None or connection.execute(
+                    "SELECT 1 FROM usage_apply_guards WHERE usage_slot_key=? AND phase!='RELEASED'",
+                    (usage_slot_key,),
+                ).fetchone():
+                    raise ValueError(
+                        "slot has unresolved apply ownership; explicit reconciliation required"
+                    )
+                generation = int(current["intent_generation"]) + 1
+                connection.execute(
+                    """
+                    UPDATE range_intent_heads
+                    SET current_request_id=?, current_receipt_id=?, receipt_hash=?,
+                        current_proposal_id=NULL, current_target_entity_id=?,
+                        current_operation=?, intent_generation=?, updated_at=?
+                    WHERE usage_slot_key=?
+                    """,
+                    (
+                        request_id,
+                        receipt_id,
+                        receipt_hash,
+                        target_entity_id,
+                        operation,
+                        generation,
+                        now,
+                        usage_slot_key,
+                    ),
+                )
+            if current is None and adopted_usage_provider_row_id is not None:
+                connection.execute(
+                    "UPDATE range_intent_heads SET current_usage_provider=?, current_usage_provider_row_id=? WHERE usage_slot_key=?",
+                    (adopted_usage_provider, adopted_usage_provider_row_id, usage_slot_key),
+                )
+            row = connection.execute(
+                "SELECT * FROM range_intent_heads WHERE usage_slot_key=?",
+                (usage_slot_key,),
+            ).fetchone()
+            connection.execute(
+                "INSERT INTO range_intent_claims VALUES (?, ?, ?, ?, ?)",
+                (usage_slot_key, request_id, receipt_id, row["intent_generation"], claim_identity),
+            )
+            return _range_intent_head_from_row(row)
+
+    def get_range_intent_head(self, usage_slot_key: str) -> RangeIntentHead | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM range_intent_heads WHERE usage_slot_key=?",
+                (usage_slot_key,),
+            ).fetchone()
+            return None if row is None else _range_intent_head_from_row(row)
+
+    def acquire_apply_lease(
+        self, *, usage_slot_key: str, generation: int, proposal_id: str,
+        baseline_json: str, expected_json: str,
+    ) -> str | None:
+        """Acquire a durable invocation owner; time never grants another writer ownership."""
+        from uls.domain.approval_identity import parse_c5_usage_snapshot
+
+        baseline = parse_c5_usage_snapshot(baseline_json)
+        expected = parse_c5_usage_snapshot(expected_json)
+        if len(expected) != 1:
+            raise ValueError("one expected physical row required")
+        token = _new_id("usage_apply_")
+        with self._transaction(immediate=True) as connection:
+            head = connection.execute(
+                "SELECT * FROM range_intent_heads WHERE usage_slot_key=?", (usage_slot_key,),
+            ).fetchone()
+            outbox = connection.execute(
+                "SELECT * FROM usage_proposal_outbox WHERE proposal_id=?", (proposal_id,),
+            ).fetchone()
+            if (head is None or head["intent_generation"] != generation
+                or head["current_proposal_id"] != proposal_id
+                or head["apply_lease_expires_at"] is not None
+                or head["reservation_state"] != "NONE"
+                or outbox is None or outbox["publish_state"] != "PUBLISHED"
+                or outbox["usage_slot_key"] != usage_slot_key
+                or outbox["intent_generation"] != generation
+                or outbox["request_id"] != head["current_request_id"]):
+                return None
+            if connection.execute(
+                "SELECT 1 FROM usage_apply_guards WHERE usage_slot_key=? AND phase!='RELEASED'",
+                (usage_slot_key,),
+            ).fetchone():
+                return None
+            if connection.execute(
+                "SELECT 1 FROM usage_apply_guards WHERE usage_slot_key=? AND generation=? AND proposal_id=? AND outcome='effect'",
+                (usage_slot_key, generation, proposal_id),
+            ).fetchone():
+                return None  # a resolved invocation must never authorize another target write
+            target = expected[0]
+            if head["current_operation"] == "update_range" and head["current_usage_provider_row_id"] is None:
+                raise ValueError("UPDATE requires a durably adopted physical binding")
+            semantics = _validate_usage_dispatch_identity(head, outbox)
+            if (target["start_page"] != semantics["desired_range"]["start_page"]
+                or target["end_page"] != semantics["desired_range"]["end_page"]
+                or target["verified"] != (True if head["current_operation"] == "create_usage" else semantics["old_snapshot"]["verified"])):
+                raise ValueError("expected row/ID differs from durable approved intent")
+            if head["current_usage_provider_row_id"] is not None and (
+                head["current_usage_provider_row_id"] != target["provider_row_id"]
+                or head["current_usage_provider"] != target["provider"]
+                or head["current_usage_app_id"] != target["usage_app_id"]
+            ):
+                raise ValueError("permanent physical binding cannot be replaced")
+            if (target["usage_app_id"] != head["current_target_entity_id"]
+                or target["session_app_id"] != head["session_app_id"]
+                or target["material_app_id"] != head["material_app_id"]
+                or target["usage_role"] != head["usage_role"]):
+                raise ValueError("expected physical row does not match bound intent")
+            baseline_mode = _validate_usage_baseline(head, semantics, baseline, target)
+            connection.execute(
+                "INSERT INTO usage_apply_guards (invocation_token, usage_slot_key, generation, proposal_id, "
+                "phase, baseline_json, expected_json, baseline_mode, readback_json, outcome, created_at) "
+                "VALUES (?, ?, ?, ?, 'HELD', ?, ?, ?, NULL, NULL, ?)",
+                (token, usage_slot_key, generation, proposal_id, baseline_json, expected_json, baseline_mode, _utc_now()),
+            )
+            return token
+
+    def mark_apply_mutating(self, *, invocation_token: str) -> None:
+        with self._transaction(immediate=True) as connection:
+            if connection.execute(
+                "UPDATE usage_apply_guards SET phase='MUTATING' WHERE invocation_token=? AND phase='HELD'",
+                (invocation_token,),
+            ).rowcount != 1:
+                raise ValueError("invocation no longer owns a pre-mutation guard")
+
+    def record_apply_outcome(
+        self, *, invocation_token: str, readback_json: str,
+        not_applied_error: Exception | None = None,
+    ) -> None:
+        from uls.domain.errors import ProviderWriteNotAppliedError
+
+        if not_applied_error is not None and not isinstance(not_applied_error, ProviderWriteNotAppliedError):
+            raise ValueError("trusted ProviderWriteNotAppliedError required")
+        outcome = "not_applied" if not_applied_error is not None else "effect"
+        with self._transaction(immediate=True) as connection:
+            guard = connection.execute(
+                "SELECT * FROM usage_apply_guards WHERE invocation_token=? AND phase='MUTATING'",
+                (invocation_token,),
+            ).fetchone()
+            if guard is None:
+                raise ValueError("no active mutating invocation")
+            row = _prove_usage_guard(guard, readback_json, outcome)
+            if row is not None:
+                head = connection.execute(
+                    "SELECT * FROM range_intent_heads WHERE usage_slot_key=?", (guard["usage_slot_key"],),
+                ).fetchone()
+                if head["current_usage_app_id"] is not None and head["current_usage_app_id"] != row["usage_app_id"]:
+                    raise ValueError("permanent app binding cannot be replaced")
+                if head["current_usage_provider_row_id"] is not None and (
+                    head["current_usage_provider_row_id"] != row["provider_row_id"]
+                    or head["current_usage_provider"] != row["provider"]
+                    or head["current_usage_app_id"] != row["usage_app_id"]
+                ):
+                    raise ValueError("permanent physical binding cannot be replaced")
+                connection.execute(
+                    "UPDATE range_intent_heads SET current_usage_app_id=?, current_usage_provider=?, "
+                    "current_usage_provider_row_id=? WHERE usage_slot_key=? AND intent_generation=?",
+                    (row["usage_app_id"], row["provider"], row["provider_row_id"], guard["usage_slot_key"], guard["generation"]),
+                )
+            connection.execute(
+                "UPDATE usage_apply_guards SET phase='RESOLVED', readback_json=?, outcome=? WHERE invocation_token=?",
+                (readback_json, "ProviderWriteNotAppliedError" if not_applied_error else "effect", invocation_token),
+            )
+
+    def release_apply_lease(self, *, usage_slot_key: str, generation: int, invocation_token: str) -> bool:
+        """Only pre-mutation ownership or a durably resolved exact owner can clear."""
+        with self._transaction(immediate=True) as connection:
+            guard = connection.execute(
+                "SELECT * FROM usage_apply_guards WHERE invocation_token=? AND usage_slot_key=? AND generation=?",
+                (invocation_token, usage_slot_key, generation),
+            ).fetchone()
+            if guard is not None and guard["phase"] == "RESOLVED":
+                return self._finalize_resolved_guard(connection, guard)
+            return connection.execute(
+                "UPDATE usage_apply_guards SET phase='RELEASED', "
+                "outcome=COALESCE(outcome, 'pre_mutation') "
+                "WHERE invocation_token=? AND usage_slot_key=? AND generation=? "
+                "AND phase='HELD' "
+                "AND EXISTS (SELECT 1 FROM range_intent_heads WHERE usage_slot_key=? AND intent_generation=?)",
+                (invocation_token, usage_slot_key, generation, usage_slot_key, generation),
+            ).rowcount == 1
+
+    def finalize_resolved_apply(self, *, usage_slot_key: str, generation: int, proposal_id: str) -> bool:
+        """Deterministically finalize only an exact, already-proven RESOLVED owner.
+
+        This never hands a new invocation an old token and never unlocks HELD or
+        MUTATING. The original HAA can only perform audit operations after resolution.
+        """
+        with self._transaction(immediate=True) as connection:
+            guard = connection.execute(
+                "SELECT * FROM usage_apply_guards WHERE usage_slot_key=? AND generation=? "
+                "AND proposal_id=? AND phase='RESOLVED'",
+                (usage_slot_key, generation, proposal_id),
+            ).fetchone()
+            if guard is None:
+                return False
+            return self._finalize_resolved_guard(connection, guard)
+
+    @staticmethod
+    def _finalize_resolved_guard(connection: sqlite3.Connection, guard: sqlite3.Row) -> bool:
+        """Shared proof gate for recovery and exact-token RESOLVED cleanup."""
+        usage_slot_key, generation, proposal_id = guard["usage_slot_key"], guard["generation"], guard["proposal_id"]
+        head = connection.execute(
+            "SELECT * FROM range_intent_heads WHERE usage_slot_key=?", (usage_slot_key,),
+        ).fetchone()
+        if head is None or head["intent_generation"] != generation or head["current_proposal_id"] != proposal_id:
+            return False
+        outbox = connection.execute("SELECT * FROM usage_proposal_outbox WHERE proposal_id=?", (proposal_id,)).fetchone()
+        _validate_usage_dispatch_identity(head, outbox)
+        outcome = guard["outcome"]
+        if outcome not in {"effect", "ProviderWriteNotAppliedError"} or guard["readback_json"] is None:
+            return False
+        proof = _prove_usage_guard(
+            guard, guard["readback_json"],
+            "effect" if outcome == "effect" else "not_applied",
+        )
+        if proof is not None and (
+            head["current_usage_provider"] != proof["provider"]
+            or head["current_usage_provider_row_id"] != proof["provider_row_id"]
+            or head["current_usage_app_id"] != proof["usage_app_id"]
+        ):
+            return False
+        return connection.execute(
+            "UPDATE usage_apply_guards SET phase='RELEASED' WHERE invocation_token=? AND phase='RESOLVED'",
+            (guard["invocation_token"],),
+        ).rowcount == 1
+
+    def has_apply_effect_proof(
+        self, *, usage_slot_key: str, generation: int, proposal_id: str, readback_json: str,
+    ) -> bool:
+        """Audit replay requires durable physical effect proof and matching live rows."""
+        from uls.domain.approval_identity import (
+            c5_usage_snapshot_json,
+            parse_c5_usage_snapshot,
+        )
+
+        with self._transaction(immediate=True) as connection:
+            if connection.execute(
+                "SELECT 1 FROM usage_apply_guards WHERE usage_slot_key=? AND phase IN ('HELD','MUTATING')",
+                (usage_slot_key,),
+            ).fetchone():
+                return False
+            guards = connection.execute(
+                "SELECT * FROM usage_apply_guards WHERE usage_slot_key=? AND generation=? "
+                "AND proposal_id=? AND phase IN ('RESOLVED','RELEASED') AND outcome='effect'",
+                (usage_slot_key, generation, proposal_id),
+            ).fetchall()
+            head = connection.execute("SELECT * FROM range_intent_heads WHERE usage_slot_key=?", (usage_slot_key,)).fetchone()
+            if len(guards) != 1 or head is None or head["intent_generation"] != generation or head["current_proposal_id"] != proposal_id:
+                return False
+            guard = guards[0]
+            proof = _prove_usage_guard(guard, guard["readback_json"], "effect")
+            if proof is None or (
+                head["current_usage_provider"] != proof["provider"]
+                or head["current_usage_provider_row_id"] != proof["provider_row_id"]
+                or head["current_usage_app_id"] != proof["usage_app_id"]
+            ):
+                return False
+            return c5_usage_snapshot_json(parse_c5_usage_snapshot(readback_json)) == c5_usage_snapshot_json(parse_c5_usage_snapshot(guard["readback_json"]))
+
+    def bind_range_intent_proposal(
+        self, *, usage_slot_key: str, generation: int, proposal_id: str
+    ) -> RangeIntentHead:
+        """PHASE 2 of the two-phase claim: durably bind a v2 proposal_id to
+        the EXACT generation claim_range_intent_generation() already
+        confirmed (phase 1). The CAS is conditioned on intent_generation
+        still matching -- if a DIFFERENT receipt's claim has since advanced
+        the generation, this call fails and the caller must recompute
+        proposal_id against the new generation and retry, rather than ever
+        writing an ID that was computed for a generation the head no longer
+        holds. Idempotent when the identical proposal_id is already bound to
+        this exact generation (a legitimate same-receipt retry).
+        """
+
+        _require_text(usage_slot_key, "usage_slot_key")
+        _require_text(proposal_id, "proposal_id")
+        if isinstance(generation, bool) or generation < 1:
+            raise ValueError("generation must be a positive integer")
+        now = _utc_now()
+        with self._transaction(immediate=True) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE range_intent_heads
+                SET current_proposal_id=?, updated_at=?
+                WHERE usage_slot_key=? AND intent_generation=?
+                  AND (current_proposal_id IS NULL OR current_proposal_id=?)
+                """,
+                (proposal_id, now, usage_slot_key, generation, proposal_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM range_intent_heads WHERE usage_slot_key=?",
+                (usage_slot_key,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(usage_slot_key)
+            head = _range_intent_head_from_row(row)
+            if cursor.rowcount != 1:
+                if head.current_proposal_id == proposal_id and head.intent_generation == generation:
+                    return head
+                raise ValueError(
+                    "range-intent generation has advanced since claim; "
+                    "recompute proposal_id against the current generation"
+                )
+            return head
+
+    def reserve_usage_dispatch(
+        self,
+        *,
+        usage_slot_key: str,
+        generation: int,
+        target_id: str,
+        pre_dispatch_snapshot_json: str,
+        provider: str,
+    ) -> tuple[RangeIntentHead, ProviderWriteAttempt] | None:
+        """Atomically claim exclusive ownership of one _create_usage() dispatch.
+
+        Returns None when another caller already holds (or has resolved) the
+        dispatch for this exact generation, OR when the supplied target_id/
+        operation does not match what claim_range_intent_generation already
+        durably committed for this generation -- a caller cannot substitute
+        an arbitrary target to win dispatch ownership. The NONE -> DISPATCHED
+        transition is a single CAS inside one BEGIN IMMEDIATE transaction, so
+        at most one caller can ever win it for a given
+        (usage_slot_key, generation, target_id) triple.
+        """
+
+        _require_text(usage_slot_key, "usage_slot_key")
+        _require_text(target_id, "target_id")
+        _require_text(pre_dispatch_snapshot_json, "pre_dispatch_snapshot_json")
+        _require_text(provider, "provider")
+        if isinstance(generation, bool) or generation < 1:
+            raise ValueError("generation must be a positive integer")
+        now = _utc_now()
+        with self._transaction(immediate=True) as connection:
+            dispatch_head = connection.execute(
+                "SELECT * FROM range_intent_heads WHERE usage_slot_key=?", (usage_slot_key,),
+            ).fetchone()
+            if (dispatch_head is None or dispatch_head["current_proposal_id"] is None
+                or dispatch_head["intent_generation"] != generation):
+                return None
+            dispatch_outbox = connection.execute(
+                "SELECT * FROM usage_proposal_outbox WHERE proposal_id=?", (dispatch_head["current_proposal_id"],),
+            ).fetchone()
+            if dispatch_outbox is None or dispatch_outbox["publish_state"] != "PUBLISHED":
+                return None
+            _validate_usage_dispatch_identity(dispatch_head, dispatch_outbox)
+            cursor = connection.execute(
+                """
+                UPDATE range_intent_heads
+                SET reservation_state='DISPATCHED', reserved_generation=?,
+                    reserved_target_id=?, dispatch_attempt_no=dispatch_attempt_no + 1,
+                    updated_at=?
+                WHERE usage_slot_key=? AND intent_generation=? AND reservation_state='NONE'
+                  AND current_operation='create_usage' AND current_target_entity_id=?
+                  AND current_proposal_id IS NOT NULL
+                  AND EXISTS (SELECT 1 FROM usage_proposal_outbox o
+                    WHERE o.proposal_id=range_intent_heads.current_proposal_id
+                    AND o.usage_slot_key=range_intent_heads.usage_slot_key
+                    AND o.intent_generation=range_intent_heads.intent_generation
+                    AND o.request_id=range_intent_heads.current_request_id
+                    AND o.publish_state='PUBLISHED')
+                  AND NOT EXISTS (SELECT 1 FROM usage_apply_guards g WHERE g.usage_slot_key=range_intent_heads.usage_slot_key AND g.phase!='RELEASED')
+                """,
+                (generation, target_id, now, usage_slot_key, generation, target_id),
+            )
+            if cursor.rowcount != 1:
+                return None
+            head_row = connection.execute(
+                "SELECT * FROM range_intent_heads WHERE usage_slot_key=?",
+                (usage_slot_key,),
+            ).fetchone()
+            head = _range_intent_head_from_row(head_row)
+            attempt_key = (
+                f"{usage_slot_key}:{generation}:{head.dispatch_attempt_no}:{target_id}"
+            )
+            connection.execute(
+                """
+                INSERT INTO provider_write_attempts(
+                    attempt_id, operation, operation_key, provider, target_id,
+                    prewrite_committed_at, reservation_id, stage, dispatched_at,
+                    response_state, readback_json, error_class, pre_dispatch_snapshot_json
+                ) VALUES (?, 'create_usage', ?, ?, ?, ?, NULL, NULL, NULL, 'PREPARED', NULL, NULL, ?)
+                """,
+                (
+                    _new_id("range_intent_"),
+                    attempt_key,
+                    provider,
+                    target_id,
+                    now,
+                    pre_dispatch_snapshot_json,
+                ),
+            )
+            attempt_row = connection.execute(
+                "SELECT * FROM provider_write_attempts WHERE operation_key=?",
+                (attempt_key,),
+            ).fetchone()
+            return head, _provider_write_attempt_from_row(attempt_row)
+
+    def release_usage_reservation(
+        self, *, usage_slot_key: str, generation: int, target_id: str,
+        outcome: str, bound_usage_app_id: str | None = None,
+    ) -> RangeIntentHead:
+        """Legacy dispatch can only block: it lacks owner-bound physical proof."""
+        if outcome != "reconcile":
+            raise ValueError("owner-bound structured evidence required; legacy release is unsupported")
+        with self._transaction(immediate=True) as connection:
+            if connection.execute(
+                "UPDATE range_intent_heads SET reservation_state='RECONCILE_REQUIRED', updated_at=? "
+                "WHERE usage_slot_key=? AND intent_generation=? AND reservation_state='DISPATCHED' "
+                "AND reserved_generation=? AND reserved_target_id=?",
+                (_utc_now(), usage_slot_key, generation, generation, target_id),
+            ).rowcount != 1:
+                raise ValueError("no matching dispatched reservation")
+            row = connection.execute(
+                "SELECT * FROM range_intent_heads WHERE usage_slot_key=?", (usage_slot_key,),
+            ).fetchone()
+            return _range_intent_head_from_row(row)
+
+    def resolve_range_intent_reconciliation(
+        self, *, usage_slot_key: str, generation: int, target_id: str,
+        bound_usage_app_id: str | None,
+    ) -> RangeIntentHead:
+        """No generic unlock: old attempts cannot establish owner quiescence/proof."""
+        raise ValueError("legacy reconciliation lacks owner-bound physical proof; remains blocked")
+
+    def record_usage_proposal_outbox(
+        self,
+        *,
+        proposal_id: str,
+        usage_slot_key: str,
+        request_id: str,
+        intent_generation: int,
+        action_json: str,
+        envelope_json: str,
+    ) -> UsageProposalOutboxEntry:
+        """Persist one generation's proposal bytes before publishing to Notion.
+
+        A byte-identical retry for the same (usage_slot_key, intent_generation) is
+        idempotent. Any difference in stored bytes is a producer-output conflict
+        and fails closed -- it is never silently overwritten.
+        """
+
+        for value, name in (
+            (proposal_id, "proposal_id"),
+            (usage_slot_key, "usage_slot_key"),
+            (request_id, "request_id"),
+            (action_json, "action_json"),
+            (envelope_json, "envelope_json"),
+        ):
+            _require_text(value, name)
+        if isinstance(intent_generation, bool) or intent_generation < 1:
+            raise ValueError("intent_generation must be a positive integer")
+        now = _utc_now()
+        with self._transaction(immediate=True) as connection:
+            existing = connection.execute(
+                "SELECT * FROM usage_proposal_outbox WHERE usage_slot_key=? AND intent_generation=?",
+                (usage_slot_key, intent_generation),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["proposal_id"] != proposal_id
+                    or existing["request_id"] != request_id
+                    or existing["action_json"] != action_json
+                    or existing["envelope_json"] != envelope_json
+                ):
+                    raise ProposalConflictError(
+                        "usage proposal outbox bytes conflict for this generation"
+                    )
+                return _usage_proposal_outbox_from_row(existing)
+            head = connection.execute(
+                "SELECT * FROM range_intent_heads WHERE usage_slot_key=?", (usage_slot_key,),
+            ).fetchone()
+            if (head is None or head["intent_generation"] != intent_generation
+                or head["current_request_id"] != request_id or head["current_proposal_id"] != proposal_id):
+                raise ValueError("outbox requires exact bound head/request/generation/proposal")
+            connection.execute(
+                """
+                INSERT INTO usage_proposal_outbox(
+                    proposal_id, usage_slot_key, request_id, intent_generation,
+                    action_json, envelope_json, publish_state, queue_page_id,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'PREPARED', NULL, ?, ?)
+                """,
+                (
+                    proposal_id,
+                    usage_slot_key,
+                    request_id,
+                    intent_generation,
+                    action_json,
+                    envelope_json,
+                    now,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM usage_proposal_outbox WHERE proposal_id=?",
+                (proposal_id,),
+            ).fetchone()
+            return _usage_proposal_outbox_from_row(row)
+
+    def get_usage_proposal_outbox(self, proposal_id: str) -> UsageProposalOutboxEntry | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM usage_proposal_outbox WHERE proposal_id=?",
+                (proposal_id,),
+            ).fetchone()
+            return None if row is None else _usage_proposal_outbox_from_row(row)
+
+    def mark_usage_proposal_published(
+        self, *, proposal_id: str, queue_page_id: str
+    ) -> UsageProposalOutboxEntry:
+        """Transition PREPARED -> PUBLISHED exactly once (write-once, not overwrite).
+
+        Idempotent only when the SAME queue_page_id is supplied for an
+        entry already PUBLISHED at that exact page -- never silently
+        repoints an existing PUBLISHED entry to a different page, and never
+        promotes a RECONCILE_REQUIRED entry through this generic path.
+        """
+
+        _require_text(proposal_id, "proposal_id")
+        _require_text(queue_page_id, "queue_page_id")
+        now = _utc_now()
+        with self._transaction(immediate=True) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE usage_proposal_outbox
+                SET publish_state='PUBLISHED', queue_page_id=?, updated_at=?
+                WHERE proposal_id=? AND publish_state='PREPARED'
+                """,
+                (queue_page_id, now, proposal_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM usage_proposal_outbox WHERE proposal_id=?",
+                (proposal_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(proposal_id)
+            entry = _usage_proposal_outbox_from_row(row)
+            if cursor.rowcount != 1:
+                if entry.publish_state == "PUBLISHED" and entry.queue_page_id == queue_page_id:
+                    return entry
+                raise ValueError(
+                    "usage proposal outbox is not PREPARED, or is already "
+                    "PUBLISHED at a different page"
+                )
+            return entry
 
     def ensure_note_job(
         self,
@@ -3037,16 +3858,7 @@ class SQLiteStateStore:
                     job_id,
                 ),
             )
-            if desired is JobStatus.PROCESSING:
-                connection.execute(
-                    """
-                    UPDATE processing_records
-                    SET status = ?, finished_at = NULL
-                    WHERE job_id = ? AND finished_at IS NULL
-                    """,
-                    (desired.value, job_id),
-                )
-            elif desired is JobStatus.PENDING:
+            if desired is JobStatus.PROCESSING or desired is JobStatus.PENDING:
                 connection.execute(
                     """
                     UPDATE processing_records
@@ -3677,7 +4489,7 @@ class SQLiteStateStore:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    return datetime.now(UTC).isoformat(timespec="microseconds")
 
 
 def _new_id(prefix: str) -> str:
@@ -3793,6 +4605,113 @@ def _entity_reservation_from_row(row: sqlite3.Row) -> EntityReservation:
 
 def _study_note_head_from_row(row: sqlite3.Row) -> StudyNoteHead:
     return StudyNoteHead(**dict(row))
+
+
+def _validate_usage_baseline(
+    head: sqlite3.Row, semantics: dict[str, Any], baseline: list[dict[str, Any]], target: dict[str, Any],
+) -> str:
+    """Authorize an explicit pre-state before allocating any invocation owner."""
+    slot_keys = ("session_app_id", "material_app_id", "usage_role")
+    occupants = [row for row in baseline if all(row[key] == target[key] for key in slot_keys)]
+    if not occupants and head["current_operation"] == "create_usage":
+        if head["current_usage_app_id"] is not None or any(
+            row["usage_app_id"] == target["usage_app_id"] or row["provider_row_id"] == target["provider_row_id"]
+            for row in baseline
+        ):
+            raise ValueError("empty CREATE baseline contradicts permanent/physical target binding")
+        return "CREATE_EMPTY"
+    if len(occupants) != 1:
+        raise ValueError("existing-target baseline must contain exactly one slot occupant")
+    row = occupants[0]
+    if any(row[key] != target[key] for key in ("provider", "provider_row_id", "usage_app_id")):
+        raise ValueError("baseline does not contain the exact physical/app target")
+    if head["current_operation"] == "update_range" and (
+        row["provider"] != head["current_usage_provider"]
+        or row["provider_row_id"] != head["current_usage_provider_row_id"]
+        or row["usage_app_id"] != head["current_usage_app_id"]
+    ):
+        raise ValueError("UPDATE baseline differs from permanent binding")
+    old = semantics["old_snapshot"]
+    for row_key, old_key in (
+        ("usage_app_id", "usage_id"), ("session_app_id", "session_id"),
+        ("material_app_id", "material_id"), ("usage_role", "role"),
+        ("start_page", "start_page"), ("end_page", "end_page"), ("verified", "verified"),
+    ):
+        if row[row_key] != old[old_key]:
+            raise ValueError("baseline differs from approved old snapshot")
+    if head["current_operation"] == "create_usage":
+        if row["verified"] is not False:
+            raise ValueError("existing CREATE target must be unverified")
+        return "CREATE_EXISTING"
+    return "UPDATE_EXISTING"
+
+
+def _prove_usage_guard(guard: sqlite3.Row, readback_json: str, outcome: str) -> dict[str, Any] | None:
+    """An UPDATE can never enter the generic proof's physical-addition branch."""
+    from uls.domain.approval_identity import parse_c5_usage_snapshot, prove_c5_usage_outcome
+
+    mode = guard["baseline_mode"]
+    before = parse_c5_usage_snapshot(guard["baseline_json"])
+    expected = parse_c5_usage_snapshot(guard["expected_json"])
+    if len(expected) != 1 or mode not in {"UPDATE_EXISTING", "CREATE_EXISTING", "CREATE_EMPTY"}:
+        raise ValueError("guard lacks validated operation-specific baseline")
+    target = expected[0]
+    matching = [row for row in before if row["provider_row_id"] == target["provider_row_id"]]
+    if mode == "CREATE_EMPTY":
+        if matching or any(all(row[key] == target[key] for key in (
+            "session_app_id", "material_app_id", "usage_role"
+        )) for row in before):
+            raise ValueError("CREATE_EMPTY guard has an occupied baseline")
+    elif len(matching) != 1 or matching[0]["usage_app_id"] != target["usage_app_id"]:
+        raise ValueError("existing-target guard cannot be proved as physical addition")
+    return prove_c5_usage_outcome(guard["baseline_json"], readback_json, guard["expected_json"], outcome)
+
+
+def _validate_usage_dispatch_identity(head: sqlite3.Row, outbox: sqlite3.Row | None) -> dict[str, Any]:
+    """Validate committed identity bytes before any dispatch/owner CAS."""
+    from uls.domain.approval_identity import (
+        canonical_action_json,
+        canonical_semantics_from_queue,
+        canonical_usage_proposal_envelope_json,
+        derive_proposal_id_for_create,
+        derive_usage_slot_key,
+        parse_usage_proposal_envelope,
+    )
+
+    if (outbox is None or outbox["publish_state"] != "PUBLISHED"
+        or outbox["proposal_id"] != head["current_proposal_id"]
+        or outbox["usage_slot_key"] != head["usage_slot_key"]
+        or outbox["request_id"] != head["current_request_id"]
+        or outbox["intent_generation"] != head["intent_generation"]):
+        raise ValueError("published outbox does not match bound head")
+    proposal_type = "MATERIAL_USAGE" if head["current_operation"] == "create_usage" else "PAGE_RANGE"
+    semantics = canonical_semantics_from_queue({
+        "Proposal Type": proposal_type, "Proposed Action": outbox["action_json"],
+        "Target Entity ID": head["current_target_entity_id"],
+    })
+    envelope = parse_usage_proposal_envelope({"Proposal Envelope": outbox["envelope_json"]})
+    if (envelope is None or envelope["usage_slot_key"] != head["usage_slot_key"]
+        or envelope["request_id"] != head["current_request_id"]
+        or envelope["intent_generation"] != head["intent_generation"]
+        or derive_usage_slot_key(semantics["session_id"], semantics["material_id"], semantics["usage_role"]) != head["usage_slot_key"]
+        or semantics["session_id"] != head["session_app_id"]
+        or semantics["material_id"] != head["material_app_id"]
+        or semantics["usage_role"] != head["usage_role"]
+        or semantics["operation"] != head["current_operation"]
+        or semantics["target_entity_id"] != head["current_target_entity_id"]
+        or canonical_action_json(semantics) != outbox["action_json"]
+        or canonical_usage_proposal_envelope_json(envelope) != outbox["envelope_json"]
+        or derive_proposal_id_for_create(proposal_type, envelope, semantics) != head["current_proposal_id"]):
+        raise ValueError("stored action/envelope/proposal identity conflicts with bound head")
+    return dict(semantics)
+
+
+def _range_intent_head_from_row(row: sqlite3.Row) -> RangeIntentHead:
+    return RangeIntentHead(**dict(row))
+
+
+def _usage_proposal_outbox_from_row(row: sqlite3.Row) -> UsageProposalOutboxEntry:
+    return UsageProposalOutboxEntry(**dict(row))
 
 
 def _note_job_from_row(row: sqlite3.Row) -> NoteJob:

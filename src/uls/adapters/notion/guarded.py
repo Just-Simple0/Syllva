@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from uls.domain.approval_identity import parse_action_json
+from uls.domain.approval_identity import canonical_semantics_from_queue, parse_action_json
 from uls.domain.course_identity import resolve_course_relation
 from uls.domain.enums import AutomationActor
 from uls.domain.errors import PolicyViolation
@@ -13,6 +13,7 @@ from uls.domain.page_range import parse_page_range
 from uls.domain.source_ref import SourceRef
 
 from .base import (
+    _PHASE4_APPLY_MARKER_PREFIX,
     Decision,
     QueueState,
     _call_lookup,
@@ -23,7 +24,9 @@ from .base import (
     _get_field,
     _is_human_decision_by,
     _normal_key,
+    _phase4_apply_marker_phase,
     _physical_or_logical_id,
+    _prepare_supported_call,
     _proposal_id,
     _queue_target,
     _unique_approval_row,
@@ -133,6 +136,7 @@ _SCHEMAS: dict[str, frozenset[str]] = {
             "Source Hash",
             "Source Version",
             "Proposed Action",
+            "Proposal Envelope",
             "Confidence",
             "Evidence",
             "Review Reason",
@@ -303,6 +307,67 @@ class GuardedNotionWriter:
             (provider_id, entity_id, dict(patch), actor),
             keywords,
         )
+
+    def _update_haa_marker(
+        self, target_db: str, entity_id: str, marker: str | None,
+        *, before_provider_write: Callable[[], None] | None = None,
+        expected_marker: str | None = None,
+        expected_state: QueueState = QueueState.APPROVED,
+    ) -> Any:
+        """Internal HAA marker dispatch; the hook grants no policy exception."""
+        logical, provider_id = self._target(target_db)
+        reference = marker if marker is not None else expected_marker
+        if logical != "automationqueue" or not isinstance(reference, str) or not reference.startswith(_PHASE4_APPLY_MARKER_PREFIX):
+            raise PolicyViolation("HAA marker boundary accepts only Queue apply markers")
+        actor = AutomationActor.HUMAN_APPROVAL_APPLIER
+        patch = {"Last Error": marker}
+        self._validate_properties(logical, patch, is_create=False)
+        enforce_write_policy(actor, logical, patch, automation_queue_ids=set(self._queue_ids or ()))
+        current = self._current_queue_for_write(entity_id)
+        if (
+            coerce_queue_state(_get_field(current, "State")) is not expected_state
+            or coerce_decision(_decision_field(current)) is not Decision.Approve
+        ):
+            raise PolicyViolation("marker transition requires its expected State and Approve Decision")
+        # Re-establish the arm's identity/content/no-marker prerequisites on this
+        # final read, not merely the broader audit/cleanup transition policy.
+        try:
+            payload = parse_action_json(reference[len(_PHASE4_APPLY_MARKER_PREFIX):])
+            target_patch = payload.get("target_patch")
+            if not isinstance(target_patch, Mapping):
+                raise PolicyViolation("marker target patch is malformed")
+            marker_binding: dict[str, Any] = {
+                "proposal_id": _proposal_id(current),
+                "proposal_type": _get_field(current, "Proposal Type"),
+                "semantics": canonical_semantics_from_queue(current),
+                "target_patch": target_patch,
+            }
+            next_phase = _phase4_apply_marker_phase({"Last Error": marker}, **marker_binding)
+            expected_phase = _phase4_apply_marker_phase({"Last Error": expected_marker}, **marker_binding)
+            if (expected_state, expected_phase, next_phase) not in {
+                (QueueState.APPROVED, None, "prepared"),
+                (QueueState.APPROVED, "prepared", "effect_observed"),
+                (QueueState.APPROVED, "prepared", None),
+                (QueueState.APPLIED, "effect_observed", None),
+            }:
+                raise PolicyViolation("unsupported marker lifecycle transition")
+            if _phase4_apply_marker_phase(current, **marker_binding) != expected_phase:
+                raise PolicyViolation("current marker phase changed before dispatch")
+        except (TypeError, ValueError) as exc:
+            raise PolicyViolation("marker arm identity is malformed") from exc
+        _validate_queue_transition(current, patch, actor)
+        entity_id = _physical_or_logical_id(current, _proposal_id(current))
+        method = getattr(self.backend, "update_properties", None)
+        if not callable(method):
+            raise PolicyViolation("wrapped Notion backend has no update_properties")
+        invoke = _prepare_supported_call(
+            method, (provider_id, entity_id, patch, actor),
+            {"target_db": provider_id, "entity_id": entity_id, "patch": patch, "actor": actor},
+            require_signature=True,
+        )
+        if before_provider_write is not None:
+            before_provider_write()
+        return invoke()
 
     def _current_queue_for_write(self, entity_id: str) -> Any:
         """Resolve a physical target, then re-establish semantic uniqueness."""
@@ -533,6 +598,13 @@ def _validate_typed_properties(
         return
 
     if logical == "automationqueue":
+        if "Proposal Envelope" in properties:
+            from uls.domain.approval_identity import parse_usage_proposal_envelope
+
+            try:
+                parse_usage_proposal_envelope(properties)
+            except (TypeError, ValueError) as exc:
+                raise PolicyViolation("Automation Queue.Proposal Envelope is invalid") from exc
         if "Proposal Type" in properties and properties["Proposal Type"] not in _QUEUE_TYPES:
             raise PolicyViolation("Automation Queue Proposal Type is invalid")
         if "State" in properties and properties["State"] not in _QUEUE_STATES:
