@@ -308,6 +308,74 @@ class GuardedNotionWriter:
             keywords,
         )
 
+    def _supersede_range_proposal(self, proposal_id: str, reason: str) -> None:
+        """Project a durable invalidation while preserving terminal/human fields."""
+        from .usage_range import UsageRangeNotionBridge
+
+        if not isinstance(self.backend, UsageRangeNotionBridge):
+            raise PolicyViolation("range projection requires the semester SDK bridge")
+        current = self._current_queue_for_write(proposal_id)
+        if coerce_queue_state(_get_field(current, "State")) not in {QueueState.PENDING_REVIEW, QueueState.APPROVED}:
+            return
+        if str(_get_field(current, "Last Error", default="")).startswith(_PHASE4_APPLY_MARKER_PREFIX):
+            raise PolicyViolation("unresolved HAA marker prevents range projection")
+        patch = {"State": "SUPERSEDED", "Last Error": reason}
+        self._validate_properties("automationqueue", patch, is_create=False)
+        enforce_write_policy(AutomationActor.AUTOMATION, "automationqueue", patch, system_transition=True)
+        _validate_queue_transition(current, patch, AutomationActor.AUTOMATION)
+        invoke = self.backend._prepare_update_properties(self._queue_db_id, current["record_id"], patch)
+        invoke()
+
+    def _create_range_entity(self, target_db: str, properties: Mapping[str, Any], *,
+                             before_provider_write: Callable[[], None]) -> Any:
+        """Receipt producer boundary; it never authorizes human-owned promotion."""
+        from .usage_range import UsageRangeNotionBridge
+
+        logical, provider_id = self._target(target_db)
+        if logical not in {"materialusage", "automationqueue"} or not isinstance(self.backend, UsageRangeNotionBridge):
+            raise PolicyViolation("range creation requires the semester SDK bridge")
+        self._validate_properties(logical, properties, is_create=True)
+        enforce_write_policy(AutomationActor.AUTOMATION, logical, properties, is_create=True,
+                             automation_queue_ids=set(self._queue_ids or ()))
+        if logical == "automationqueue" and self.find_approval_rows(str(properties["Proposal ID"])):
+            raise PolicyViolation("range Queue identity already exists; exact readback required")
+        invoke = self.backend._prepare_create_entity(provider_id, properties)
+        before_provider_write()
+        return invoke()
+
+    def _update_haa_audit(self, proposal_id: str, patch: Mapping[str, Any], *,
+                          before_provider_write: Callable[[], None]) -> Any:
+        from .usage_range import UsageRangeNotionBridge
+
+        if not isinstance(self.backend, UsageRangeNotionBridge):
+            raise PolicyViolation("live range audit requires the semester SDK bridge")
+        current = self._current_queue_for_write(proposal_id)
+        actor = AutomationActor.HUMAN_APPROVAL_APPLIER
+        self._validate_properties("automationqueue", patch, is_create=False)
+        enforce_write_policy(actor, "automationqueue", patch)
+        _validate_queue_transition(current, patch, actor)
+        invoke = self.backend._prepare_update_properties(self._queue_db_id, current["record_id"], patch)
+        before_provider_write()
+        return invoke()
+
+    def _update_haa_usage(self, entity_id: str, patch: Mapping[str, Any], *,
+                          before_provider_write: Callable[[], None]) -> Any:
+        """HAA-only live bridge dispatch with freshness after all preparation."""
+        from .usage_range import UsageRangeNotionBridge
+
+        logical, provider_id = self._target("Material Usage")
+        actor = AutomationActor.HUMAN_APPROVAL_APPLIER
+        self._validate_properties(logical, patch, is_create=False)
+        enforce_write_policy(actor, logical, patch)
+        if not isinstance(self.backend, UsageRangeNotionBridge):
+            raise PolicyViolation("live range dispatch requires the semester SDK bridge")
+        row = self.backend.find_entity_by_id(provider_id, entity_id)
+        if row is None:
+            raise PolicyViolation("live range target is missing")
+        invoke = self.backend._prepare_update_properties(provider_id, row["id"], patch)
+        before_provider_write()
+        return invoke()
+
     def _update_haa_marker(
         self, target_db: str, entity_id: str, marker: str | None,
         *, before_provider_write: Callable[[], None] | None = None,
@@ -360,11 +428,16 @@ class GuardedNotionWriter:
         method = getattr(self.backend, "update_properties", None)
         if not callable(method):
             raise PolicyViolation("wrapped Notion backend has no update_properties")
-        invoke = _prepare_supported_call(
-            method, (provider_id, entity_id, patch, actor),
-            {"target_db": provider_id, "entity_id": entity_id, "patch": patch, "actor": actor},
-            require_signature=True,
-        )
+        from .usage_range import UsageRangeNotionBridge
+
+        if isinstance(self.backend, UsageRangeNotionBridge):
+            invoke = self.backend._prepare_update_properties(provider_id, entity_id, patch)
+        else:
+            invoke = _prepare_supported_call(
+                method, (provider_id, entity_id, patch, actor),
+                {"target_db": provider_id, "entity_id": entity_id, "patch": patch, "actor": actor},
+                require_signature=True,
+            )
         if before_provider_write is not None:
             before_provider_write()
         return invoke()
@@ -395,6 +468,20 @@ class GuardedNotionWriter:
         if not callable(method):
             raise PolicyViolation("guarded Queue backend must expose find_approval_rows")
         return _call_queue_finder(method, self._queue_db_id, proposal_id)
+
+    def find_entity_by_id(self, target_db: str, entity_id: str) -> Any | None:
+        _, provider_id = self._target(target_db)
+        method = getattr(self.backend, "find_entity_by_id", None)
+        if not callable(method):
+            raise PolicyViolation("guarded backend has no identity lookup")
+        return _call_lookup(method, provider_id, entity_id)
+
+    def find_by_alias(self, target_db: str, alias: str) -> Any | None:
+        _, provider_id = self._target(target_db)
+        method = getattr(self.backend, "find_by_alias", None)
+        if not callable(method):
+            raise PolicyViolation("guarded backend has no alias lookup")
+        return _call_lookup(method, provider_id, alias)
 
     def read_approval(self, proposal_id: str) -> Any | None:
         return _unique_approval_row(self.find_approval_rows(proposal_id), proposal_id)

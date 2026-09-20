@@ -92,6 +92,14 @@ mcp:
   mode: local
   read_only: true
 
+study_notes:
+  enabled: false  # Separate AI-draft submission service; search stays read-only.
+  local_caller_id: uls-local-study-notes
+  template_version: study-note.v1
+  generator_config_version: mcp-client-draft.v1
+  grant_ttl_seconds: 1800
+  max_draft_chars: 100000
+
 remote_mcp:
   enabled: false
   auth_mode: oauth_or_bearer  # "oauth_or_bearer" | "oidc" | "bearer"

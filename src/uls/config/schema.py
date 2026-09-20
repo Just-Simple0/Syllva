@@ -77,6 +77,10 @@ class SemesterWorkspaceCfg:
     materials_data_source_id: str = ""
     file_intake_data_source_id: str = ""
     input_requests_data_source_id: str = ""
+    # Explicit v1.3 extensions. Missing mappings never fall back to legacy IDs.
+    material_usage_data_source_id: str = ""
+    automation_queue_data_source_id: str = ""
+    study_requests_data_source_id: str = ""
     portal_page_ids: dict[str, str] = field(default_factory=dict)
 
 
@@ -122,6 +126,18 @@ class RetrievalCfg:
 class McpCfg:
     mode: str = "local"
     read_only: bool = True
+
+
+@dataclass
+class StudyNotesCfg:
+    """Separate opt-in for AI draft submission; never enables search writes."""
+
+    enabled: bool = False
+    local_caller_id: str = "uls-local-study-notes"
+    template_version: str = "study-note.v1"
+    generator_config_version: str = "mcp-client-draft.v1"
+    grant_ttl_seconds: int = 1800
+    max_draft_chars: int = 100_000
 
 
 @dataclass
@@ -172,6 +188,7 @@ class UlsConfig:
     normalization: NormalizationCfg = field(default_factory=NormalizationCfg)
     retrieval: RetrievalCfg = field(default_factory=RetrievalCfg)
     mcp: McpCfg = field(default_factory=McpCfg)
+    study_notes: StudyNotesCfg = field(default_factory=StudyNotesCfg)
     remote_mcp: RemoteMcpCfg = field(default_factory=RemoteMcpCfg)
     behavior_contract: BehaviorContractCfg = field(default_factory=BehaviorContractCfg)
     courses: list[CourseCfg] = field(default_factory=list)
@@ -220,6 +237,7 @@ __all__ = [
     "RemoteMcpCfg",
     "RetrievalCfg",
     "StorageCfg",
+    "StudyNotesCfg",
     "SemesterRegistryCfg",
     "SemesterWorkspaceCfg",
     "SystemCfg",

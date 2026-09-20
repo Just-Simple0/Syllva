@@ -119,6 +119,21 @@ class IntakeWorker:
         # ``runner`` with ``run_once``.  Keeping this alias makes the preview
         # worker a drop-in local runner without importing the legacy pipeline.
         self.runner = self
+        # Installed only by the explicit v1.3 composition after readiness checks.
+        # The runner remains the sole local-worker-lock owner.
+        self.request_coordinators: list[Any] = []
+        self.request_extension_readiness: dict[str, Any] = {}
+        self.extension_resources: list[Any] = []
+
+    def close(self) -> None:
+        """Close extension stores and the main state even if one close fails."""
+        from contextlib import ExitStack
+
+        with ExitStack() as resources:
+            resources.callback(self.state.close)
+            for resource in self.extension_resources:
+                resources.callback(resource.close)
+            self.extension_resources.clear()
 
     @property
     def provider(self) -> str:
@@ -161,6 +176,7 @@ class IntakeWorker:
             "provider_capability": asdict(self.drive.capabilities),
             "semester_count": len(self.workspaces),
             "sources_json_optional": True,
+            "request_extensions": dict(self.request_extension_readiness),
         }
 
     def sync(self) -> int:
@@ -283,6 +299,19 @@ class IntakeWorker:
                     except Exception as exc:  # noqa: BLE001 - worker records a safe durable failure
                         self._record_job_error(job, exc)
                         failed += 1
+            extensions: dict[str, Any] = {}
+            if process:
+                for coordinator in self.request_coordinators:
+                    try:
+                        snapshot = coordinator.snapshot()
+                        barrier = coordinator.receive(snapshot)
+                        result = coordinator.publish(barrier)
+                        extensions[coordinator.workspace] = result
+                        if result.get("status") != "ok":
+                            needs_input += 1
+                    except Exception:  # noqa: BLE001 - no provider payload in status
+                        extensions[coordinator.workspace] = {"status": "failed"}
+                        failed += 1
             return {
                 "status": "failed" if failed else "needs_input" if needs_input else "ok",
                 "discovered": discovered,
@@ -290,6 +319,7 @@ class IntakeWorker:
                 "failed": failed,
                 "needs_input": needs_input,
                 "readiness": self.readiness(),
+                "request_extensions": extensions,
             }
         finally:
             self.state.release_local_worker_lock()
@@ -2467,6 +2497,14 @@ class IntakeWorker:
         if not candidates:
             return None
         row = candidates[0]
+        profile: dict[str, Any] = {}
+        extra_sources: dict[str, str] = {}
+        if row.material_usage_data_source_id and row.automation_queue_data_source_id:
+            profile["schema_profile"] = "c5-range-v1"
+            extra_sources = {
+                "material_usage": row.material_usage_data_source_id,
+                "automation_queue": row.automation_queue_data_source_id,
+            }
         return NotionIntakeWriter(
             notion,
             {
@@ -2475,9 +2513,11 @@ class IntakeWorker:
                 "materials": row.materials_data_source_id,
                 "file_intake": row.file_intake_data_source_id,
                 "input_request": row.input_requests_data_source_id,
+                **extra_sources,
             },
             parent_page_id=row.connection_settings_files_parent_id,
             semester=row.semester,
+            **profile,
         )
 
     @staticmethod

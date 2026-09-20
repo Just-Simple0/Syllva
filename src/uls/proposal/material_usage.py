@@ -233,6 +233,10 @@ class MaterialUsageProposalProducer:
         material_ids: Sequence[str] | None = None,
         materials: Sequence[Any] | None = None,
     ) -> MaterialUsageProducerResult:
+        from uls.adapters.notion.usage_range import UsageRangeNotionBridge
+
+        if isinstance(getattr(self.writer, "backend", None), UsageRangeNotionBridge):
+            raise PolicyViolation("C5 range production requires a validated human request receipt")
         self._require_dependencies()
         session = _reader_call(self.graph_reader, "get_session", session_id)
         if session is None:
@@ -453,6 +457,51 @@ class MaterialUsageProposalProducer:
             raise PolicyViolation("Material Usage producer requires a trusted source binding resolver")
         if not callable(getattr(self.source_binding_resolver, "resolve_derivative_ref", None)):
             raise PolicyViolation("Material Usage producer source binding resolver is invalid")
+
+    def prepare_human_range(
+        self, *, session_id: str, material_id: str, role: str, operation: str,
+        target_id: str, desired_range: PageRange, old_snapshot: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Validate deterministic USER intent without invoking a proposer or writing.
+
+        The caller binds this exact action into its durable request intent and
+        repeats this preparation before dispatch to detect changed dependencies.
+        """
+        if self.source_binding_resolver is None:
+            raise PolicyViolation("human range request requires trusted source bindings")
+        session = _reader_call(self.graph_reader, "get_session", session_id)
+        material = _reader_call(self.graph_reader, "get_material", material_id)
+        if _graph_app_id(session, "S") != session_id or _graph_app_id(material, "M") != material_id:
+            raise SourceUnavailableError("human range graph identity is missing or mismatched")
+        course = self._course(session, session_id)
+        if self._course(material, material_id) != course:
+            raise SourceUnavailableError("human range crosses Course identity")
+        dependencies: dict[str, dict[str, Any]] = {}
+        for kind, record, entity_id, names in (
+            ("session", session, session_id, ("Normalized Transcript", "normalized_transcript")),
+            ("material", material, material_id, ("Normalized Source", "normalized_source")),
+        ):
+            ref = self._source_ref(record, entity_id, names)
+            fingerprint = _fingerprint(self.source_reader, ref)
+            context = self._prepare(_source_read(self.source_reader, ref), entity_id=entity_id,
+                                    fingerprint=fingerprint, kind=kind, source_ref=ref)
+            if context.front_matter.get("course_key") != course.course_key:
+                raise SourcePartialError("human range derivative Course differs from graph")
+            if kind == "material" and not _range_has_pages(context, desired_range):
+                raise SourcePartialError("human range is outside validated Material coverage")
+            if _fingerprint(self.source_reader, ref) != fingerprint:
+                raise SourceUnavailableError("human range source changed during validation")
+            dependencies[kind] = _dependency(ref, fingerprint)
+        return dict(build_material_usage_semantics(
+            operation=operation, target_entity_id=target_id, session_id=session_id, material_id=material_id,
+            course_relation_page_id=course.relation_page_id, course_key=course.course_key,
+            usage_role=role, material_type=_material_type(material),
+            source_class=_material_source_class(material, self.config), old_snapshot=old_snapshot,
+            desired_range=desired_range, session_dependency=dependencies["session"],
+            material_dependency=dependencies["material"], evidence=None,
+            review_reason="Human-requested range; verify source coverage before approval",
+            processor_version=self.processor_version,
+        ))
 
     def _course(self, record: Any, entity_id: str) -> CourseIdentity:
         relation = resolve_course_relation(raw_field(record, "Course", "course", default=None))

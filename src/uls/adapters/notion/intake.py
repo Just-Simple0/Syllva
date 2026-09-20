@@ -183,6 +183,51 @@ INTAKE_SCHEMAS: dict[str, dict[str, dict[str, Any]]] = {
     },
 }
 
+def intake_schemas(profile: str = "legacy5") -> dict[str, dict[str, dict[str, Any]]]:
+    """Return an isolated versioned profile; legacy exact-shape checks stay intact."""
+    schemas = deepcopy(INTAKE_SCHEMAS)
+    if profile == "legacy5":
+        return schemas
+    if profile != "c5-range-v1":
+        raise ValueError("unsupported intake schema profile")
+    request = schemas["input_request"]
+    request["Request Type"] = _spec("select", ownership="USER", options=(*INPUT_REQUEST_TYPES, "USAGE_RANGE"))
+    request.update({
+        "Usage Operation": _spec("select", ownership="USER", options=("CREATE", "UPDATE")),
+        "Material": _spec("relation", ownership="USER", relation="materials"),
+        "Target Usage": _spec("relation", ownership="USER", relation="material_usage"),
+        "Usage Role": _spec("select", ownership="USER", options=("Primary", "Supporting", "Reference")),
+        "Range Mode": _spec("select", ownership="USER", options=("UNKNOWN", "WHOLE", "BOUNDED")),
+        "Start Page": _spec("number", ownership="USER"), "End Page": _spec("number", ownership="USER"),
+    })
+    schemas["material_usage"] = {
+        "Name": _spec("title"), "ID": _spec("rich_text"),
+        "Session": _spec("relation", relation="sessions"),
+        "Material": _spec("relation", relation="materials"),
+        "Role": _spec("select", options=("Primary", "Supporting", "Reference")),
+        "Start Page": _spec("number"), "End Page": _spec("number"),
+        "Scope Note": _spec("rich_text"), "Verified": _spec("checkbox", ownership="USER"),
+        "Evidence": _spec("rich_text"), "Confidence": _spec("select", options=("High", "Medium", "Low")),
+        "Notes": _spec("rich_text", ownership="USER"),
+    }
+    schemas["automation_queue"] = {
+        "Name": _spec("title"), "Proposal ID": _spec("rich_text"),
+        "Proposal Type": _spec("select", options=("MATERIAL_REVISION", "GOODNOTES_MATCH", "MATERIAL_USAGE", "PAGE_RANGE", "EXAM_SCOPE", "OTHER")),
+        "State": _spec("status", options=("PENDING_REVIEW", "APPROVED", "REJECTED", "APPLIED", "FAILED", "SUPERSEDED")),
+        "Course": _spec("relation", relation="academic_courses"),
+        "Target Entity ID": _spec("rich_text"), "Source Ref": _spec("rich_text"),
+        "Source Hash": _spec("rich_text"), "Source Version": _spec("number"),
+        "Proposed Action": _spec("rich_text"), "Proposal Envelope": _spec("rich_text"),
+        "Confidence": _spec("select", options=("High", "Medium", "Low")),
+        "Evidence": _spec("rich_text"), "Review Reason": _spec("rich_text"),
+        "Decision": _spec("select", ownership="USER", options=("Pending", "Approve", "Reject")),
+        "Decision By": _spec("rich_text", ownership="USER"), "Decision At": _spec("date", ownership="USER"),
+        "Created": _spec("created_time"), "Updated": _spec("last_edited_time"),
+        "Applied At": _spec("date"), "Last Error": _spec("rich_text"),
+    }
+    return schemas
+
+
 _USER_FIELDS = {
     "academic_courses": {"Aliases", "Professor"},
     "sessions": {"Aliases", "Session No", "Date", "Topics"},
@@ -266,6 +311,7 @@ class NotionAPIWorker:
         *,
         parent_page_id: str,
         semester: str | None = None,
+        schema_profile: str = "legacy5",
     ) -> dict[str, Any]:
         """Read back the five reviewed data sources before enabling writes.
 
@@ -275,7 +321,8 @@ class NotionAPIWorker:
         for a verified current workspace.
         """
 
-        expected_logicals = tuple(INTAKE_SCHEMAS)
+        schemas = intake_schemas(schema_profile)
+        expected_logicals = tuple(schemas)
         if set(data_source_ids) != set(expected_logicals) or not parent_page_id:
             return {"status": "NOT_VERIFIED", "reason": "five data-source IDs and parent are required"}
         retrieve = getattr(getattr(self.client, "data_sources", None), "retrieve", None)
@@ -300,6 +347,7 @@ class NotionAPIWorker:
                 data_source_ids=data_source_ids,
                 parent_page_id=parent_page_id,
                 semester=semester,
+                schema_profile=schema_profile,
             )
             if reason is not None:
                 return {"status": "NOT_VERIFIED", "reason": reason}
@@ -329,11 +377,14 @@ class NotionIntakeWriter:
         *,
         parent_page_id: str = "",
         semester: str | None = None,
+        schema_profile: str = "legacy5",
     ) -> None:
         self.backend = backend
         self.data_source_ids = {str(key): str(value) for key, value in data_source_ids.items() if value}
         self.parent_page_id = parent_page_id
         self.semester = semester
+        self.schema_profile = schema_profile
+        self.schemas = intake_schemas(schema_profile)
 
     def validate_workspace(self) -> dict[str, Any]:
         """Return provider schema/parent verification for the current binding."""
@@ -346,6 +397,7 @@ class NotionIntakeWriter:
                 self.data_source_ids,
                 parent_page_id=self.parent_page_id,
                 semester=self.semester,
+                **({"schema_profile": self.schema_profile} if self.schema_profile != "legacy5" else {}),
             )
         except Exception:  # noqa: BLE001 - readiness fails closed on any adapter failure
             return {"status": "NOT_VERIFIED", "reason": "Notion schema readback failed"}
@@ -358,7 +410,7 @@ class NotionIntakeWriter:
         return dict(result)
 
     def data_source_id(self, logical: str) -> str:
-        if logical not in INTAKE_SCHEMAS or not self.data_source_ids.get(logical):
+        if logical not in self.schemas or not self.data_source_ids.get(logical):
             raise SourceUnavailableError(f"missing resolved Notion intake data source: {logical}")
         return self.data_source_ids[logical]
 
@@ -387,10 +439,11 @@ class NotionIntakeWriter:
         self._validate(logical, patch, is_create=False, allow_user_defaults=False)
         preserve = {
             key
-            for key, spec in INTAKE_SCHEMAS[logical].items()
+            for key, spec in self.schemas[logical].items()
             if spec["ownership"] == "SYSTEM_INITIAL_USER_PRESERVE"
         }
-        forbidden = (_USER_FIELDS.get(logical, set()) | preserve).intersection(patch)
+        user_fields = {key for key, spec in self.schemas[logical].items() if spec["ownership"] == "USER"}
+        forbidden = (user_fields | preserve).intersection(patch)
         if forbidden:
             raise PolicyDeniedError("worker cannot overwrite USER-owned or preserved Notion fields")
         return self.backend.update_record(self.data_source_id(logical), page_id, self._wire(logical, patch))
@@ -418,7 +471,7 @@ class NotionIntakeWriter:
             raise PolicyDeniedError("Notion properties must be a mapping")
         if _FORBIDDEN_AUTOMATION_FIELDS.intersection(properties):
             raise PolicyDeniedError("intake writer cannot touch human approval fields")
-        schema = INTAKE_SCHEMAS[logical]
+        schema = self.schemas[logical]
         unknown = set(properties).difference(schema)
         if unknown:
             raise PolicyDeniedError("properties outside the additive intake schema")
@@ -450,6 +503,10 @@ class NotionIntakeWriter:
                         )
                 elif key == "Intake Items":
                     _validate_value(logical, key, value, spec)
+                elif key == "Request Type" and value in INPUT_REQUEST_TYPES:
+                    # The expanded profile keeps existing file-intake draft creation.
+                    # Human USAGE_RANGE requests are not synthesized through this path.
+                    _validate_value(logical, key, value, spec)
                 elif not _is_blank_user_value(value):
                     raise PolicyDeniedError(
                         f"initial Input Request cannot set USER field: {key}"
@@ -457,7 +514,7 @@ class NotionIntakeWriter:
             _validate_value(logical, key, value, spec)
 
     def _wire(self, logical: str, properties: Mapping[str, Any]) -> dict[str, Any]:
-        return {key: _wire_value(INTAKE_SCHEMAS[logical][key]["type"], value) for key, value in properties.items()}
+        return {key: _wire_value(self.schemas[logical][key]["type"], value) for key, value in properties.items()}
 
 
 @dataclass
@@ -487,16 +544,18 @@ class InMemoryNotionWorker:
         *,
         parent_page_id: str,
         semester: str | None = None,
+        schema_profile: str = "legacy5",
     ) -> dict[str, Any]:
         del semester
-        expected = set(INTAKE_SCHEMAS)
+        schemas = intake_schemas(schema_profile)
+        expected = set(schemas)
         if not self.schema_verified:
             return {"status": "NOT_VERIFIED", "reason": "synthetic schema attestation is disabled"}
         if set(data_source_ids) != expected or not parent_page_id or parent_page_id != self.parent_page_id:
             return {"status": "NOT_VERIFIED", "reason": "synthetic parent/data-source readback mismatch"}
         if any(data_source_id not in self.data_sources for data_source_id in data_source_ids.values()):
             return {"status": "NOT_VERIFIED", "reason": "synthetic data-source readback is incomplete"}
-        return {"status": "VERIFIED", "data_sources": len(expected), "properties": sum(len(spec) for spec in INTAKE_SCHEMAS.values())}
+        return {"status": "VERIFIED", "data_sources": len(expected), "properties": sum(len(spec) for spec in schemas.values())}
 
     def list_records(self, data_source_id: str) -> list[dict[str, Any]]:
         self._event_log().append(("list", data_source_id))
@@ -540,6 +599,7 @@ def _validate_data_source_readback(
     data_source_ids: Mapping[str, str],
     parent_page_id: str,
     semester: str | None,
+    schema_profile: str = "legacy5",
 ) -> str | None:
     expected_id = data_source_ids.get(logical)
     actual_id = raw.get("id")
@@ -559,7 +619,7 @@ def _validate_data_source_readback(
         if not isinstance(name, str) or not name or name in named:
             return f"data-source property name is ambiguous: {logical}"
         named[name] = value
-    expected_schema = INTAKE_SCHEMAS[logical]
+    expected_schema = intake_schemas(schema_profile)[logical]
     if set(named) != set(expected_schema):
         return f"data-source property set mismatch: {logical}"
     for name, expected in expected_schema.items():
@@ -580,7 +640,7 @@ def _validate_data_source_readback(
             expected_options = _expected_options(logical, name, expected, semester)
             if actual_options != set(expected_options):
                 return f"data-source option set mismatch: {logical}.{name}"
-        if expected_type == "status":
+        if expected_type == "status" and logical != "automation_queue":
             expected_groups = STATUS_GROUPS.get(logical)
             if expected_groups is None:
                 return f"status group contract is missing: {logical}.{name}"
@@ -744,6 +804,9 @@ def _normalize_page(page: Any) -> dict[str, Any]:
         for name in ("data_source_id", "page_id"):
             if isinstance(parent.get(name), str):
                 result["_parent_" + name] = parent[name]
+    for name in ("created_time", "last_edited_time", "created_by", "last_edited_by", "archived", "in_trash"):
+        if name in page:
+            result[name] = page[name]
     for name, prop in page.get("properties", {}).items():
         if isinstance(prop, Mapping):
             result[name] = _normalize_property(prop)
@@ -765,7 +828,11 @@ def _normalize_property(prop: Mapping[str, Any]) -> Any:
     if kind in {"select", "status"}:
         return value.get("name") if isinstance(value, Mapping) else None
     if kind == "relation":
-        return {"relation": [item.get("id") for item in value if isinstance(item, Mapping) and isinstance(item.get("id"), str)]} if isinstance(value, list) else {"relation": []}
+        if prop.get("has_more", False) is not False:
+            raise SourcePartialError("Notion relation readback is truncated")
+        if not isinstance(value, list) or any(not isinstance(item, Mapping) or not isinstance(item.get("id"), str) for item in value):
+            raise SourceUnavailableError("Notion relation readback is malformed")
+        return {"relation": [item["id"] for item in value]}
     if kind == "date":
         return value.get("start") if isinstance(value, Mapping) else None
     if kind == "multi_select":

@@ -26,6 +26,7 @@ from .schema import (
     SemesterRegistryCfg,
     SemesterWorkspaceCfg,
     StorageCfg,
+    StudyNotesCfg,
     SystemCfg,
     UlsConfig,
     WorkerCfg,
@@ -125,6 +126,7 @@ def load_config_unvalidated(path: str | os.PathLike[str]) -> UlsConfig:
         normalization=_from_mapping(NormalizationCfg, _section(raw, "normalization")),
         retrieval=_from_mapping(RetrievalCfg, _section(raw, "retrieval")),
         mcp=_from_mapping(McpCfg, _section(raw, "mcp")),
+        study_notes=_from_mapping(StudyNotesCfg, _section(raw, "study_notes")),
         remote_mcp=_from_mapping(RemoteMcpCfg, remote_values),
         behavior_contract=_from_mapping(
             BehaviorContractCfg, _section(raw, "behavior_contract")

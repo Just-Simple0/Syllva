@@ -284,6 +284,10 @@ class RangeIntentHead:
     apply_lease_expires_at: str | None = None
     current_usage_provider: str | None = None
     current_usage_provider_row_id: str | None = None
+    slot_identity_json: str | None = None
+    active: int = 1
+    inactive_reason: str | None = None
+    input_mode: str | None = None
     created_at: str = ""
     updated_at: str = ""
 

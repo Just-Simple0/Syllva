@@ -123,6 +123,8 @@ def build_intake_worker(
     notion: Any | None = None,
     provider_account_binding_id: str | None = None,
     semester: str | None = None,
+    source_reader: Any | None = None,
+    study_note_block_port: Any | None = None,
 ) -> Any:
     """Compose the writable preview worker behind explicit provider ports.
 
@@ -163,7 +165,7 @@ def build_intake_worker(
         )
     if state is None:
         state = SQLiteStateStore(state_path(config))
-    return IntakeWorker(
+    worker = IntakeWorker(
         config,
         state,
         drive,
@@ -171,6 +173,18 @@ def build_intake_worker(
         provider_account_binding_id=binding,
         semester=semester,
     )
+    from uls.intake.composition import install_usage_range
+
+    if source_reader is None and not injected_ports:
+        from uls.adapters.drive.google import GoogleDriveReader
+        from uls.state.reader import ReadOnlyState
+
+        source_reader = GoogleDriveReader(service, ReadOnlyState(state.db_path))
+    install_usage_range(worker, config, state, notion, source_reader)
+    from uls.intake.study_note_composition import install_study_notes
+
+    install_study_notes(worker, config, state, notion, source_reader, block_port=study_note_block_port)
+    return worker
 
 
 def build_retrieval(config: UlsConfig, credentials: ResolvedCredentials) -> Any:
@@ -199,3 +213,24 @@ def build_retrieval(config: UlsConfig, credentials: ResolvedCredentials) -> Any:
     return RetrievalEngine(notion, drive, state, MemoryEphemeralStore(), config,
                            source_binding_resolver=ValidatedSourceBindingResolver(state),
                            github_reader=GitHubAPIReader(credentials.get('GITHUB_READ_TOKEN', '')))
+
+
+def build_study_note_submission_server(config: UlsConfig) -> Any:
+    """Local draft inbox only: never resolve or pass provider credentials."""
+    if config.study_notes.enabled is not True:
+        raise ConfigurationError('study_notes.enabled must be explicitly true')
+    from dataclasses import asdict
+
+    from uls.study_notes.config import StudyNoteConfig
+    from uls.study_notes.core import StudyNoteSubmissionCore
+    from uls.study_notes.mcp import StudyNoteMCP
+    from uls.study_notes.store import StudyNoteStore
+
+    cfg = StudyNoteConfig(**asdict(config.study_notes))
+    store = StudyNoteStore(state_path(config).parent / 'study_notes.sqlite3')
+    try:
+        core = StudyNoteSubmissionCore(store, config=cfg)
+        return StudyNoteMCP(core, caller_context=cfg.local_caller_id)
+    except BaseException:
+        store.close()
+        raise

@@ -703,3 +703,56 @@ def test_cli_routes_preview_commands_to_one_bounded_run(
     result = cli_main.dispatch(Namespace(command=command, config=Path("config.yaml"), max_jobs=7))
     assert result["status"] == "ok"
     assert calls == [{"sync": sync, "process": process, "max_jobs": 7}, {"closed": True}]
+
+
+def test_request_extensions_share_worker_lock_and_sync_never_publishes(tmp_path: Path) -> None:
+    events: list[str] = []
+    with _system(tmp_path) as system, SQLiteStateStore(tmp_path / "state.sqlite3") as competitor:
+        class Extension:
+            workspace = "test-extension"
+
+            def snapshot(self) -> str:
+                assert not competitor.acquire_local_worker_lock()
+                events.append("snapshot")
+                return "snapshot"
+
+            def receive(self, snapshot: str) -> str:
+                assert snapshot == "snapshot"
+                events.append("receive")
+                return "barrier"
+
+            def publish(self, barrier: str) -> dict[str, str]:
+                assert barrier == "barrier"
+                assert not competitor.acquire_local_worker_lock()
+                events.append("publish")
+                return {"status": "ok"}
+
+        system["worker"].request_coordinators.append(Extension())
+        system["worker"].run_once(sync=False, process=False)
+        assert events == []
+        result = system["worker"].run_once(sync=False, process=True)
+        assert events == ["snapshot", "receive", "publish"]
+        assert result["request_extensions"] == {"test-extension": {"status": "ok"}}
+        assert competitor.acquire_local_worker_lock()
+        competitor.release_local_worker_lock()
+
+
+def test_incomplete_c5_configuration_does_not_disable_legacy_intake(tmp_path: Path) -> None:
+    from uls.intake.composition import install_usage_range
+
+    with _system(tmp_path) as system:
+        system["config"].notion.semester_workspaces[0].material_usage_data_source_id = "usage-only"
+        worker = system["worker"]
+        install_usage_range(worker, system["config"], system["state"], system["notion"], None)
+        assert worker.request_extension_readiness[SEMESTER]["status"] == "NOT_VERIFIED"
+        assert worker.request_coordinators == []
+        assert worker.intake_ready
+
+
+def test_ai_study_note_moved_into_upload_is_never_registered_as_source(tmp_path: Path) -> None:
+    with _system(tmp_path) as system:
+        drive = system["drive"]
+        file_id = system["source_id"]
+        drive.files[file_id] = replace(drive.files[file_id], app_properties={"uls_r": "AI_STUDY_NOTE"})
+        assert system["worker"].sync() == 0
+        assert system["state"].get_intake_item_by_provider_file("google_drive", file_id) is None

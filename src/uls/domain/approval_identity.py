@@ -13,7 +13,9 @@ import json
 import re
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
+from uuid import UUID
 
 from .ids import strict_entity_id
 from .page_range import PageRange, parse_page_range
@@ -910,6 +912,51 @@ _HEX64_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _UUID_PATTERN = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
+
+
+def canonical_notion_page_id(value: str) -> str:
+    """Normalize a real provider UUID; application IDs are never substitutes."""
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-fA-F]{32}|[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", value) is None:
+        raise ValueError("Notion identity must be a page UUID")
+    return str(UUID(value))
+
+
+@dataclass(frozen=True)
+class UsageSlotIdentity:
+    """Provider-qualified, range-independent identity from validated relations."""
+
+    course_page_id: str
+    session_page_id: str
+    material_page_id: str
+    role: str
+    provider: str = "notion"
+
+    def __post_init__(self) -> None:
+        if self.provider != "notion" or self.role not in {"Primary", "Supporting", "Reference"}:
+            raise ValueError("unsupported Usage provider/role")
+        for name in ("course_page_id", "session_page_id", "material_page_id"):
+            object.__setattr__(self, name, canonical_notion_page_id(getattr(self, name)))
+
+    @property
+    def canonical_json(self) -> str:
+        return json.dumps(
+            ["uls.usage-slot.v2", self.provider, self.course_page_id, self.session_page_id, self.material_page_id, self.role],
+            ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+        )
+
+    @property
+    def key(self) -> str:
+        return hashlib.sha256(self.canonical_json.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def from_json(cls, value: str) -> UsageSlotIdentity:
+        payload = json.loads(value)
+        if not isinstance(payload, list) or len(payload) != 6 or payload[0] != "uls.usage-slot.v2":
+            raise ValueError("invalid physical slot identity")
+        result = cls(payload[2], payload[3], payload[4], payload[5], payload[1])
+        if result.canonical_json != value:
+            raise ValueError("physical slot identity must be canonical")
+        return result
 
 
 def derive_usage_slot_key(session_app_id: str, material_app_id: str, role: str) -> str:

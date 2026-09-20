@@ -32,6 +32,14 @@ def validate_config(cfg: UlsConfig) -> list[str]:
     _validate_declared_bool_fields(cfg, "", problems)
 
     _validate_required_bool(cfg.mcp.read_only, "mcp.read_only", True, problems)
+    for name in ("local_caller_id", "template_version", "generator_config_version"):
+        value = getattr(cfg.study_notes, name)
+        if not isinstance(value, str) or not value.strip() or len(value) > 128:
+            problems.append(f"study_notes.{name} must be a non-empty string up to 128 characters")
+    for name, lower, upper in (("grant_ttl_seconds", 60, 86_400), ("max_draft_chars", 1000, 1_000_000)):
+        value = getattr(cfg.study_notes, name)
+        if type(value) is not int or not lower <= value <= upper:
+            problems.append(f"study_notes.{name} must be an integer from {lower} to {upper}")
     _validate_required_bool(
         cfg.remote_mcp.public_unauthenticated,
         "remote_mcp.public_unauthenticated",
@@ -266,6 +274,13 @@ def _validate_intake_config(cfg: UlsConfig, problems: list[str]) -> None:
             "input_requests_data_source_id",
         ):
             _validate_opaque_id(getattr(row, name), f"{prefix}.{name}", problems)
+        for name in (
+            "material_usage_data_source_id", "automation_queue_data_source_id",
+            "study_requests_data_source_id",
+        ):
+            value = getattr(row, name)
+            if value != "":
+                _validate_opaque_id(value, f"{prefix}.{name}", problems)
         _validate_opaque_id_map(row.portal_page_ids, f"{prefix}.portal_page_ids", problems, allow_empty=True)
         if any(not key.startswith(f"{row.semester}_") for key in row.portal_page_ids):
             problems.append(f"{prefix} contains a portal from another semester")

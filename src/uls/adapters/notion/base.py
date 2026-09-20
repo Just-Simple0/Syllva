@@ -31,6 +31,7 @@ from uls.enrichment.schemas import EnrichmentRecord
 
 if TYPE_CHECKING:
     from uls.domain.academic import ActivityRecord, ExamRecord
+    from uls.intake.usage_range import UsageRequestFreshness
 
 AUTOMATION_QUEUE = "Automation Queue"
 """The canonical Notion database name for human-review proposals."""
@@ -2333,6 +2334,7 @@ class HumanApprovalApplier:
         automation_queue_db_id: str | None = None,
         automation_queue_ids: set[str] | None = None,
         usage_intent_state: UsageIntentStateReader | None = None,
+        request_freshness: UsageRequestFreshness | None = None,
     ) -> None:
         if callable(decision_by) and clock is None:
             # A small convenience for tests that pass a clock as the second
@@ -2356,6 +2358,7 @@ class HumanApprovalApplier:
         self._source_binding_resolver = source_binding_resolver
         self._config = config
         self._usage_intent_state = usage_intent_state
+        self._request_freshness = request_freshness
 
     def _timestamp(self) -> str:
         value = self._clock()
@@ -2380,13 +2383,9 @@ class HumanApprovalApplier:
             raises -- this is unconditional and applies regardless of State,
             never falling through to the APPLIED-replay case.
 
-        CURRENTLY: the "envelope absent + State != APPLIED: deny" branch is
-        deliberately a no-op (deferred), not yet enforced -- see the NOTE in
-        this method's body. Activating it is bundled with the producer-side
-        v2 envelope/generation-claim wiring (a separate, later slice), since
-        the producer does not build envelopes yet and enforcing this now
-        would deny every pending v1 proposal system-wide. The "present but
-        INVALID" half IS active now, unconditionally, in this slice.
+        The opt-in C5 composition supplies request_freshness and refuses
+        unapplied v1 proposals. Standalone v1.2 composition remains compatible;
+        physical C5 heads always require this capability, including replay.
 
         Called from BOTH _read_current() (the first entry point, before any
         Queue-mutating side effect) and _phase4_approved_queue() (the final
@@ -2395,6 +2394,7 @@ class HumanApprovalApplier:
         """
 
         from uls.domain.approval_identity import (
+            UsageSlotIdentity,
             canonical_semantics_from_queue,
             derive_usage_slot_key,
             parse_usage_proposal_envelope,
@@ -2410,20 +2410,8 @@ class HumanApprovalApplier:
             return
         envelope = parse_usage_proposal_envelope(record)
         if envelope is None:
-            # NOTE: the accepted rev10 design (contract Sec 5.3) ultimately
-            # requires denying a non-APPLIED legacy (envelope-less) proposal
-            # ("미적용 v1 제안은 '새 제안 필요'로 보류") so every pending
-            # MATERIAL_USAGE/PAGE_RANGE proposal must be resubmitted through
-            # the v2 producer once it ships. That enforcement is NOT yet
-            # activated here: the existing contract/unit test suite still
-            # exercises the current (pre-C5) v1 create/approve/apply
-            # lifecycle without envelopes throughout, and flipping this on
-            # unconditionally breaks that entire suite (a coordinated test
-            # migration to v2 envelopes is a separate, larger follow-up, not
-            # bundled into this slice). A present-but-INVALID envelope is
-            # still always rejected above via parse_usage_proposal_envelope,
-            # regardless of this deferred enforcement -- that guard is not
-            # weakened.
+            if self._request_freshness is not None and coerce_queue_state(_get_field(record, "State")) is not QueueState.APPLIED:
+                raise PolicyViolation("unapplied legacy Usage/Range proposal requires a new v2 request and approval")
             return
         from .guarded import GuardedNotionWriter
 
@@ -2437,16 +2425,30 @@ class HumanApprovalApplier:
             semantics = canonical_semantics_from_queue(record)
         except (TypeError, ValueError) as exc:
             raise PolicyViolation("stored Phase4 Queue action is malformed") from exc
-        slot_key = derive_usage_slot_key(
+        legacy_slot_key = derive_usage_slot_key(
             semantics["session_id"], semantics["material_id"], semantics["usage_role"]
         )
-        if envelope["usage_slot_key"] != slot_key:
-            raise PolicyViolation(
-                "Proposal Envelope usage_slot_key does not match the action"
-            )
+        slot_key = envelope["usage_slot_key"]
         head = self._usage_intent_state.get_range_intent_head(slot_key)
         if head is None:
             raise PolicyViolation("no range-intent head exists for this usage slot")
+        physical_identity = getattr(head, "slot_identity_json", None)
+        if physical_identity is not None:
+            try:
+                physical = UsageSlotIdentity.from_json(physical_identity)
+                if (physical.key != slot_key or physical.role != semantics["usage_role"]
+                    or physical.course_page_id.replace("-", "") != semantics["course_relation_page_id"].replace("-", "")
+                    or head.session_app_id != semantics["session_id"] or head.material_app_id != semantics["material_id"]
+                    or not getattr(head, "active", False)):
+                    raise ValueError("physical slot or active request differs")
+                freshness = getattr(self._request_freshness, "assert_current", None)
+                if not callable(freshness):
+                    raise TypeError("request freshness capability is missing")
+                freshness(head.current_receipt_id, slot_key, head.intent_generation)
+            except (TypeError, ValueError) as exc:
+                raise PolicyViolation("physical range request is not current") from exc
+        elif slot_key != legacy_slot_key:
+            raise PolicyViolation("Proposal Envelope usage_slot_key does not match the action")
         if (
             envelope["request_id"] != getattr(head, "current_request_id", None)
             or envelope["intent_generation"] != getattr(head, "intent_generation", None)
@@ -2774,6 +2776,9 @@ class HumanApprovalApplier:
 
         def before_attempt() -> None:
             nonlocal attempted
+            if self._request_freshness is not None:
+                payload = json.loads(expected_marker[len(_PHASE4_APPLY_MARKER_PREFIX):])
+                self._assert_request_for_proposal(payload["proposal_id"])
             attempted = True
 
         try:
@@ -2793,6 +2798,41 @@ class HumanApprovalApplier:
         except Exception:  # noqa: BLE001 - readback is permitted only after an own backend attempt
             return attempted
         return attempted
+
+    def _assert_request_for_proposal(self, proposal_id: str) -> None:
+        if self._request_freshness is None:
+            return
+        if self._usage_intent_state is None:
+            raise PolicyViolation("range request state is unavailable")
+        outbox = self._usage_intent_state.get_usage_proposal_outbox(proposal_id)
+        if outbox is None:
+            from uls.domain.approval_identity import parse_usage_proposal_envelope
+
+            legacy = _read_approval(self._adapter, proposal_id, automation_queue_id=self._queue_db_id,
+                                    automation_queue_ids=set(self._queue_ids or ()))
+            if (legacy is not None and parse_usage_proposal_envelope(legacy) is None
+                and coerce_queue_state(_get_field(legacy, "State")) is QueueState.APPLIED):
+                return
+            raise PolicyViolation("range request outbox is unavailable")
+        head = self._usage_intent_state.get_range_intent_head(outbox.usage_slot_key)
+        if head is None or head.current_proposal_id != proposal_id:
+            raise PolicyViolation("range request head changed before dispatch")
+        self._request_freshness.assert_current(head.current_receipt_id, outbox.usage_slot_key, outbox.intent_generation)
+
+    def _write_phase4_audit(self, proposal_id: str, current: Any, patch: Mapping[str, Any]) -> None:
+        from uls.domain.approval_identity import parse_usage_proposal_envelope
+
+        if self._request_freshness is not None and parse_usage_proposal_envelope(current) is not None:
+            from .guarded import GuardedNotionWriter
+
+            if not isinstance(self._adapter, GuardedNotionWriter):
+                raise PolicyViolation("live range audit requires guarded provider boundary")
+            self._adapter._update_haa_audit(proposal_id, patch,
+                                           before_provider_write=lambda: self._assert_request_for_proposal(proposal_id))
+        else:
+            _guarded_update(self._adapter, self._actor, self._queue_db_id,
+                            _physical_or_logical_id(current, proposal_id), patch,
+                            automation_queue_ids=set(self._queue_ids or ()))
 
     def _phase4_mark_effect_observed(
         self,
@@ -3119,14 +3159,7 @@ class HumanApprovalApplier:
             return ApprovalApplyResult(proposal_id, QueueState.APPLIED, False, "already applied")
 
         try:
-            _guarded_update(
-                self._adapter,
-                self._actor,
-                self._queue_db_id,
-                _physical_or_logical_id(current, proposal_id),
-                audit_patch,
-                automation_queue_ids=set(self._queue_ids or ()),
-            )
+            self._write_phase4_audit(proposal_id, current, audit_patch)
         except Exception as exc:
             if self._phase4_confirm_applied_queue(
                 proposal_id,
@@ -3889,7 +3922,9 @@ class HumanApprovalApplier:
                 if checked is None:
                     return self._phase4_recoverable(proposal_id, "approved Queue unavailable before marker")
                 intent_state = self._usage_intent_state
-                before_marker_write = lambda: intent_state.mark_apply_mutating(invocation_token=token)
+                def before_marker_write() -> None:
+                    self._validate_v2_usage_generation(current)
+                    intent_state.mark_apply_mutating(invocation_token=token)
 
             # Graph/source reads may take time.  Arm the durable marker, then
             # repeat the trusted dependency and target checks before writing.
@@ -3967,7 +4002,17 @@ class HumanApprovalApplier:
             if ownership and self._c5_snapshot(session_id) != baseline:
                 return self._phase4_recoverable(proposal_id, "physical baseline changed before target write")
             try:
-                _guarded_update(self._adapter, self._actor, "Material Usage", target_id, target_patch)
+                if self._request_freshness is not None:
+                    from .guarded import GuardedNotionWriter
+
+                    if not isinstance(self._adapter, GuardedNotionWriter):
+                        raise PolicyViolation("live range target requires the guarded provider boundary")
+                    self._adapter._update_haa_usage(
+                        target_id, target_patch,
+                        before_provider_write=lambda: self._validate_v2_usage_generation(pre_write),
+                    )
+                else:
+                    _guarded_update(self._adapter, self._actor, "Material Usage", target_id, target_patch)
                 mutated = True
             except Exception as exc:
                 if ownership and not isinstance(exc, ProviderWriteNotAppliedError):
@@ -4179,14 +4224,7 @@ class HumanApprovalApplier:
             "State": QueueState.APPLIED.value,
         }
         try:
-            _guarded_update(
-                self._adapter,
-                self._actor,
-                self._queue_db_id,
-                _physical_or_logical_id(latest, proposal_id),
-                queue_patch,
-                automation_queue_ids=set(self._queue_ids or ()),
-            )
+            self._write_phase4_audit(proposal_id, latest, queue_patch)
         except Exception as exc:
             if self._phase4_confirm_applied_queue(
                 proposal_id,

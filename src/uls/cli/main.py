@@ -35,6 +35,8 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser('retry').add_argument('job_id')
     commands.add_parser('reprocess').add_argument('entity_id')
     commands.add_parser('mcp').add_argument('mode', choices=('local', 'remote', 'status'))
+    commands.add_parser('study-notes', help='Separate AI draft submission service').add_argument(
+        'mode', choices=('local', 'status'))
     commands.add_parser('behavior').add_argument('action', choices=('lint',))
     credential_parser = commands.add_parser('credential', help='Manage stored credentials')
     credential_sub = credential_parser.add_subparsers(dest='credential_action', required=True)
@@ -355,6 +357,20 @@ def dispatch(args: argparse.Namespace) -> Any:
         problems = lint_behavior()
         return {'status': 'failed' if problems else 'ok', 'problems': problems}
     config = _config(args.config)
+    if args.command == 'study-notes':
+        if args.mode == 'status':
+            return {'enabled': config.study_notes.enabled,
+                    'service': 'uls_submit', 'transport': 'local_stdio',
+                    'client_e2e': 'not_proven', 'search_read_only': True}
+        from uls.mcp.transports.local import run_local
+        from uls.runtime import build_study_note_submission_server
+
+        server = build_study_note_submission_server(config)
+        try:
+            run_local(server)
+        finally:
+            server.close()
+        return None
     if args.command == 'status':
         return status(config)
     if args.command == 'doctor':
@@ -371,7 +387,11 @@ def dispatch(args: argparse.Namespace) -> Any:
             return worker.runner.run_once(sync=args.command != 'process', process=args.command != 'sync',
                                            max_jobs=args.max_jobs)
         finally:
-            worker.state.close()
+            close = getattr(worker, 'close', None)
+            if callable(close):
+                close()
+            else:
+                worker.state.close()
     if args.command in {'jobs', 'retry', 'reprocess'}:
         from uls.state.sqlite import SQLiteStateStore
         if not state_path(config).is_file():

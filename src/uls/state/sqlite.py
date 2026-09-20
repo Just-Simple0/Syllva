@@ -55,6 +55,7 @@ from .models import (
     StudyNoteHead,
     UsageProposalOutboxEntry,
 )
+from .usage_range import RANGE_REQUEST_SCHEMA, UsageRangeStateMixin
 
 _TERMINAL_STATUSES = {
     JobStatus.READY,
@@ -427,7 +428,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_note_artifacts_one_reusable
 """
 
 
-class SQLiteStateStore:
+class SQLiteStateStore(UsageRangeStateMixin):
     """Thread-safe SQLite StateStore with repeatable migrations."""
 
     def __init__(self, db_path: str | os.PathLike[str]) -> None:
@@ -502,10 +503,17 @@ class SQLiteStateStore:
                     (version, _utc_now()),
                 )
             self._connection.executescript(_INTAKE_SCHEMA)
+            self._connection.executescript(RANGE_REQUEST_SCHEMA)
             head_columns = {row[1] for row in self._connection.execute("PRAGMA table_info(range_intent_heads)")}
             for column in ("apply_lease_expires_at", "current_usage_provider", "current_usage_provider_row_id"):
                 if column not in head_columns:
                     self._connection.execute(f"ALTER TABLE range_intent_heads ADD COLUMN {column} TEXT")
+            for column, declaration in (
+                ("slot_identity_json", "TEXT"), ("active", "INTEGER NOT NULL DEFAULT 1"),
+                ("inactive_reason", "TEXT"), ("input_mode", "TEXT"),
+            ):
+                if column not in head_columns:
+                    self._connection.execute(f"ALTER TABLE range_intent_heads ADD COLUMN {column} {declaration}")
             guard_columns = {row[1] for row in self._connection.execute("PRAGMA table_info(usage_apply_guards)")}
             if "baseline_mode" not in guard_columns:
                 self._connection.execute("ALTER TABLE usage_apply_guards ADD COLUMN baseline_mode TEXT")
@@ -2207,6 +2215,7 @@ class SQLiteStateStore:
                 "SELECT * FROM usage_proposal_outbox WHERE proposal_id=?", (proposal_id,),
             ).fetchone()
             if (head is None or head["intent_generation"] != generation
+                or not head["active"]
                 or head["current_proposal_id"] != proposal_id
                 or head["apply_lease_expires_at"] is not None
                 or head["reservation_state"] != "NONE"
@@ -2214,6 +2223,11 @@ class SQLiteStateStore:
                 or outbox["usage_slot_key"] != usage_slot_key
                 or outbox["intent_generation"] != generation
                 or outbox["request_id"] != head["current_request_id"]):
+                return None
+            if connection.execute(
+                "SELECT 1 FROM range_producer_attempts WHERE usage_slot_key=? AND phase!='RELEASED'",
+                (usage_slot_key,),
+            ).fetchone():
                 return None
             if connection.execute(
                 "SELECT 1 FROM usage_apply_guards WHERE usage_slot_key=? AND phase!='RELEASED'",
@@ -4670,6 +4684,7 @@ def _prove_usage_guard(guard: sqlite3.Row, readback_json: str, outcome: str) -> 
 def _validate_usage_dispatch_identity(head: sqlite3.Row, outbox: sqlite3.Row | None) -> dict[str, Any]:
     """Validate committed identity bytes before any dispatch/owner CAS."""
     from uls.domain.approval_identity import (
+        UsageSlotIdentity,
         canonical_action_json,
         canonical_semantics_from_queue,
         canonical_usage_proposal_envelope_json,
@@ -4690,10 +4705,17 @@ def _validate_usage_dispatch_identity(head: sqlite3.Row, outbox: sqlite3.Row | N
         "Target Entity ID": head["current_target_entity_id"],
     })
     envelope = parse_usage_proposal_envelope({"Proposal Envelope": outbox["envelope_json"]})
+    slot_key = derive_usage_slot_key(semantics["session_id"], semantics["material_id"], semantics["usage_role"])
+    if head["slot_identity_json"] is not None:
+        physical = UsageSlotIdentity.from_json(head["slot_identity_json"])
+        if (physical.course_page_id.replace("-", "") != semantics["course_relation_page_id"].replace("-", "")
+            or physical.role != semantics["usage_role"] or not head["active"]):
+            raise ValueError("inactive or conflicting physical slot identity")
+        slot_key = physical.key
     if (envelope is None or envelope["usage_slot_key"] != head["usage_slot_key"]
         or envelope["request_id"] != head["current_request_id"]
         or envelope["intent_generation"] != head["intent_generation"]
-        or derive_usage_slot_key(semantics["session_id"], semantics["material_id"], semantics["usage_role"]) != head["usage_slot_key"]
+        or slot_key != head["usage_slot_key"]
         or semantics["session_id"] != head["session_app_id"]
         or semantics["material_id"] != head["material_app_id"]
         or semantics["usage_role"] != head["usage_role"]
