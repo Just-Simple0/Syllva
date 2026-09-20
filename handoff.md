@@ -2,6 +2,7 @@
 Updated 2026-09-21.
 
 Branch: `codex/protected-secret-file-and-credential-set`.
+Remote MCP OAuth implementation commit: `216e996` (`feat: add OAuth remote MCP transport`).
 Do not touch unrelated `RESEARCH/`, secrets, or `CLAUDE.md`. No push or protected-branch merge is authorized.
 
 ## Accepted baseline
