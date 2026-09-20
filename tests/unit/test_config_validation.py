@@ -152,6 +152,79 @@ courses:
         load_config(config)
 
 
+def test_mcp_oauth_config_loads_with_direct_tls_default(tmp_path) -> None:
+    contract = tmp_path / "study-behavior.md"
+    contract.write_text("# contract\n", encoding="utf-8")
+    config = tmp_path / "mcp-oauth.yaml"
+    config.write_text(
+        f"""
+remote_mcp:
+  enabled: true
+  auth_mode: mcp_oauth
+  public_unauthenticated: false
+  oauth:
+    google_client_id: google-client.apps.googleusercontent.com
+    authorized_email: owner@example.com
+behavior_contract:
+  path: {contract}
+courses:
+  - course_key: 2026-1_COMP319-002
+""",
+        encoding="utf-8",
+    )
+    cfg = load_config(config)
+    assert cfg.remote_mcp.edge_mode == "direct_tls"
+    assert cfg.remote_mcp.oauth.google_client_id == "google-client.apps.googleusercontent.com"
+    assert validate_config(cfg) == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        ("google_client_id", "''", "google_client_id"),
+        ("authorized_email", "owner-without-at", "authorized_email"),
+        ("access_token_ttl_seconds", "10", "access_token_ttl_seconds"),
+        ("refresh_token_ttl_seconds", "99999999", "refresh_token_ttl_seconds"),
+        ("authorization_ttl_seconds", "30", "authorization_ttl_seconds"),
+    ],
+)
+def test_mcp_oauth_invalid_fields_fail_closed(tmp_path, field, value, expected) -> None:
+    contract = tmp_path / "study-behavior.md"
+    contract.write_text("# contract\n", encoding="utf-8")
+    values = {
+        "google_client_id": "google-client.apps.googleusercontent.com",
+        "authorized_email": "owner@example.com",
+        "access_token_ttl_seconds": "900",
+        "refresh_token_ttl_seconds": "2592000",
+        "authorization_ttl_seconds": "600",
+    }
+    values[field] = value
+    config = tmp_path / "invalid-mcp-oauth.yaml"
+    config.write_text(
+        f"""
+remote_mcp:
+  enabled: true
+  auth_mode: mcp_oauth
+  edge_mode: cloudflare_tunnel
+  oauth:
+    google_client_id: {values['google_client_id']}
+    authorized_email: {values['authorized_email']}
+    access_token_ttl_seconds: {values['access_token_ttl_seconds']}
+    refresh_token_ttl_seconds: {values['refresh_token_ttl_seconds']}
+    authorization_ttl_seconds: {values['authorization_ttl_seconds']}
+behavior_contract:
+  path: {contract}
+courses:
+  - course_key: 2026-1_COMP319-002
+""",
+        encoding="utf-8",
+    )
+    problems = validate_config(load_config_unvalidated(config))
+    assert any(expected in problem for problem in problems)
+    with pytest.raises(ConfigurationError):
+        load_config(config)
+
+
 def test_oidc_issuer_with_trailing_slash_is_rejected_at_config_load(tmp_path) -> None:
     """The validator must mirror JwksKeyManager's trailing-slash rejection
     exactly. Otherwise a trailing-slash issuer could load as "valid"

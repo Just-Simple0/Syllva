@@ -199,8 +199,17 @@ def doctor(config: Any, *, live: bool = False) -> dict[str, Any]:
     # calls, slices values out of that same DiagnosticResolution via
     # select()/require() instead of diagnosing or resolving again.
     diagnose_names = frozenset(ALLOWED_SOURCES)
-    if config.remote_mcp.enabled and config.remote_mcp.auth_mode == 'oidc':
+    remote_credential_names = {
+        'REMOTE_MCP_SECRET', 'REMOTE_MCP_EXPIRES_AT', 'REMOTE_MCP_GOOGLE_CLIENT_SECRET'
+    }
+    if not config.remote_mcp.enabled:
+        diagnose_names = diagnose_names - remote_credential_names
+    elif config.remote_mcp.auth_mode in {'oidc', 'mcp_oauth'}:
         diagnose_names = diagnose_names - {'REMOTE_MCP_SECRET', 'REMOTE_MCP_EXPIRES_AT'}
+        if config.remote_mcp.auth_mode == 'oidc':
+            diagnose_names = diagnose_names - {'REMOTE_MCP_GOOGLE_CLIENT_SECRET'}
+    else:
+        diagnose_names = diagnose_names - {'REMOTE_MCP_GOOGLE_CLIENT_SECRET'}
     resolver = CredentialResolver(config.credentials, path_overrides=getattr(config, 'google_path_overrides', {}))
     diagnostic = resolver.diagnose(diagnose_names)
 
@@ -262,9 +271,42 @@ def doctor(config: Any, *, live: bool = False) -> dict[str, Any]:
         try:
             from uls.mcp.transports.remote import validate_remote_profile
             validate_remote_profile(config)
-            tls_ok = all(Path(p).is_file() for p in (config.remote_mcp.tls_certfile, config.remote_mcp.tls_keyfile))
+            tls_ok = (
+                config.remote_mcp.edge_mode == 'cloudflare_tunnel'
+                or all(Path(p).is_file() for p in (config.remote_mcp.tls_certfile, config.remote_mcp.tls_keyfile))
+            )
             if not tls_ok:
                 checks['remote_profile'] = False
+            elif config.remote_mcp.auth_mode == 'mcp_oauth':
+                from uls.mcp.transports.oauth import (
+                    GOOGLE_ISSUER,
+                    canonical_public_identity,
+                    validate_oauth_state_boundary,
+                )
+                from uls.mcp.transports.oidc import JwksKeyManager
+                oauth = config.remote_mcp.oauth
+                identity = canonical_public_identity(config.remote_mcp.public_url)
+                secret_ok = _ready('REMOTE_MCP_GOOGLE_CLIENT_SECRET')
+                state_dir = Path(config.system.workspace_dir).expanduser()
+                db_path = state_dir / 'remote-oauth.sqlite3'
+                try:
+                    validate_oauth_state_boundary(db_path)
+                    state_ok = True
+                except ConfigurationError:
+                    state_ok = False
+                oauth_ok = bool(
+                    identity.resource_uri
+                    and oauth.google_client_id
+                    and oauth.authorized_email
+                    and secret_ok
+                    and state_ok
+                )
+                if live and oauth_ok:
+                    try:
+                        JwksKeyManager(GOOGLE_ISSUER).live_check_sync()
+                    except (ConfigurationError, OSError, ValueError):
+                        oauth_ok = False
+                checks['remote_profile'] = oauth_ok
             elif config.remote_mcp.auth_mode == 'oidc':
                 oidc = config.remote_mcp.oidc
                 oidc_ok = bool(oidc.issuer and oidc.audience and (oidc.authorized_subject or oidc.authorized_email))
@@ -438,7 +480,8 @@ def dispatch(args: argparse.Namespace) -> Any:
         if args.mode == 'status':
             return status(config)
         optional_creds = {'GITHUB_READ_TOKEN': '', 'NOTION_WORKER_TOKEN': '', 'GOOGLE_WORKER_CREDENTIALS_FILE': ''}
-        if args.mode == 'remote' and config.remote_mcp.auth_mode != 'oidc':
+        required_creds = {'GOOGLE_MCP_CREDENTIALS_FILE', 'NOTION_MCP_TOKEN'}
+        if args.mode == 'remote' and config.remote_mcp.auth_mode in {'bearer', 'oauth_or_bearer'}:
             # auth_mode == 'oidc' must resolve zero REMOTE_MCP_SECRET /
             # REMOTE_MCP_EXPIRES_AT credentials (rev3 plan section 5.1):
             # the OIDC-only lane never consults CredentialResolver for
@@ -446,8 +489,10 @@ def dispatch(args: argparse.Namespace) -> Any:
             # input set.
             optional_creds['REMOTE_MCP_SECRET'] = ''
             optional_creds['REMOTE_MCP_EXPIRES_AT'] = '0'
+        if args.mode == 'remote' and config.remote_mcp.auth_mode == 'mcp_oauth':
+            required_creds.add('REMOTE_MCP_GOOGLE_CLIENT_SECRET')
         credentials = CredentialResolver(config.credentials, path_overrides=getattr(config, 'google_path_overrides', {})).resolve(
-            required=frozenset({'GOOGLE_MCP_CREDENTIALS_FILE', 'NOTION_MCP_TOKEN'}),
+            required=frozenset(required_creds),
             optional=optional_creds,
         )
         from uls.mcp.server import ReadOnlyMCP
@@ -475,7 +520,16 @@ def dispatch(args: argparse.Namespace) -> Any:
                         leeway_seconds=oidc.leeway_seconds,
                         key_manager=km,
                     )
-            run_remote(registry, config, credential=credential, oidc_verifier=verifier)
+            if config.remote_mcp.auth_mode == 'mcp_oauth':
+                run_remote(
+                    registry,
+                    config,
+                    credential=None,
+                    oidc_verifier=None,
+                    google_client_secret=credentials['REMOTE_MCP_GOOGLE_CLIENT_SECRET'],
+                )
+            else:
+                run_remote(registry, config, credential=credential, oidc_verifier=verifier)
         return None
     raise ValueError('Unsupported command')
 

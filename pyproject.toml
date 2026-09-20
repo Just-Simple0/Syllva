@@ -25,6 +25,7 @@ notion = ["notion-client>=3.1,<4"]
 github = ["PyGithub>=2.0"]
 mcp = ["mcp>=2.2,<3", "uvicorn>=0.30,<1"]
 remote-mcp-oidc = ["PyJWT[crypto]>=2.8,<3"]
+remote-mcp-oauth = ["PyJWT[crypto]>=2.8,<3"]
 pdf = ["pypdf>=4.0"]
 keyring = ["keyring>=25.0"]
 dev = [

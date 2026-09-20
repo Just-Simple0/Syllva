@@ -151,9 +151,19 @@ class OidcCfg:
 
 
 @dataclass
+class RemoteOAuthCfg:
+    google_client_id: str = ""
+    authorized_email: str = ""
+    access_token_ttl_seconds: int = 900
+    refresh_token_ttl_seconds: int = 2_592_000
+    authorization_ttl_seconds: int = 600
+
+
+@dataclass
 class RemoteMcpCfg:
     enabled: bool = False
     auth_mode: str = "oauth_or_bearer"
+    edge_mode: str = "direct_tls"
     public_unauthenticated: bool = False
     public_url: str = ""
     host: str = "127.0.0.1"
@@ -161,6 +171,7 @@ class RemoteMcpCfg:
     tls_certfile: str = ""
     tls_keyfile: str = ""
     oidc: OidcCfg = field(default_factory=OidcCfg)
+    oauth: RemoteOAuthCfg = field(default_factory=RemoteOAuthCfg)
 
 
 @dataclass
@@ -235,6 +246,7 @@ __all__ = [
     "NormalizationCfg",
     "NotionCfg",
     "RemoteMcpCfg",
+    "RemoteOAuthCfg",
     "RetrievalCfg",
     "StorageCfg",
     "StudyNotesCfg",

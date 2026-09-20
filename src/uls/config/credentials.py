@@ -34,6 +34,7 @@ ALLOWED_SOURCES: Final[dict[str, frozenset[str]]] = {
     "GOOGLE_MCP_CREDENTIALS_FILE": frozenset({"environment"}),
     "REMOTE_MCP_SECRET": frozenset({"environment", "file"}),
     "REMOTE_MCP_EXPIRES_AT": frozenset({"environment"}),
+    "REMOTE_MCP_GOOGLE_CLIENT_SECRET": frozenset({"environment", "keyring"}),
 }
 
 # Fixed, code-owned keyring locator per keyring-eligible credential. Never
@@ -43,6 +44,7 @@ KEYRING_BINDINGS: Final[dict[str, tuple[str, str]]] = {
     "NOTION_MCP_TOKEN": ("Syllva MCP", "notion_mcp_token"),
     "GITHUB_READ_TOKEN": ("Syllva MCP", "github_read_token"),
     "LLM_API_KEY": ("Syllva LLM", "llm_api_key"),
+    "REMOTE_MCP_GOOGLE_CLIENT_SECRET": ("Syllva MCP", "remote_mcp_google_client_secret"),
 }
 
 # Fixed, code-owned protected-secret-file locator per file-eligible

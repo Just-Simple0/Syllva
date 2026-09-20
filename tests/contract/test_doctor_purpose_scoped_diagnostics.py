@@ -11,6 +11,7 @@ the credentials a selected feature actually needs.
 
 from __future__ import annotations
 
+import os
 import pathlib
 import sys
 
@@ -51,6 +52,9 @@ def _clear_all_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
         "GOOGLE_MCP_CREDENTIALS_FILE",
         "NOTION_MCP_TOKEN",
         "GITHUB_READ_TOKEN",
+        "REMOTE_MCP_SECRET",
+        "REMOTE_MCP_EXPIRES_AT",
+        "REMOTE_MCP_GOOGLE_CLIENT_SECRET",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -186,6 +190,63 @@ def test_remote_mcp_enabled_bearer_mode_missing_secret_fails_remote_profile(tmp_
     result = doctor(config)
     assert result["checks"]["remote_profile"] is False
     assert result["status"] == "needs_configuration"
+
+
+def test_remote_mcp_oauth_cloudflare_requires_google_secret_not_legacy_bearer(tmp_path, monkeypatch):
+    _clear_all_credentials(monkeypatch)
+    raw = yaml.safe_load((asset_root() / "config.example.yaml").read_text(encoding="utf-8"))
+    raw["system"]["workspace_dir"] = str(tmp_path / "state")
+    raw["behavior_contract"]["path"] = str(asset_root() / "contracts/study-behavior.md")
+    raw["worker"]["enabled"] = False
+    raw["remote_mcp"] = {
+        "enabled": True,
+        "auth_mode": "mcp_oauth",
+        "edge_mode": "cloudflare_tunnel",
+        "host": "127.0.0.1",
+        "public_unauthenticated": False,
+        "public_url": "https://uls.example/mcp",
+        "oauth": {
+            "google_client_id": "google-client.apps.googleusercontent.com",
+            "authorized_email": "owner@example.com",
+        },
+    }
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    initialize(cfg_path)
+    config = _config(cfg_path)
+    _set_mcp_credentials(monkeypatch, tmp_path)
+
+    missing = doctor(config)
+    assert missing["checks"]["remote_profile"] is False
+    assert missing["status"] == "needs_configuration"
+
+    monkeypatch.setenv("REMOTE_MCP_GOOGLE_CLIENT_SECRET", "test-google-client-secret")
+    ready = doctor(config)
+    assert ready["checks"]["remote_profile"] is True
+    assert ready["status"] == "ok"
+
+    # Development bearer credentials are irrelevant to this lane, even if malformed.
+    monkeypatch.setenv("REMOTE_MCP_SECRET", "too-short")
+    monkeypatch.setenv("REMOTE_MCP_EXPIRES_AT", "not-a-number")
+    still_ready = doctor(config)
+    assert still_ready["checks"]["remote_profile"] is True
+    assert still_ready["status"] == "ok"
+
+    if os.name == "posix":
+        state_dir = pathlib.Path(config.system.workspace_dir).expanduser()
+        original_mode = state_dir.stat().st_mode & 0o777
+        state_dir.chmod(original_mode | 0o020)
+        unprotected = doctor(config)
+        assert unprotected["checks"]["remote_profile"] is False
+        assert unprotected["status"] == "needs_configuration"
+        state_dir.chmod(original_mode)
+
+        db_path = state_dir / "remote-oauth.sqlite3"
+        db_path.write_bytes(b"")
+        db_path.chmod(0o644)
+        insecure_db = doctor(config)
+        assert insecure_db["checks"]["remote_profile"] is False
+        assert insecure_db["status"] == "needs_configuration"
 
 
 def test_remote_mcp_hybrid_mode_requires_every_configured_lane_to_be_valid(tmp_path, monkeypatch):

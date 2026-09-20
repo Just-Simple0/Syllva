@@ -22,6 +22,7 @@ Syllva는 명시적 설정과 process environment credential을 사용합니다.
 | Worker | `GOOGLE_WORKER_CREDENTIALS_FILE`, `NOTION_WORKER_TOKEN` |
 | Local/remote MCP | `GOOGLE_MCP_CREDENTIALS_FILE`, `NOTION_MCP_TOKEN`; private GitHub source 사용 시 `GITHUB_READ_TOKEN` |
 | Remote development bearer | `REMOTE_MCP_SECRET`, `REMOTE_MCP_EXPIRES_AT` |
+| Remote MCP OAuth 브라우저 로그인 | `REMOTE_MCP_GOOGLE_CLIENT_SECRET` + 비밀이 아닌 `remote_mcp.oauth.google_client_id` / `authorized_email` 설정 |
 
 provider 측 least privilege를 적용하세요. provider가 지원하면 MCP credential은 read-only여야 합니다. Worker credential은 명시적으로 구성한 작업에 필요한 write 권한만 가져야 합니다.
 

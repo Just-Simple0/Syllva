@@ -102,7 +102,8 @@ study_notes:
 
 remote_mcp:
   enabled: false
-  auth_mode: oauth_or_bearer  # "oauth_or_bearer" | "oidc" | "bearer"
+  auth_mode: oauth_or_bearer  # "oauth_or_bearer" | "oidc" | "bearer" | "mcp_oauth"
+  edge_mode: direct_tls  # "direct_tls" | "cloudflare_tunnel" (mcp_oauth only)
   public_unauthenticated: false
   # public_url: https://uls.example/mcp
   # host: 127.0.0.1
@@ -114,6 +115,12 @@ remote_mcp:
   #   audience: "your-client-id.apps.googleusercontent.com"
   #   authorized_subject: "your-sub-id"
   #   authorized_email: "your-email@example.com"
+  # oauth:  # used only by auth_mode: mcp_oauth
+  #   google_client_id: "your-google-web-client.apps.googleusercontent.com"
+  #   authorized_email: "owner@example.com"
+  #   access_token_ttl_seconds: 900
+  #   refresh_token_ttl_seconds: 2592000
+  #   authorization_ttl_seconds: 600
 
 behavior_contract:
   version: 2
@@ -160,4 +167,6 @@ courses:
 #   GITHUB_READ_TOKEN:
 #     source: keyring
 #   LLM_API_KEY:
+#     source: keyring
+#   REMOTE_MCP_GOOGLE_CLIENT_SECRET:
 #     source: keyring

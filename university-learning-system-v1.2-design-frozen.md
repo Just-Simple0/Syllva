@@ -1430,6 +1430,17 @@ Minimum requirements:
 - secrets are never committed to Git or embedded in generated Skills/Instructions,
 - unauthenticated public MCP endpoints are forbidden.
 
+2026-09-21 Remote OAuth extension: the prohibition above applies to the
+academic/retrieval surface. A standards-compliant Remote MCP OAuth profile may
+expose only the protocol control-plane endpoints required for discovery and the
+authorization flow without an MCP access token: protected-resource metadata,
+authorization-server metadata, authorization, token, dynamic client
+registration/revocation when enabled, and the fixed upstream identity-provider
+callback. These endpoints must expose no academic data, must still pass the
+configured transport Host/Origin/edge boundary, and must not make `/mcp`,
+`/health`, or any retrieval tool unauthenticated. This is a narrow protocol
+carve-out, not permission for a general public application surface.
+
 Authentication details may vary by client, but the remote facade must preserve the same read-only tool contract.
 
 It does not move ingestion/normalization/state ownership to the cloud.

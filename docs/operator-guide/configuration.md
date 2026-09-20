@@ -22,6 +22,7 @@ The checked-in deployment profile documents these environment variables:
 | Worker | `GOOGLE_WORKER_CREDENTIALS_FILE`, `NOTION_WORKER_TOKEN` |
 | Local/remote MCP | `GOOGLE_MCP_CREDENTIALS_FILE`, `NOTION_MCP_TOKEN`; `GITHUB_READ_TOKEN` when private GitHub sources are used |
 | Remote development bearer | `REMOTE_MCP_SECRET`, `REMOTE_MCP_EXPIRES_AT` |
+| Remote MCP OAuth browser login | `REMOTE_MCP_GOOGLE_CLIENT_SECRET` plus non-secret `remote_mcp.oauth.google_client_id` / `authorized_email` config |
 
 Use provider-side least privilege. MCP credentials should be read-only where the provider supports it. Worker credentials may need write permissions for the specific configured workflow.
 

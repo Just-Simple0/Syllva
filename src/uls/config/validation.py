@@ -97,10 +97,20 @@ def validate_config(cfg: UlsConfig) -> list[str]:
     remote_enabled = type(cfg.remote_mcp.enabled) is bool and cfg.remote_mcp.enabled
     if remote_enabled and (
         not isinstance(cfg.remote_mcp.auth_mode, str)
-        or cfg.remote_mcp.auth_mode not in {"oauth_or_bearer", "oidc", "bearer"}
+        or cfg.remote_mcp.auth_mode not in {"oauth_or_bearer", "oidc", "bearer", "mcp_oauth"}
     ):
         problems.append("remote_mcp.auth_mode is not allowed when remote_mcp.enabled")
     if remote_enabled:
+        if (
+            not isinstance(cfg.remote_mcp.edge_mode, str)
+            or cfg.remote_mcp.edge_mode not in {"direct_tls", "cloudflare_tunnel"}
+        ):
+            problems.append("remote_mcp.edge_mode is not allowed when remote_mcp.enabled")
+        elif cfg.remote_mcp.edge_mode == "cloudflare_tunnel":
+            if cfg.remote_mcp.auth_mode != "mcp_oauth":
+                problems.append("remote_mcp.edge_mode cloudflare_tunnel requires auth_mode mcp_oauth")
+            if cfg.remote_mcp.host not in {"127.0.0.1", "::1"}:
+                problems.append("remote_mcp.edge_mode cloudflare_tunnel requires a loopback host")
         oidc = cfg.remote_mcp.oidc
         should_validate_oidc = cfg.remote_mcp.auth_mode == "oidc" or (
             cfg.remote_mcp.auth_mode == "oauth_or_bearer" and bool(oidc.issuer)
@@ -126,6 +136,34 @@ def validate_config(cfg: UlsConfig) -> list[str]:
                 problems.append("remote_mcp.oidc.jwks_uri must be a valid HTTPS URL")
             if isinstance(oidc.leeway_seconds, bool) or not isinstance(oidc.leeway_seconds, int) or not (0 <= oidc.leeway_seconds <= 120):
                 problems.append("remote_mcp.oidc.leeway_seconds must be an integer between 0 and 120")
+        if cfg.remote_mcp.auth_mode == "mcp_oauth":
+            oauth = cfg.remote_mcp.oauth
+            if not isinstance(oauth.google_client_id, str) or not oauth.google_client_id.strip():
+                problems.append("remote_mcp.oauth.google_client_id is required for mcp_oauth")
+            if (
+                not isinstance(oauth.authorized_email, str)
+                or not oauth.authorized_email.strip()
+                or "@" not in oauth.authorized_email
+            ):
+                problems.append("remote_mcp.oauth.authorized_email is required for mcp_oauth")
+            if (
+                isinstance(oauth.access_token_ttl_seconds, bool)
+                or not isinstance(oauth.access_token_ttl_seconds, int)
+                or not (300 <= oauth.access_token_ttl_seconds <= 3600)
+            ):
+                problems.append("remote_mcp.oauth.access_token_ttl_seconds must be 300..3600")
+            if (
+                isinstance(oauth.refresh_token_ttl_seconds, bool)
+                or not isinstance(oauth.refresh_token_ttl_seconds, int)
+                or not (3600 <= oauth.refresh_token_ttl_seconds <= 2_592_000)
+            ):
+                problems.append("remote_mcp.oauth.refresh_token_ttl_seconds must be 3600..2592000")
+            if (
+                isinstance(oauth.authorization_ttl_seconds, bool)
+                or not isinstance(oauth.authorization_ttl_seconds, int)
+                or not (60 <= oauth.authorization_ttl_seconds <= 900)
+            ):
+                problems.append("remote_mcp.oauth.authorization_ttl_seconds must be 60..900")
 
     _validate_ttl(
         cfg.retrieval.context_ttl_seconds,

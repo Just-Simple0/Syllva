@@ -22,6 +22,7 @@ from .schema import (
     NotionCfg,
     OidcCfg,
     RemoteMcpCfg,
+    RemoteOAuthCfg,
     RetrievalCfg,
     SemesterRegistryCfg,
     SemesterWorkspaceCfg,
@@ -42,6 +43,7 @@ SECRET_KEYS = (
     "LLM_API_KEY",
     "REMOTE_MCP_SECRET",
     "REMOTE_MCP_EXPIRES_AT",
+    "REMOTE_MCP_GOOGLE_CLIENT_SECRET",
 )
 
 # Every top-level YAML section name this loader recognizes. Used only by the
@@ -117,6 +119,12 @@ def load_config_unvalidated(path: str | os.PathLike[str]) -> UlsConfig:
     if not isinstance(oidc_raw, Mapping):
         raise ValueError("remote_mcp.oidc must be a YAML mapping")
     remote_values["oidc"] = _from_mapping(OidcCfg, oidc_raw)
+    oauth_raw = remote_raw.get("oauth", {})
+    if oauth_raw is None:
+        oauth_raw = {}
+    if not isinstance(oauth_raw, Mapping):
+        raise ValueError("remote_mcp.oauth must be a YAML mapping")
+    remote_values["oauth"] = _from_mapping(RemoteOAuthCfg, oauth_raw)
     return UlsConfig(
         system=_from_mapping(SystemCfg, _section(raw, "system")),
         worker=_from_mapping(WorkerCfg, _section(raw, "worker")),
