@@ -222,6 +222,7 @@ def validate_config(cfg: UlsConfig) -> list[str]:
                     "retrieval.material_type_source_class values must be one of: "
                     + ", ".join(sorted(SUPPORTED_MATERIAL_SOURCE_CLASSES))
                 )
+    _validate_retrieval_lane(cfg, problems)
     if (
         isinstance(cfg.behavior_contract.version, bool)
         or not isinstance(cfg.behavior_contract.version, int)
@@ -230,6 +231,59 @@ def validate_config(cfg: UlsConfig) -> list[str]:
         problems.append("behavior_contract.version must be positive")
     _validate_intake_config(cfg, problems)
     return problems
+
+
+def _validate_retrieval_lane(cfg: UlsConfig, problems: list[str]) -> None:
+    lane = cfg.retrieval.notion_lane
+    semester = cfg.retrieval.semester
+    if not isinstance(lane, str) or lane not in {"legacy_global", "semester_workspace"}:
+        problems.append(
+            "retrieval.notion_lane must be legacy_global or semester_workspace"
+        )
+        return
+    if not isinstance(semester, str):
+        problems.append("retrieval.semester must be a string")
+        return
+    if lane == "legacy_global":
+        if semester:
+            problems.append(
+                "retrieval.semester must be empty when notion_lane is legacy_global"
+            )
+        return
+
+    if not semester:
+        problems.append(
+            "retrieval.semester is required when notion_lane is semester_workspace"
+        )
+        return
+    try:
+        parse_course_key(f"{semester}_LMS101-001")
+    except UlsError:
+        problems.append("retrieval.semester is invalid")
+        return
+
+    matching_workspaces = [
+        row
+        for row in cfg.notion.semester_workspaces
+        if isinstance(row, SemesterWorkspaceCfg) and row.semester == semester
+    ]
+    if len(matching_workspaces) != 1:
+        problems.append(
+            "retrieval semester_workspace must select exactly one notion.semester_workspaces row"
+        )
+
+    matching_courses = 0
+    for course in cfg.courses:
+        try:
+            parsed = parse_course_key(course.course_key)
+        except UlsError:
+            continue
+        if parsed.semester == semester:
+            matching_courses += 1
+    if matching_courses == 0:
+        problems.append(
+            "retrieval semester_workspace must have at least one configured Course in the selected semester"
+        )
 
 
 def _validate_intake_config(cfg: UlsConfig, problems: list[str]) -> None:

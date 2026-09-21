@@ -197,6 +197,58 @@ def test_notion_reader_rejects_wrong_database_archival_and_truncated_relations()
         reader.get_course_by_relation_id('course-page')
 
 
+def test_semester_reader_uses_direct_sources_and_exact_session_is_semester_scoped():
+    service, cfg = NotionService(), config()
+    service.rows['session-page'] = {
+        'id': 'session-page',
+        'parent': {'data_source_id': 'sessions-ds'},
+        'archived': False,
+        'properties': {
+            'ID': property_value('rich_text', 'COMP319-S05'),
+            'Name': property_value('title', '05 · CPU Scheduling'),
+            'Aliases': property_value('rich_text', '5강 | CPU Scheduling'),
+            'Session No': property_value('number', 5),
+            'Course': property_value('relation', [{'id': 'course-page'}]),
+        },
+    }
+    service.databases.retrieve = lambda **_: (_ for _ in ()).throw(
+        AssertionError('semester retrieval must not discover legacy databases')
+    )
+    reader = NotionAPIReader(
+        service,
+        cfg.notion,
+        data_source_ids={
+            'courses': 'courses-ds',
+            'sessions': 'sessions-ds',
+            'materials': 'materials-ds',
+        },
+        expected_semester='2026-1',
+    )
+    cfg.retrieval.notion_lane = 'semester_workspace'
+    cfg.retrieval.semester = '2026-1'
+    engine = RetrievalEngine(
+        reader,
+        object(),
+        object(),
+        MemoryEphemeralStore(),
+        cfg,
+    )
+
+    resolved = engine.resolve_entity('COMP319-S05')
+    assert resolved.status == 'resolved'
+    assert resolved.entity is not None
+    assert resolved.entity.entity_id == 'COMP319-S05'
+    assert reader.supports_data_source('material_usage') is False
+    with pytest.raises(SourceUnavailableError):
+        reader.get_exam('COMP319-E01')
+
+    service.rows['course-page']['properties']['Course Key'] = property_value(
+        'rich_text', '2025-2_COMP319-002'
+    )
+    with pytest.raises(SourceUnavailableError):
+        engine.resolve_entity('COMP319-S05')
+
+
 def test_state_reader_never_manufactures_a_binding_from_an_arbitrary_pointer(tmp_path):
     path = tmp_path / 'state.db'
     with SQLiteStateStore(path):

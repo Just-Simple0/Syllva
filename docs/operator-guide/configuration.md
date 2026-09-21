@@ -74,6 +74,33 @@ notion:
 
 Do not mix these five current-semester intake data-source IDs with the existing global IDs used by the legacy read-only retrieval composition. There is no implicit fallback between those lanes.
 
+## Semester-scoped read-only retrieval
+
+The v1.2 global registry remains the default. To read one current-semester
+workspace directly, opt in with an exact semester:
+
+```yaml
+retrieval:
+  notion_lane: semester_workspace
+  semester: "2026-2"
+```
+
+This mode uses the selected workspace's Courses, Sessions, and Materials
+`data_source_id` values directly; it never copies them into or falls back to
+the legacy global `*_db_id` fields. Course relations are checked against the
+selected Courses source and semester before a Course, Session, or Material can
+be returned.
+
+`material_usage_data_source_id` is optional. When it is absent, Session
+retrieval remains available from transcript evidence and reports Material Usage
+as unavailable; it does not treat the missing source as a verified empty
+database. Semester-scoped Exam and Activity retrieval is unavailable until
+explicit mappings exist. `uls doctor --live` probes a Course from the
+selected semester when this lane is enabled.
+
+To return to the frozen v1.2 path, use `notion_lane: legacy_global` with an
+empty `semester`.
+
 ## Source registrations
 
 `sources.json` is a metadata-only explicit source-registration path. It should bind a source to a configured course/location; it is not a place for source bodies or secrets.

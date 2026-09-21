@@ -59,6 +59,8 @@ notion:
       materials_data_source_id: "<materials-db-id>"
       file_intake_data_source_id: "<file-intake-db-id>"
       input_requests_data_source_id: "<input-requests-db-id>"
+      # Optional v1.3 retrieval evidence; absence keeps Session retrieval transcript-only.
+      # material_usage_data_source_id: "<material-usage-data-source-id>"
       # Map from course_key → Notion portal page ID (dashboard page per course).
       portal_page_ids:
         "2026-2_COURSE001-001": "<course-portal-page-id>"
@@ -69,6 +71,8 @@ normalization:
   goodnotes_visual_fallback: true
 
 retrieval:
+  notion_lane: legacy_global  # v1.2 default; use semester_workspace only by explicit opt-in
+  semester: ""                # required exact semester only for semester_workspace
   concept_mode: bounded_lexical
   max_candidate_entities: 20
   max_candidate_chunks: 12

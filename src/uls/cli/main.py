@@ -18,6 +18,7 @@ from uls.config.credentials import (
 )
 from uls.config.errors import ConfigurationError
 from uls.domain.errors import UlsError
+from uls.domain.ids import parse_course_key
 from uls.runtime import build_retrieval, require_mcp_credentials, state_path
 
 
@@ -189,6 +190,27 @@ def _readiness_funnel(job_counts: dict[str, int], *, state: Any = None) -> dict[
         'ai_client': 'not_proven',
         'ai_client_note': 'requires human confirmation through actual AI client use',
     }
+
+
+def _live_retrieval_probe_course_key(config: Any) -> str:
+    if not config.courses:
+        raise ConfigurationError('live retrieval probe requires a configured Course')
+    if config.retrieval.notion_lane != 'semester_workspace':
+        course_key = config.courses[0].course_key
+        if not isinstance(course_key, str) or not course_key:
+            raise ConfigurationError('live retrieval probe requires a valid Course Key')
+        return course_key
+    for course in config.courses:
+        course_key = getattr(course, 'course_key', None)
+        if not isinstance(course_key, str) or not course_key:
+            continue
+        try:
+            parsed = parse_course_key(course_key)
+        except UlsError:
+            continue
+        if parsed.semester == config.retrieval.semester:
+            return course_key
+    raise ConfigurationError('selected retrieval semester has no configured Course')
 
 
 def doctor(config: Any, *, live: bool = False) -> dict[str, Any]:
@@ -378,7 +400,12 @@ def doctor(config: Any, *, live: bool = False) -> dict[str, Any]:
                 optional={'GITHUB_READ_TOKEN': ''},
             )
             engine = build_retrieval(config, live_snapshot)
-            checks['live_notion_read'] = engine.notion_reader.get_course_by_alias(config.courses[0].course_key) is not None
+            checks['live_notion_read'] = (
+                engine.notion_reader.get_course_by_alias(
+                    _live_retrieval_probe_course_key(config)
+                )
+                is not None
+            )
             live_mcp = live_snapshot.get_google_payload('GOOGLE_MCP_CREDENTIALS_FILE')
             if live_mcp is None:
                 raise ConfigurationError('GOOGLE_MCP_CREDENTIALS_FILE payload is missing')

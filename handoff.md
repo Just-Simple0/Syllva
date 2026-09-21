@@ -1,47 +1,46 @@
 # ULS handoff
-Updated 2026-09-21.
+Updated 2026-09-21. Branch: `codex/protected-secret-file-and-credential-set`.
 
-Branch: `codex/protected-secret-file-and-credential-set`.
-Remote MCP OAuth implementation commit: `216e996` (`feat: add OAuth remote MCP transport`).
 Do not touch unrelated `RESEARCH/`, secrets, or `CLAUDE.md`. No push or protected-branch merge is authorized.
 
 ## Accepted baseline
 
-- C5/C6 core is accepted and committed at `a868039` (`feat: complete C5 integration and C6 study note flow`). Do not reopen it without a concrete transport regression.
-- Search MCP remains read-only. Human Decision/Verified are never synthesized. Preserve SOURCE/AI/USER ownership.
-- Behavior Contract remains v2, `sha256:987d09ec152f91e368e070c5ccbe961602a18da8b6113afd968ac965406aae1a`.
+- C5/C6 core: `a868039` (`feat: complete C5 integration and C6 study note flow`).
+- Remote MCP Google OAuth: `216e996` (`feat: add OAuth remote MCP transport`), final web/Gemini rereviews GO.
+- Search MCP remains read-only; preserve SOURCE/AI/USER ownership and human-owned Decision/Verified.
+- Behavior Contract v2: `sha256:987d09ec152f91e368e070c5ccbe961602a18da8b6113afd968ac965406aae1a`.
 
-## Remote MCP OAuth — accepted
+## Semester-scoped read-only retrieval v1.3 — accepted, pending commit
 
-Plan: `docs/plans/remote-mcp-google-oauth.md`.
+Plan: `docs/plans/semester-scoped-retrieval-v1.3.md`.
 
-Syllva now supports additive `mcp_oauth`: Syllva is the MCP OAuth authorization server and Google is only the upstream owner-login IdP. Local stdio remains supported. Public identity is one canonical issuer/resource/callback tuple. Access tokens are opaque; refresh tokens rotate by family/generation. DCR supports public and confidential clients. Policy changes permanently retire prior grants. OAuth state is fail-closed on owner/protection/0600 checks. `direct_tls` remains the default; `cloudflare_tunnel` is loopback-only HTTP behind public HTTPS. OAuth control-plane routes are tokenless; `/mcp` and `/health` remain authenticated.
+Implemented additive opt-in retrieval for one exact `notion.semester_workspaces` row. Frozen v1.2 `legacy_global` remains the default. `semester_workspace` uses direct Notion data-source IDs only; no discovery/copy/fallback to legacy IDs.
 
-Final auth corrections are accepted:
-- A→B→A policy rollback cannot resurrect old codes/access/refresh tokens.
-- trusted Google callback DB failures return fixed `server_error` to the prevalidated client redirect; untrusted state still returns local 400.
-- runtime and doctor share the same protected OAuth state-boundary validation; insecure existing DBs are rejected, not repaired.
-- metadata advertises only route-proven auth methods: token `none` / `client_secret_post` / `client_secret_basic`; revocation `client_secret_post`.
+Boundary rules:
+- Courses, Sessions, and Materials fail closed on missing/malformed/cross-semester Course identity.
+- Exact Session-ID public resolution validates the Session Course relation before returning metadata.
+- Missing optional Material Usage permits transcript-only Session context with explicit `SOURCE_UNAVAILABLE`; it cannot authorize material evidence/capabilities.
+- Missing semester Exam/Activity mappings fail unavailable without touching legacy IDs.
+- `doctor --live` selects a Course from the configured retrieval semester.
 
 Review evidence:
-- plan rereviews GO: web `GPT-5.6 Sol / 매우 높음` at `.insane-review/response_Syllva_20260921_004729_75488_0bd2b3.md`; Gemini high at `.review/remote-mcp-google-oauth-plan-rev2-gemini.md`.
-- initial final web review REVISE: `.insane-review/response_Syllva_20260921_014057_77410_1cc973.md`; all four blockers fixed.
-- targeted final web rereview GO using actual `GPT-5.6 Sol / 매우 높음`: `.insane-review/response_Syllva_20260921_020132_78097_67023a.md`.
-- targeted Gemini high rereview GO: `.review/remote-mcp-google-oauth-final-rereview-gemini.md`.
+- initial plan web review REVISE: `.insane-review/response_Syllva_20260921_190954_82376_9ec887.md`; exact Session-ID boundary fixed.
+- targeted plan rereview GO: `.insane-review/response_Syllva_20260921_192104_85196_ca0a96.md`.
+- final implementation web review GO: `.insane-review/response_Syllva_20260921_195551_97741_6fc369.md` (`GPT-5.6 Sol / Pro`).
+- Gemini: N/A; this slice has no user-facing UI/design/flow change.
 
-Verification after final fixes:
-- full suite: **1787 passed, 3 skipped, 2 unchanged warnings**
-- contract: **98 passed**
+Verification:
+- full suite: **1793 passed, 3 skipped**
 - unit: **415 passed, 3 skipped**
-- focused OAuth/OIDC/config/doctor/runtime: **81 passed**
-- Behavior Contract/projection lint: clean
-- OAuth/remote Mypy: clean
-- relevant Ruff: clean
-- `git diff --check`: clean
-- broader repo Ruff and config Mypy still contain pre-existing unrelated debt.
+- contract: **98 passed**
+- focused semester/config/integration/contract tests: passing
+- Behavior Contract hash unchanged; projection lint clean; `git diff --check` clean
+- targeted Mypy for `cli/main.py`, `adapters/notion/api.py`, `config/validation.py`: clean with `--follow-imports=skip`; full repo Mypy retains pre-existing debt
 
-## Next
+Local `config.yaml` is explicitly set to `retrieval.notion_lane: semester_workspace`, `semester: 2026-2`. Host `uls doctor` is `status: ok`. With the venv certifi bundle, `doctor --live` proves `live_notion_read: true`; the unchanged Drive-root probe still reports false, so full live doctor is not yet green.
 
-Code acceptance is complete; live deployment has not been performed. Google Auth Platform project `syllva-academic` is prepared with External audience and the owner test user.
+## External rollout still pending
 
-For the first live check: start a Cloudflare Quick Tunnel, use its exact public origin for `public_url`, register exactly `<public-origin>/oauth/google/callback` in the Google OAuth Web client, store `REMOTE_MCP_GOOGLE_CLIENT_SECRET` through the configured protected credential source, start `mcp_oauth + cloudflare_tunnel`, verify metadata + owner login, then register the `/mcp` URL in one target client. Never relax Host validation or trust forwarded headers to accommodate the tunnel.
+GitHub Student status is approved; partner offers should unlock after ~72 hours. After obtaining a stable domain, replace Quick Tunnel with a Cloudflare Named Tunnel and fixed `mcp.<domain>`, update the Google OAuth callback once, then finish Claude/Codex/Gemini owner-login E2E. Quick Tunnel hostnames are disposable.
+
+Separate follow-up: diagnose the Drive-root live probe and Python default CA behavior. Neither blocks the accepted local semester retrieval slice.

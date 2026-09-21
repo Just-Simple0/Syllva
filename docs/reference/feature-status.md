@@ -17,7 +17,7 @@ This page gives one place to check whether a feature or document describes what 
 | --- | --- | --- |
 | Read-only MCP search surface (`get_context` and related tools) | Available | The core release invariant; read-only in v1.2. See [MCP Tools](mcp-tools.md). |
 | Legacy global Notion/Drive registry (seven global data sources) | Available | The v1.2 retrieval path described by the frozen specifications. |
-| Semester-scoped native Notion workspaces + Drive semester registries | Limited preview | Implemented intake slice; see `docs/ux/intake-v1.3-preview.md`. The intake worker's own `readiness()` output explicitly marks the separate read-only MCP composition as `NOT_PROVEN_BY_INTAKE_PREVIEW` — successful intake does not by itself prove this data is retrievable through MCP. |
+| Semester-scoped native Notion workspaces + Drive semester registries | Limited preview | Intake plus an explicit opt-in read-only retrieval lane are implemented. `retrieval.notion_lane: semester_workspace` selects one exact semester and consumes its direct data-source IDs with no legacy fallback. Intake `readiness()` remains separate evidence; live provider/client E2E must still be established independently. See `docs/ux/intake-v1.3-preview.md`. |
 | Bounded LLM re-rank for concept search | Held / paused by default | Opt-in via `retrieval.allow_bounded_llm_rerank`; deterministic lexical/index retrieval is the default. |
 
 ## Intake and file handling

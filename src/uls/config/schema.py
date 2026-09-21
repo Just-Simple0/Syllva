@@ -93,6 +93,10 @@ class NormalizationCfg:
 
 @dataclass
 class RetrievalCfg:
+    # v1.3 additive selector.  The frozen v1.2 global registry remains the
+    # default; semester workspaces are used only after an explicit opt-in.
+    notion_lane: str = "legacy_global"
+    semester: str = ""
     concept_mode: str = "bounded_lexical"
     max_candidate_entities: int = 20
     max_candidate_chunks: int = 12

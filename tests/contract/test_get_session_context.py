@@ -8,6 +8,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures")
 
 from fake_drive import FakeDriveReader
 from fake_notion import COURSE_KEY, FakeNotionReader
+
 from uls.adapters.drive.binding import ValidatedSourceBindingResolver
 from uls.adapters.notion.base import NotionReader
 from uls.config.schema import RetrievalCfg, UlsConfig
@@ -145,6 +146,14 @@ class _NetworkFailureNotion(FakeNotionReader):
         raise RuntimeError("Notion network unavailable")
 
 
+class _NoMaterialUsageReader(FakeNotionReader):
+    def supports_data_source(self, kind):
+        return kind != "material_usage"
+
+    def get_material_usage(self, session_id):
+        raise AssertionError("missing semester Material Usage must not be queried")
+
+
 class _ProtocolExactReader:
     """Reader with exactly the methods declared by the retrieval protocol."""
 
@@ -217,6 +226,34 @@ def test_context_returns_transcript_and_only_verified_usage_by_default() -> None
     assert {str(item.locator) for item in package.sources} == {
         str(allowed.locator) for allowed in capability.allowed_locators
     }
+
+
+def test_semester_lane_without_material_usage_keeps_transcript_only_context() -> None:
+    session = {
+        "ID": "COMP319-S05",
+        "Name": "05 · CPU Scheduling",
+        "Aliases": "5강 | CPU Scheduling",
+        "Course": COURSE_KEY,
+        "Session No": 5,
+        "Normalized Transcript": "transcript-05",
+    }
+    notion = _NoMaterialUsageReader(sessions=[session])
+    engine, _, _ = _ready_engine(notion=notion)
+
+    package = engine.get_session_context("COMP319-S05", caller_scope="study")
+
+    assert any(item.source_class == "professor_transcript" for item in package.sources)
+    assert all(item.source_class != "professor_material" for item in package.sources)
+    assert any(
+        "Material Usage is unavailable in the selected semester lane" in str(warning)
+        for warning in package.warnings
+    )
+    capability = engine.ephemeral.get_context_capability(package.context_id)
+    assert capability is not None
+    assert all(
+        allowed.source_class == "professor_transcript"
+        for allowed in capability.allowed_locators
+    )
 
 
 def test_derivative_without_front_matter_fingerprint_is_not_factual() -> None:

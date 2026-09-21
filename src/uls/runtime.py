@@ -187,6 +187,40 @@ def build_intake_worker(
     return worker
 
 
+def _retrieval_notion_sources(config: UlsConfig) -> tuple[dict[str, str] | None, str]:
+    lane = config.retrieval.notion_lane
+    semester = config.retrieval.semester
+    if lane == 'legacy_global':
+        if semester:
+            raise ConfigurationError(
+                'retrieval.semester must be empty for the legacy_global lane'
+            )
+        return None, ''
+    if lane != 'semester_workspace' or not semester:
+        raise ConfigurationError('semester_workspace retrieval requires an explicit semester')
+
+    matches = [
+        row for row in config.notion.semester_workspaces if row.semester == semester
+    ]
+    if len(matches) != 1:
+        raise ConfigurationError(
+            'semester_workspace retrieval must select exactly one Notion workspace'
+        )
+    workspace = matches[0]
+    sources = {
+        'courses': workspace.academic_courses_data_source_id,
+        'sessions': workspace.sessions_data_source_id,
+        'materials': workspace.materials_data_source_id,
+    }
+    if any(not value for value in sources.values()):
+        raise ConfigurationError(
+            'semester_workspace retrieval requires Courses, Sessions and Materials data sources'
+        )
+    if workspace.material_usage_data_source_id:
+        sources['material_usage'] = workspace.material_usage_data_source_id
+    return sources, semester
+
+
 def build_retrieval(config: UlsConfig, credentials: ResolvedCredentials) -> Any:
     # credentials is a required ResolvedCredentials snapshot produced by
     # exactly one CredentialResolver.resolve() call at this composition's
@@ -208,8 +242,17 @@ def build_retrieval(config: UlsConfig, credentials: ResolvedCredentials) -> Any:
     if mcp_payload is None:
         raise ConfigurationError('GOOGLE_MCP_CREDENTIALS_FILE payload is missing')
     drive = GoogleDriveReader(google_service(mcp_payload, read_only=True), state)
-    notion = NotionAPIReader(Client(auth=credentials['NOTION_MCP_TOKEN'], notion_version='2025-09-03',
-                                     timeout_ms=20_000), config.notion)
+    direct_sources, expected_semester = _retrieval_notion_sources(config)
+    notion = NotionAPIReader(
+        Client(
+            auth=credentials['NOTION_MCP_TOKEN'],
+            notion_version='2025-09-03',
+            timeout_ms=20_000,
+        ),
+        config.notion,
+        data_source_ids=direct_sources,
+        expected_semester=expected_semester,
+    )
     return RetrievalEngine(notion, drive, state, MemoryEphemeralStore(), config,
                            source_binding_resolver=ValidatedSourceBindingResolver(state),
                            github_reader=GitHubAPIReader(credentials.get('GITHUB_READ_TOKEN', '')))
