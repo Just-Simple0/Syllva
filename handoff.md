@@ -37,10 +37,8 @@ Verification:
 - Behavior Contract hash unchanged; projection lint clean; `git diff --check` clean
 - targeted Mypy for `cli/main.py`, `adapters/notion/api.py`, `config/validation.py`: clean with `--follow-imports=skip`; full repo Mypy retains pre-existing debt
 
-Local `config.yaml` is explicitly set to `retrieval.notion_lane: semester_workspace`, `semester: 2026-2`. Host `uls doctor` is `status: ok`. With the venv certifi bundle, `doctor --live` proves `live_notion_read: true`; the unchanged Drive-root probe still reports false, so full live doctor is not yet green.
+Local `config.yaml` is explicitly set to `retrieval.notion_lane: semester_workspace`, `semester: 2026-2`. Host `uls doctor` and `uls doctor --live` are both `status: ok`: `remote_profile`, `live_notion_read`, and `live_drive_read` all pass. The configured Drive root is the accessible `School` folder, and the `2026-2` folder resolves directly under it. Python 3.14's official `Install Certificates.command` was run, so the default CA path now exists and no `SSL_CERT_FILE` override is required.
 
 ## External rollout still pending
 
-GitHub Student status is approved; partner offers should unlock after ~72 hours. After obtaining a stable domain, replace Quick Tunnel with a Cloudflare Named Tunnel and fixed `mcp.<domain>`, update the Google OAuth callback once, then finish Claude/Codex/Gemini owner-login E2E. Quick Tunnel hostnames are disposable.
-
-Separate follow-up: diagnose the Drive-root live probe and Python default CA behavior. Neither blocks the accepted local semester retrieval slice.
+GitHub Student status is approved; partner offers should unlock after ~72 hours. After obtaining a stable domain, replace Quick Tunnel with a Cloudflare Named Tunnel and fixed `mcp.<domain>`, update the Google OAuth callback once, then finish Claude/Codex/Gemini owner-login E2E. Quick Tunnel hostnames are disposable. No remaining local provider-health blocker is known.
