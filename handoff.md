@@ -10,7 +10,7 @@ Do not touch unrelated `RESEARCH/`, secrets, or `CLAUDE.md`. No push or protecte
 - Search MCP remains read-only; preserve SOURCE/AI/USER ownership and human-owned Decision/Verified.
 - Behavior Contract v2: `sha256:987d09ec152f91e368e070c5ccbe961602a18da8b6113afd968ac965406aae1a`.
 
-## Semester-scoped read-only retrieval v1.3 — accepted, pending commit
+## Semester-scoped read-only retrieval v1.3 — accepted, committed locally
 
 Plan: `docs/plans/semester-scoped-retrieval-v1.3.md`.
 
