@@ -31,6 +31,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _lms_platform as fsplat
 
 ORIGIN = "https://canvas.knu.ac.kr"
+ASIDE_TRANSPORT = "aside-readonly"
+CANVAS_API_TRANSPORT = "canvas-api-readonly"
+SUPPORTED_SEMESTER_TRANSPORTS = frozenset({ASIDE_TRANSPORT, CANVAS_API_TRANSPORT})
 ANNOUNCEMENT_WINDOW_DAYS = 31
 KST = dt.timezone(dt.timedelta(hours=9), name="Asia/Seoul")
 MODULE_POSITIONS = frozenset(range(1, 16))
@@ -39,13 +42,41 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_DIR = PROJECT_ROOT / ".review" / "knu-lms-hourly"
 CONFIG_PATH = RUNTIME_DIR / "config.json"
 AUTH_MANIFEST_PATH = RUNTIME_DIR / "auth-manifest.json"
+SEMESTER_API_CONFIG_PATH = RUNTIME_DIR / "semester-api-config.json"
+SEMESTER_API_AUTH_MANIFEST_PATH = RUNTIME_DIR / "semester-api-auth-manifest.json"
 KEYCHAIN_SERVICE = "Syllva KNU LMS"
+SEMESTER_API_KEYCHAIN_ACCOUNT_PREFIX = "canvas.knu.ac.kr/semester/"
+SEMESTER_API_ACADEMIC_COURSE_COUNT = 5
+SEMESTER_API_MAX_RUN_SECONDS = 45.0 * SEMESTER_API_ACADEMIC_COURSE_COUNT
+RECONCILIATION_CONFIRMATION = "RECONCILE_SETTLED"
+RECONCILIATION_MAX_EVIDENCE_BYTES = 1024 * 1024
+RECONCILIATION_EVIDENCE_FILES = (
+    "apply-journal.json",
+    "source-alignment-journal.json",
+    "acceptance.json",
+    "accepted-projection.json",
+    "canonical-live.json",
+    "live-readback.json",
+)
 CONFIG_FIELDS = frozenset(
     {"version", "course", "origin", "service", "account", "backend", "resources", "issued_at", "expires_at"}
+)
+SEMESTER_API_CONFIG_FIELDS = frozenset(
+    {
+        "version", "transport", "semester", "registry_hash", "scope_hash", "origin",
+        "service", "account", "backend", "resources", "issued_at", "expires_at",
+    }
 )
 MANIFEST_FIELDS = frozenset(
     {"version", "state", "scope_hash", "origin", "course", "service", "account", "backend", "expires_at"}
 )
+SEMESTER_API_MANIFEST_FIELDS = frozenset(
+    {
+        "version", "state", "transport", "semester", "registry_hash", "scope_hash", "origin",
+        "service", "account", "backend", "resources", "issued_at", "expires_at",
+    }
+)
+RESOURCE_POLICY = ("course", "assignments", "announcements", "modules")
 DATASOURCE_IDENTITY = "notion:datasource:2026-2:schedule"
 SCHEMA_FIELDS = (
     "이름",
@@ -82,6 +113,12 @@ class SyncError(Exception):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+def _validate_transport(transport: Any) -> str:
+    if not isinstance(transport, str) or transport not in SUPPORTED_SEMESTER_TRANSPORTS:
+        raise SyncError("transport_invalid")
+    return transport
 
 
 def _notification_state(value: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -221,7 +258,7 @@ class CourseSpec:
         ) != semester:
             raise SyncError("course_term_mismatch")
         if self.verification_state not in {
-            "api_code_verified", "identity_observed", "observed_candidate", "needs_verification"
+            "api_code_verified", "verified", "identity_observed", "observed_candidate", "needs_verification"
         }:
             raise SyncError("verification_state_invalid")
         if self.module_positions is not None and not self.module_positions:
@@ -279,11 +316,12 @@ class SemesterCourseRegistry:
             "courses": [course.as_dict() for course in sorted(self.courses, key=lambda c: c.course_id)],
         }
 
-    def scope_hash(self, *, transport: str = "aside-readonly") -> str:
+    def scope_hash(self, *, transport: str = ASIDE_TRANSPORT) -> str:
+        _validate_transport(transport)
         policy = {
             "registry": self.canonical_dict(),
             "transport": transport,
-            "resource_policy": ["course", "assignments", "announcements", "modules"],
+            "resource_policy": list(RESOURCE_POLICY),
         }
         return sha256(_canonical_bytes(policy)).hexdigest()
 
@@ -317,6 +355,23 @@ def registry_from_document(document: Any) -> SemesterCourseRegistry:
     registry = SemesterCourseRegistry(semester=document["semester"], courses=tuple(courses))
     registry.validate()
     return registry
+
+
+def registry_hash(registry: SemesterCourseRegistry) -> str:
+    return sha256(_canonical_bytes(registry.canonical_dict())).hexdigest()
+
+
+def _validate_semester_api_registry(registry: SemesterCourseRegistry) -> None:
+    registry.validate()
+    academic = registry.academic_courses
+    if len(academic) != SEMESTER_API_ACADEMIC_COURSE_COUNT:
+        raise SyncError("api_academic_course_count_invalid")
+    if any(
+        course.expected_code is None
+        or course.verification_state not in {"api_code_verified", "verified"}
+        for course in academic
+    ):
+        raise SyncError("api_course_identity_unverified")
 
 
 def _canonical_bytes(value: dict[str, Any]) -> bytes:
@@ -413,6 +468,11 @@ def _parse_expiry(value: Any) -> dt.datetime:
     return parsed
 
 
+def _validate_expiry_bounds(issued_at: dt.datetime, expires_at: dt.datetime) -> None:
+    if expires_at <= issued_at or expires_at > issued_at + dt.timedelta(days=30):
+        raise SyncError("expiry_invalid")
+
+
 def _config_from_document(document: Mapping[str, Any]) -> tuple[SyncConfig, dict[str, Any]]:
     if set(document) != CONFIG_FIELDS:
         raise SyncError("config_invalid")
@@ -454,8 +514,7 @@ def _config_from_document(document: Mapping[str, Any]) -> tuple[SyncConfig, dict
         raise SyncError("config_scope_invalid")
     issued_at = _parse_expiry(document.get("issued_at"))
     expires_at = _parse_expiry(document.get("expires_at"))
-    if expires_at <= issued_at or expires_at > issued_at + dt.timedelta(days=30):
-        raise SyncError("expiry_invalid")
+    _validate_expiry_bounds(issued_at, expires_at)
     return config, dict(document)
 
 
@@ -509,6 +568,114 @@ def _ensure_participant(owner_id: str, scope_hash: str) -> None:
         if isinstance(code, str) and re.fullmatch(r"[a-z_]+", code):
             raise SyncError(code) from None
         raise SyncError("reservation_binding_mismatch") from exc
+
+
+def _reconciliation_guard(owner_id: str, scope_hash: str) -> Any:
+    try:
+        module = _lock_module()
+        return module.ReconciliationGuard.begin(RUNTIME_DIR, owner_id, scope_hash)
+    except SyncError:
+        raise
+    except Exception as exc:
+        code = getattr(exc, "args", [None])[0]
+        if isinstance(code, str) and re.fullmatch(r"[a-z_]+", code):
+            raise SyncError(code) from None
+        raise SyncError("reservation_unavailable") from exc
+
+
+def _reconciliation_evidence() -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for name in RECONCILIATION_EVIDENCE_FILES:
+        path = RUNTIME_DIR / name
+        if path.is_symlink():
+            raise SyncError("reconciliation_evidence_invalid")
+        fd: int | None = None
+        try:
+            fd = fsplat.open_nofollow(path, os.O_RDONLY)
+            info = os.fstat(fd)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_size > RECONCILIATION_MAX_EVIDENCE_BYTES
+                or not fsplat.owns_path(path, posix_stat=info)
+                or (
+                    not fsplat.IS_WINDOWS
+                    and stat.S_IMODE(info.st_mode) != 0o600
+                )
+            ):
+                raise SyncError("reconciliation_evidence_invalid")
+            with os.fdopen(fd, "rb", closefd=False) as stream:
+                payload = stream.read(RECONCILIATION_MAX_EVIDENCE_BYTES + 1)
+            after = os.fstat(fd)
+            identity_before = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+            identity_after = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            if len(payload) != info.st_size or identity_before != identity_after:
+                raise SyncError("reconciliation_evidence_invalid")
+            entries.append({
+                "name": name,
+                "size": info.st_size,
+                "sha256": sha256(payload).hexdigest(),
+            })
+        except SyncError:
+            raise
+        except OSError as exc:
+            raise SyncError("reconciliation_evidence_invalid") from exc
+        finally:
+            if fd is not None:
+                os.close(fd)
+    return entries
+
+
+def _reconciliation_candidate(guard: Any) -> dict[str, Any]:
+    record = guard.record()
+    bound = {
+        "version": 1,
+        "owner_id": guard.owner_id,
+        "scope_hash": guard.scope_hash,
+        "active_run_sha256": sha256(_canonical_bytes(record)).hexdigest(),
+        "evidence": _reconciliation_evidence(),
+    }
+    return {
+        "status": "candidate",
+        **bound,
+        "candidate_hash": sha256(_canonical_bytes(bound)).hexdigest(),
+    }
+
+
+def reconciliation_check(owner_id: str, scope_hash: str) -> dict[str, Any]:
+    guard = _reconciliation_guard(owner_id, scope_hash)
+    try:
+        return _reconciliation_candidate(guard)
+    finally:
+        guard.close()
+
+
+def reconciliation_apply(
+    owner_id: str,
+    scope_hash: str,
+    candidate_hash: str,
+    confirmation: str,
+) -> dict[str, Any]:
+    if confirmation != RECONCILIATION_CONFIRMATION:
+        raise SyncError("authorization_required")
+    if not re.fullmatch(r"[0-9a-f]{64}", candidate_hash):
+        raise SyncError("reconciliation_candidate_invalid")
+    guard = _reconciliation_guard(owner_id, scope_hash)
+    try:
+        current = _reconciliation_candidate(guard)
+        if current["candidate_hash"] != candidate_hash:
+            raise SyncError("reconciliation_candidate_stale")
+        confirmed = _reconciliation_candidate(guard)
+        if confirmed["candidate_hash"] != candidate_hash:
+            raise SyncError("reconciliation_candidate_stale")
+        guard.complete(candidate_hash)
+        return {
+            "status": "reconciled",
+            "owner_id": owner_id,
+            "scope_hash": scope_hash,
+            "candidate_hash": candidate_hash,
+        }
+    finally:
+        guard.close()
 
 
 def _expected_backend_module() -> str:
@@ -585,6 +752,208 @@ def _fixed_auth_document(config_document: dict[str, Any], state: str, scope_hash
         "backend": _expected_backend_module(),
         "expires_at": config_document["expires_at"],
     }
+
+
+def _semester_api_account(semester: str) -> str:
+    return f"{SEMESTER_API_KEYCHAIN_ACCOUNT_PREFIX}{semester}"
+
+
+def _semester_api_binding(
+    registry: SemesterCourseRegistry,
+    scope_hash: str,
+    issued_at: str,
+    expires_at: str,
+) -> dict[str, Any]:
+    _validate_semester_api_registry(registry)
+    expected_scope_hash = registry.scope_hash(transport=CANVAS_API_TRANSPORT)
+    if scope_hash != expected_scope_hash:
+        raise SyncError("scope_hash_mismatch")
+    return {
+        "version": 1,
+        "transport": CANVAS_API_TRANSPORT,
+        "semester": registry.semester,
+        "registry_hash": registry_hash(registry),
+        "scope_hash": expected_scope_hash,
+        "origin": ORIGIN,
+        "service": KEYCHAIN_SERVICE,
+        "account": _semester_api_account(registry.semester),
+        "backend": _expected_backend_module(),
+        "resources": list(RESOURCE_POLICY),
+        "issued_at": issued_at,
+        "expires_at": expires_at,
+    }
+
+
+def _semester_api_manifest(binding: Mapping[str, Any], state: str) -> dict[str, Any]:
+    if state not in {"pending", "enrolled"}:
+        raise SyncError("auth_manifest_invalid")
+    return {"version": 1, "state": state, **{
+        field: binding[field]
+        for field in SEMESTER_API_CONFIG_FIELDS
+        if field != "version"
+    }}
+
+
+def _validate_semester_api_config(
+    document: Mapping[str, Any], registry: SemesterCourseRegistry,
+) -> tuple[dict[str, Any], str]:
+    _validate_semester_api_registry(registry)
+    if set(document) != SEMESTER_API_CONFIG_FIELDS or document.get("version") != 1:
+        raise SyncError("semester_api_config_invalid")
+    if document.get("transport") != CANVAS_API_TRANSPORT:
+        raise SyncError("semester_api_config_invalid")
+    if document.get("semester") != registry.semester:
+        raise SyncError("semester_api_config_binding_mismatch")
+    expected_scope_hash = registry.scope_hash(transport=CANVAS_API_TRANSPORT)
+    if document.get("registry_hash") != registry_hash(registry):
+        raise SyncError("semester_api_registry_binding_mismatch")
+    if document.get("scope_hash") != expected_scope_hash:
+        raise SyncError("semester_api_scope_binding_mismatch")
+    if document.get("origin") != ORIGIN or document.get("service") != KEYCHAIN_SERVICE:
+        raise SyncError("semester_api_config_binding_mismatch")
+    if document.get("account") != _semester_api_account(registry.semester):
+        raise SyncError("semester_api_config_binding_mismatch")
+    if document.get("backend") != _expected_backend_module():
+        raise SyncError("semester_api_config_binding_mismatch")
+    if document.get("resources") != list(RESOURCE_POLICY):
+        raise SyncError("semester_api_scope_invalid")
+    issued_at = _parse_expiry(document.get("issued_at"))
+    expires_at = _parse_expiry(document.get("expires_at"))
+    _validate_expiry_bounds(issued_at, expires_at)
+    return dict(document), expected_scope_hash
+
+
+def _load_semester_api_config(
+    registry: SemesterCourseRegistry,
+) -> tuple[dict[str, Any], str]:
+    document = _read_json_file(SEMESTER_API_CONFIG_PATH, expected_mode=0o600)
+    return _validate_semester_api_config(document, registry)
+
+
+def prepare_semester_api(
+    registry: SemesterCourseRegistry,
+    *,
+    issued_at: str,
+    expires_at: str,
+) -> dict[str, Any]:
+    issued = _parse_expiry(issued_at)
+    expires = _parse_expiry(expires_at)
+    _validate_expiry_bounds(issued, expires)
+    scope_hash = registry.scope_hash(transport=CANVAS_API_TRANSPORT)
+    binding = _semester_api_binding(registry, scope_hash, issued_at, expires_at)
+    _atomic_json_write(SEMESTER_API_CONFIG_PATH, binding, 0o600)
+    return {
+        "status": "prepared",
+        "transport": CANVAS_API_TRANSPORT,
+        "semester": registry.semester,
+        "registry_hash": binding["registry_hash"],
+        "scope_hash": scope_hash,
+        "expires_at": expires_at,
+    }
+
+
+def _load_semester_api_enrollment(
+    registry: SemesterCourseRegistry,
+    *,
+    now: dt.datetime | None,
+    expected_scope_hash: str | None = None,
+) -> tuple[dict[str, Any], str]:
+    config_document, scope_hash = _load_semester_api_config(registry)
+    if expected_scope_hash is not None and expected_scope_hash != scope_hash:
+        raise SyncError("scope_hash_mismatch")
+    _validate_auth_window(config_document, now)
+    manifest = _read_json_file(SEMESTER_API_AUTH_MANIFEST_PATH, expected_mode=0o600)
+    if set(manifest) != SEMESTER_API_MANIFEST_FIELDS or manifest.get("state") != "enrolled":
+        raise SyncError("semester_api_manifest_not_enrolled")
+    expected = _semester_api_manifest(config_document, "enrolled")
+    if manifest != expected:
+        raise SyncError("semester_api_manifest_binding_mismatch")
+    return config_document, scope_hash
+
+
+def read_semester_api_token(
+    registry: SemesterCourseRegistry,
+    *,
+    now: dt.datetime | None = None,
+    expected_scope_hash: str | None = None,
+) -> tuple[str, dict[str, Any], str]:
+    config_document, scope_hash = _load_semester_api_enrollment(
+        registry, now=now, expected_scope_hash=expected_scope_hash,
+    )
+    backend = _explicit_os_keyring()
+    if hasattr(backend, "keychain"):
+        backend.keychain = None
+        if backend.keychain is not None:
+            raise SyncError("keychain_backend_invalid")
+    try:
+        token = backend.get_password(
+            KEYCHAIN_SERVICE,
+            str(config_document["account"]),
+        )
+    except Exception as exc:
+        raise SyncError("keychain_read_failed") from exc
+    if not isinstance(token, str) or not token:
+        raise SyncError("credential_missing")
+    return token, config_document, scope_hash
+
+
+def enroll_semester_api(
+    registry: SemesterCourseRegistry,
+    *,
+    prompt: Callable[[str], str],
+    stdin: Any,
+    now: dt.datetime | None = None,
+    backend: Any | None = None,
+) -> dict[str, Any]:
+    if not stdin.isatty():
+        raise SyncError("credential_tty_required")
+    config_document, scope_hash = _load_semester_api_config(registry)
+    _validate_auth_window(config_document, now)
+    reservation = _begin_reservation(scope_hash)
+    try:
+        pending = _semester_api_manifest(config_document, "pending")
+        _atomic_json_write(SEMESTER_API_AUTH_MANIFEST_PATH, pending, 0o600)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", getpass.GetPassWarning)
+                token = prompt("Canvas access token: ")
+        except getpass.GetPassWarning:
+            raise SyncError("credential_noecho_unavailable") from None
+        except (EOFError, OSError, KeyboardInterrupt):
+            raise SyncError("credential_noecho_unavailable") from None
+        if not isinstance(token, str) or not token or any(
+            not 0x21 <= ord(char) <= 0x7E for char in token
+        ):
+            raise SyncError("credential_invalid")
+        selected_backend = backend if backend is not None else _explicit_os_keyring()
+        if hasattr(selected_backend, "keychain"):
+            selected_backend.keychain = None
+            if selected_backend.keychain is not None:
+                raise SyncError("keychain_backend_invalid")
+        try:
+            selected_backend.set_password(
+                KEYCHAIN_SERVICE,
+                str(config_document["account"]),
+                token,
+            )
+        except Exception as exc:
+            raise SyncError("keychain_write_failed") from exc
+        try:
+            enrolled = _semester_api_manifest(config_document, "enrolled")
+            _atomic_json_write(SEMESTER_API_AUTH_MANIFEST_PATH, enrolled, 0o600)
+        except SyncError:
+            raise SyncError("enrollment_incomplete") from None
+        reservation.complete()
+        return {
+            "status": "enrolled",
+            "transport": CANVAS_API_TRANSPORT,
+            "semester": registry.semester,
+            "registry_hash": config_document["registry_hash"],
+            "scope_hash": scope_hash,
+            "expires_at": config_document["expires_at"],
+        }
+    finally:
+        reservation.close()
 
 
 def _load_auth_config() -> tuple[SyncConfig, dict[str, Any], str]:
@@ -755,6 +1124,58 @@ def collect(
         raise SyncError("collect_failed") from exc
     _ensure_participant(owner_id, scope_hash)
     return validate_snapshot(raw, config)
+
+
+def collect_semester_api(
+    registry: SemesterCourseRegistry,
+    *,
+    owner_id: str,
+    scope_hash: str,
+    now: dt.datetime | None = None,
+    opener: Any | None = None,
+    clock: Callable[[], float] = time.monotonic,
+) -> dict[str, Any]:
+    """Collect the five-course registry through the bounded Canvas API path."""
+    _validate_semester_api_registry(registry)
+    expected_scope_hash = registry.scope_hash(transport=CANVAS_API_TRANSPORT)
+    if scope_hash != expected_scope_hash:
+        raise SyncError("scope_hash_mismatch")
+    _ensure_participant(owner_id, scope_hash)
+    token, _config_document, returned_scope_hash = read_semester_api_token(
+        registry, now=now, expected_scope_hash=scope_hash,
+    )
+    if returned_scope_hash != scope_hash:
+        raise SyncError("scope_hash_mismatch")
+    current = now or dt.datetime.now(dt.UTC)
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise SyncError("invalid_clock")
+    today = current.astimezone(KST).date()
+    end_date = (today + dt.timedelta(days=1)).isoformat()
+    start_date = (today - dt.timedelta(days=ANNOUNCEMENT_WINDOW_DAYS - 2)).isoformat()
+    probe = _probe_module()
+    registry_document = registry.canonical_dict()
+    try:
+        raw = probe.run_registry_api(
+            registry_document["courses"],
+            token=token,
+            owner_id=owner_id,
+            scope_hash=scope_hash,
+            start_date=start_date,
+            end_date=end_date,
+            opener=opener,
+            clock=clock,
+        )
+    except Exception as exc:
+        raise SyncError("collect_failed") from exc
+    _ensure_participant(owner_id, scope_hash)
+    result = validate_semester_snapshot(
+        registry,
+        raw,
+        expected_scope_hash=scope_hash,
+        transport=CANVAS_API_TRANSPORT,
+    )
+    result["owner_id"] = owner_id
+    return result
 
 
 @dataclass(frozen=True)
@@ -1065,15 +1486,25 @@ def validate_semester_snapshot(
     raw: Any,
     *,
     expected_scope_hash: str | None = None,
+    transport: str = ASIDE_TRANSPORT,
 ) -> dict[str, Any]:
     """Validate every explicitly registered course and preserve per-course coverage."""
     registry.validate()
     if not isinstance(raw, dict) or raw.get("status") != "complete":
         raise SyncError("incomplete_semester_snapshot")
+    _validate_transport(transport)
     provenance = raw.get("provenance")
-    if provenance not in {"aside-readonly", "fixture-synthetic"}:
+    allowed_provenance = (
+        {ASIDE_TRANSPORT, "fixture-synthetic"}
+        if transport == ASIDE_TRANSPORT
+        else {CANVAS_API_TRANSPORT}
+    )
+    if provenance not in allowed_provenance:
         raise SyncError("invalid_provenance")
-    registry_scope_hash = registry.scope_hash(transport="aside-readonly")
+    raw_transport = raw.get("transport")
+    if raw_transport is not None and raw_transport != transport:
+        raise SyncError("transport_mismatch")
+    registry_scope_hash = registry.scope_hash(transport=transport)
     if raw.get("scope_hash") != registry_scope_hash or (
         expected_scope_hash is not None and expected_scope_hash != registry_scope_hash
     ):
@@ -1136,12 +1567,13 @@ def validate_semester_snapshot(
     return {
         "status": "complete" if academic_complete else "incomplete",
         "provenance": provenance,
+        "transport": transport,
         "semester": registry.semester,
         "registry_hash": sha256(_canonical_bytes(registry.canonical_dict())).hexdigest(),
         "scope_hash": registry_scope_hash,
         "academic_expected": len(registry.academic_courses),
         "academic_complete": sum(1 for item in results.values() if item.get("status") == "complete" and item.get("academic_import") is True),
-        "apply_ready": academic_complete and provenance == "aside-readonly",
+        "apply_ready": academic_complete and provenance == transport,
         "courses": results,
         "snapshots": canonical,
         "excluded_candidates": [str(spec.course_id) for spec in registry.courses if not spec.academic_import],
@@ -1168,8 +1600,10 @@ def build_semester_projection(
         return {"status": "incomplete", "apply_ready": False, "conflicts": [{"reason": "semester_incomplete"}]}
     if semester_snapshot.get("provenance") == "fixture-synthetic":
         return {"status": "synthetic", "apply_ready": False, "conflicts": [{"reason": "synthetic_provenance"}]}
+    transport = semester_snapshot.get("transport", ASIDE_TRANSPORT)
+    _validate_transport(transport)
     expected_registry_hash = sha256(_canonical_bytes(registry.canonical_dict())).hexdigest()
-    expected_scope_hash = registry.scope_hash(transport="aside-readonly")
+    expected_scope_hash = registry.scope_hash(transport=transport)
     if semester_snapshot.get("registry_hash") != expected_registry_hash:
         raise SyncError("registry_hash_mismatch")
     if semester_snapshot.get("scope_hash") != expected_scope_hash:
@@ -1273,6 +1707,7 @@ def build_semester_projection(
     return {
         "status": "complete" if not conflicts else "conflict",
         "apply_ready": not conflicts and semester_snapshot.get("apply_ready") is True,
+        "transport": transport,
         "semester": registry.semester,
         "registry_hash": semester_snapshot.get("registry_hash"),
         "scope_hash": semester_snapshot.get("scope_hash"),
@@ -2102,14 +2537,38 @@ def _parser() -> SanitizedParser:
     collect_parser.add_argument("--scope-hash", required=True)
     enroll_parser = subparsers.add_parser("enroll")
     enroll_parser.add_argument("--confirm", required=True)
+    prepare_api = subparsers.add_parser("prepare-semester-api")
+    prepare_api.add_argument("--registry", required=True)
+    prepare_api.add_argument("--issued-at", required=True)
+    prepare_api.add_argument("--expires-at", required=True)
+    prepare_api.add_argument("--confirm", required=True)
+    enroll_api = subparsers.add_parser("enroll-semester-api")
+    enroll_api.add_argument("--registry", required=True)
+    enroll_api.add_argument("--confirm", required=True)
+    collect_api = subparsers.add_parser("collect-semester-api")
+    collect_api.add_argument("--registry", required=True)
+    collect_api.add_argument("--owner-id", required=True)
+    collect_api.add_argument("--scope-hash", required=True)
+    collect_api.add_argument("--output")
     hold_parser = subparsers.add_parser("hold-lock")
     hold_parser.add_argument("--scope-hash", required=True)
+    reconcile_check = subparsers.add_parser("reconcile-check")
+    reconcile_check.add_argument("--owner-id", required=True)
+    reconcile_check.add_argument("--scope-hash", required=True)
+    reconcile_apply = subparsers.add_parser("reconcile-apply")
+    reconcile_apply.add_argument("--owner-id", required=True)
+    reconcile_apply.add_argument("--scope-hash", required=True)
+    reconcile_apply.add_argument("--candidate-hash", required=True)
+    reconcile_apply.add_argument("--confirm-settled", required=True)
     snapshot = subparsers.add_parser("snapshot")
     _add_config_args(snapshot)
     snapshot.add_argument("--input", required=True)
     snapshot.add_argument("--registry")
     snapshot.add_argument("--owner-id")
     snapshot.add_argument("--scope-hash")
+    snapshot.add_argument(
+        "--transport", choices=(ASIDE_TRANSPORT, CANVAS_API_TRANSPORT), default=ASIDE_TRANSPORT
+    )
     snapshot.add_argument("--output")
     project = subparsers.add_parser("project")
     project.add_argument("--snapshot", required=True)
@@ -2119,6 +2578,9 @@ def _parser() -> SanitizedParser:
     project.add_argument("--registry")
     project.add_argument("--owner-id")
     project.add_argument("--scope-hash")
+    project.add_argument(
+        "--transport", choices=(ASIDE_TRANSPORT, CANVAS_API_TRANSPORT), default=ASIDE_TRANSPORT
+    )
     project.add_argument("--output")
     bind = subparsers.add_parser("bind-bootstrap")
     bind.add_argument("--registry", required=True)
@@ -2241,6 +2703,20 @@ def main(argv: list[str] | None = None, *, output: TextIO | None = None, error: 
                 if isinstance(code, str) and re.fullmatch(r"[a-z_]+", code):
                     raise SyncError(code) from None
                 raise SyncError("reservation_unavailable") from exc
+        if args.command == "reconcile-check":
+            _write_json(output_stream, reconciliation_check(args.owner_id, args.scope_hash))
+            return 0
+        if args.command == "reconcile-apply":
+            if args.confirm_settled != "yes":
+                raise SyncError("authorization_required")
+            reconcile_result = reconciliation_apply(
+                args.owner_id,
+                args.scope_hash,
+                args.candidate_hash,
+                RECONCILIATION_CONFIRMATION,
+            )
+            _write_json(output_stream, reconcile_result)
+            return 0
         if args.command == "collect":
             collect_result = collect(owner_id=args.owner_id, scope_hash=args.scope_hash)
             _write_json(output_stream, collect_result.as_dict())
@@ -2251,6 +2727,37 @@ def main(argv: list[str] | None = None, *, output: TextIO | None = None, error: 
             enroll_result = enroll_keychain(prompt=getpass.getpass, stdin=sys.stdin)
             _write_json(output_stream, enroll_result)
             return 0
+        if args.command == "prepare-semester-api":
+            if args.confirm != "PREPARE":
+                raise SyncError("authorization_required")
+            registry = registry_from_document(_read_json(args.registry))
+            prepare_result = prepare_semester_api(
+                registry,
+                issued_at=args.issued_at,
+                expires_at=args.expires_at,
+            )
+            _write_json(output_stream, prepare_result)
+            return 0
+        if args.command == "enroll-semester-api":
+            if args.confirm != "ENROLL":
+                raise SyncError("authorization_required")
+            registry = registry_from_document(_read_json(args.registry))
+            enrollment_result = enroll_semester_api(
+                registry,
+                prompt=getpass.getpass,
+                stdin=sys.stdin,
+            )
+            _write_json(output_stream, enrollment_result)
+            return 0
+        if args.command == "collect-semester-api":
+            registry = registry_from_document(_read_json(args.registry))
+            semester_collect_result = collect_semester_api(
+                registry,
+                owner_id=args.owner_id,
+                scope_hash=args.scope_hash,
+            )
+            _write_json_path(args.output, semester_collect_result, output_stream)
+            return 0 if semester_collect_result.get("status") == "complete" else 3
         if args.command == "bind-bootstrap":
             bind_result = bind_bootstrap(args.registry, args.candidate)
             _write_json(output_stream, bind_result)
@@ -2263,13 +2770,18 @@ def main(argv: list[str] | None = None, *, output: TextIO | None = None, error: 
                     raise SyncError("reservation_binding_mismatch")
                 if not re.fullmatch(r"[0-9a-f]{64}", args.scope_hash):
                     raise SyncError("scope_hash_mismatch")
-                if args.scope_hash != registry.scope_hash(transport="aside-readonly"):
+                if args.scope_hash != registry.scope_hash(transport=args.transport):
                     raise SyncError("scope_hash_mismatch")
                 _ensure_participant(args.owner_id, args.scope_hash)
                 input_value = _read_json(args.input)
                 if not isinstance(input_value, dict) or input_value.get("scope_hash") != args.scope_hash:
                     raise SyncError("scope_hash_mismatch")
-                result = validate_semester_snapshot(registry, input_value, expected_scope_hash=args.scope_hash)
+                result = validate_semester_snapshot(
+                    registry,
+                    input_value,
+                    expected_scope_hash=args.scope_hash,
+                    transport=args.transport,
+                )
                 result["owner_id"] = args.owner_id
             else:
                 if None in (args.course_id, args.expected_name, args.expected_code, args.expected_term):
@@ -2295,11 +2807,15 @@ def main(argv: list[str] | None = None, *, output: TextIO | None = None, error: 
                     raise SyncError("semester_runtime_binding_required")
                 if not re.fullmatch(r"[0-9a-f]{64}", args.scope_hash):
                     raise SyncError("scope_hash_mismatch")
-                if args.scope_hash != registry.scope_hash(transport="aside-readonly"):
+                if args.scope_hash != registry.scope_hash(transport=args.transport):
                     raise SyncError("scope_hash_mismatch")
                 _ensure_participant(args.owner_id, args.scope_hash)
                 semester_value = _read_json(args.snapshot)
-                if not isinstance(semester_value, dict) or semester_value.get("scope_hash") != args.scope_hash:
+                if (
+                    not isinstance(semester_value, dict)
+                    or semester_value.get("scope_hash") != args.scope_hash
+                    or semester_value.get("transport", ASIDE_TRANSPORT) != args.transport
+                ):
                     raise SyncError("scope_hash_mismatch")
                 result = build_semester_projection(
                     registry, semester_value, notion_readback=readback, prior=prior,

@@ -137,6 +137,59 @@ def complete_responses() -> list[FakeResponse]:
     ]
 
 
+def api_registry() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": 100 + index,
+            "name": f"API Course {index}",
+            "code": f"API-{index:03d}",
+            "term": "2026-2",
+            "origin": probe.CANVAS_ORIGIN,
+            "academic_import": True,
+            "verification_state": "api_code_verified",
+        }
+        for index in range(5)
+    ] + [{
+        "id": 999,
+        "name": "Excluded candidate",
+        "code": "EXTRA",
+        "term": "other",
+        "origin": probe.CANVAS_ORIGIN,
+        "academic_import": False,
+        "verification_state": "observed_candidate",
+    }]
+
+
+def api_responses(registry: list[dict[str, Any]]) -> list[FakeResponse]:
+    responses: list[FakeResponse] = []
+    for course in registry:
+        if not course["academic_import"]:
+            continue
+        course_id = course["id"]
+        responses.extend([
+            FakeResponse(course_response(
+                id=course_id,
+                name=course["name"],
+                course_code=course["code"],
+                term={"name": course["term"]},
+            )),
+            FakeResponse([{"id": course_id + 1000, "name": "Assignment", "due_at": None}]),
+            FakeResponse([{
+                "id": course_id + 2000,
+                "title": "Announcement",
+                "context_code": f"course_{course_id}",
+            }]),
+            FakeResponse([{
+                "id": course_id + 3000,
+                "name": "1주차",
+                "position": 1,
+                "items_count": 0,
+                "items": [],
+            }]),
+        ])
+    return responses
+
+
 def test_success_is_clean_and_preserves_missing_due_date() -> None:
     status, result, error, opener = run_probe(complete_responses())
 
@@ -443,6 +496,61 @@ def test_optional_files_and_modules_are_metadata_only() -> None:
     assert "html_url" not in result["modules"][0]["items"][0]
     assert len(opener.calls) == 5
     assert "SYNTHETIC_SECRET" not in json.dumps(result) + error
+
+
+def test_canvas_api_registry_collects_five_courses_get_only_and_excludes_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = api_registry()
+    scope_hash = probe._expected_registry_scope_hash(registry, probe.CANVAS_API_TRANSPORT)
+    monkeypatch.setattr(probe, "_api_participant", lambda *_args: None)
+    opener = QueueOpener(api_responses(registry))
+    result = probe.run_registry_api(
+        registry,
+        token=TOKEN,
+        owner_id="owner",
+        scope_hash=scope_hash,
+        start_date="2026-09-01",
+        end_date="2026-09-13",
+        opener=opener,
+    )
+    assert result["status"] == "complete"
+    assert result["provenance"] == probe.CANVAS_API_TRANSPORT
+    assert set(result["courses"]) == {str(index) for index in range(100, 105)}
+    assert all(value["status"] == "complete" for value in result["courses"].values())
+    assert len(opener.calls) == 20
+    allowed_suffixes = ("/assignments", "/announcements", "/modules")
+    for request, timeout in opener.calls:
+        assert request.get_method() == "GET"
+        path = urlsplit(request.full_url).path
+        assert path.startswith("/api/v1/courses/") or path == "/api/v1/announcements"
+        assert not path.endswith("/files")
+        assert "download" not in request.full_url
+        assert timeout <= probe.MAX_SOCKET_TIMEOUT_SECONDS
+        if path.startswith("/api/v1/courses/") and path.count("/") == 4:
+            continue
+        assert path == "/api/v1/announcements" or path.endswith(allowed_suffixes)
+    assert TOKEN not in json.dumps(result)
+
+
+def test_canvas_api_registry_rejects_changed_registry_scope_before_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = api_registry()
+    scope_hash = probe._expected_registry_scope_hash(registry, probe.CANVAS_API_TRANSPORT)
+    changed = [*registry]
+    changed[0] = {**changed[0], "name": "Changed"}
+    monkeypatch.setattr(probe, "_api_participant", lambda *_args: pytest.fail("reservation must not run"))
+    with pytest.raises(probe.ProbeError, match="scope_hash_mismatch"):
+        probe.run_registry_api(
+            changed,
+            token=TOKEN,
+            owner_id="owner",
+            scope_hash=scope_hash,
+            start_date="2026-09-01",
+            end_date="2026-09-13",
+            opener=QueueOpener([]),
+        )
 
 
 @pytest.mark.parametrize(

@@ -1,58 +1,93 @@
 # ULS handoff
-Updated 2026-09-27. Branch: `codex/protected-secret-file-and-credential-set`.
+Updated 2026-09-28. Repo: `/Users/admin/Project/Syllva`. Branch: `codex/protected-secret-file-and-credential-set`.
 
-Do not touch unrelated `RESEARCH/`, secrets, or `CLAUDE.md`. No push or protected-branch merge is authorized.
+Do not touch unrelated `RESEARCH/`, secrets, or `CLAUDE.md`. No push/merge to protected branches is authorized.
 
 ## Accepted baseline
 
-- C5/C6 core: `a868039` (`feat: complete C5 integration and C6 study note flow`).
-- Remote MCP Google OAuth: `216e996` (`feat: add OAuth remote MCP transport`), final web/Gemini rereviews GO.
-- Search MCP remains read-only; preserve SOURCE/AI/USER ownership and human-owned Decision/Verified.
-- Behavior Contract v2: `sha256:987d09ec152f91e368e070c5ccbe961602a18da8b6113afd968ac965406aae1a`.
+- C5/C6 core: `a868039`.
+- Remote MCP Google OAuth: `216e996`; prior web/Gemini final rereviews GO.
+- Semester-scoped retrieval v1.3: `2489fac` plus later handoff commits; full suite previously 1793 passed / 3 skipped.
+- MCP search remains read-only. Preserve SOURCE/AI/USER and human-owned academic approvals.
+- `syllva.dev` / `mcp.syllva.dev` Cloudflare fixed-domain route works.
+- Claude remote MCP OAuth + `uls.ping`: passed.
+- Codex remote MCP OAuth + `uls.ping`: passed.
+- Antigravity/Gemini remote MCP `uls.ping`: still unproven/deferred.
 
-## Semester-scoped read-only retrieval v1.3 — accepted, committed locally
+## Live academic state
 
-Plan: `docs/plans/semester-scoped-retrieval-v1.3.md`.
+- Notion/Drive live doctor checks are green.
+- 2026-2 currently has 0 Sessions, 0 Materials, 0 File Intake, 0 Input Request; upload folder is empty.
+- Current `SOURCE_UNAVAILABLE` is caused by no real Session, not provider outage. Never fabricate one.
 
-Implemented additive opt-in retrieval for one exact `notion.semester_workspaces` row. Frozen v1.2 `legacy_global` remains the default. `semester_workspace` uses direct Notion data-source IDs only; no discovery/copy/fallback to legacy IDs.
+## Canvas API / intake candidates
 
-Boundary rules:
-- Courses, Sessions, and Materials fail closed on missing/malformed/cross-semester Course identity.
-- Exact Session-ID public resolution validates the Session Course relation before returning metadata.
-- Missing optional Material Usage permits transcript-only Session context with explicit `SOURCE_UNAVAILABLE`; it cannot authorize material evidence/capabilities.
-- Missing semester Exam/Activity mappings fail unavailable without touching legacy IDs.
-- `doctor --live` selects a Course from the configured retrieval semester.
+Current `scripts/knu_lms_*` work and related docs/tests are checkpointed for continuity but are **not accepted** as a released Canvas/LMS design. Keep them separate from GUI work and inactive until separately accepted.
 
-Review evidence:
-- initial plan web review REVISE: `.insane-review/response_Syllva_20260921_190954_82376_9ec887.md`; exact Session-ID boundary fixed.
-- targeted plan rereview GO: `.insane-review/response_Syllva_20260921_192104_85196_ca0a96.md`.
-- final implementation web review GO: `.insane-review/response_Syllva_20260921_195551_97741_6fc369.md` (`GPT-5.6 Sol / Pro`).
-- Gemini: N/A; this slice has no user-facing UI/design/flow change.
+Two independent plans remain:
+- `docs/plans/knu-lms-api-semester.md`: generic Canvas direction; exact collection must require `api_code_verified`; real Canvas file -> bounded exact bytes/hash -> private Drive -> existing intake. PDF may prove SOURCE -> Material only. Session requires a real transcript-compatible source plus USER-owned Session inputs.
+- `docs/plans/knu-lms-reservation-reconciliation.md`: stale reservation recovery requires semantic owner/scope/run binding; no hash-only reclaim or timeout takeover.
 
-Verification:
-- full suite: **1793 passed, 3 skipped**
-- unit: **415 passed, 3 skipped**
-- contract: **98 passed**
-- focused semester/config/integration/contract tests: passing
-- Behavior Contract hash unchanged; projection lint clean; `git diff --check` clean
-- targeted Mypy for `cli/main.py`, `adapters/notion/api.py`, `config/validation.py`: clean with `--follow-imports=skip`; full repo Mypy retains pre-existing debt
+No live Canvas credential/provider write, Drive import, reconciliation apply, Notion write, or push is authorized for these candidates.
 
-Local `config.yaml` is explicitly set to `retrieval.notion_lane: semester_workspace`, `semester: 2026-2`. Host `uls doctor` and `uls doctor --live` are both `status: ok`: `remote_profile`, `live_notion_read`, and `live_drive_read` all pass. The configured Drive root is the accessible `School` folder, and the `2026-2` folder resolves directly under it. Python 3.14's official `Install Certificates.command` was run, so the default CA path now exists and no `SSL_CERT_FILE` override is required.
+## Local Settings Web GUI PLAN — current active task
 
-## External rollout — current
+Files:
+- `docs/plans/local-settings-web-gui.md`
+- `docs/plans/local-settings-web-gui-interaction-mock.md`
 
-- `syllva.dev` is active on Cloudflare. Named Tunnel `syllva-mcp` publishes `mcp.syllva.dev` to `http://127.0.0.1:8765`; local `public_url` is `https://mcp.syllva.dev/mcp`.
-- Google Web OAuth redirect URI is updated to `https://mcp.syllva.dev/oauth/google/callback`.
-- Remote MCP is listening on `127.0.0.1:8765`; public OAuth discovery returns 200 with issuer `https://mcp.syllva.dev`; unauthenticated `/health` returns the expected 401.
-- Claude: OAuth connected; `uls.ping` E2E passed (`service=uls`, `protocol_version=1.2`).
-- Codex: `syllva-live` registered, OAuth login completed, and `uls.ping` E2E passed (`service=uls`, `protocol_version=1.2`).
-- Antigravity: global `syllva-live` config points to the fixed endpoint and Antigravity account auth succeeds, but Gemini 3.8 Flash High `uls.ping` E2E is **not proven**. Bounded attempts time out without a final tool result; one resumed attempt reported failure / protocol N/A. Do not mark this client complete yet.
+Goal: one localhost-only nondeveloper GUI for config, Canvas, Drive, Notion, automation, and Remote MCP settings while keeping config/secrets/provider bindings in their existing authoritative stores.
 
-## Current live retrieval state
+Plan now fixes:
+- single-use <=30s bootstrap URL -> consumed HttpOnly/SameSite session -> 303 clean URL;
+- exact Host on all requests; GET navigation may omit Origin; mutations require same-origin + CSRF;
+- explicit session close + inactivity-expiry UX;
+- typed config mutation preserving unknown sections, redacted diff, generation conflict handling;
+- credential writes return new `config_generation` without clearing dirty form state;
+- secret-free multi-store transaction journal with explicit Partial recovery;
+- Google service-account files use 64 KiB credential-file limit;
+- fixed Canvas `CANVAS_PAT` keyring role/service/profile locator;
+- revoked/unreachable Canvas tokens remain locally forgettable;
+- dedicated local OAuth-grant reset endpoint;
+- Canvas Pause/Disable Sync is separate from Forget Token;
+- resumable stepper: root storage/Notion parent -> Canvas -> Academic course mappings;
+- restart-required is explicit and never a hidden Save side effect.
 
-- `uls doctor --live` remains green for Notion and Drive.
-- The configured 2026-2 Sessions data source ID/schema is correct, but both the Syllva reader and raw Notion API return **0 Session rows**.
-- Current 2026-2 operational counts: File Intake 0, Input Request 0, Sessions 0, Materials 0; the configured Drive upload folder also has 0 children; `worker.enabled=false`.
-- Therefore current Session resolution returns `SOURCE_UNAVAILABLE` because no Session exists yet, not because of a provider outage or wrong Sessions data-source ID.
+Gemini UI/flow plan review:
+- actual model: `gemini-3.8-flash-high`.
+- initial verdict: REVISE with R1-R10.
+- all R1-R10 were integrated.
+- targeted rereview verdict: **GO**; mock artifact requirement satisfied; no new blocker.
 
-Next: put a real source into the semester intake flow, submit its Input Request, enable/run the bounded intake worker, then rerun Session resolution/context E2E after the first Session row exists. Separately finish Antigravity MCP ping diagnosis. Never record the Tunnel token in chat or repo.
+Web ChatGPT plan review:
+- **NOT completed / NOT sent**.
+- Desired reviewer is **GPT-5.6 Sol + Extra High (`매우 높음`)**. Do not call this Pro.
+- `insane-review` v0.6.8 fails before submission because its old model/effort selector verifier no longer matches the current ChatGPT UI. This is not a quota failure.
+- Pack: `.insane-review/pack_Syllva_20260927_212502_89012_2d2625.md`.
+- Prompt: `.insane-review/local-settings-plan-review-prompt.txt`.
+- Aside successfully opened the logged-in ChatGPT UI, selected GPT-5.6 Sol, and visibly verified Extra High 4/4, but the review was not uploaded/sent before Aside stopped.
+- Codex in-app browser reached ChatGPT while logged out; Google authentication was not completed. Do not ask for or paste passwords into chat.
+
+PLAN status: **pending required web ChatGPT review**. Do not implement GUI-1 until that gate is complete.
+
+## Current blocker / fresh-session recovery
+
+Repeated error:
+
+`stream disconnected before completion: ChatGPT web turn is missing cwd in trusted Codex environment context`
+
+The local repo/worktree is normal. The failure is consistent with the Codex <-> ChatGPT web bridge receiving trusted environment metadata without an explicit `cwd`. Passing `workdir` to individual shell calls does not repair that higher-level web-turn context.
+
+Start the next Codex session directly rooted at `/Users/admin/Project/Syllva`. Verify the new session exposes that path as `cwd` before retrying browser/web review. If the same error reproduces immediately in a fresh rooted session, treat it as a Codex product/runtime bug rather than a Syllva, Cloudflare, Google, repomix, or model-selection failure.
+
+## Resume order
+
+1. Confirm fresh-session `cwd=/Users/admin/Project/Syllva` and that the stream error is gone.
+2. Run the required web ChatGPT PLAN review using the existing pack and prompt; visibly verify GPT-5.6 Sol + Extra High.
+3. If REQUIRED findings exist, update the plan and run a targeted web rereview; rerun Gemini only if UI/flow changes materially.
+4. After both plan gates GO, start GUI-1 only: secure local settings shell/session, typed config snapshot + redacted diff/apply, transaction journal, resumable Overview/setup shell.
+5. Keep Canvas ingestion/reconciliation candidates inactive until their own acceptance path is complete.
+
+## Checkpoint note
+
+The 2026-09-28 commit explicitly requested by the user is a continuity checkpoint before opening a fresh Codex session. It preserves current candidates and plans; it does **not** constitute plan/final acceptance, web-review completion, deployment approval, or push authorization.
