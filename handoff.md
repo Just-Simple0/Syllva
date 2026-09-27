@@ -1,5 +1,5 @@
 # ULS handoff
-Updated 2026-09-21. Branch: `codex/protected-secret-file-and-credential-set`.
+Updated 2026-09-27. Branch: `codex/protected-secret-file-and-credential-set`.
 
 Do not touch unrelated `RESEARCH/`, secrets, or `CLAUDE.md`. No push or protected-branch merge is authorized.
 
@@ -39,6 +39,20 @@ Verification:
 
 Local `config.yaml` is explicitly set to `retrieval.notion_lane: semester_workspace`, `semester: 2026-2`. Host `uls doctor` and `uls doctor --live` are both `status: ok`: `remote_profile`, `live_notion_read`, and `live_drive_read` all pass. The configured Drive root is the accessible `School` folder, and the `2026-2` folder resolves directly under it. Python 3.14's official `Install Certificates.command` was run, so the default CA path now exists and no `SSL_CERT_FILE` override is required.
 
-## External rollout still pending
+## External rollout — current
 
-GitHub Student status is approved; partner offers should unlock after ~72 hours. After obtaining a stable domain, replace Quick Tunnel with a Cloudflare Named Tunnel and fixed `mcp.<domain>`, update the Google OAuth callback once, then finish Claude/Codex/Gemini owner-login E2E. Quick Tunnel hostnames are disposable. No remaining local provider-health blocker is known.
+- `syllva.dev` is active on Cloudflare. Named Tunnel `syllva-mcp` publishes `mcp.syllva.dev` to `http://127.0.0.1:8765`; local `public_url` is `https://mcp.syllva.dev/mcp`.
+- Google Web OAuth redirect URI is updated to `https://mcp.syllva.dev/oauth/google/callback`.
+- Remote MCP is listening on `127.0.0.1:8765`; public OAuth discovery returns 200 with issuer `https://mcp.syllva.dev`; unauthenticated `/health` returns the expected 401.
+- Claude: OAuth connected; `uls.ping` E2E passed (`service=uls`, `protocol_version=1.2`).
+- Codex: `syllva-live` registered, OAuth login completed, and `uls.ping` E2E passed (`service=uls`, `protocol_version=1.2`).
+- Antigravity: global `syllva-live` config points to the fixed endpoint and Antigravity account auth succeeds, but Gemini 3.8 Flash High `uls.ping` E2E is **not proven**. Bounded attempts time out without a final tool result; one resumed attempt reported failure / protocol N/A. Do not mark this client complete yet.
+
+## Current live retrieval state
+
+- `uls doctor --live` remains green for Notion and Drive.
+- The configured 2026-2 Sessions data source ID/schema is correct, but both the Syllva reader and raw Notion API return **0 Session rows**.
+- Current 2026-2 operational counts: File Intake 0, Input Request 0, Sessions 0, Materials 0; the configured Drive upload folder also has 0 children; `worker.enabled=false`.
+- Therefore current Session resolution returns `SOURCE_UNAVAILABLE` because no Session exists yet, not because of a provider outage or wrong Sessions data-source ID.
+
+Next: put a real source into the semester intake flow, submit its Input Request, enable/run the bounded intake worker, then rerun Session resolution/context E2E after the first Session row exists. Separately finish Antigravity MCP ping diagnosis. Never record the Tunnel token in chat or repo.
