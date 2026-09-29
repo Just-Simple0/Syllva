@@ -1,20 +1,25 @@
 # Syllva Local Settings Web GUI — implementation plan
 
-Date: 2026-09-27. Status: **PLAN revision — Gemini high findings integrated; web ChatGPT review still pending**.
+Date: 2026-09-27. Status: **Plan accepted (web ChatGPT and Gemini GO). GUI-1 implemented; Gemini
+final rereview GO; web Pro rereview closed every finding except 5C, whose fix (credential journal
+machines and role binding) awaits rereview.**
+
+Supported platforms for GUI-1: macOS and Linux. **GUI-1 is unavailable on Windows**: `uls setup`
+refuses to start there before creating any runtime state or listener. Windows replacement support is
+not implemented and is not implied by this plan until the separate named-pipe, DACL/SID/PID, and
+Windows reparse-point/owner-check work is designed, reviewed, and accepted (pending user decision).
 
 ## Task record
 
 - Risk: high. This work joins credential enrollment, provider identity, configuration mutation,
   remote-access settings, and a new user-facing flow.
-- Technical worker assignment: `gpt-5.6-luna` / high, selected for the cross-component Python,
-  local-security, and configuration-state-machine design. Astra/root retains plan acceptance.
+- Technical worker assignment: `gpt-6-luna` / max, selected for local HTTP session security,
+  cross-process locking/CAS, and crash-safe multi-store recovery. Astra/root retains plan acceptance.
 - Required plan reviews: independent web ChatGPT review through `insane-review`; independent
   `gemini-3.8-flash-high` UI-flow review.
 - Gemini plan review (2026-09-27): **REVISE**. This revision integrates its ten required findings.
-- Web ChatGPT review has not been accepted: `insane-review` v0.6.8 currently fails closed before
-  prompt submission because the current ChatGPT UI exposes no model/effort pill matching its Pro
-  verifier. Do not substitute an unverified default model or call this plan accepted until that
-  gate is recovered and rerun.
+- Web ChatGPT plan review (2026-09-28): **REVISE** with required findings R1-R3. This revision
+  integrates those findings; targeted rereview is pending and the plan is not yet accepted.
 - Interaction evidence for the user-facing flow is frozen separately in
   `docs/plans/local-settings-web-gui-interaction-mock.md` and must be included in UI-flow rereviews.
 - Current implementation candidate under `scripts/knu_lms_*` is not accepted and must not be
@@ -69,40 +74,87 @@ Add an explicit launcher such as `uls setup` (desktop shortcut can call the same
 It starts an **on-demand** settings process, opens the default browser, and stops when the setup
 session ends or idles out. It is a different app/process/port from Remote MCP.
 
+One settings process owns a per-user, owner-only single-instance OS lock for its full lifetime. A
+second `uls setup` first sends a same-user authenticated shutdown request to the current owner; the
+owner immediately invalidates its bootstrap/session/CSRF state, rejects mutations, and enters a
+bounded notification-only shutdown drain. During that drain, requests to the old port receive a fixed
+`401 {"error":{"code":"SESSION_REPLACED"}}` with no application data; then the owner closes its
+listener and exits. The new launcher waits until the old process has exited and released the lock
+before it binds a port or creates any bootstrap capability. If the owner cannot be authenticated or
+does not exit within the bounded wait, the new launch fails closed without issuing a bootstrap
+capability. A successful replacement therefore leaves the old port closed and its session unusable
+before the new session starts.
+
 Security requirements:
 
 1. Bind only to loopback. Prefer `127.0.0.1` on an OS-assigned random port; never `0.0.0.0`.
-2. Generate a high-entropy, memory-only one-time `bootstrap_token` for each launch. It is valid for
-   at most 30 seconds and only for the exact process/port. The launcher opens exactly
-   `http://127.0.0.1:<port>/?bootstrap=<token>`. The first valid top-level GET consumes the token,
-   invalidates it immediately, sets an `HttpOnly; SameSite=Strict` session cookie, and returns a
-   `303` redirect to `/` so the capability is removed from the address bar and browser history.
-   Refreshing, replaying, or guessing a bootstrap URL after consumption must fail closed.
+2. Generate a CSPRNG one-time `bootstrap_token` with at least 256 bits of entropy for each launch. It
+   is memory-only, valid for at most 30 seconds, and bound to the exact process/port. The launcher
+   opens exactly `http://127.0.0.1:<port>/?bootstrap=<token>`. Bootstrap consumption is the sole GET
+   authentication-state exception in this application: the first valid launcher-opened top-level
+   document navigation consumes the token, invalidates it immediately, creates independently
+   generated CSPRNG session and CSRF capabilities, sets the session cookie, and returns a `303`
+   redirect to `/` so the bootstrap capability is removed from the address bar and browser history.
+   The redirect sets only the session cookie and carries no CSRF value.
+   Require browser fetch metadata for bootstrap consumption to identify a top-level document
+   navigation (`Sec-Fetch-Mode: navigate`, `Sec-Fetch-Dest: document`, and `Sec-Fetch-Site: none` or
+   `same-origin`); explicitly reject iframe/frame and subresource destinations. Refreshing, replaying,
+   or guessing a bootstrap URL after consumption must fail closed.
 3. Validate `Host` on every request as the exact generated `127.0.0.1:<port>` value; reject
    `localhost`, alternate loopback names, forwarded-host headers, and external hosts. Top-level GET
    navigation does not require an `Origin` header because browsers may omit it. State-changing API
    requests require exact `Origin: http://127.0.0.1:<port>` plus the session cookie and CSRF header;
    `Referer` may be used only as a fail-closed origin fallback when `Origin` is absent. Disable CORS.
-4. Unsafe requests require the local session plus a per-session CSRF token in a custom header. GET
-   never changes state. Initial/top-level document navigations must be same-site documents and must
+4. Session and CSRF values are independently generated with at least 256 bits of CSPRNG entropy.
+   The server-side session record and expected CSRF value exist only in server memory for the process
+   lifetime. The session handle is delivered only in the `HttpOnly; SameSite=Strict; Path=/` cookie,
+   with no `Domain` attribute. After the clean `303` redirect, the page makes an authenticated
+   same-origin `GET /api/v1/session/csrf`; that endpoint returns the per-session CSRF value with
+   `Cache-Control: no-store`; it requires the valid session cookie and same-origin fetch metadata,
+   plus an exact `Origin` when present. Client code keeps it only in ephemeral page/JavaScript memory,
+   never in a URL, localStorage, sessionStorage, IndexedDB, a readable cookie, or logs. Unsafe requests
+   require the session cookie plus this value in a custom header. Closing, expiry, process shutdown, or
+   replacement invalidates both server-side values; the page clears its in-memory CSRF value when the
+   session ends. Apart from bootstrap consumption in item 2, GET never changes authentication or
+   application state. Initial/top-level document navigations must be same-site documents and must
    never accept iframe/frame embedding.
 5. Serve all HTML/CSS/JS locally. No CDN, analytics, external fonts, service worker, or remote
    script execution.
 6. Use restrictive CSP, `frame-ancestors 'none'`, `Cache-Control: no-store`, no-referrer policy,
    and same-origin isolation headers where applicable.
-7. Store no credential or reusable setup capability in `localStorage`, IndexedDB, telemetry, or
-   browser-visible API responses after submission. The one-time bootstrap token is the sole narrow
-   exception: it may appear only in the launch URL until the first consuming request and immediate
-   `303` redirect described above; it must never be persisted or returned afterward.
+7. Store no credential or capability in `localStorage`, sessionStorage, IndexedDB, telemetry, or logs.
+   The authenticated `GET /api/v1/session/csrf` in item 4 is the sole post-bootstrap API response
+   allowed to deliver a reusable capability; it is same-origin, `no-store`, and its value remains
+   only in ephemeral page/JavaScript memory. The bootstrap token is the sole launch-URL exception: it
+   may appear only until the first consuming request and immediate `303` redirect, and is never
+   persisted or returned afterward.
 8. Password/secret inputs are write-only. Existing values render only as `Configured` /
    `Not configured` / `Error`; the backend never returns them.
-9. Apply an inactivity expiry and explicit `Close settings` action. The frontend warns before expiry
-   when possible, then replaces the app with a clear `Settings session expired` screen rather than
-   leaving the user with a generic connection error. `Close settings` invalidates the session and
-   gracefully stops the settings process after returning an ended-session page. Session capabilities
-   die with the process.
-10. Protect the config write path with a local settings-process lock so two GUI sessions cannot
-    concurrently mutate the same configuration.
+9. Apply an inactivity expiry and explicit `Close settings` action. Passive/background requests such
+   as Overview polling, provider-status refresh, or retry timers do **not** renew inactivity. Only an
+   explicit user interaction that reaches the authenticated UI, including the explicit `Stay signed
+   in locally` action, may renew it. The frontend warns before expiry when possible, then replaces the
+   app with a clear `Settings session expired` screen rather than leaving the user with a generic
+   connection error. `Close settings` invalidates the session and gracefully stops the settings
+   process after returning an ended-session page. An API `401 SESSION_EXPIRED` clears the in-memory
+   CSRF value and secret inputs while keeping dirty non-secret values only in ephemeral page memory
+   until close/reload; no draft is persisted or retried. Session capabilities die with the process.
+   If the backend returns `401 SESSION_REPLACED` or a fetch fails because the old backend is closed or
+   unreachable, immediately show the interaction mock's read-only moved/closed screen. Clear the
+   in-memory CSRF value, clear every secret input value and all secret values retained by page code, and
+   retain dirty non-secret values in the existing DOM as read-only, selectable text. Disable
+   Save/Next/Apply/Restart and every other mutation control. Add a
+   beforeunload warning only while dirty non-secret values remain. Announce the state through a
+   `role=alert`/live region and move focus to its heading. Distinguish the fixed `SESSION_REPLACED`
+   response from `SESSION_EXPIRED`; map an unreachable backend to the same safe closed state without
+   throwing an uncaught error or persisting/retrying the draft.
+10. Settings access/error logging is secret-minimal from the first bootstrap request onward: never log
+    raw query strings, request bodies, cookies, authorization headers, CSRF headers, bootstrap tokens,
+    or submitted credential material. Log only route templates, fixed error codes, and safe metadata.
+11. Protect every config mutation with one cross-process OS/file lock shared by all config-writing GUI
+    and CLI services. The lock covers the final raw-byte reread, expected-generation comparison,
+    validated candidate binding, atomic replace, directory fsync, and readback. A Python/thread-local or
+    settings-process-only lock is insufficient.
 
 Use the Starlette/uvicorn family already present in the MCP dependency path rather than creating
 a second web stack. Keep the settings application in its own adapter/package so core domain,
@@ -128,6 +180,23 @@ Step 1 collects only provider/workspace roots that do not depend on course ident
 Drive folders, Notion course portals, and other per-course mappings are deferred to **Academic scope**
 after Canvas course selection exists. A user may leave and relaunch setup without losing already
 saved steps; secret fields themselves are never repopulated.
+
+Each step has a durable completion predicate independent of transient live-check health:
+
+- **Storage roots / Notion parent** — the required retrieval-side credential declarations and verified
+  provider/root IDs are durably bound. Worker credentials are required here only when the corresponding
+  write/intake feature is enabled.
+- **Canvas** — the Canvas profile identity, selected term, and selected course registry are durably
+  bound for the active setup path.
+- **Academic scope** — every selected course has the required durable Drive/Notion mappings for the
+  features the user enabled.
+- **Automation** — each automation has an explicit durable Enabled/Disabled choice; enabling a
+  write-capable automation additionally requires its worker credential/readiness prerequisites.
+- **Remote Access** — either a valid Remote MCP setup is durably configured, or the user explicitly
+  chooses `Skip / keep Remote MCP disabled`. Skipping completes this optional step without enabling
+  public remote access.
+- **Check** — all required durable predicates above are complete. Current live checks are shown as
+  diagnostics but a later transient provider outage does not erase previously completed setup steps.
 
 Every card distinguishes four facts instead of one ambiguous "connected" badge:
 
@@ -329,9 +398,13 @@ Treat the existing config file as canonical for core non-secret settings.
 5. Before final apply, show a redacted semantic diff containing only allowlisted non-secret changes,
    secret readiness transitions (`Not configured -> Configured`) and restart impact. Never render
    submitted secret values, protected-file contents, or provider payloads in the diff.
-6. Write through a same-directory owner-only temporary regular file, fsync, atomic replace, and
-   directory fsync. Refuse symlink/untrusted ownership targets.
-7. Read the file back and validate again before reporting `Saved`.
+6. Acquire the shared cross-process config lock before the final raw-byte reread. Inside that critical
+   section, recompute the generation, compare it to the caller's expected generation, bind the already
+   validated candidate to that exact generation, then write through a same-directory owner-only
+   temporary regular file, fsync, atomic replace, and directory fsync. Refuse symlink/untrusted
+   ownership targets.
+7. Read the file back and validate again while still holding the lock before reporting `Saved`, then
+   release the lock. All other GUI/CLI config writers must use this same primitive.
 
 Do not accept arbitrary JSON-pointer/YAML-path writes from the browser.
 
@@ -341,10 +414,14 @@ Credential endpoints accept one supported credential role, never an arbitrary se
 path. Reuse code-owned credential allowlists/bindings and OS-native keyring checks.
 
 - responses never contain the submitted or stored value;
-- replace is a separate user action and verifies the new value before reporting success;
+- replace is a separate user action and verifies a staged new value before the active known-good value
+  can be replaced;
 - deleting/forgetting a credential is separate from disabling the feature;
-- failed config mutation after a successful safe credential write may leave an unused credential,
-  but must not roll back by deleting an unknown prior secret. Report the exact partial state.
+- a new enrollment may leave an unused staged credential after a later config failure, but recovery
+  must never guess whether an unknown prior secret can be deleted or restored. Report the exact
+  partial state;
+- replacement and forget follow the action-specific transaction machines below rather than a generic
+  credential-first order.
 
 Credential actions that also update `config.yaml` return the **new** `config_generation` after
 readback. The frontend updates its active generation without clearing dirty form inputs so a valid
@@ -352,16 +429,65 @@ credential enrollment does not make the user's still-open non-secret form immedi
 
 ### 6.3 Multi-store transaction journal
 
-Any user action spanning config plus keyring/protected-file/connector-manifest stores uses a small,
-secret-free local transaction journal. The journal records an operation ID, action kind, exact fixed
-credential/profile role, original config generation, candidate config hash, intended non-secret
-binding, phase, and readback result. It never stores credential values or uploaded JSON.
+Every operation has its own durable, secret-free record in a code-owned owner-only journal directory.
+Create records exclusively with mode `0600`; update only that operation's record through a
+symlink-safe same-directory atomic replacement, file fsync, and directory fsync. Concurrent writers
+never replace a shared journal index or stale whole-journal snapshot, so one operation cannot erase
+another's record. Each record contains an operation ID, action kind, exact fixed credential/profile
+role, original config generation, candidate config hash, intended non-secret binding, phase, exact
+staging/backup/version locator identities, per-effect pre/post state IDs, and readback result. It never
+stores credential values or uploaded JSON.
 
-The backend follows `prepare -> credential/binding write -> config apply -> readback -> complete` and
-records each completed phase durably. If a later phase fails, the operation remains `Partial` with a
-specific repair action. It must not guess whether a previous secret can be deleted or restored and
-must never silently overwrite a concurrent config edit. Relaunching Settings detects unfinished
-journal entries and offers `Resume repair` or `Leave as-is`; no timeout auto-repair is allowed.
+Operations acquire cross-process owner-only locks for each affected `(provider, profile identity,
+credential role)`, in sorted canonical order, then that operation's cross-process journal-record
+lock, then the shared config lock. Config-only operations skip the role lock. This is the sole lock
+order; release in reverse order and never acquire an earlier lock while holding a later one. Under the
+role lock, a new operation checks for an unresolved record for that exact role. If one exists, it fails
+with `OPERATION_IN_PROGRESS`; disjoint roles may proceed concurrently. A role remains reserved across
+process exit while its record is unresolved, including after the user chooses `Leave as-is`. Hold the
+role lock through each active operation/recovery; after a crash the OS lock is released, and the
+unresolved record continues to reserve the role until recovery reacquires it. Resolve it only by
+verified completion or a terminal `resolved_without_change` disposition proving that no uncertain side
+effect remains.
+
+Before each authoritative store effect, durably record its intent, exact expected pre-state, target
+version/locator, and applicable config generation. Perform only that one effect, read the authoritative
+store back, then durably record the observed post-state/version. Never combine multiple store effects
+under one journal phase. Recovery compares these recorded identities with exact readbacks; it never
+infers success from a phase label alone.
+
+Use action-specific state machines:
+
+- **New enrollment:** `prepare -> stage new credential -> verify staged credential -> config/binding
+  CAS -> promote/activate -> readback -> complete`. Journal each store effect with the pre/post
+  protocol above. A failure after staging may leave only that exact new operation-owned credential
+  orphaned; the UI reports it and offers deterministic cleanup/repair.
+- **Replacement:** `prepare -> stage new credential separately -> verify staged credential -> acquire
+  shared config lock and revalidate expected generation/candidate -> preserve the exact old active
+  credential in an operation-owned protected backup -> journal intent and promote staged credential ->
+  read back and journal its exact active version -> journal intent and commit the prepared non-secret
+  binding by config CAS -> read back and journal the config generation -> read back all stores -> journal
+  intent and delete backup -> verify deletion -> complete`. Never combine credential promotion and
+  config commit as one effect. If recovery finds the exact staged version active while config still
+  matches the original generation, the recorded repair is to restore the exact operation-owned backup;
+  if config matches the candidate generation and the staged version is active, continue post-commit
+  verification and backup cleanup. Any other version/generation combination remains `Partial` for
+  explicit inspection; recovery never guesses. The current known-good credential remains recoverable
+  until successful post-commit readback. Google service-account replacement uses a protected staging
+  file and atomic promotion; a syntactically valid but provider-invalid upload never replaces the
+  current file. Temporary backup/staging locators are code-owned and never caller selectable or
+  browser-visible.
+- **Forget:** `prepare -> under shared config lock CAS the non-secret binding/profile/lease into a state
+  that no longer depends on the credential -> read back detached state -> delete the exact fixed local
+  credential -> readback -> complete`. If deletion fails, the safe partial state is explicitly
+  `configuration detached; old local credential still present; retry deletion`; config must never keep
+  referencing a credential that was already deleted.
+
+Each journal sub-state is durable. If a later effect fails, the operation remains `Partial` with one
+phase-specific repair action. Recovery uses only recorded version/locator identities and readbacks,
+never guesses which previous secret existed, and never silently overwrites a concurrent config edit.
+Relaunching Settings detects unfinished records and offers `Resume repair` or `Leave as-is`; no
+timeout auto-repair is allowed.
 
 The journal is recovery evidence, not a second source of truth. Successful completion requires
 readback from every authoritative store named by the operation, after which the compact journal
@@ -380,6 +506,21 @@ The first implementation does not restart services as a side effect of `Save`. T
 shows a persistent `Restart required` banner and a separate explicit restart/start action where a
 reviewed cross-platform service controller exists.
 
+For every restart-scoped service, define a stable fingerprint over exactly the settings that service
+loads. Settings records/derives the **desired** fingerprint from the saved config. The worker and
+Remote MCP process report or durably record the **applied/loaded** fingerprint only after successful
+startup with that configuration; the setup process exposes its current startup fingerprint directly.
+`Restart required` is derived from desired != applied, never from an in-browser dirty flag. It clears
+only after observing the service successfully running with the desired fingerprint. A failed restart
+retains the mismatch and the fixed error state; a service that is stopped is distinct from one that is
+running the previous fingerprint. If a service is currently healthy under an older fingerprint, the UI
+may show `Ready — running previous settings` plus the separate `Restart required` modifier; it must not
+imply that newly saved settings are active.
+
+For every GUI-2/GUI-3 credential change, state whether the new credential is consumed live or include
+a non-secret credential revision in the affected service's desired/applied fingerprint. Never derive
+or expose that revision from the credential value itself.
+
 ## 7. HTTP/API surface
 
 Use purpose-specific, versioned local routes rather than a generic admin API. Representative shape:
@@ -387,6 +528,7 @@ Use purpose-specific, versioned local routes rather than a generic admin API. Re
 ```text
 GET  /api/v1/overview
 GET  /api/v1/settings/<group>
+GET  /api/v1/session/csrf
 POST /api/v1/settings/<group>/validate
 POST /api/v1/settings/<group>/apply
 POST /api/v1/session/close
@@ -406,10 +548,17 @@ POST /api/v1/doctor/live
 
 Every request requires the exact generated `Host`. A top-level GET/document request may omit
 `Origin`; it still requires a valid consumed-bootstrap session (except the one-time bootstrap GET)
-and may never mutate state. Every state-changing route requires session + exact `Origin` (or strict
+and may never mutate application state. The one-time bootstrap document GET is the sole GET allowed
+to mutate authentication state by consuming the bootstrap token and creating the in-memory session.
+Every state-changing route requires session + exact `Origin` (or strict
 same-origin `Referer` fallback if `Origin` is absent) + custom-header CSRF + generation/candidate
 binding where applicable. Provider live tests happen only after an explicit click and remain
 read-only unless the action clearly says it is a worker/write-capability test.
+
+All request bodies have fixed route-specific limits enforced before parsing. Ordinary JSON mutation
+and confirmation bodies use a small bounded limit; secret-value routes use the smallest bound suitable
+for their credential type, while Google service-account upload alone may use the existing 64 KiB
+credential-file limit.
 
 `POST /api/v1/session/close` invalidates the in-memory session before returning an ended-session
 document and schedules graceful shutdown. `POST /api/v1/remote-mcp/oauth-grants/reset` is a separate
@@ -422,15 +571,25 @@ apply or a GET request.
 Settings changes must distinguish disabling a feature from removing a secret or local state.
 
 - **Disable Canvas**: stops future collection; imported Drive/Notion/source history remains.
-- **Forget Canvas token**: explicit confirmation, removes only the exact profile credential after
-  the locally stored profile identity + exact code-owned keyring locator are rechecked; imported
-  academic data remains. Live provider success is not required, and a revoked token or unavailable
-  provider must not block forgetting the local credential.
+- **Forget Canvas token**: explicit confirmation first CAS-detaches the exact Canvas credential binding
+  and invalidates/removes the associated authorization lease, then deletes only the exact profile
+  credential after the locally stored profile identity + exact code-owned keyring locator are
+  rechecked. Imported academic/source history remains. Live provider success is not required, and a
+  revoked token or unavailable provider must not block forgetting the local credential. A delete
+  failure leaves the profile detached with the old local credential still present and offers retry.
+- **Forget Drive credential**: confirmation names the exact retrieval or worker role and fixed protected
+  file/credential slot. It detaches only that role, then removes that exact local credential. Drive
+  files, durable academic bindings, and imported/source history remain unless a separately reviewed
+  action says otherwise.
+- **Forget Notion credential**: confirmation names the exact retrieval or worker role and fixed keyring
+  or protected-file slot. It detaches only that role, then removes that exact local credential. Notion
+  pages/databases, durable academic bindings, and imported/source history remain.
 - **Disable Remote MCP**: config only; does not claim to delete a Cloudflare tunnel or Google OAuth client.
 - **Reset local OAuth grants**: separate high-impact operation with exact local database identity,
   candidate/readback, confirmation, and audit; clears only local authorization codes/tokens in the
   identified OAuth database and is not part of ordinary `Save`.
-- Drive/Notion credential replacement never deletes academic content.
+- Drive/Notion credential replacement verifies the staged replacement while the current credential
+  remains active/recoverable and never deletes academic content.
 
 No GUI action offers database reset, source deletion, public-sharing enablement, or automated
 academic approval.
@@ -525,21 +684,49 @@ Security/contract tests must prove at least:
 - non-loopback and wrong Host/Origin requests are rejected;
 - guessed port without bootstrap/session cannot read settings; the one-time bootstrap is consumed,
   replay fails, and successful bootstrap redirects to a clean URL;
+- bootstrap consumption accepts only a launcher-compatible top-level document navigation and rejects
+  iframe/frame/subresource attempts; bootstrap/session/CSRF capabilities are independently generated;
+- after the clean redirect, only an authenticated same-origin `GET /api/v1/session/csrf` returns the
+  session's CSRF value with `Cache-Control: no-store`; it appears only in ephemeral page/JavaScript
+  memory, never in a URL, persistent browser storage, readable cookie, or logs, and becomes unusable
+  after close, expiry, or replacement;
+- a double-launch race invalidates and stops the first process, waits for its exit/lock release, and
+  only then issues the second bootstrap; after replacement the old port is closed and its session
+  cannot authenticate;
+- instance A's old tab handles `401 SESSION_REPLACED` during the bounded drain and closed-port/fetch
+  failure after exit without an uncaught exception. Both paths clear CSRF and all secret values, preserve
+  dirty non-secret values as read-only selectable DOM content, disable mutations, arm beforeunload only
+  when such values remain, announce/focus the state accessibly, and reject every mutation;
+- Settings access/error logs contain no bootstrap query capability, raw query string, cookie, CSRF
+  header, request body, or submitted credential material;
 - top-level same-host GET navigation succeeds without `Origin`, while mutations require exact
   same-origin `Origin`/fallback `Referer` plus CSRF;
-- session close invalidates access and idle expiry produces a deliberate ended/expired flow;
+- passive/background polling does not renew inactivity; explicit keepalive/user activity can; session
+  close invalidates access and idle expiry produces a deliberate ended/expired flow;
 - CSRF is required for every mutation;
-- secrets never appear in GET responses, error JSON, logs, HTML, local browser storage, or config YAML;
+- submitted/stored credential material never appears in GET responses, error JSON, logs, HTML,
+  persistent browser storage, or config YAML; the CSRF value appears only in the dedicated no-store
+  session handoff and ephemeral page memory;
 - no external asset requests are emitted by the UI;
-- concurrent config edit/generation mismatch fails closed;
+- a real two-process config race starting from the same generation permits exactly one writer to
+  commit under the shared OS/file lock; the loser gets the generation-conflict flow without overwrite;
 - unrelated/unknown valid config keys survive GUI edits byte-semantically or round-trip semantically;
 - credential-driven config writes return the new generation and do not clear dirty non-secret form state;
-- multi-store journal recovery exposes `Partial` and never auto-deletes/rolls back an unknown prior secret;
+- two concurrent journal writers retain both independent operation records; overlapping operations on
+  the same credential/profile role fail with `OPERATION_IN_PROGRESS` until the earlier operation is
+  resolved, while lock acquisition follows the fixed role-lock -> journal-record-lock -> config-lock
+  order;
+- journal crash injection runs after every authoritative side effect and before its durable post-state,
+  including credential promotion before config commit; recovery follows exact recorded version IDs and
+  config generations, and never guesses or silently rolls back an unknown secret;
 - redacted diff output contains no submitted secret or protected-file content;
 - symlink/untrusted config/credential targets fail closed;
 - failed validation leaves config bytes unchanged;
 - atomic write + readback preserves a valid config;
-- credential replace/forget applies only to the exact code-owned binding;
+- credential replacement verifies staging before active promotion and retains the prior known-good
+  value until commit/readback succeeds; credential forget detaches config/lease before exact deletion;
+- Canvas Forget removes its exact authorization lease with the credential; Drive/Notion Forget names
+  the exact role/store and preserves academic/source content;
 - valid Google service-account JSON up to `GOOGLE_CREDENTIAL_PATH_MAX_BYTES` can use the protected
   credential path while oversize input fails before write;
 - Google worker/MCP credential separation is preserved;
@@ -551,15 +738,22 @@ Security/contract tests must prove at least:
 - disabled/unaccepted Canvas ingestion cannot be activated from the GUI;
 - settings routes are absent from Remote MCP;
 - human-owned academic approval fields are absent from the settings mutation surface;
-- restart-required behavior is explicit and `Save` does not silently restart services;
+- restart-required is derived from desired-vs-applied service fingerprints, survives Settings
+  close/relaunch, clears after a successful external/explicit restart onto the desired fingerprint,
+  remains after failed restart, and handles multiple saves before restart; `Save` never silently
+  restarts services;
 - first-run step 1 cannot request course-specific mappings before Canvas course selection exists;
+- first-run durable completion predicates are deterministic: disabled optional Remote Access can be
+  skipped without enabling it, worker credentials block only enabled write/intake features, and a
+  transient live-provider failure does not erase durable step completion;
 - local OAuth-grant reset is reachable only through its dedicated confirmed/audited endpoint.
 
 Add UI-flow tests for first-run success, invalid credential, unavailable provider, partially configured
 connection, replacement confirmation, pause-vs-forget semantics, stale form generation with dirty
-input preserved, unfinished transaction recovery, session timeout/close, restart-required state, and
-keyboard/error accessibility. Use fakes for ordinary tests; live provider smoke tests are separate
-and opt-in.
+input preserved, unfinished transaction recovery, stepper back-navigation with dependent steps marked
+`Partial` and values retained, structured `SESSION_EXPIRED` handling, session timeout/close,
+restart-required state, and keyboard/error accessibility. Use fakes for ordinary tests; live provider
+smoke tests are separate and opt-in.
 
 Run focused pytest, contract tests, Ruff, targeted mypy, Behavior Contract drift checks, and
 `git diff --check`. Final implementation requires both independent web ChatGPT and Gemini high reviews,

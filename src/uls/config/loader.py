@@ -77,6 +77,12 @@ def load_config_unvalidated(path: str | os.PathLike[str]) -> UlsConfig:
         raw = yaml.safe_load(handle)
     if raw is None:
         raw = {}
+    return load_config_mapping(raw)
+
+
+def load_config_mapping(raw: Mapping[str, Any]) -> UlsConfig:
+    """Build the existing typed config model from an already-parsed YAML mapping."""
+
     if not isinstance(raw, Mapping):
         raise ValueError("configuration root must be a YAML mapping")
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from uls.config.credentials import (
     CredentialResolver,
 )
 from uls.config.errors import ConfigurationError
+from uls.config.mutation import ConfigFileLock
 from uls.domain.errors import UlsError
 from uls.domain.ids import parse_course_key
 from uls.runtime import build_retrieval, require_mcp_credentials, state_path
@@ -27,6 +29,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument('--config', type=Path, default=Path('config.yaml'))
     commands = result.add_subparsers(dest='command', required=True)
     commands.add_parser('init', help='Create missing config, state and source registrations')
+    setup_parser = commands.add_parser('setup', help='Open the local Settings web interface')
+    setup_parser.add_argument(
+        '--no-browser', action='store_true',
+        help='Print the one-time local URL instead of opening a browser',
+    )
     doctor_parser = commands.add_parser('doctor', help='Check configuration and credential readiness')
     doctor_parser.add_argument('--live', action='store_true', help='Perform read-only provider checks')
     for name in ('sync', 'process', 'run'):
@@ -74,12 +81,18 @@ def _config(path: Path) -> Any:
 
 def initialize(path: Path) -> dict[str, Any]:
     from uls.state.sqlite import SQLiteStateStore
-    if not path.exists():
-        template = yaml.safe_load((asset_root() / 'config.example.yaml').read_text(encoding='utf-8'))
-        template['behavior_contract']['path'] = str(asset_root() / 'contracts/study-behavior.md')
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open('x', encoding='utf-8') as handle:
-            yaml.safe_dump(template, handle, allow_unicode=True, sort_keys=False)
+    with ConfigFileLock(path):
+        if not path.exists():
+            template = yaml.safe_load((asset_root() / 'config.example.yaml').read_text(encoding='utf-8'))
+            template['behavior_contract']['path'] = str(asset_root() / 'contracts/study-behavior.md')
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            try:
+                payload = yaml.safe_dump(template, allow_unicode=True, sort_keys=False).encode('utf-8')
+                os.write(fd, payload)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
     config = _config(path)
     workspace = state_path(config).parent
     workspace.mkdir(parents=True, exist_ok=True)
@@ -213,7 +226,27 @@ def _live_retrieval_probe_course_key(config: Any) -> str:
     raise ConfigurationError('selected retrieval semester has no configured Course')
 
 
-def doctor(config: Any, *, live: bool = False) -> dict[str, Any]:
+def doctor(
+    config: Any, *, live: bool = False, include_credentials: bool = True,
+) -> dict[str, Any]:
+    if not include_credentials:
+        local_checks: dict[str, Any] = {
+            'behavior_contract': not lint_behavior(Path(config.behavior_contract.path)),
+            'state': status(config)['status'] == 'ok',
+        }
+        try:
+            from uls.mcp.server import ReadOnlyMCP
+            ReadOnlyMCP(None).sdk_server()
+            local_checks['mcp_startable'] = True
+        except ImportError:
+            local_checks['mcp_startable'] = False
+        return {
+            'status': 'ok' if all(local_checks.values()) else 'needs_configuration',
+            'checks': local_checks,
+            'optional_checks': {},
+            'client_e2e': 'not_proven_by_doctor',
+            'credential_readiness': 'not_checked',
+        }
     # doctor() is a composition root (see docs/plans/credential-resolver.md):
     # it builds one CredentialResolver from config.credentials and calls
     # diagnose() exactly once, over every known credential name. Every
@@ -422,6 +455,15 @@ def doctor(config: Any, *, live: bool = False) -> dict[str, Any]:
 def dispatch(args: argparse.Namespace) -> Any:
     if args.command == 'init':
         return initialize(args.config)
+    if args.command == 'setup':
+        from uls.settings.launcher import preflight, run_setup
+        refusal = preflight()
+        if refusal is not None:
+            print(refusal.message, file=sys.stderr)
+            return {'status': 'failed', 'code': refusal.code}
+        if not args.config.is_file():
+            raise ConfigurationError('Run uls init before opening Local Settings')
+        return run_setup(args.config, open_browser=not args.no_browser)
     if args.command == 'behavior':
         problems = lint_behavior()
         return {'status': 'failed' if problems else 'ok', 'problems': problems}

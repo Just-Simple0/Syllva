@@ -16,11 +16,13 @@ actions, prerequisite order, destructive-action wording, and secret-handling beh
 │                                                                            │
 │ Google Drive retrieval credential        [Not configured]  [Configure]     │
 │ Google Drive worker credential           [Not configured]  [Configure]     │
+│                                         required if intake is enabled      │
 │ University/root folder                   [ Select folder… ]                  │
 │ Upload root                              [ Select folder… ]                  │
 │                                                                            │
 │ Notion retrieval credential              [Not configured]  [Configure]     │
 │ Notion worker credential                 [Not configured]  [Configure]     │
+│                                         required if write automation is on │
 │ Semester parent/workspace                 [ Select… ]                         │
 │                                                                            │
 │ Course-specific folders/portals are configured after Canvas course choice. │
@@ -29,8 +31,78 @@ actions, prerequisite order, destructive-action wording, and secret-handling beh
 ```
 
 Step 1 never asks for a course mapping. If the user closes Settings after saving, the next launch
-derives the completed step from durable config/readiness and resumes at the first incomplete step.
-Secret inputs are always empty on relaunch.
+derives the completed step from durable bindings and explicit feature choices and resumes at the first
+incomplete step. A missing worker credential blocks completion only when the corresponding
+write/intake feature is enabled. A later provider outage changes the current live-check state but does
+not erase a previously satisfied durable step predicate. Secret inputs are always empty on relaunch.
+
+The durable step predicates presented to the user are:
+
+```text
+1 Storage   retrieval roots/bindings saved; enabled write features have worker credentials
+2 Canvas    verified profile + term + selected-course registry saved
+3 Academic  required mappings for selected courses saved
+4 Automation each automation explicitly Enabled or Disabled; enabled writers are ready
+5 Remote    configured, or explicitly [Skip / keep Remote MCP disabled]
+6 Check     all required durable predicates complete; live failures remain diagnostics
+```
+
+If the user runs `uls setup` while Settings is already open, the launcher invalidates the existing
+session, stops its process, and waits for its exit before creating or opening the new session:
+
+```text
+$ uls setup
+Existing Settings session is being replaced…
+Previous Settings process exited. Opening a fresh session…
+```
+
+The new Settings page displays:
+
+```text
+Previous Settings session ended because a new session was launched.
+Saved settings are unchanged. Unsaved entries from the previous tab were not carried over.
+```
+
+When the old tab receives the replacement response before the old process exits, it displays:
+
+```text
+Settings session moved
+A new Settings window was opened. This window can no longer save.
+Unsaved non-secret entries are kept below for reference or copying into the new window.
+Secret fields were cleared and are never retained or shown here.
+
+Unsaved entries (read-only; selectable)
+Time zone                 Asia/Seoul
+Context limit             24
+
+Use the new Settings window to continue.
+```
+
+If the old port is already closed or otherwise unreachable, the old tab uses the same read-only
+layout with this safe message instead:
+
+```text
+Settings session closed
+This window can no longer connect to Syllva Settings or save changes.
+Unsaved non-secret entries are kept below for reference or copying.
+Secret fields were cleared and are never retained or shown here.
+```
+
+Both states immediately remove the CSRF value, make all non-secret entries read-only/selectable,
+disable Save/Next/Apply/Restart, and announce the heading with an alert/live region while moving focus
+to it. A before-unload warning is active only while unsaved non-secret entries remain. Reloading or
+closing after the warning discards those in-memory entries.
+
+The old port is closed and its session cookie no longer authenticates after replacement completes. If
+the old process cannot be authenticated or does not exit within the wait limit, the launcher displays:
+
+```text
+The current Settings session did not stop. A new session was not started.
+Close Settings, then run uls setup again.
+```
+
+Using `Back` from a later setup step retains entered values. Dependent steps become `Partial` until
+their durable predicates are rechecked; their data is not silently cleared.
 
 ## 2. Canvas connect and course selection
 
@@ -76,6 +148,21 @@ opens a confirmation dialog that states: **the stored token and authorization le
 already imported academic/source history is preserved.** Provider availability is not required to
 forget a revoked token; the dialog binds the action to the local Canvas origin/account profile.
 
+Invalid submitted token is distinct from a provider outage:
+
+```text
+Canvas LMS                                                        [Failed]
+Canvas URL   [ https://canvas.example.edu ]
+Access token [                              ]   cleared after submit
+
+Canvas rejected this access token. Existing saved Canvas connection was not changed.
+[Try another token]
+```
+
+If Canvas is unreachable after a previously completed connection, the saved profile/course registry
+remains durable and the card shows `Failed — provider unavailable, last successful check <time>` with
+`[Retry check]`; it does not send the wizard back to an earlier incomplete step.
+
 ## 3. Academic scope after Canvas
 
 ```text
@@ -112,6 +199,25 @@ Credential actions expose a write-only field only while configuring/replacing. A
 field is cleared. The card receives only readiness metadata and the new `config_generation`; it
 never receives the stored value, service-account JSON, private key, or keyring content.
 
+`Forget…` always names one exact role/store before confirmation. For Drive, forgetting retrieval or
+worker credentials removes only that local credential after detaching that role; Drive files,
+academic bindings, and imported/source history remain. For Notion, forgetting retrieval or worker
+credentials removes only the named keyring/protected-file credential after detaching that role;
+Notion pages/databases, academic bindings, and imported/source history remain.
+
+Failed replacement preserves the previously active credential:
+
+```text
+Google Drive · Retrieval                                      [Failed]
+Replacement credential was rejected. Current credential is still active.
+The submitted secret was cleared. Folder ID: 1Abc… (unchanged)
+[Retry replacement]   [Test current credential]
+```
+
+The same pattern applies to Canvas and Notion: non-secret fields stay populated, submitted secret
+fields clear, a polite live region announces the fixed redacted error/remediation, and the current
+known-good credential remains active/recoverable until replacement commits successfully.
+
 ## 5. Save review and concurrent/partial failure
 
 Before apply, Settings shows a redacted semantic diff:
@@ -147,11 +253,20 @@ No existing secret was deleted or rolled back.
 Relaunching Settings surfaces the same unfinished operation from the secret-free transaction
 journal. No timeout silently repairs or deletes it.
 
+Forget has a different safe partial state because configuration is detached before local deletion:
+
+```text
+Notion retrieval credential                                      [Partial]
+Configuration detached. Old local credential is still present.
+Academic bindings and Notion content are preserved.
+[Retry local deletion]   [Leave as-is]
+```
+
 ## 6. Overview and restart-required state
 
 ```text
 ┌ Overview ───────────────────────────────────────────────────────────────────┐
-│ Restart required: Remote MCP settings changed. Saved configuration is safe. │
+│ Restart required: saved Remote MCP settings are not active yet.              │
 │ [Restart Remote MCP]  [Later]                                               │
 │                                                                             │
 │ Canvas                 Ready        checked 19:20                           │
@@ -161,13 +276,16 @@ journal. No timeout silently repairs or deletes it.
 │ Notion worker          Ready                                               │
 │ Academic scope         Partial      1 course mapping incomplete             │
 │ Intake worker          Disabled                                            │
-│ Remote MCP             Ready        https://mcp.example.dev/mcp             │
+│ Remote MCP             Ready        running previous settings               │
 │ AI client E2E          Not checked                                         │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-`Save` never silently restarts a service. `Restart required` is a separate banner/modifier rather
-than a connection status.
+`Save` never silently restarts a service. `Restart required` is derived from the service's saved
+desired fingerprint differing from its reported/durable applied fingerprint, so it survives closing
+and reopening Settings. `Ready — running previous settings` describes the currently running instance,
+not the newly saved configuration. A failed restart keeps the banner and adds a fixed redacted error;
+an external restart onto the desired fingerprint clears it on the next status refresh.
 
 ## 7. Remote Access
 
@@ -185,6 +303,10 @@ Redirect URI                       https://mcp.example.dev/oauth/callback [Copy]
 Cloudflare tunnel/account creation is completed outside Syllva Settings.
 ```
 
+For first-run setup this step also offers `[Skip / keep Remote MCP disabled]`. Choosing it durably
+completes the optional Remote step without creating public access, credentials, or a tunnel. The user
+can configure Remote Access later from normal navigation.
+
 No tunnel token field exists in the normal flow. Resetting local OAuth grants is under an explicit
 advanced destructive action and states that it removes only local authorization codes/tokens from
 the identified Syllva OAuth database, not the Cloudflare tunnel or Google OAuth client.
@@ -192,13 +314,19 @@ the identified Syllva OAuth database, not the Cloudflare tunnel or Google OAuth 
 ## 8. Session expiry and close
 
 Before inactivity expiry, the UI shows an accessible warning dialog with `Stay signed in locally`
-and `Close settings`. If expiry wins, the current app becomes:
+and `Close settings`. Passive Overview/status polling never extends the timer; only explicit user
+activity such as `Stay signed in locally` renews it. If expiry wins, the current app becomes:
 
 ```text
 Settings session expired
 For your security, this local setup session ended after inactivity.
+Unsaved non-secret entries remain in this tab's memory until it is closed or reloaded.
 Run/open Syllva Settings again to continue. Saved configuration was not changed.
 ```
+
+An API `401 SESSION_EXPIRED` clears the in-memory CSRF value and any secret input. Dirty non-secret
+fields remain only in ephemeral page/JavaScript memory for re-entry; nothing is persisted or retried
+against the expired session.
 
 `Close settings` invalidates the session first, shows `Settings session ended`, and then allows the
 local settings process to shut down gracefully. Opening the old localhost URL afterward cannot
@@ -212,3 +340,6 @@ restore access; a fresh launcher bootstrap is required.
   explicitly state what academic/source data is preserved.
 - Validation errors remain associated with their input. Non-secret fields remain populated after
   errors; submitted secret fields are cleared.
+- Invalid credential, provider-unavailable, and failed-replacement states use fixed redacted errors,
+  expose a retry action, and announce the outcome without moving focus. A failed replacement states
+  explicitly that the previously active credential is preserved.

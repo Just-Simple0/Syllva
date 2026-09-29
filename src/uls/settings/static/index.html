@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ULS Settings</title>
+  <link rel="stylesheet" href="static/styles.css">
+  <script src="static/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#overview" aria-label="Syllva Settings home">Syllva <span>Settings</span></a>
+    <div class="top-actions">
+      <button id="keepalive" type="button" data-mutation disabled>Keep this session open</button>
+      <button id="close-session" class="quiet-button" type="button" data-mutation disabled>Close Settings</button>
+    </div>
+  </header>
+  <main>
+    <section id="connection-state" class="connection-state" role="alert" aria-live="assertive" aria-labelledby="connection-heading" hidden>
+      <h1 id="connection-heading" tabindex="-1">Settings session moved</h1>
+      <p id="connection-message"></p>
+      <p>Secret fields were cleared and are never retained or shown here.</p>
+      <h2>Unsaved entries (read-only; selectable)</h2>
+      <p id="draft-help"></p>
+      <dl id="draft-list" class="draft-list"></dl>
+      <p id="connection-next"></p>
+    </section>
+
+    <section id="idle-warning" class="idle-warning" role="alertdialog" aria-labelledby="idle-warning-heading" aria-describedby="idle-warning-text" hidden>
+      <h2 id="idle-warning-heading" tabindex="-1">Settings will close soon</h2>
+      <p id="idle-warning-text">This local setup session ends after inactivity. Unsaved entries stay in this tab only.</p>
+      <button id="idle-stay" type="button" data-mutation disabled>Stay signed in locally</button>
+      <button id="idle-close" class="quiet-button" type="button" data-mutation disabled>Close settings</button>
+    </section>
+
+    <section id="close-confirm" class="idle-warning" role="alertdialog" aria-modal="false" aria-labelledby="close-confirm-heading" aria-describedby="close-confirm-text" hidden>
+      <h2 id="close-confirm-heading" tabindex="-1">Close Settings without saving?</h2>
+      <p id="close-confirm-text">Some entries in this window are not saved. Closing Settings discards them. Secret fields are never kept.</p>
+      <button id="close-confirm-accept" type="button" data-mutation disabled>Close without saving</button>
+      <button id="close-confirm-cancel" class="quiet-button" type="button">Keep editing</button>
+    </section>
+
+    <div id="ordinary-header">
+      <p class="eyebrow">LOCAL SETTINGS</p>
+      <h1 id="page-heading" tabindex="-1">Settings overview</h1>
+      <p class="lede">Review the saved setup, make bounded local changes, and resume unfinished steps.</p>
+      <p id="replaced-notice" class="replaced-notice" hidden>Previous Settings session ended because a new session was launched. Saved settings are unchanged. Unsaved entries from the previous tab were not carried over.</p>
+    </div>
+
+    <nav id="setup-stepper" class="stepper" aria-label="First-run setup">
+      <ol id="setup-steps"></ol>
+      <button id="recheck-steps" class="quiet-button" type="button">Check steps again</button>
+    </nav>
+    <p id="step-detail" class="step-detail"></p>
+
+    <p id="notice" class="notice" role="status" aria-live="polite"></p>
+
+    <section id="overview-panel" class="panel">
+      <div class="section-title"><div><p class="eyebrow">AT A GLANCE</p><h2>Overview</h2></div>
+        <span id="overall-status" class="status-pill">Loading</span></div>
+      <div class="overview-grid">
+        <article class="summary-card"><h3>Readiness</h3><dl id="readiness-list"></dl></article>
+        <article class="summary-card"><h3>Local services</h3><dl id="service-list"></dl></article>
+        <article class="summary-card"><h3>Credential checks</h3><p>Not checked in Local Settings. Use <code>uls doctor</code> for the approved local diagnostic.</p></article>
+        <article class="summary-card"><h3>Restart status</h3><p id="restart-status">Loaded settings fingerprints are not reported by running services.</p></article>
+      </div>
+      <div class="section-title recovery-title"><div><p class="eyebrow">RECOVERY</p><h2>Unfinished local changes</h2></div></div>
+      <div id="recovery-list" class="recovery-list"><p>No pending recovery items.</p></div>
+      <div class="section-title"><div><p class="eyebrow">CONFIGURATION</p><h2>Editable groups</h2></div></div>
+      <div class="card-grid">
+        <button class="nav-card" type="button" data-panel="general"><span>General</span><small>Time zone</small></button>
+        <button class="nav-card" type="button" data-panel="advanced"><span>Advanced</span><small>Bounded retrieval and normalization limits</small></button>
+        <article class="deferred-card"><span>Connections</span><small>Credential and provider actions are not available in this version.</small></article>
+        <article class="deferred-card"><span>Academic</span><small>Course and mapping changes are read-only.</small></article>
+        <article class="deferred-card"><span>Automation</span><small>Automation controls are read-only.</small></article>
+        <article class="deferred-card"><span>Remote access</span><small>Remote MCP and access settings are read-only.</small></article>
+      </div>
+      <p class="invariant-note">MCP remains read-only. Settings are local to this computer and are never exposed through Remote MCP.</p>
+    </section>
+
+    <section id="general-panel" class="panel" hidden>
+      <button class="back-link" type="button" data-panel="overview">← Overview</button>
+      <p class="eyebrow">GENERAL</p><h2>General settings</h2>
+      <p class="muted">Changes are saved to this computer's configuration file.</p>
+      <form id="general-form" data-group="general">
+        <label for="system-timezone">Time zone</label>
+        <input id="system-timezone" name="system.timezone" type="text" autocomplete="off" spellcheck="false" required>
+        <p class="field-help">Use a standard time zone name, for example Asia/Seoul.</p>
+        <button type="submit" data-mutation disabled>Review and save</button>
+      </form>
+      <div id="general-preview" class="preview" hidden aria-live="polite">
+        <h3>Review this change</h3><ul></ul>
+        <button type="button" data-apply-group="general" data-mutation disabled>Apply changes</button>
+        <button type="button" data-cancel-preview="general">Keep editing</button>
+      </div>
+    </section>
+
+    <section id="advanced-panel" class="panel" hidden>
+      <button class="back-link" type="button" data-panel="overview">← Overview</button>
+      <p class="eyebrow">ADVANCED</p><h2>Advanced settings</h2>
+      <p class="muted">Values have fixed limits. Provider, approval, and Remote MCP settings stay read-only.</p>
+      <form id="advanced-form" data-group="advanced" class="settings-form">
+        <label for="concept-mode">Concept mode</label><input id="concept-mode" name="retrieval.concept_mode" type="text" autocomplete="off" required>
+        <label for="max-candidate-entities">Maximum candidate entities <small>1–500</small></label><input id="max-candidate-entities" name="retrieval.max_candidate_entities" inputmode="numeric" type="text" required>
+        <label for="max-candidate-chunks">Maximum candidate chunks <small>1–1,000</small></label><input id="max-candidate-chunks" name="retrieval.max_candidate_chunks" inputmode="numeric" type="text" required>
+        <label for="context-ttl">Context lifetime in seconds <small>60–86,400</small></label><input id="context-ttl" name="retrieval.context_ttl_seconds" inputmode="numeric" type="text" required>
+        <label for="resolution-ttl">Resolution lifetime in seconds <small>60–86,400</small></label><input id="resolution-ttl" name="retrieval.resolution_ttl_seconds" inputmode="numeric" type="text" required>
+        <label for="max-evidence-items">Maximum evidence items <small>1–200</small></label><input id="max-evidence-items" name="retrieval.max_evidence_items" inputmode="numeric" type="text" required>
+        <label for="max-chars-per-item">Maximum characters per item <small>100–20,000</small></label><input id="max-chars-per-item" name="retrieval.max_chars_per_item" inputmode="numeric" type="text" required>
+        <label for="max-total-chars">Maximum total characters <small>1,000–1,000,000</small></label><input id="max-total-chars" name="retrieval.max_total_chars" inputmode="numeric" type="text" required>
+        <label for="max-followup-chunks">Maximum follow-up chunks <small>1–200</small></label><input id="max-followup-chunks" name="retrieval.max_followup_chunks" inputmode="numeric" type="text" required>
+        <label for="goodnotes-fallback">Goodnotes visual fallback <small>Enter true or false</small></label><input id="goodnotes-fallback" name="normalization.goodnotes_visual_fallback" type="text" autocomplete="off" required>
+        <button type="submit" data-mutation disabled>Review and save</button>
+      </form>
+      <div id="advanced-preview" class="preview" hidden aria-live="polite">
+        <h3>Review these changes</h3><ul></ul>
+        <button type="button" data-apply-group="advanced" data-mutation disabled>Apply changes</button>
+        <button type="button" data-cancel-preview="advanced">Keep editing</button>
+      </div>
+    </section>
+
+    <footer><span>Local-only Settings</span><span>No provider calls are made when this page opens.</span></footer>
+  </main>
+</body>
+</html>
