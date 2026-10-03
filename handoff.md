@@ -1,5 +1,13 @@
 # Syllva 인계 — Local Settings GUI-2/GUI-3
 
+## 게시 완료 및 추가 PR 리뷰·CI 보완 대기 — 2026-10-04
+
+- 커밋·push 완료: GUI-2·3 `e464e814961963808dce28a48ab5306f7a57e20a`, 프로젝트 전용 검사기 `4bc17f44b0f9d05dcad1b3841a0d0a86a19ac1b3`. 원격 세 브랜치 SHA를 실제 확인했다. [PR #13](https://github.com/Just-Simple0/Syllva/pull/13)은 GUI-1 기준 `codex/gui1-reviewed-base`와 비교하고, [PR #14](https://github.com/Just-Simple0/Syllva/pull/14)는 GUI-2·3과 비교한다. 기존 `main` 대비 36개 누적 커밋은 이 두 PR의 변경 범위 밖이며, 기준 브랜치도 `main`에 병합되지 않았다.
+- GitHub Codex의 추가 리뷰는 두 원본 커밋에서 완료됐다. #14는 주요 지적 없음. #13은 복구 버튼과 가능한 transaction branch의 불일치, 불완전 Canvas identity/registry의 Ready 표시, 최초 등록 실패에 기존 credential 보존 문구 표시의 세 지적이다. 총괄이 실제 소스와 대조했고, 동일 Luna/max 담당자에게 읽기 전용 진단·구체 수정안을 배정했다. 동일 Gemini ultra는 해당 GUI-2·3 UX 지적을 독립 판정한다. 이 추가 GitHub 리뷰의 실제 모델·강도는 노출되지 않아 기존 Native Latest/max·Gemini 정책 gate를 대체하지 않는다.
+- CI는 문서 빌드와 다수 macOS 실행을 통과했지만, macOS/Python 3.11의 Google 동시 replacement 한 실행에서 양쪽 `OPERATION_IN_PROGRESS`가 관측됐다. Windows 실행도 인코딩·보안 파일 처리·POSIX 전용 GUI 테스트 등에서 실패했다. 같은 커밋의 다른 macOS 통과를 실패 무시 근거로 삼지 않는다. 아직 CI 전체 통과·새 지적 CLOSED·병합 가능 판정은 없다.
+- 기존 GUI-2·3 범위 수락 증거는 보존하지만 **새 PR 지적·CI 실패에 대한 통합 수락은 대기**다. 제품 코드 추가 수정이나 checker의 고정 9핀 변경은 아직 하지 않았다. GUI-4·5 대기와 실제 secrets/provider 접근 금지를 유지한다. 게시·검사·리뷰 원본과 진단 범위는 `.insane-review/gui23-20261002/publication-20261004.json`, `publication-pr13-findings.md`, `publication-ci-failure-111254320118.txt`, `publication-windows-summary-*.txt`에 기록했다.
+- 게시 결과를 이 인계와 작업 기록에 추가하는 문서 커밋은 검사기 PR에 포함한다. GUI-4 master/mock 수정, 신규 GUI-4 계획서와 `RESEARCH/`는 로컬에 보존한다. 임시 기준 게시 worktree는 recoverable archive로 정리했다. 자동 merge·기존 heartbeat 재활성화는 하지 않았다. 아래 게시 준비·수정 전 수락 문구는 해당 당시 범위다.
+
 ## GUI-2·3 커밋·PR 게시 준비 — 2026-10-04
 
 - 사용자가 커밋·push·PR 생성 및 리뷰 진행을 지시했다. 누적 변경이 크다는 지적에 따라 GUI-1 커밋 `2f39f19`을 `codex/gui1-reviewed-base` 비교 기준으로 보존하고, 수락된 GUI-2·3은 `codex/gui23-settings`, 프로젝트 전용 증거 검사기는 별도 후속 브랜치/PR로 나눈다. 기존 작업을 `main`에 한 번에 합치거나 자동 merge하지 않는다.
