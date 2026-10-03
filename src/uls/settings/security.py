@@ -259,7 +259,7 @@ class SecurityBoundary:
                 except ValueError:
                     await _send_json(send, 400, {"error": {"code": "INVALID_REQUEST"}})
                     return
-                if declared < 0 or declared > MAX_REQUEST_BODY_BYTES:
+                if declared < 0 or declared > request_body_limit(str(scope.get("path", ""))):
                     await _send_json(send, 413, {"error": {"code": "REQUEST_TOO_LARGE"}})
                     return
             body_parts: list[bytes] = []
@@ -271,7 +271,7 @@ class SecurityBoundary:
                     return
                 part = message.get("body", b"")
                 body_size += len(part)
-                if body_size > MAX_REQUEST_BODY_BYTES:
+                if body_size > request_body_limit(str(scope.get("path", ""))):
                     await _send_json(send, 413, {"error": {"code": "REQUEST_TOO_LARGE"}})
                     return
                 body_parts.append(part)
@@ -314,6 +314,14 @@ _SECURITY_HEADERS: dict[bytes, bytes] = {
         b"object-src 'none'"
     ),
 }
+
+
+def request_body_limit(path: str) -> int:
+    if re.search(r"/credentials/google-(mcp|worker)/(set|replace)$", path):
+        return 65 * 1024
+    if re.search(r"/(credentials/notion-(mcp|worker)/(set|replace)|canvas/(connect|replace))$", path):
+        return 8 * 1024
+    return MAX_REQUEST_BODY_BYTES
 
 
 def request_cookie(scope: MutableMapping[str, Any]) -> str | None:

@@ -1,0 +1,466 @@
+"""Credential transactions over the sealed journal and per-user admission."""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import os
+import secrets
+import sys
+from collections.abc import Callable, Mapping
+from functools import partial
+from pathlib import Path
+from typing import Any, cast
+
+import yaml  # type: ignore[import-untyped]
+
+from uls.config._secure_file import is_reserved_secret_locator, read_secure_file
+from uls.config.mutation import ConfigFileLock, atomic_replace_config, read_config_bytes
+
+from .config_service import ConfigStore, SettingsServiceError
+from .credential_admission import (
+    credential_admission,
+    credential_pair_admission,
+    credential_pair_recovery_admission,
+    credential_recovery_admission,
+)
+from .credential_roles import ROLES, CredentialRole, role_from_binding
+from .credential_stores import CredentialStores, StoreResolver
+from .journal import TERMINAL_PHASES, JournalStore
+from .provider_checks import ProviderChecks, failure, structural_credential
+
+
+def _digest(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+class CredentialService:
+    def __init__(self, config: ConfigStore, journal: JournalStore, stores: CredentialStores,
+                 checks: ProviderChecks, *, platform: str | None = None,
+                 environ: Mapping[str, str] | None = None, google_loader: Callable[..., Any] | None = None) -> None:
+        self.config, self.journal, self.stores, self.checks = config, journal, stores, checks
+        self.platform = platform or sys.platform
+        self.environ = environ if environ is not None else os.environ
+        self.google_loader = google_loader
+        self.resolver = StoreResolver(stores)
+        journal.credential_root = stores.root
+        self.canvas_verifier: Callable[[CredentialRole, bytes, Any], Any] | None = None
+
+    def _require_platform(self) -> None:
+        if self.platform != "darwin":
+            raise SettingsServiceError("unsupported_platform", "Syllva cannot store credentials securely on this computer yet.", 403)
+
+    def source(self, role: CredentialRole, raw: dict[str, Any]) -> tuple[str, str | None]:
+        if role.provider == "canvas":
+            return "keyring", None
+        if role.provider == "notion":
+            source = raw.get("credentials", {}).get(role.name, {}).get("source", "environment")
+            return source, None
+        nested = raw.get("google_drive", raw.get("drive", {}))
+        path = raw.get(f"google_{role.purpose}_credentials_path") or nested.get(f"{role.purpose}_credentials_path")
+        value = path or self.environ.get(role.name)
+        if not path:
+            return "environment", value
+        configured_path = Path(path).expanduser()
+        if not configured_path.is_absolute():
+            configured_path = self.config.path.parent / configured_path
+        managed_path = Path(role.locator(self.stores.root)).resolve()
+        source = "file" if configured_path.resolve() == managed_path else "external_file"
+        return source, value
+
+    def _storage_label(self, role: CredentialRole, source: str) -> str:
+        if source == "external_file":
+            return "the configured external credential file"
+        if source == "environment":
+            return "the Settings process environment"
+        backend_label = getattr(self.stores.backend, "storage_label", None)
+        if source in {"keyring", "file"} and isinstance(backend_label, str) and backend_label:
+            return backend_label
+        if source == "keyring" and role.service and self.platform == "darwin":
+            return "this Mac's Keychain"
+        if source == "file":
+            return "this computer's protected secrets folder"
+        return "the local credential store"
+
+    def effective(self, role: CredentialRole, raw: dict[str, Any]) -> bytes | None:
+        source, path = self.source(role, raw)
+        if role.provider == "google":
+            if not path:
+                return None
+            expanded = Path(path).expanduser()
+            if not expanded.is_absolute():
+                expanded = self.config.path.parent / expanded
+            if is_reserved_secret_locator(expanded, root=self.stores.root):
+                raise failure("INVALID_CREDENTIAL")
+            return read_secure_file(expanded, max_bytes=65536)
+        if source != "environment":
+            return self.stores.read(role)
+        value = self.environ.get(role.name)
+        return value.encode() if value else None
+
+    def _separate(self, role: CredentialRole, value: bytes, raw: dict[str, Any]) -> None:
+        if role.provider == "canvas":
+            return
+        peer = ROLES[f"{role.provider}-{'worker' if role.purpose == 'mcp' else 'mcp'}"]
+        credentials = raw.get("credentials", {})
+        notion_entry = credentials.get(peer.name) if isinstance(credentials, dict) else None
+        declared_notion_peer = role.provider == "notion" and notion_entry is not None
+
+        try:
+            source, _path = self.source(peer, raw)
+            if source == "environment" and peer.name not in self.environ:
+                if declared_notion_peer:
+                    raise failure("INVALID_CREDENTIAL")
+                effective_peer = None
+            elif source == "environment" and not self.environ.get(peer.name):
+                raise failure("INVALID_CREDENTIAL")
+            else:
+                effective_peer = self.effective(peer, raw)
+                if effective_peer is None or not effective_peer:
+                    raise failure("INVALID_CREDENTIAL")
+                if role.provider == "notion":
+                    effective_peer.decode("utf-8", errors="strict")
+        except SettingsServiceError:
+            raise
+        except UnicodeDecodeError:
+            raise failure("INVALID_CREDENTIAL") from None
+        except Exception:  # noqa: BLE001 - peer read failures must fail closed without details
+            raise failure("INVALID_CREDENTIAL") from None
+
+        try:
+            managed_peer = self.stores.read(peer)
+            if role.provider == "notion" and managed_peer is not None:
+                managed_peer.decode("utf-8", errors="strict")
+        except Exception:  # noqa: BLE001 - managed peer read failures must fail closed without details
+            raise failure("INVALID_CREDENTIAL") from None
+        if managed_peer == b"":
+            raise failure("INVALID_CREDENTIAL")
+
+        peers = [item for item in (effective_peer, managed_peer) if item is not None]
+        if role.provider == "notion":
+            conflict = any(hmac.compare_digest(value, old) for old in peers)
+        else:
+            def identity(payload: bytes) -> tuple[str, str]:
+                try:
+                    parsed = json.loads(payload)
+                except (ValueError, TypeError, UnicodeError):
+                    raise failure("INVALID_CREDENTIAL") from None
+                if not isinstance(parsed, dict):
+                    raise failure("INVALID_CREDENTIAL")
+                values = tuple(parsed.get(key) for key in ("client_email", "private_key_id"))
+                if any(not isinstance(item, str) or not item.strip() for item in values):
+                    raise failure("INVALID_CREDENTIAL")
+                return cast(tuple[str, str], values)
+
+            incoming_identity = identity(value)
+            old_identities = [identity(old) for old in peers]
+            conflict = any(any(incoming == existing for incoming, existing in zip(incoming_identity, old_identity))
+                           for old_identity in old_identities)
+        if conflict:
+            raise SettingsServiceError("CREDENTIAL_PURPOSE_CONFLICT", "Retrieval and worker must use different credentials.")
+
+    def _admission_context(self, role: CredentialRole, *, recovery_id: str | None = None,
+                           fault_hook: Callable[[str], None] | None = None) -> Any:
+        if role.provider in {"notion", "google"}:
+            peer = ROLES[f"{role.provider}-{'worker' if role.purpose == 'mcp' else 'mcp'}"]
+            locators = [role.locator(self.stores.root), peer.locator(self.stores.root)]
+            if recovery_id is not None:
+                return credential_pair_recovery_admission(
+                    self.stores.root, role.provider, role.profile, locators,
+                    operation_id=recovery_id, journal=self.journal, config_path=self.config.path,
+                    config_dir_id=self.config.binding()["config_dir_id"],
+                )
+            return credential_pair_admission(
+                self.stores.root, role.provider, role.profile, locators,
+                journal=self.journal, config_path=self.config.path, fault_hook=fault_hook,
+            )
+        if recovery_id is not None:
+            return credential_recovery_admission(
+                self.stores.root, role.locator(self.stores.root), operation_id=recovery_id,
+                journal=self.journal, config_path=self.config.path,
+                config_dir_id=self.config.binding()["config_dir_id"],
+            )
+        return credential_admission(self.stores.root, role.locator(self.stores.root), journal=self.journal,
+                                    config_path=self.config.path, fault_hook=fault_hook)
+
+    @staticmethod
+    def _publish_admission(role: CredentialRole, admission: Any, operation_id: str,
+                           binding: dict[str, Any]) -> None:
+        if role.provider in {"notion", "google"}:
+            admission.publish(operation_id, binding)
+        else:
+            admission.publish(operation_id, binding["config_dir_id"])
+
+    def _verify(self, role: CredentialRole, value: bytes, raw: dict[str, Any]) -> None:
+        structural_credential(role, value, google_loader=self.google_loader)
+        self._separate(role, value, raw)
+        if role.provider == "canvas":
+            if self.canvas_verifier is None:
+                raise failure("NOT_CONFIGURED")
+            self.canvas_verifier(role, value, raw)
+        else:
+            self.checks.check(role, value, self.config._parse(yaml.safe_dump(raw).encode()).config)
+
+    def cards(self) -> dict[str, Any]:
+        loaded = self.config.load()
+        cards = []
+        pending = self.journal.unresolved()
+        for role in ROLES.values():
+            source, _path = self.source(role, loaded.raw)
+            managed = (source in {"keyring", "file"})
+            try:
+                present = self.effective(role, loaded.raw) is not None
+                state = ("external" if present and source in {"environment", "external_file"}
+                         else "configured" if present else "not_configured")
+            except Exception:  # noqa: BLE001 - return metadata only
+                present, state = False, "error"
+            operation = next((item for item in pending if role.role_key in item["role_keys"]), None)
+            if operation:
+                card_state = "partial"
+            elif state == "external" or self.platform == "darwin":
+                card_state = state
+            else:
+                card_state = "unsupported_platform"
+            cards.append({"role": role.slug, "provider": role.provider, "purpose": role.purpose,
+                          "state": card_state,
+                          "source": source, "managed": managed, "can_test": present,
+                          "can_mutate": self.platform == "darwin" and not operation,
+                          "can_detach": source == "external_file", "environment_variable": role.name,
+                          "storage_label": self._storage_label(role, source),
+                          "last_check": self.checks.results.get(role.slug), "pending_operation": operation,
+                          "takes_effect": "MCP restart" if role.purpose == "mcp" else "worker restart"})
+        return {"cards": cards, "config_generation": loaded.generation}
+
+    def test(self, role: CredentialRole) -> dict[str, Any]:
+        loaded = self.config.load()
+        value = self.effective(role, loaded.raw)
+        if value is None:
+            raise failure("NOT_CONFIGURED")
+        return self.checks.check(role, value, loaded.config)
+
+    def _patch(self, role: CredentialRole, raw: dict[str, Any], *, detach: bool = False,
+               candidate: dict[str, Any] | None = None) -> tuple[dict[str, Any], str]:
+        revision = secrets.token_hex(16)
+        result = candidate if candidate is not None else role.candidate(raw, self.stores.root, revision, detach=detach)
+        result.setdefault("credential_revisions", {})[role.slug] = revision
+        keys = {"credential_revisions", "canvas"} if role.provider == "canvas" else {
+            "credential_revisions", "credentials", "google_drive", f"google_{role.purpose}_credentials_path"}
+        patch = {key: result.get(key) for key in keys}
+        return result, json.dumps(patch, sort_keys=True)
+
+    def _candidate_bytes(self, raw: dict[str, Any], patch: str) -> bytes:
+        result = dict(raw)
+        for key, value in json.loads(patch).items():
+            if value is None:
+                result.pop(key, None)
+            else:
+                result[key] = value
+        data = cast(str, yaml.safe_dump(result, sort_keys=False, allow_unicode=True)).encode()
+        self.config._parse(data)
+        return data
+
+    def save(self, role: CredentialRole, value: bytes, generation: str, *, replace: bool = False,
+             candidate: dict[str, Any] | None = None, fault_hook: Callable[[str], None] | None = None) -> dict[str, Any]:
+        self._require_platform()
+        structural_credential(role, value, google_loader=self.google_loader)
+        with self._admission_context(role, fault_hook=fault_hook) as admission, self.journal.role_locks([role.role_key]) as roles:
+            with ConfigFileLock(self.config.path):
+                loaded = self.config._parse(read_config_bytes(self.config.path))
+                if generation != loaded.generation:
+                    raise failure("CONFIGURATION_CHANGED")
+                self._separate(role, value, loaded.raw)
+                if replace and (not self.source(role, loaded.raw)[0] in {"keyring", "file"} or self.stores.read(role) is None):
+                    raise failure("NOT_CONFIGURED")
+                old = self.stores.state(role)
+                kind = "credential_enrollment" if old == "absent" else "credential_replacement"
+                _raw, patch = self._patch(role, loaded.raw, candidate=candidate)
+                payload = self._candidate_bytes(loaded.raw, patch)
+                binding = {**self.config.binding(), "provider": role.provider, "profile": role.profile,
+                           "role": role.purpose, "store_locator": role.locator(self.stores.root),
+                           "staging_locator": role.locator(self.stores.root, "staged"), "config_patch": patch}
+                if kind == "credential_replacement":
+                    binding.update(backup_locator=role.locator(self.stores.root, "backup"), original_active_id=old)
+                if self.stores.read(role, "staged") is not None or self.stores.read(role, "backup") is not None:
+                    raise failure("OPERATION_IN_PROGRESS")
+                operation_id = secrets.token_hex(16)
+                self._publish_admission(role, admission, operation_id, binding)
+                self.journal.create_operation(action_kind=kind, binding=binding, original_generation=loaded.generation,
+                    candidate_hash=_digest(payload), fields=[role.slug], role_locks=roles, allow_unreleased=True, operation_id=operation_id)
+            with self.journal.operation(operation_id) as op:
+                self._effect(op, roles, role, "credential_stage", "absent", self.stores.value_id(role, value),
+                             lambda: self.stores.write(role, value, "staged"), fault_hook)
+                try:
+                    self._verify(role, value, _raw if role.provider == "canvas" else loaded.raw)
+                except SettingsServiceError:
+                    with ConfigFileLock(self.config.path) as lock:
+                        op.switch_branch("abandon" if kind == "credential_enrollment" else "reject", role_locks=roles,
+                            config_lock=lock, resolver=self.resolver, observe={}, next_action="cleanup")
+                        self._effect(op, roles, role, "staged_delete", self.stores.value_id(role, value), "absent",
+                                     lambda: self.stores.delete(role, "staged"), fault_hook, lock)
+                        op.update(phase="complete", next_action="none")
+                    admission.release(operation_id)
+                    raise
+                self._continue(op, roles, role, payload, fault_hook)
+            admission.release(operation_id)
+        return {"status": "complete", "code": "VERIFIED", "config_generation": self.config.load().generation}
+
+    def _effect(self, op: Any, roles: Any, role: CredentialRole, name: str, pre: str, post: str,
+                perform: Callable[[], None], fault: Callable[[str], None] | None, lock: Any = None) -> None:
+        existing = op.read()["effects"].get(name)
+        if existing and existing["status"] in {"verified", "verified_by_recovery"}:
+            return
+        if existing:
+            pre, post = existing["pre_state_id"], existing["intended_post_state_id"]
+        op.run_effect(name, pre_state=pre, intended_post_state=post, perform=perform, observe=lambda: "unused",
+                      resolver=self.resolver, role_locks=roles, config_lock=lock, fault_hook=fault)
+
+    def _continue(self, op: Any, roles: Any, role: CredentialRole, payload: bytes | None,
+                  fault: Callable[[str], None] | None = None) -> None:
+        with ConfigFileLock(self.config.path) as lock:
+            record = op.read()
+            generation = self.resolver.observe(record, "config")
+            expected = record["original_generation"] if record["branch"] != "primary" else record["candidate_hash"]
+            if generation not in {record["original_generation"], expected}:
+                raise failure("MANUAL_REVIEW")
+            if record["branch"] == "primary" and role.provider in {"notion", "google"} and record["action_kind"] in {"credential_enrollment", "credential_replacement"}:
+                staged = self.stores.read(role, "staged")
+                if staged is not None:
+                    self._separate(role, staged, self.config._parse(read_config_bytes(self.config.path)).raw)
+            for name in record["planned_effects"]:
+                if name == "credential_stage":
+                    if op.read()["effects"].get(name, {}).get("status") not in {"verified", "verified_by_recovery"}:
+                        staged = self.stores.read(role, "staged")
+                        if staged is None:
+                            raise failure("MANUAL_REVIEW")
+                        effect = op.read()["effects"][name]
+                        self._effect(op, roles, role, name, effect["pre_state_id"], effect["intended_post_state_id"], lambda: None, fault, lock)
+                    continue
+                record = op.read()
+                existing = record["effects"].get(name)
+                if existing and existing["status"] in {"verified", "verified_by_recovery"}:
+                    continue
+                self._check_store_evidence(record, except_store=self.resolver.effect_store(name))
+                if name in {"config_commit", "config_detach"}:
+                    if payload is None and self.resolver.observe(record, "config") != record["candidate_hash"]:
+                        raise failure("MANUAL_REVIEW")
+                    pre, post = record["original_generation"], record["candidate_hash"]
+                    perform = lambda: atomic_replace_config(self.config.path, payload or b"")
+                elif name == "credential_backup":
+                    pre, post = "absent", self.stores.state(role)
+                    perform = lambda: self.stores.write(role, self.stores.read(role) or b"", "backup")
+                elif name in {"credential_promote", "credential_restore"}:
+                    slot = "staged" if name == "credential_promote" else "backup"
+                    pre, post = self.stores.state(role), self.stores.state(role, slot)
+                    perform = partial(self.stores.write, role, self.stores.read(role, slot) or b"")
+                else:
+                    slot = {"backup_delete": "backup", "credential_delete": "active",
+                            "staged_delete": "staged", "staging_cleanup": "staged"}[name]
+                    pre, post = self.stores.state(role, slot), "absent"
+                    if name == "credential_delete":
+                        self._ensure_not_selected(role, self.config._parse(read_config_bytes(self.config.path)).raw)
+                    perform = partial(self.stores.delete, role, slot)
+                self._effect(op, roles, role, name, pre, post, perform, fault, lock)
+            self._check_store_evidence(op.read())
+            op.update(phase="complete", next_action="none")
+
+    def _check_store_evidence(self, record: dict[str, Any], *, except_store: str | None = None) -> None:
+        last: dict[str, Any] = {}
+        for name in record["planned_effects"]:
+            effect = record["effects"].get(name)
+            if effect is not None:
+                last[self.resolver.effect_store(name)] = effect
+        for key, effect in last.items():
+            if key == except_store:
+                continue
+            current = self.resolver.observe(record, key)
+            expected = effect["post_state_id"] if effect["status"] in {"verified", "verified_by_recovery"} else effect["intended_post_state_id"]
+            if current != expected:
+                raise failure("MANUAL_REVIEW")
+
+    def _ensure_not_selected(self, role: CredentialRole, candidate: dict[str, Any]) -> None:
+        if role.provider != "google":
+            return
+        target = Path(role.locator(self.stores.root)).resolve()
+        for peer in ROLES.values():
+            if peer.provider != "google":
+                continue
+            _source, path = self.source(peer, candidate)
+            if path:
+                real = Path(path).expanduser()
+                if not real.is_absolute():
+                    real = self.config.path.parent / real
+                if real.resolve() == target:
+                    raise failure("CREDENTIAL_STILL_SELECTED")
+
+    def forget(self, role: CredentialRole, generation: str, *, detach: bool = False,
+               candidate: dict[str, Any] | None = None, fault_hook: Callable[[str], None] | None = None) -> dict[str, Any]:
+        self._require_platform()
+        with self._admission_context(role, fault_hook=fault_hook) as admission, self.journal.role_locks([role.role_key]) as roles:
+            with ConfigFileLock(self.config.path):
+                loaded = self.config._parse(read_config_bytes(self.config.path))
+                if loaded.generation != generation:
+                    raise failure("CONFIGURATION_CHANGED")
+                source, _path = self.source(role, loaded.raw)
+                if (detach and source != "external_file") or (not detach and source not in {"file", "keyring"}):
+                    raise failure("NOT_CONFIGURED")
+                raw, patch = self._patch(role, loaded.raw, detach=True, candidate=candidate)
+                if detach and self.source(role, raw)[1]:
+                    raise failure("DETACH_INEFFECTIVE")
+                if not detach:
+                    self._ensure_not_selected(role, raw)
+                payload = self._candidate_bytes(loaded.raw, patch)
+                binding = {**self.config.binding(), "provider": role.provider, "profile": role.profile,
+                           "role": role.purpose, "store_locator": role.locator(self.stores.root), "config_patch": patch}
+                operation_id = secrets.token_hex(16)
+                self._publish_admission(role, admission, operation_id, binding)
+                self.journal.create_operation(action_kind="credential_detach" if detach else "credential_forget", binding=binding,
+                    original_generation=loaded.generation, candidate_hash=_digest(payload), fields=[role.slug],
+                    role_locks=roles, allow_unreleased=True, operation_id=operation_id)
+            with self.journal.operation(operation_id) as op:
+                self._continue(op, roles, role, payload, fault_hook)
+            admission.release(operation_id)
+        return {"status": "complete", "code": "DETACHED" if detach else "FORGOTTEN", "config_generation": self.config.load().generation}
+
+    def recover(self, operation_id: str, action: str) -> dict[str, Any]:
+        self._require_platform()
+        record = self.journal.read(operation_id)
+        if record["schema_version"] != 4 or {key: record["binding"][key] for key in self.config.binding()} != self.config.binding():
+            raise failure("MANUAL_REVIEW")
+        role = role_from_binding(record["binding"])
+        with self._admission_context(role, recovery_id=operation_id) as admission:
+            with self.journal.role_locks([role.role_key]) as roles, self.journal.operation(operation_id) as op, ConfigFileLock(self.config.path) as lock:
+                record = op.read()
+                if record["phase"] in TERMINAL_PHASES:
+                    admission.release(operation_id)
+                    return {"status": "complete", "config_generation": self.config.load().generation}
+                current = self.config._parse(read_config_bytes(self.config.path))
+                if current.generation not in {record["original_generation"], record["candidate_hash"]}:
+                    raise failure("MANUAL_REVIEW")
+                payload = self._candidate_bytes(current.raw, record["binding"]["config_patch"]) if current.generation == record["original_generation"] else None
+                if payload is not None and _digest(payload) != record["candidate_hash"]:
+                    raise failure("MANUAL_REVIEW")
+                if record["effects"].get("credential_stage", {}).get("status") == "intent":
+                    staged = self.stores.read(role, "staged")
+                    if staged is None:
+                        raise failure("MANUAL_REVIEW")
+                    e = record["effects"]["credential_stage"]
+                    self._effect(op, roles, role, "credential_stage", e["pre_state_id"], e["intended_post_state_id"], lambda: None, None, lock)
+                    record = op.read()
+                if record["branch"] == "primary" and action in {"restore", "leave"}:
+                    branch = "abandon" if record["action_kind"] == "credential_enrollment" else "restore" if "credential_promote" in record["effects"] else "reject"
+                    op.switch_branch(branch, role_locks=roles, config_lock=lock, resolver=self.resolver, observe={}, next_action="cleanup")
+                elif action not in {"resume", "retry_delete", "restore", "leave"}:
+                    raise failure("INVALID_REQUEST")
+                if op.read()["branch"] == "primary" and record["action_kind"] in {"credential_enrollment", "credential_replacement"}:
+                    verify_raw = self.config._parse(payload).raw if payload is not None and role.provider == "canvas" else current.raw
+                    staged = self.stores.read(role, "staged")
+                    if staged is not None:
+                        self._verify(role, staged, verify_raw)
+                    elif "staging_cleanup" not in op.read()["effects"]:
+                        raise failure("MANUAL_REVIEW")
+            # _continue takes the config lock; role/record locks stay held.
+            with self.journal.role_locks([role.role_key]) as roles, self.journal.operation(operation_id) as op:
+                self._continue(op, roles, role, payload)
+            admission.release(operation_id)
+        return {"status": "complete", "config_generation": self.config.load().generation}

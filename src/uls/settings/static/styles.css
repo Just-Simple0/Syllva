@@ -86,3 +86,13 @@ button[aria-disabled="true"] { cursor: not-allowed; }
 .invariant-note { color: var(--muted); margin-top: 16px; }
 footer { display: flex; justify-content: space-between; color: var(--muted); font-size: 0.85rem; margin-top: 24px; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+/* Connection controls share the local shell's focus and invalid-field styles. */
+.credential-dialog, .term-change-dialog { position: fixed; z-index: 10; inset: 12% max(1rem, calc((100vw - 640px) / 2)); max-height: 76vh; overflow: auto; padding: 2rem; background: #fff; border: 3px solid #293b35; border-radius: 16px; box-shadow: 0 0 0 100vmax #172620aa; }
+.credential-dialog[hidden], .term-change-dialog[hidden] { display: none; }
+.credential-dialog input { display: block; width: 100%; margin: .75rem 0; }
+.credential-dialog input[hidden] { display: none; }
+#credential-cards button, #canvas-actions button { margin: .35rem .35rem .35rem 0; }
+#canvas-course-area label { display: block; margin: .5rem 0; }
+#canvas-course-area input { width: auto; }
+#canvas-origin { width: min(100%, 38rem); }
+@media (max-width: 600px) { .credential-dialog, .term-change-dialog { inset: 5% 1rem; padding: 1rem; } }

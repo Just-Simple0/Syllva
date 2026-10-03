@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import fields
 from pathlib import Path
@@ -147,6 +148,8 @@ def load_config_mapping(raw: Mapping[str, Any]) -> UlsConfig:
         ),
         courses=courses,
         credentials=_credentials_section(raw),
+        credential_revisions=_credential_revisions_section(raw),
+        canvas=_canvas_section(raw),
         google_worker_credentials_path=worker_cred_path,
         google_mcp_credentials_path=mcp_cred_path,
     )
@@ -248,6 +251,59 @@ def _credentials_section(raw: Mapping[str, Any]) -> dict[str, str]:
     return result
 
 
+_REVISION_ROLE = re.compile(r"^[a-z][a-z0-9:-]{0,63}$")
+_REVISION_VALUE = re.compile(r"^[a-f0-9]{32}$")
+
+
+def _canvas_section(raw: Mapping[str, Any]) -> dict[str, Any]:
+    section = raw.get("canvas", {})
+    if not isinstance(section, Mapping) or set(section) - {"profile", "registry", "lease", "sync_enabled"}:
+        raise ValueError("canvas section is invalid")
+    if not isinstance(section.get("sync_enabled", False), bool):
+        raise ValueError("canvas.sync_enabled must be boolean")  # noqa: TRY004 - parser contract uses ValueError
+    for name in ("profile", "registry", "lease"):
+        if name in section and not isinstance(section[name], Mapping):
+            raise ValueError("canvas metadata must be a mapping")
+    profile = section.get("profile")
+    if profile:
+        if set(profile) != {"id", "origin", "user_id", "display_name", "credential"} or not all(isinstance(value, str) for value in profile.values()):
+            raise ValueError("canvas profile is invalid")
+        if not re.fullmatch(r"c[a-f0-9]{32}", profile["id"]) or profile["credential"] != "keyring":
+            raise ValueError("canvas profile identity is invalid")
+    registry = section.get("registry")
+    if registry:
+        if set(registry) != {"term_id", "courses"} or not isinstance(registry["term_id"], str) or not isinstance(registry["courses"], list):
+            raise ValueError("canvas registry is invalid")
+        if len(registry["courses"]) > 20:
+            raise ValueError("canvas registry exceeds selection limit")
+        for course in registry["courses"]:
+            if not isinstance(course, dict) or set(course) != {"course_id", "term_id", "name", "code"} or not all(isinstance(value, str) for value in course.values()):
+                raise ValueError("canvas registry course is invalid")
+    return dict(section)
+
+
+def _credential_revisions_section(raw: Mapping[str, Any]) -> dict[str, str]:
+    """Parse the optional credential_revisions: section (Local Settings GUI-2).
+
+    Maps a fixed role slug to a random, non-secret 128-bit hex revision.
+    Malformed entries fail closed.
+    """
+
+    section = raw.get("credential_revisions")
+    if section is None:
+        return {}
+    if not isinstance(section, Mapping):
+        raise ValueError("credential_revisions must be a YAML mapping")  # noqa: TRY004 - parser contract uses ValueError
+    result: dict[str, str] = {}
+    for role, revision in section.items():
+        if not isinstance(role, str) or not _REVISION_ROLE.fullmatch(role):
+            raise ValueError("credential_revisions keys must be Settings role slugs")
+        if not isinstance(revision, str) or not _REVISION_VALUE.fullmatch(revision):
+            raise ValueError(f"credential_revisions.{role} must be a 32-character hex revision")
+        result[role] = revision
+    return result
+
+
 def _from_mapping(cls: type[_CfgT], value: Any) -> _CfgT:
     if value is None:
         value = {}
@@ -339,8 +395,8 @@ def _read_dotenv(path: Path) -> dict[str, str]:
 
 
 __all__ = [
-    "ConfigurationError",
     "SECRET_KEYS",
+    "ConfigurationError",
     "load_config",
     "load_config_unvalidated",
     "load_secrets",

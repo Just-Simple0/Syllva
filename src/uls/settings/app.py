@@ -51,6 +51,9 @@ def create_settings_app(
     barrier: MutationBarrier | None = None,
     on_close: Callable[[], None] | None = None,
     replaced_previous: bool = False,
+    credential_service: Any = None,
+    canvas_service: Any = None,
+    fake_mode: bool = False,
 ) -> Any:
     expected_origin = f"http://{expected_host}"
     root = f"/{prefix}/"
@@ -99,6 +102,7 @@ def create_settings_app(
         except Exception:  # noqa: BLE001 - fixed error code; never echo internals
             return _error("OVERVIEW_UNAVAILABLE", 503)
         payload["session_notice"] = "replaced_previous" if replaced_previous else None
+        payload["fake_mode"] = fake_mode
         return JSONResponse(payload)
 
     async def get_group(request: Request) -> Response:
@@ -139,6 +143,8 @@ def create_settings_app(
 
     async def validate_group(request: Request) -> Response:
         group = request.path_params["group"]
+        if group == "canvas_registry":
+            return await canvas_registry_validate(request)
         return await mutate(
             request,
             lambda body: config_store.preview(group, body.get("values"), body.get("generation")),
@@ -147,6 +153,14 @@ def create_settings_app(
 
     async def apply_group(request: Request) -> Response:
         group = request.path_params["group"]
+        if group == "canvas_registry":
+            if canvas_service is None:
+                return _error("FEATURE_DEFERRED", 403)
+            def apply_selection(body: dict[str, Any]) -> Any:
+                if set(body) != {"term_id", "course_ids", "generation", "candidate_hash"}:
+                    return _invalid_body()
+                return canvas_service.apply_selection(body["term_id"], body["course_ids"], body["generation"], body["candidate_hash"])
+            return await mutate(request, apply_selection, "CANVAS_UNAVAILABLE")
         return await mutate(
             request,
             lambda body: config_store.apply(
@@ -157,14 +171,122 @@ def create_settings_app(
         )
 
     async def recover(request: Request) -> Response:
-        action = request.path_params["action"]
+        action = request.path_params.get("action", "test")
         operation_id = request.path_params["operation_id"]
         if not _OPERATION_ID.fullmatch(operation_id):
             return _error("OPERATION_NOT_FOUND", 404)
+        def repair(_body: dict[str, Any]) -> Any:
+            record = journal.read(operation_id)
+            if record["schema_version"] == 4 and credential_service is not None:
+                return credential_service.recover(operation_id, action)
+            return config_store.recover(journal, operation_id, action)
         return await mutate(
-            request, lambda _body: config_store.recover(journal, operation_id, action),
+            request, repair,
             "RECOVERY_UNAVAILABLE",
         )
+
+    async def credentials(request: Request) -> Response:
+        if credential_service is None:
+            return _error("FEATURE_DEFERRED", 403)
+        if not same_origin_request(request.scope, expected_origin, require_origin=False):
+            return _error("SAME_ORIGIN_REQUIRED", 403)
+        try:
+            return JSONResponse(await run_in_threadpool(credential_service.cards))
+        except Exception:  # noqa: BLE001 - metadata errors never echo secrets
+            return _error("CREDENTIALS_UNAVAILABLE", 503)
+
+    async def credential_action(request: Request) -> Response:
+        from .credential_roles import ROLES
+        role = ROLES.get(request.path_params["role"])
+        action = request.path_params.get("action", "test")
+        if role is None or action not in {"set", "replace", "forget", "detach"}:
+            return _error("NOT_FOUND", 404)
+        if credential_service is None:
+            return _error("FEATURE_DEFERRED", 403)
+        if role.provider == "google" and action in {"set", "replace"}:
+            # The upload itself is JSON; generation is outside the secret body.
+            denied = _authorize_mutation(request, security, expected_origin)
+            if denied is not None:
+                return denied
+            if not security.record_explicit_activity(request_cookie(request.scope)):
+                return _error("SESSION_EXPIRED", 401)
+            generation = single_header(request.scope, b"x-uls-generation")
+            if generation is None:
+                return _error("INVALID_GENERATION", 400)
+            value = await request.body()
+            if len(value) > 65536:
+                return _error("REQUEST_TOO_LARGE", 413)
+            try:
+                _unique_json(value)
+                async with gate.mutation():
+                    result = await run_in_threadpool(credential_service.save, role, value, generation.decode("ascii"), replace=action == "replace")
+                return JSONResponse(result)
+            except SettingsServiceError as exc:
+                return _service_error(exc)
+            except JournalError as exc:
+                return _error(exc.code, 409)
+            except BarrierClosed:
+                return _error("SESSION_REPLACED", 401)
+            except (ValueError, UnicodeError):
+                return _error("INVALID_REQUEST", 400)
+            except Exception:  # noqa: BLE001 - secret upload failure
+                return _error("CREDENTIAL_SAVE_UNAVAILABLE", 503)
+        def work(body: dict[str, Any]) -> Any:
+            keys = {"generation", "secret"} if action in {"set", "replace"} else {"generation", "confirm_role"}
+            if set(body) != keys:
+                raise SettingsServiceError("INVALID_REQUEST", "Choose a listed credential action.")
+            if action in {"set", "replace"}:
+                if not isinstance(body["secret"], str):
+                    raise SettingsServiceError("INVALID_REQUEST", "Enter a credential.")
+                return credential_service.save(role, body["secret"].encode(), body["generation"], replace=action == "replace")
+            if body["confirm_role"] != role.slug:
+                raise SettingsServiceError("CONFIRMATION_REQUIRED", "Confirm the connection shown in this dialog.")
+            return credential_service.forget(role, body["generation"], detach=action == "detach")
+        return await mutate(request, work, "CREDENTIAL_SAVE_UNAVAILABLE")
+
+    async def connection_test(request: Request) -> Response:
+        from .credential_roles import ROLES
+        role = ROLES.get(f"{request.path_params['provider']}-{request.path_params['purpose']}")
+        if role is None or credential_service is None:
+            return _error("NOT_FOUND", 404)
+        return await mutate(request, lambda body: credential_service.test(role) if not body else _invalid_body(), "CHECK_UNAVAILABLE")
+
+    async def canvas_snapshot(request: Request) -> Response:
+        if canvas_service is None:
+            return _error("FEATURE_DEFERRED", 403)
+        if not same_origin_request(request.scope, expected_origin, require_origin=False):
+            return _error("SAME_ORIGIN_REQUIRED", 403)
+        try:
+            return JSONResponse(await run_in_threadpool(canvas_service.snapshot))
+        except SettingsServiceError as exc:
+            return _service_error(exc)
+
+    async def canvas_action(request: Request) -> Response:
+        if canvas_service is None:
+            return _error("FEATURE_DEFERRED", 403)
+        action = request.path_params.get("action", "test")
+        signatures = {"connect": ("origin", "secret", "generation"), "replace": ("secret", "generation"),
+                      "forget": ("confirm_profile_id", "generation"), "renew": ("generation",),
+                      "disable_sync": ("generation",), "discover": (), "test": ()}
+        if action not in signatures:
+            return _error("NOT_FOUND", 404)
+        def work(body: dict[str, Any]) -> Any:
+            names = signatures[action]
+            if set(body) != set(names):
+                return _invalid_body()
+            return getattr(canvas_service, action)(*(body[name] for name in names))
+        return await mutate(request, work, "CANVAS_UNAVAILABLE")
+
+    async def canvas_registry_validate(request: Request) -> Response:
+        if canvas_service is None:
+            return _error("FEATURE_DEFERRED", 403)
+        def work(body: dict[str, Any]) -> Any:
+            if set(body) != {"term_id", "course_ids", "generation"}:
+                return _invalid_body()
+            # CanvasService performs bounded authoritative re-reads and returns
+            # a reviewed candidate; apply goes through the config CAS below.
+            return canvas_service.save_selection(body["term_id"], body["course_ids"], body["generation"])
+        return await mutate(request, work, "CANVAS_UNAVAILABLE")
 
     async def keepalive(request: Request) -> Response:
         denied = _authorize_mutation(request, security, expected_origin)
@@ -198,6 +320,15 @@ def create_settings_app(
         Route(f"{root}api/v1/session/close", close_session, methods=["POST"]),
         Route(f"{root}api/v1/recovery/{{operation_id:str}}/{{action:str}}", recover, methods=["POST"]),
     ]
+    routes.extend([
+        Route(f"{root}api/v1/credentials", credentials, methods=["GET"]),
+        Route(f"{root}api/v1/credentials/{{role:str}}/{{action:str}}", credential_action, methods=["POST"]),
+        Route(f"{root}api/v1/connections/{{provider:str}}/{{purpose:str}}/test", connection_test, methods=["POST"]),
+        Route(f"{root}api/v1/canvas", canvas_snapshot, methods=["GET"]),
+        Route(f"{root}api/v1/canvas/{{action:str}}", canvas_action, methods=["POST"]),
+        Route(f"{root}api/v1/connections/canvas/test", canvas_action, methods=["POST"], name="canvas_test"),
+        Route(f"{root}api/v1/settings/canvas_registry/validate", canvas_registry_validate, methods=["POST"]),
+    ])
     application = Starlette(debug=False, routes=routes)
     return SecurityBoundary(application, security, expected_host, prefix)
 
@@ -226,12 +357,27 @@ async def _json_object(request: Request) -> dict[str, Any] | Response:
     if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
         return _error("JSON_REQUIRED", 415)
     try:
-        value = json.loads(await request.body())
-    except (json.JSONDecodeError, UnicodeDecodeError):
+        value = _unique_json(await request.body())
+    except (ValueError, UnicodeDecodeError):
         return _error("INVALID_REQUEST", 400)
     if not isinstance(value, dict):
         return _error("INVALID_REQUEST", 400)
     return value
+
+
+def _unique_json(data: bytes) -> Any:
+    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+    return json.loads(data, object_pairs_hook=unique)
+
+
+def _invalid_body() -> Any:
+    raise SettingsServiceError("INVALID_REQUEST", "Choose a listed settings action.")
 
 
 def _csrf_fetch_allowed(request: Request, expected_origin: str) -> bool:

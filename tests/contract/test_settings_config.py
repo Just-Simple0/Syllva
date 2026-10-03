@@ -236,7 +236,7 @@ def test_setup_steps_never_claim_ready_from_template_or_defaults(tmp_path):
     assert config.courses and config.remote_mcp.enabled is False and config.worker.enabled is True
     steps = _steps(config)
     assert steps["Storage"]["state"] == PARTIAL  # template placeholder IDs
-    assert steps["Canvas"]["state"] == NOT_CHECKED
+    assert steps["Canvas"]["state"] == PARTIAL
     assert steps["Academic"]["state"] == NOT_CHECKED
     assert "not verified" in steps["Academic"]["reason"]
     assert steps["Automation"]["state"] == NOT_CHECKED

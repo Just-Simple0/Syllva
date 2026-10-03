@@ -440,12 +440,25 @@ class SettingsServer:
 
     async def serve(self) -> str:
         from .app import create_settings_app
+        from .composition import FAKE_STORES_ENV, build_settings_services
         from .config_service import ConfigStore
         from .journal import JournalStore
 
         store = ConfigStore(self.config_path)
         loaded = store.load()
         journal = JournalStore(loaded.config.system.workspace_dir)
+        fake_root = os.environ.get(FAKE_STORES_ENV)
+        root: Path | None = None
+        if fake_root:
+            root = Path(fake_root).resolve()
+            if (self.open_browser or not str(root).startswith(("/tmp/", "/private/tmp/"))
+                    or not self.config_path.resolve().is_relative_to(root)
+                    or not Path(loaded.config.system.workspace_dir).resolve().is_relative_to(root)
+                    or not self.runtime_dir.resolve().is_relative_to(root)):
+                raise SettingsLaunchError("FAKE_MODE_REFUSED", "Fake Settings requires temporary config, workspace and runtime roots, with --no-browser.")
+        credentials, canvas = build_settings_services(
+            store, journal, self.runtime_dir, fake_mode=bool(fake_root), fake_root=root,
+        )
         sock = reserve_loopback_socket()
         port = sock.getsockname()[1]
         prefix = new_path_prefix()
@@ -456,6 +469,7 @@ class SettingsServer:
             prefix=prefix, barrier=self.barrier,
             on_close=lambda: self.request_shutdown("closed", CLOSE_DRAIN_SECONDS),
             replaced_previous=self.replaced_previous,
+            credential_service=credentials, canvas_service=canvas, fake_mode=bool(fake_root),
         )
         import uvicorn
 

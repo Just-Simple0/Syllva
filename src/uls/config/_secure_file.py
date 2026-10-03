@@ -83,6 +83,85 @@ def secret_file_path(filename: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Reserved, non-active names in the secrets directory
+# ---------------------------------------------------------------------------
+
+RESERVED_SUFFIXES: Final[tuple[str, ...]] = (".staging", ".backup", ".lock", ".reservation")
+TEMP_PREFIX: Final[str] = ".tmp_"
+
+
+def temporary_secret_name(target_name: str) -> str:
+    """The one temporary-file name format used by write_secure_file."""
+
+    return TEMP_PREFIX + target_name + "_" + str(os.getpid())
+
+
+def is_reserved_secret_name(name: str) -> bool:
+    """True for staging/backup copies, writer temporaries and admission files."""
+
+    return name.startswith(TEMP_PREFIX) or name.endswith(RESERVED_SUFFIXES)
+
+
+def is_reserved_secret_locator(path: str | os.PathLike[str], *, root: Path | None = None) -> bool:
+    """True when path names a reserved, never-active entry in the secrets directory.
+
+    Covers .staging/.backup copies, write_secure_file's .tmp_<target>_<pid>
+    temporaries (including those of staging/backup targets), and the
+    admission folder's .lock/.reservation files. Paths outside the secrets
+    directory (and its admission/ subfolder) are never reserved.
+    """
+
+    try:
+        base = root if root is not None else secrets_directory()
+    except ConfigurationError:
+        return False
+    try:
+        real = Path(os.path.realpath(Path(path).expanduser()))
+        base_real = Path(os.path.realpath(base))
+    except (OSError, ValueError):
+        return False
+    if real.parent not in {base_real, base_real / "admission"}:
+        return False
+    return is_reserved_secret_name(real.name)
+
+
+def delete_secure_file(path: Path) -> None:
+    """Delete one protected file after the same directory/file identity checks as reads.
+
+    A missing file is not an error (the slot is already absent). The parent
+    directory is fsynced after unlinking. POSIX only; Windows is out of scope.
+    """
+
+    if IS_WINDOWS:
+        raise ConfigurationError("secret_platform_unsupported")
+    directory = path.parent
+    try:
+        dir_fd = os.open(str(directory), os.O_RDONLY | _DIRECTORY_FLAG | _NOFOLLOW_FLAG)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise ConfigurationError("secret_dir_is_symlink") from exc
+        raise ConfigurationError("secret_dir_missing") from exc
+    try:
+        _posix_verify_directory(dir_fd)
+        try:
+            info = os.stat(path.name, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if stat.S_ISLNK(info.st_mode):
+            raise ConfigurationError("secret_file_is_symlink")
+        if not stat.S_ISREG(info.st_mode):
+            raise ConfigurationError("secret_file_not_regular")
+        if info.st_uid != os.getuid():
+            raise ConfigurationError("secret_file_owner_mismatch")
+        os.unlink(path.name, dir_fd=dir_fd)
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+# ---------------------------------------------------------------------------
 # Read boundary
 # ---------------------------------------------------------------------------
 
@@ -173,12 +252,12 @@ def _read_all_fd(fd: int, max_bytes: int) -> bytes:
 # ---------------------------------------------------------------------------
 
 
-def write_secure_file(path: Path, data: bytes) -> None:
+def write_secure_file(path: Path, data: bytes, *, max_bytes: int = MAX_SECRET_BYTES) -> None:
     """Atomically write data to path (see write contract above)."""
 
     if len(data) == 0:
         raise ConfigurationError("secret_value_empty")
-    if len(data) > MAX_SECRET_BYTES:
+    if len(data) > max_bytes:
         raise ConfigurationError("secret_value_too_large")
     directory = path.parent
     directory.mkdir(parents=True, exist_ok=True)
@@ -200,7 +279,7 @@ def write_secure_file(path: Path, data: bytes) -> None:
             _posix_verify_directory(dir_fd)
         finally:
             os.close(dir_fd)
-    tmp_path = directory / (".tmp_" + path.name + "_" + str(os.getpid()))
+    tmp_path = directory / temporary_secret_name(path.name)
     if IS_WINDOWS:
         _windows_atomic_write(tmp_path, path, data)
         return

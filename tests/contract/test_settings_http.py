@@ -290,10 +290,10 @@ def test_security_headers_no_cors_and_body_limit(tmp_path):
     assert huge.status_code == 413
 
 
-def test_only_gui1_routes_exist(tmp_path):
+def test_deferred_remote_scheduler_and_mcp_routes_do_not_exist(tmp_path):
     h = make_harness(tmp_path)
     csrf = h.signed_in()
-    for path in ("/api/v1/credentials", "/api/v1/canvas/connect", "/api/v1/remote/enable",
+    for path in ("/api/v1/remote/enable",
                  "/api/v1/oauth/grants", "/mcp", "/api/v1/scheduler"):
         assert h.client.get(path, headers=FETCH).status_code == 404
         assert h.post(path, {}, csrf).status_code in {404, 405}

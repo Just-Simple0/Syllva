@@ -27,6 +27,8 @@ from .journal import JournalStore
 GENERATION_PATTERN = re.compile(r"^[a-f0-9]{64}$")
 GROUP_FIELDS: dict[str, frozenset[str]] = {
     "general": frozenset({"system.timezone"}),
+    "canvas_registry": frozenset({"canvas.registry"}),
+    "canvas_sync": frozenset({"canvas.sync_enabled"}),
     "advanced": frozenset({
         "retrieval.concept_mode",
         "retrieval.max_candidate_entities",
@@ -353,6 +355,10 @@ class ConfigStore:
 
     @staticmethod
     def _group_values(config: Any, group: str) -> dict[str, Any]:
+        if group == "canvas_registry":
+            return {"canvas.registry": config.canvas.get("registry", {})}
+        if group == "canvas_sync":
+            return {"canvas.sync_enabled": config.canvas.get("sync_enabled", False)}
         if group == "general":
             return {"system.timezone": config.system.timezone}
         if group == "advanced":
@@ -365,6 +371,14 @@ class ConfigStore:
 def _field_problem(field: str, value: Any) -> str | None:
     """Return a plain-language problem for one allowlisted field, or None."""
 
+    if field == "canvas.sync_enabled":
+        if value is True:
+            raise SettingsServiceError("FEATURE_DEFERRED", "Canvas sync is not available yet.", 403)
+        return None if value is False else "Choose Disable Sync."
+    if field == "canvas.registry":
+        if not isinstance(value, dict) or set(value) != {"term_id", "courses"}:
+            return "Choose a term and courses from the checked list."
+        return None
     if field == "system.timezone":
         if not isinstance(value, str) or not 1 <= len(value) <= 64:
             return "Enter a valid time zone, for example Asia/Seoul."

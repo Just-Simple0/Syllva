@@ -26,6 +26,7 @@ import stat
 import time
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import AbstractContextManager
+from functools import partial
 from pathlib import Path
 from typing import Any, Self
 
@@ -207,7 +208,45 @@ def _effect_positions(schema: dict[str, Any]) -> dict[str, int]:
     return positions
 
 
-_POSITIONS = {kind: _effect_positions(schema) for kind, schema in ACTION_SCHEMAS.items()}
+# Preserve the earlier fake-store machine regressions as unreleased test kinds.
+for _kind in ("credential_enrollment", "credential_replacement", "credential_forget"):
+    ACTION_SCHEMAS["fake_" + _kind] = copy.deepcopy(ACTION_SCHEMAS[_kind])
+
+ACTION_SCHEMAS["credential_enrollment"]["branches"]["primary"] += ("staging_cleanup",)
+ACTION_SCHEMAS["credential_replacement"]["branches"]["primary"] += ("staging_cleanup",)
+ACTION_SCHEMAS["credential_replacement"]["branches"]["restore"] += ("staging_cleanup",)
+ACTION_SCHEMAS["credential_replacement"]["branches"]["reject"] = ("credential_stage", "staged_delete")
+ACTION_SCHEMAS["credential_replacement"]["switch"]["reject"] = {
+    "verified": ("credential_stage",), "absent": ("credential_backup", "credential_promote", "config_commit"),
+    "proof": {"config": ("record", "original_generation"),
+              "active": ("effect", "credential_stage", "pre_active_id"), "backup": ("constant", ABSENT_STATE)},
+    "not_applied": {},
+    "effect_guards": {"staged_delete": {"config": ("record", "original_generation"),
+                                         "active": ("binding", "original_active_id"),
+                                         "backup": ("constant", ABSENT_STATE)}},
+}
+# The pre-active identity is immutable binding evidence (never a secret).
+ACTION_SCHEMAS["credential_replacement"]["binding"] |= {"original_active_id"}
+ACTION_SCHEMAS["credential_replacement"]["switch"]["reject"]["proof"]["active"] = ("binding", "original_active_id")
+ACTION_SCHEMAS["credential_replacement"]["switch"]["restore"]["effect_guards"]["staging_cleanup"] = {
+    "config": ("record", "original_generation"), "active": ("effect", "credential_restore", "post_state_id"),
+    "backup": ("constant", ABSENT_STATE),
+}
+for _kind in ("credential_enrollment", "credential_replacement"):
+    ACTION_SCHEMAS[_kind]["links"] += (("staging_cleanup", "pre_state_id", "credential_stage", "post_state_id"),)
+    ACTION_SCHEMAS[_kind]["fixed"] += (("staging_cleanup", "intended_post_state_id", ABSENT_STATE),)
+ACTION_SCHEMAS["credential_replacement"]["links"] += (("staged_delete", "pre_state_id", "credential_stage", "post_state_id"),)
+ACTION_SCHEMAS["credential_replacement"]["fixed"] += (("staged_delete", "intended_post_state_id", ABSENT_STATE),)
+ACTION_SCHEMAS["credential_detach"] = copy.deepcopy(ACTION_SCHEMAS["credential_forget"])
+ACTION_SCHEMAS["credential_detach"]["branches"] = {"primary": ("config_detach",)}
+ACTION_SCHEMAS["credential_detach"]["fixed"] = ()
+for _kind in ("credential_enrollment", "credential_replacement", "credential_forget", "credential_detach"):
+    ACTION_SCHEMAS[_kind]["binding"] |= {"config_patch"}
+ACTION_VERSIONS = {kind: (4 if kind.startswith("credential_") else 3) for kind in ACTION_SCHEMAS}
+
+
+def _positions(schema: dict[str, Any], branch: str) -> dict[str, int]:
+    return {name: index for index, name in enumerate(schema["branches"][branch])}
 
 
 def canonical_role_key(binding: dict[str, Any]) -> str:
@@ -221,9 +260,9 @@ LIVE_ACTION_KINDS = frozenset({"config_apply"})
 # Parent-plan schemas owned by GUI-2/GUI-3. Records of these kinds validate, but
 # GUI-1 refuses to create them because it owns no credential store.
 DEFERRED_ACTION_KINDS = frozenset({
-    "credential_enrollment", "credential_replacement", "credential_forget",
+    "credential_enrollment", "credential_replacement", "credential_forget", "credential_detach",
 })
-FAKE_ACTION_KINDS = frozenset({"fake_store_test", "fake_multi_store_test"})
+FAKE_ACTION_KINDS = frozenset(kind for kind in ACTION_SCHEMAS if kind.startswith("fake_"))
 _IMMUTABLE_FIELDS = (
     "schema_version", "operation_id", "action_kind", "role_group", "role_keys", "binding",
     "original_generation", "candidate_hash", "fields", "created_at",
@@ -353,6 +392,7 @@ class JournalOperation(AbstractContextManager["JournalOperation"]):
         config_lock: Any,
         observe: Mapping[str, Callable[[], str]],
         next_action: str,
+        resolver: Any = None,
     ) -> dict[str, Any]:
         """Select a mutually exclusive recovery/cleanup branch from authoritative proof.
 
@@ -366,6 +406,10 @@ class JournalOperation(AbstractContextManager["JournalOperation"]):
 
         self._require_operation_lock()
         record = self.read()
+        if record["schema_version"] == 4:
+            if resolver is None:
+                raise ValueError("credential effects require a code-owned resolver")
+            observe = {key: partial(resolver.observe, record, key) for key in ("config", "active", "staged", "backup")}
         rule = ACTION_SCHEMAS[record["action_kind"]].get("switch", {}).get(branch)
         if rule is None or record["branch"] != "primary":
             raise ValueError("journal branch switch is not allowed")
@@ -418,6 +462,7 @@ class JournalOperation(AbstractContextManager["JournalOperation"]):
         role_locks: RoleLockSet | None = None,
         config_lock: Any = None,
         guards: Mapping[str, Callable[[], str]] | None = None,
+        resolver: Any = None,
     ) -> str:
         """Perform exactly one authoritative side effect between durable records.
 
@@ -436,6 +481,11 @@ class JournalOperation(AbstractContextManager["JournalOperation"]):
 
         self._require_operation_lock()
         record = self.read()
+        if record["schema_version"] == 4:
+            if resolver is None:
+                raise ValueError("credential effects require a code-owned resolver")
+            observe = lambda: resolver.observe(record, resolver.effect_store(name))
+            guards = {key: partial(resolver.observe, record, key) for key in ("config", "active", "staged", "backup")}
         planned = record["planned_effects"]
         if name not in planned:
             raise ValueError("journal effect was not planned for this operation")
@@ -444,8 +494,8 @@ class JournalOperation(AbstractContextManager["JournalOperation"]):
             rule = ACTION_SCHEMAS[record["action_kind"]]["switch"][record["branch"]]
             spec = rule["effect_guards"].get(name, {})
             expected = _expected_proof(record, {"proof": spec})
-            current = {key: (guards or {})[key]() for key in spec} if set(spec) <= set(guards or {}) else None
-            if current != expected:
+            guard_values = {key: (guards or {})[key]() for key in spec} if set(spec) <= set(guards or {}) else None
+            if guard_values != expected:
                 raise JournalError(
                     "BRANCH_GUARD_FAILED",
                     "Saved settings changed since this repair was chosen. It stays for review.",
@@ -506,8 +556,9 @@ class JournalOperation(AbstractContextManager["JournalOperation"]):
 class JournalStore:
     """Each operation owns one 0600 JSON record and its own cross-process lock."""
 
-    def __init__(self, workspace_dir: str | os.PathLike[str]) -> None:
+    def __init__(self, workspace_dir: str | os.PathLike[str], *, credential_root: Path | None = None) -> None:
         self.directory = journal_directory(workspace_dir)
+        self.credential_root = credential_root
 
     def role_locks(self, role_keys: Iterable[str]) -> RoleLockSet:
         return RoleLockSet(self.directory, role_keys)
@@ -522,6 +573,7 @@ class JournalStore:
         fields: list[str],
         role_locks: RoleLockSet | None = None,
         allow_unreleased: bool = False,
+        operation_id: str | None = None,
     ) -> str:
         """Exclusively create one durable record for one new operation.
 
@@ -559,9 +611,9 @@ class JournalStore:
             role_group = "credential"
         else:
             role_group = "config" if action_kind == "config_apply" else "fake"
-        operation_id = secrets.token_hex(16)
+        operation_id = operation_id or secrets.token_hex(16)
         record: dict[str, Any] = {
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": ACTION_VERSIONS[action_kind],
             "operation_id": operation_id,
             "action_kind": action_kind,
             "role_group": role_group,
@@ -579,6 +631,7 @@ class JournalStore:
             "next_action": "inspect",
         }
         validate_record(record, operation_id)
+        self._validate_locators(record)
         self._create(record)
         return operation_id
 
@@ -618,7 +671,13 @@ class JournalStore:
             os.close(fd)
         record = json.loads(b"".join(chunks).decode("utf-8"))
         validate_record(record, operation_id)
+        self._validate_locators(record)
         return dict(record)
+
+    def _validate_locators(self, record: dict[str, Any]) -> None:
+        if record["schema_version"] == 4:
+            from .credential_roles import validate_locators
+            validate_locators(record["binding"], self.credential_root)
 
     def unresolved(self) -> list[dict[str, Any]]:
         """Scan every record; unreadable records stay visible as pending."""
@@ -707,7 +766,7 @@ def validate_record(record: object, operation_id: str) -> None:
         _REQUIRED_FIELDS | _OPTIONAL_FIELDS
     ):
         raise ValueError("journal record shape is unsupported")
-    if record["schema_version"] != SCHEMA_VERSION or record["operation_id"] != operation_id:
+    if record["schema_version"] != ACTION_VERSIONS.get(record["action_kind"]) or record["operation_id"] != operation_id:
         raise ValueError("journal record identity is invalid")
     schema = ACTION_SCHEMAS.get(record["action_kind"])
     if schema is None:
@@ -730,7 +789,8 @@ def validate_record(record: object, operation_id: str) -> None:
         raise ValueError("journal record role keys are invalid")
     binding = record["binding"]
     if not isinstance(binding, dict) or set(binding) != schema["binding"] or not all(
-        isinstance(value, str) and 0 < len(value) <= 1024 for value in binding.values()
+        isinstance(value, str) and 0 < len(value) <= (16384 if key == "config_patch" else 1024)
+        for key, value in binding.items()
     ):
         raise ValueError("journal record binding does not match its action schema")
     if schema["roles"]:
@@ -741,7 +801,10 @@ def validate_record(record: object, operation_id: str) -> None:
     branches = schema["branches"]
     if record["branch"] not in branches or record["planned_effects"] != list(branches[record["branch"]]):
         raise ValueError("journal planned effects do not match the selected branch")
-    positions = _POSITIONS[record["action_kind"]]
+    positions = _positions(schema, record["branch"])
+    for other_order in schema["branches"].values():
+        for index, name in enumerate(other_order):
+            positions.setdefault(name, index)
     order = list(branches[record["branch"]])
     effects = record["effects"]
     if not isinstance(effects, dict) or not set(effects).issubset(positions):
@@ -937,7 +1000,7 @@ def replacement_recovery_action(
     effect-level plan before promotion; manual_review otherwise.
     """
 
-    if record["action_kind"] != "credential_replacement":
+    if record["action_kind"] not in {"credential_replacement", "fake_credential_replacement"}:
         raise ValueError("not a credential replacement record")
     effects = record["effects"]
     promote = effects.get("credential_promote")
@@ -993,7 +1056,7 @@ def enrollment_recovery_action(
     staged slot still holds the recorded staged version; manual_review otherwise.
     """
 
-    if record["action_kind"] != "credential_enrollment":
+    if record["action_kind"] not in {"credential_enrollment", "fake_credential_enrollment"}:
         raise ValueError("not a credential enrollment record")
     if record["branch"] == "abandon":
         effects = record["effects"]
@@ -1031,6 +1094,10 @@ def _expected_proof(record: dict[str, Any], rule: dict[str, Any]) -> dict[str, A
     for key, source in rule["proof"].items():
         if source[0] == "record":
             expected[key] = record[source[1]]
+        elif source[0] == "binding":
+            expected[key] = record["binding"][source[1]]
+        elif source[0] == "constant":
+            expected[key] = source[1]
         else:
             effect = record["effects"].get(source[1])
             expected[key] = effect.get(source[2]) if isinstance(effect, dict) else None
