@@ -82,7 +82,7 @@ class Harness:
 
 def make_harness(tmp_path: Path, *, platform: str = "darwin") -> Harness:
     repo = Path(__file__).resolve().parents[2]
-    raw = yaml.safe_load((repo / "config.example.yaml").read_text())
+    raw = yaml.safe_load((repo / "config.example.yaml").read_text(encoding="utf-8"))
     raw["system"]["workspace_dir"] = str(tmp_path / "workspace")
     raw["behavior_contract"]["path"] = str(repo / "contracts" / "study-behavior.md")
     raw["x_user_work"] = {"keep": [1, 2, 3]}
