@@ -1,0 +1,62 @@
+{
+  "purpose": "review-only source inventory; not runtime permission input",
+  "repository_root": "/Users/admin/Project/Syllva",
+  "provenance": {
+    "owner_frozen_inventory": ".insane-review/gui23-20261002/owner-freeze-peer-preservation.json",
+    "path_finding": ".insane-review/gui23-20261002/state-check-path-finding.md"
+  },
+  "sources": [
+    {
+      "path": "src/uls/cli/credential_set.py",
+      "sha256": "cada62beb0c0faacf34ed64e44eebb1cf24b6d6574380d0291943d709bc09e09",
+      "size_bytes": 22654
+    },
+    {
+      "path": "src/uls/config/credentials.py",
+      "sha256": "ecbe398f52b4edf4267b07e368ae4e1a3413e0aa577dee0eac2fc4ae8cfefa86",
+      "size_bytes": 20347
+    },
+    {
+      "path": "src/uls/settings/credential_admission.py",
+      "sha256": "9b72fa7d3ff333f643c203f064025f2a5e5edfe9dfc27d6d53ee2a5c5e03da87",
+      "size_bytes": 29151
+    },
+    {
+      "path": "src/uls/settings/credential_roles.py",
+      "sha256": "f9f3ea23807747cc42ad7c08a9947ac255942619660218695e0e84eb58d763c9",
+      "size_bytes": 4222
+    },
+    {
+      "path": "src/uls/settings/credential_stores.py",
+      "sha256": "6ec843bcf25ef2046d3a580180468e658f923a816760c89a55eda7c5c7b88896",
+      "size_bytes": 5608
+    },
+    {
+      "path": "src/uls/settings/credential_service.py",
+      "sha256": "d70bf1b5fcb63cb7d4c2f774a675be1b1d617b46a60bb4f932d3a7c831c62852",
+      "size_bytes": 28058
+    },
+    {
+      "path": "tests/unit/test_credential_set_cli.py",
+      "sha256": "a36d47e6cb0e66dd341512cd0833416e56de85cab42900e439dcfa130b6a61d1",
+      "size_bytes": 31404
+    },
+    {
+      "path": "tests/contract/test_settings_credential_service.py",
+      "sha256": "1eeae0b30657492c8d67a829acf41f16398075f9527c891854b6af4dff4520e2",
+      "size_bytes": 38729
+    },
+    {
+      "path": "tests/contract/test_settings_credential_admission.py",
+      "sha256": "2a06ec2fc45494d89f84cf519cf619c1b738a7bee15ce168d23aefa7fe0d4bae",
+      "size_bytes": 32402
+    }
+  ],
+  "runtime_authority": "none; any future candidate implementation must independently hard-code and review these exact pins",
+  "root_binding": {
+    "path": "/Users/admin/Project/Syllva",
+    "device": 16777230,
+    "inode": 22556999
+  },
+  "original_checker_sha256": "f6b8df58b956919d6afcba6670f1395ef5c6e13fb31bef6ab85d1131dc4a4f97"
+}
