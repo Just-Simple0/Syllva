@@ -20,7 +20,7 @@ def _scenario(name: str) -> dict:
     if NODE is None:
         pytest.skip("node is required to run the Settings UI harness")
     proc = subprocess.run([NODE, str(HARNESS), str(STATIC), name], check=False,
-                          capture_output=True, text=True, timeout=60)
+                          capture_output=True, text=True, encoding="utf-8", errors="strict", timeout=60)
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout)
 

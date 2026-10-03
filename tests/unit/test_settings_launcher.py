@@ -59,6 +59,7 @@ def short_runtime():
     return runtime_directory(tempfile.mkdtemp(prefix="uls-rt-", dir="/tmp"))
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Local Settings POSIX runtime is unavailable on Windows")
 def test_runtime_directory_is_private(tmp_path, short_runtime):
     if os.name != "nt":
         assert short_runtime.stat().st_mode & 0o777 == 0o700
@@ -93,6 +94,10 @@ def _write_config(tmp_path: Path) -> Path:
 
 
 def test_windows_is_refused_before_any_runtime_state(tmp_path, monkeypatch):
+    def unexpected_dependency_probe(*_args, **_kwargs):
+        pytest.fail("Windows refusal must precede dependency probing")
+
+    monkeypatch.setattr(launcher.importlib.util, "find_spec", unexpected_dependency_probe)
     monkeypatch.setattr(launcher, "_IS_WINDOWS", True)
     runtime = tmp_path / "rt"
     messages: list[str] = []
@@ -119,6 +124,7 @@ def test_cli_setup_refuses_windows_before_runtime_state(tmp_path, monkeypatch, c
 
 
 def test_missing_web_extra_is_reported_before_any_runtime_state(tmp_path, monkeypatch):
+    monkeypatch.setattr(launcher, "_IS_WINDOWS", False)
     real_find_spec = launcher.importlib.util.find_spec
     monkeypatch.setattr(launcher.importlib.util, "find_spec",
                         lambda name, *a: None if name == "starlette" else real_find_spec(name, *a))
@@ -141,19 +147,21 @@ def test_reserve_loopback_socket_binds_exact_loopback_port_zero():
         sock.close()
 
 
-def test_control_handler_prepare_has_no_effect_and_commit_needs_the_nonce():
+def test_control_handler_prepare_has_no_effect_and_commit_needs_the_nonce(monkeypatch):
+    synthetic_uid = 1000
+    monkeypatch.setattr(launcher, "_current_uid", lambda: synthetic_uid)
     calls: list[bool] = []
     handler = ControlHandler("lock-token", lambda: calls.append(True))
     good = {"v": 2, "op": "prepare", "owner_pid": os.getpid(), "lock_token": "lock-token"}
     for request, uid in [
-        (good, None), (good, os.getuid() + 1),
-        ({**good, "lock_token": "wrong"}, os.getuid()),
-        ({**good, "owner_pid": os.getpid() + 1}, os.getuid()),
-        ({**good, "v": 1}, os.getuid()), ({**good, "op": "commit"}, os.getuid()),
+        (good, None), (good, synthetic_uid + 1),
+        ({**good, "lock_token": "wrong"}, synthetic_uid),
+        ({**good, "owner_pid": os.getpid() + 1}, synthetic_uid),
+        ({**good, "v": 1}, synthetic_uid), ({**good, "op": "commit"}, synthetic_uid),
     ]:
         assert handler.prepare(json.dumps(request).encode(), uid)["ok"] is False
-    assert handler.prepare(b"not json", os.getuid())["ok"] is False
-    ready = handler.prepare(json.dumps(good).encode(), os.getuid())
+    assert handler.prepare(b"not json", synthetic_uid)["ok"] is False
+    ready = handler.prepare(json.dumps(good).encode(), synthetic_uid)
     assert ready["ok"] is True and ready["stage"] == "ready" and calls == []
     for bad in ({"v": 2, "op": "commit", "nonce": "other"}, {"v": 2, "op": "prepare", "nonce": ready["nonce"]}):
         assert handler.commit(json.dumps(bad).encode(), ready["nonce"])["ok"] is False
@@ -163,6 +171,7 @@ def test_control_handler_prepare_has_no_effect_and_commit_needs_the_nonce():
     assert calls == [True]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Local Settings POSIX runtime is unavailable on Windows")
 def test_peer_identity_reports_same_user():
     left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
@@ -175,6 +184,7 @@ def test_peer_identity_reports_same_user():
         right.close()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Local Settings POSIX runtime is unavailable on Windows")
 def test_owner_without_verifiable_channel_fails_closed(short_runtime):
     owner = LocalFileLock(owner_lock_path(short_runtime))
     assert owner.acquire()
@@ -187,6 +197,7 @@ def test_owner_without_verifiable_channel_fails_closed(short_runtime):
         owner.release()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Local Settings POSIX runtime is unavailable on Windows")
 def test_owner_that_does_not_exit_after_commit_fails_closed(short_runtime, monkeypatch):
     owner = LocalFileLock(owner_lock_path(short_runtime))
     assert owner.acquire()
@@ -201,6 +212,7 @@ def test_owner_that_does_not_exit_after_commit_fails_closed(short_runtime, monke
         owner.release()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Local Settings POSIX runtime is unavailable on Windows")
 def test_launch_failure_never_emits_a_url(tmp_path, short_runtime):
     owner = LocalFileLock(owner_lock_path(short_runtime))
     assert owner.acquire()
@@ -279,6 +291,7 @@ def _runtime() -> Path:
 
 
 @needs_loopback
+@pytest.mark.skipif(os.name == "nt", reason="Local Settings POSIX runtime is unavailable on Windows")
 def test_double_launch_replaces_old_process_before_new_bootstrap(tmp_path):
     httpx = pytest.importorskip("httpx")
     config = _write_config(tmp_path)
@@ -337,6 +350,7 @@ def test_double_launch_replaces_old_process_before_new_bootstrap(tmp_path):
 
 
 @needs_loopback
+@pytest.mark.skipif(os.name == "nt", reason="Local Settings POSIX runtime is unavailable on Windows")
 def test_prepare_without_commit_leaves_the_owner_fully_usable(tmp_path):
     httpx = pytest.importorskip("httpx")
     runtime = _runtime()
@@ -360,6 +374,7 @@ def test_prepare_without_commit_leaves_the_owner_fully_usable(tmp_path):
 
 
 @needs_loopback
+@pytest.mark.skipif(os.name == "nt", reason="Local Settings POSIX runtime is unavailable on Windows")
 def test_lost_commit_acknowledgement_is_resolved_by_observing_owner_exit(tmp_path, monkeypatch):
     httpx = pytest.importorskip("httpx")
     runtime = _runtime()
@@ -394,6 +409,7 @@ def test_lost_commit_acknowledgement_is_resolved_by_observing_owner_exit(tmp_pat
 
 
 @needs_loopback
+@pytest.mark.skipif(os.name == "nt", reason="Local Settings POSIX runtime is unavailable on Windows")
 def test_replacement_during_an_active_mutation_on_a_held_config_lock(tmp_path, monkeypatch):
     httpx = pytest.importorskip("httpx")
     config = _write_config(tmp_path)
@@ -450,6 +466,7 @@ def test_replacement_during_an_active_mutation_on_a_held_config_lock(tmp_path, m
 
 
 @needs_loopback
+@pytest.mark.skipif(os.name == "nt", reason="Local Settings POSIX runtime is unavailable on Windows")
 def test_hanging_browser_open_never_blocks_replacement(tmp_path):
     runtime = _runtime()
     hang = tmp_path / "hang.sh"

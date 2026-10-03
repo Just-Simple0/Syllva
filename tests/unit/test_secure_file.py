@@ -251,3 +251,14 @@ def test_windows_dacl_round_trip_and_tampered_mask_rejected(tmp_path):
     with pytest.raises(ConfigurationError) as exc_info:
         read_secure_file(p)
     assert exc_info.value.details["problems"][0] == "secret_file_permissions_too_open"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows-only default-owner token API test")
+def test_windows_default_owner_sid_returns_valid_sid():
+    import re
+
+    from uls.config._secure_file import _windows_default_owner_sid
+
+    sid = _windows_default_owner_sid()
+    assert isinstance(sid, str)
+    assert re.fullmatch(r"S-\d+(?:-\d+)+", sid)

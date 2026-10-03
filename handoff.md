@@ -1,5 +1,13 @@
 # Syllva 인계 — Local Settings GUI-2/GUI-3
 
+## CI 보완 A+B1 게시·실제 재검사 — 2026-10-04
+
+- 사용자 “CI 보완 해서 재테스트 해보자”에 따라 동일 Luna/max 담당자가 7개 파일을 보완했다. CI `web` extra·Windows 한정 `tzdata`·fixture/Node UTF-8·정확한 POSIX GUI lifecycle 10개 Windows skip·portable 인증/nonce 및 거부 우선순위 검사를 유지했다. Windows owner-SID helper의 ctypes 서명 6개와 native direct 회귀 1개만 추가했다. 전체 OS/Python 4개 조합과 전체 pytest는 유지한다.
+- Native Latest/Chat/Extra High `[0,3,3]` 최대 검토: A PLAN REVISE3의 지정 수정 반영, 별도 B1 PLAN GO, 21개 전체 관련 소스의 FINAL GO/REQUIRED0 및 원본 identity-bound 회수. 변경하지 않은 프로젝트 checker에서 현재 FINAL record exit0을 확인했다. UI 동작 변경 없는 이 범위의 새 Gemini는 N/A다.
+- 로컬 A 전체 pytest는 B1 전 `2345 passed, 9 skipped, 2 warnings`; loopback 권한을 갖춘 launcher `16 passed`로 해당 6개 환경 skip을 별도 확인했다. B1 후 secure-file `14 passed, 2 skipped`이며 두 native Windows 검사는 이 macOS에서 실행되지 않았다. 변경 Python Ruff, compile, projection lint, TOML parse PASS. 이를 실제 Windows 성공으로 확대하지 않는다.
+- 보완 커밋 `950931d3d86686e5e5d42500839bf22d67713d9b`를 기존 [PR #13](https://github.com/Just-Simple0/Syllva/pull/13)에 push하고 네 조합 Actions를 재실행했다. 같은 소스를 후속 [PR #14](https://github.com/Just-Simple0/Syllva/pull/14)에 일반 merge로 반영한다. 현재 실제 CI 판정·run/job/head 및 남은 결함은 `.insane-review/gui23-20261002/ci-corrections-20261004/progress.json`에 이어 기록한다. 이 문서 커밋 시점에는 CI 전체 통과·전체 PR 수락을 선언하지 않는다.
+- Windows 공통 credential admission/CLI(B2)는 별도 계획 상태이며 아직 구현하지 않았다. 디렉터리 durability·native 보안 동등성과 고정 3개 소스 pin의 새 인간 범위 결정이 남았다. checker 코드/컴파일된 9핀/전역 설정은 불변이다. GUI23 기존 UI 지적 3건과 GUI4·5 대기는 유지한다. 근거 원문·전체 해시·실제 검사·부모 처분은 같은 private CI 작업 기록에 보존했다. 아래 절은 이전 게시 snapshot이다.
+
 ## 게시 완료 및 추가 PR 리뷰·CI 보완 대기 — 2026-10-04
 
 - 커밋·push 완료: GUI-2·3 `e464e814961963808dce28a48ab5306f7a57e20a`, 프로젝트 전용 검사기 `4bc17f44b0f9d05dcad1b3841a0d0a86a19ac1b3`. 원격 세 브랜치 SHA를 실제 확인했다. [PR #13](https://github.com/Just-Simple0/Syllva/pull/13)은 GUI-1 기준 `codex/gui1-reviewed-base`와 비교하고, [PR #14](https://github.com/Just-Simple0/Syllva/pull/14)는 GUI-2·3과 비교한다. 기존 `main` 대비 36개 누적 커밋은 이 두 PR의 변경 범위 밖이며, 기준 브랜치도 `main`에 병합되지 않았다.

@@ -17,6 +17,7 @@ keywords = ["mcp", "retrieval", "notion", "google-drive", "learning-system", "st
 dependencies = [
     "pydantic>=2.6",
     "PyYAML>=6.0",
+    "tzdata; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
