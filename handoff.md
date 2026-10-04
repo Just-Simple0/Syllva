@@ -4,7 +4,7 @@
 
 - 사용자 결정: “후속 수정은 나중에. 일단 handoff.md 최신화하고 PR 두 개다 머지해. 윈도우즈는 일단 호환 정도로 하고 완벽 지원은 개발 이후에 제대로 해보자.” Windows 완전 지원을 위한 admission/journal/config/CLI(B2) 후속 수정은 개발 이후 과제로 보류한다. 현재는 검증된 호환 범위로 진행하며 완전 지원이나 전체 CI 통과를 선언하지 않는다.
 - 실제 Windows3.11·3.14의 secure-file 집중 검사는 각각 `12 passed, 6 skipped`로 검증됐지만 전체 검사에는 각각 195개 실패가 남아 있다. 사용자가 이 알려진 제한을 수용하고 기존 두 PR의 머지를 지시했다. 검사 실패를 숨기거나 CI checks를 성공으로 변경하지 않는다. 이 결정은 향후 release gate·비밀 값 접근·고정 checker source pin 확대·전역 설정 변경의 승인이 아니다.
-- 현재 기준 브랜치에 따라 [PR #14](https://github.com/Just-Simple0/Syllva/pull/14) → `codex/gui23-settings`, 이후 [PR #13](https://github.com/Just-Simple0/Syllva/pull/13) → `codex/gui1-reviewed-base` 순서로 일반 merge를 진행한다. 실제 merged/head/base/SHA는 private CI progress의 `merge_followup`에 기록한다. 기존 GUI PR 지적은 해결 완료로 표시하지 않고 후속 기록에 남긴다. GUI4·5는 설계부터 대기를 유지한다.
+- **두 PR 일반 merge 완료:** [PR #14](https://github.com/Just-Simple0/Syllva/pull/14)는 `codex/gui23-settings`에 merge commit `dac79697f3434799e14c9068af1df6fd4716471f`로 2026-10-04 11:25:35 KST, 이어 [PR #13](https://github.com/Just-Simple0/Syllva/pull/13)은 `codex/gui1-reviewed-base`에 merge commit `c41d6aeb34cf789efea9b6adde20548b3abb1b73`로 11:26:24 KST 머지됐다. GitHub의 두 `MERGED` 상태와 SHA를 확인했고 로컬을 같은 최종 merge까지 fast-forward했다. 현재 최종 통합 브랜치는 `codex/gui1-reviewed-base`다. 기존 GUI PR 지적은 해결 완료로 표시하지 않고 후속 기록에 남긴다. GUI4·5는 설계부터 대기를 유지한다. 실제 head/base/SHA 및 인계 문서 게시 결과는 private CI progress의 `merge_followup`에 보존한다.
 
 ## Windows 보안 파일 보완·실제 CI 판정 — 2026-10-04
 
