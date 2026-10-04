@@ -1,5 +1,17 @@
 # Syllva 인계 — Local Settings GUI-2/GUI-3
 
+## Windows 보안 파일 보완·실제 CI 판정 — 2026-10-04
+
+- 승인한 프로젝트 문서 예외 `dac0e6f7f5b6c54ae0a7bc7b0ba5af1c4575c706d3cc9d79ba2c2c649c7b700d`와 기존 Python 9핀·문서 1핀을 유지한다. 사용자가 유지 결정을 재확인했으며 개인 전역 검사기·hooks/config는 이 작업에서 변경하지 않았다.
+- 이전 실제 Windows 집중 검사의 유일한 실패는 missing-file 테스트의 준비 과정이었다. 같은 담당자 `gpt-6-luna/max`가 public writer로 synthetic sibling을 먼저 작성해 canonical Windows 디렉터리 DACL을 마련하고 missing target 부재를 확인하도록 한 테스트만 보완했다. 제품 guard·공유 helper·CI·checker는 동결했다. 로컬 targeted `1 passed`, owning Ruff/diff-check PASS다.
+- 전체 9개 관련 소스의 Native Latest/Chat/Extra High 최대 `[0,3,3]` FINAL은 **GO / REQUIRED0**다. 원본 identity-bound 회수와 active project checker exit0을 확인했다(`final-missing-fixture-ready/task-record.json`). Pro effort 부재 fallback은 `pro_option_unavailable`; 새 UI/flow 변경이 없어 Gemini N/A다. 같은 exact source hash에 실제 CI 증거를 추가해 의견을 재사용했다.
+- 한 테스트 수정 커밋 `be6f1b0cb887c448e972ff0956828424d05e84d8`을 [PR #13](https://github.com/Just-Simple0/Syllva/pull/13)에 push했고, 일반 merge `2b90815d280b2db096093a3983d85577fc0ba792`로 [PR #14](https://github.com/Just-Simple0/Syllva/pull/14)에 반영했다. 두 remote SHA·비보호 ref preflight·한 파일 변경 범위·기존 dirty 보존을 확인했다.
+- [실제 CI run 37168540862](https://github.com/Just-Simple0/Syllva/actions/runs/37168540862)의 Windows Python **3.11·3.14 집중 검사는 각각 `12 passed, 6 skipped`**다. skip 6개는 POSIX mode/symlink/FIFO 전용이고 Windows raw directory/file ACL·missing/extra mask 거부·partial SID cleanup·TokenOwner 검사는 실제 실행됐다. 두 버전의 전체 suite는 각각 **`195 failed, 2139 passed, 23 skipped, 1 warning`**이며 macOS 두 버전은 통과했다. 3.11 이전 실패 목록과 비교하면 missing-file 한 건만 해결됐고 새 실패는 없다.
+- 현재 `_secure_file.py` SHA `325e7a970e02210d12c04e1c87edf77ac7244b71b9b3ea916729303648735559`, test SHA `e3c91864fe116567922740d7cceff859af3a48a57cadeb7b6ceccd930d772e37`, CI SHA `0a21b598577d8bf72328cb562f57295e97c4cdb675e46e9fe5f4d3462d455a8f`를 검토·게시·CI snapshot과 대조했다. 원문 로그/SHA·최종 처분은 `.insane-review/gui23-20261002/ci-corrections-20261004/corrected-runtime-final-disposition.json` 및 같은 `progress.json`에 보존한다.
+- 이 보안 파일 보완은 수락했지만 **전체 Windows CI·프로젝트는 완료가 아니다**. Windows `os.getuid()` 등 admission/journal/config/CLI(B2) 범위와 이전 GUI PR 지적은 별도 미결이다. B2 구현이나 고정 source pin 확대를 이번 수락으로 승인하지 않는다. GUI4·5는 설계부터 대기를 유지한다. 모델 호출 ledger는 hash 보충 참조를 기록했으나 자동 lifecycle 관측 0·hook trust/완전성 미확인으로 기록 공백을 남겼다. 실제 선택은 runtime/Native 원본 근거이며 시간·비용을 추정하지 않는다.
+
+아래 절은 각 게시 시점의 역사 기록이며 현재 판정은 위 절과 최신 private progress를 따른다.
+
 ## Windows DACL 수정·프로젝트 문서 예외 적용 완료 / CI 게시 준비 — 2026-10-04
 
 - 사용자 “세가지 모두 진행”에 따라 같은 담당자 `gpt-6-luna/max`가 Windows specific mask, directory/file 양쪽의 독립 raw ACL 검증, missing/extra 권한 거부 회귀를 구현했다. Native에서 추가로 발견한 부분 SID 변환 실패의 메모리 해제 누락도 같은 담당자가 보완했다. 현재 source SHA는 `_secure_file.py` `325e7a970e02210d12c04e1c87edf77ac7244b71b9b3ea916729303648735559`, test SHA는 `31b3461ad2a4ebd330beb3c97cd0863732a197fbb6dee32569eb2bfcf2cc666f`다. 부모 확인 `15 passed, 3 Windows-only skipped`, owning Ruff와 diff-check PASS다.
