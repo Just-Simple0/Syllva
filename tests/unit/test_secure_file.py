@@ -246,8 +246,11 @@ def test_write_failure_never_leaves_a_temp_file_behind(tmp_path, monkeypatch):
 
 def test_read_rejects_missing_file(tmp_path):
     directory = _secrets_dir(tmp_path)
+    write_secure_file(directory / "existing.secret", b"synthetic")
+    missing_path = directory / "missing.secret"
+    assert not missing_path.exists()
     with pytest.raises(ConfigurationError) as exc_info:
-        read_secure_file(directory / "missing.secret")
+        read_secure_file(missing_path)
     assert exc_info.value.details["problems"][0] == "secret_file_missing"
 
 
