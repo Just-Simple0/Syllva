@@ -1,5 +1,47 @@
 # Syllva 인계 — Local Settings GUI-2/GUI-3
 
+## 사용자 결정: Windows 완전 지원 보완 보류·PR 머지 — 2026-10-04
+
+- 사용자 결정: “후속 수정은 나중에. 일단 handoff.md 최신화하고 PR 두 개다 머지해. 윈도우즈는 일단 호환 정도로 하고 완벽 지원은 개발 이후에 제대로 해보자.” Windows 완전 지원을 위한 admission/journal/config/CLI(B2) 후속 수정은 개발 이후 과제로 보류한다. 현재는 검증된 호환 범위로 진행하며 완전 지원이나 전체 CI 통과를 선언하지 않는다.
+- 실제 Windows3.11·3.14의 secure-file 집중 검사는 각각 `12 passed, 6 skipped`로 검증됐지만 전체 검사에는 각각 195개 실패가 남아 있다. 사용자가 이 알려진 제한을 수용하고 기존 두 PR의 머지를 지시했다. 검사 실패를 숨기거나 CI checks를 성공으로 변경하지 않는다. 이 결정은 향후 release gate·비밀 값 접근·고정 checker source pin 확대·전역 설정 변경의 승인이 아니다.
+- 현재 기준 브랜치에 따라 [PR #14](https://github.com/Just-Simple0/Syllva/pull/14) → `codex/gui23-settings`, 이후 [PR #13](https://github.com/Just-Simple0/Syllva/pull/13) → `codex/gui1-reviewed-base` 순서로 일반 merge를 진행한다. 실제 merged/head/base/SHA는 private CI progress의 `merge_followup`에 기록한다. 기존 GUI PR 지적은 해결 완료로 표시하지 않고 후속 기록에 남긴다. GUI4·5는 설계부터 대기를 유지한다.
+
+## Windows 보안 파일 보완·실제 CI 판정 — 2026-10-04
+
+- 승인한 프로젝트 문서 예외 `dac0e6f7f5b6c54ae0a7bc7b0ba5af1c4575c706d3cc9d79ba2c2c649c7b700d`와 기존 Python 9핀·문서 1핀을 유지한다. 사용자가 유지 결정을 재확인했으며 개인 전역 검사기·hooks/config는 이 작업에서 변경하지 않았다.
+- 이전 실제 Windows 집중 검사의 유일한 실패는 missing-file 테스트의 준비 과정이었다. 같은 담당자 `gpt-6-luna/max`가 public writer로 synthetic sibling을 먼저 작성해 canonical Windows 디렉터리 DACL을 마련하고 missing target 부재를 확인하도록 한 테스트만 보완했다. 제품 guard·공유 helper·CI·checker는 동결했다. 로컬 targeted `1 passed`, owning Ruff/diff-check PASS다.
+- 전체 9개 관련 소스의 Native Latest/Chat/Extra High 최대 `[0,3,3]` FINAL은 **GO / REQUIRED0**다. 원본 identity-bound 회수와 active project checker exit0을 확인했다(`final-missing-fixture-ready/task-record.json`). Pro effort 부재 fallback은 `pro_option_unavailable`; 새 UI/flow 변경이 없어 Gemini N/A다. 같은 exact source hash에 실제 CI 증거를 추가해 의견을 재사용했다.
+- 한 테스트 수정 커밋 `be6f1b0cb887c448e972ff0956828424d05e84d8`을 [PR #13](https://github.com/Just-Simple0/Syllva/pull/13)에 push했고, 일반 merge `2b90815d280b2db096093a3983d85577fc0ba792`로 [PR #14](https://github.com/Just-Simple0/Syllva/pull/14)에 반영했다. 두 remote SHA·비보호 ref preflight·한 파일 변경 범위·기존 dirty 보존을 확인했다.
+- [실제 CI run 37168540862](https://github.com/Just-Simple0/Syllva/actions/runs/37168540862)의 Windows Python **3.11·3.14 집중 검사는 각각 `12 passed, 6 skipped`**다. skip 6개는 POSIX mode/symlink/FIFO 전용이고 Windows raw directory/file ACL·missing/extra mask 거부·partial SID cleanup·TokenOwner 검사는 실제 실행됐다. 두 버전의 전체 suite는 각각 **`195 failed, 2139 passed, 23 skipped, 1 warning`**이며 macOS 두 버전은 통과했다. 3.11 이전 실패 목록과 비교하면 missing-file 한 건만 해결됐고 새 실패는 없다.
+- 현재 `_secure_file.py` SHA `325e7a970e02210d12c04e1c87edf77ac7244b71b9b3ea916729303648735559`, test SHA `e3c91864fe116567922740d7cceff859af3a48a57cadeb7b6ceccd930d772e37`, CI SHA `0a21b598577d8bf72328cb562f57295e97c4cdb675e46e9fe5f4d3462d455a8f`를 검토·게시·CI snapshot과 대조했다. 원문 로그/SHA·최종 처분은 `.insane-review/gui23-20261002/ci-corrections-20261004/corrected-runtime-final-disposition.json` 및 같은 `progress.json`에 보존한다.
+- 이 보안 파일 보완은 수락했지만 **전체 Windows CI·프로젝트는 완료가 아니다**. Windows `os.getuid()` 등 admission/journal/config/CLI(B2) 범위와 이전 GUI PR 지적은 별도 미결이다. B2 구현이나 고정 source pin 확대를 이번 수락으로 승인하지 않는다. GUI4·5는 설계부터 대기를 유지한다. 모델 호출 ledger는 hash 보충 참조를 기록했으나 자동 lifecycle 관측 0·hook trust/완전성 미확인으로 기록 공백을 남겼다. 실제 선택은 runtime/Native 원본 근거이며 시간·비용을 추정하지 않는다.
+
+아래 절은 각 게시 시점의 역사 기록이며 현재 판정은 위 절과 최신 private progress를 따른다.
+
+## Windows DACL 수정·프로젝트 문서 예외 적용 완료 / CI 게시 준비 — 2026-10-04
+
+- 사용자 “세가지 모두 진행”에 따라 같은 담당자 `gpt-6-luna/max`가 Windows specific mask, directory/file 양쪽의 독립 raw ACL 검증, missing/extra 권한 거부 회귀를 구현했다. Native에서 추가로 발견한 부분 SID 변환 실패의 메모리 해제 누락도 같은 담당자가 보완했다. 현재 source SHA는 `_secure_file.py` `325e7a970e02210d12c04e1c87edf77ac7244b71b9b3ea916729303648735559`, test SHA는 `31b3461ad2a4ebd330beb3c97cd0863732a197fbb6dee32569eb2bfcf2cc666f`다. 부모 확인 `15 passed, 3 Windows-only skipped`, owning Ruff와 diff-check PASS다.
+- 현재 CI는 기존 OS/Python 4개 matrix와 전체 pytest를 유지하면서 full-suite 성공·실패 뒤 Windows secure-file 집중 검사를 실행한다. 전체 22개 관련 소스의 Native Latest/Chat/Extra High `[0,3,3]` 최대 FINAL에서 **DACL·CI SOURCE GO / REQUIRED0**, 별도 **문서 pin 후보 GO / REQUIRED0**를 받았다. Pro effort 부재 근거와 원본 결속 회수는 `.insane-review/gui23-20261002/ci-corrections-20261004/final-corrected-scopes/`에 보존한다. Gemini는 UI/flow 변경 없음으로 N/A다.
+- 기존 오탐 보완은 정확한 Python 9개 source pin에 한정됐다. 이번 정상 설계 문서 `docs/plans/credential-secret-file-launcher.md`는 기존 예외 밖이었다. 사용자 “예외 추가하고 실제 3.11, 3.14는 CI 통해서 할 거지?” 결정 후, 한 문서의 exact path/SHA/48,413 bytes만 독립 immutable map으로 추가한 검토본 `dac0e6f7f5b6c54ae0a7bc7b0ba5af1c4575c706d3cc9d79ba2c2c649c7b700d`를 프로젝트 내부에 적용하고 AGENTS·채택 문서를 정합화했다. 적용 위치에서 `36 passed, 113 subtests passed`, 신규 test Ruff PASS, 실제 active checker의 `applied-current-task-record.json` exit0을 확인했다. 기존 9핀·reader·artifact/review gates 및 전역 설정은 불변이다. 적용 전 원본 기록/정책은 보존하고 전체 22개 패키지 source와 적용된 정확 bytes의 별도 mapping을 감사했다.
+- 제품/CI 정확한 3파일은 커밋 `6b4b28cdd182add99a685c5b7a1e2ece4d6656cb`로 기존 PR #13에 push했고 원격 head를 확인했다. 실제 GitHub Actions `37166278082`(pull_request)와 `37166275847`(push)가 새 소스로 진행 중이다. Windows3.11/3.14 집중 검사의 실제 결과는 아직 없다. PR #14에는 프로젝트 검사기 예외·문서 커밋과 이 제품 커밋의 일반 merge를 반영한다. 이전 PR #14 head `2386b44b25f7296a3e7947ef6d3d4892e6c1517c`의 Windows 실패는 새 소스의 결과가 아니다. 실제 runner 판정은 같은 CI progress에 이어 기록한다. Windows admission/journal/config(B2)와 기존 GUI PR 지적은 이 DACL 소스 GO로 완료되지 않는다. GUI4·5는 설계부터 대기를 유지한다.
+
+## CI 보완 A+B1 게시·실제 재검사 — 2026-10-04
+
+- 사용자 “CI 보완 해서 재테스트 해보자”에 따라 동일 Luna/max 담당자가 7개 파일을 보완했다. CI `web` extra·Windows 한정 `tzdata`·fixture/Node UTF-8·정확한 POSIX GUI lifecycle 10개 Windows skip·portable 인증/nonce 및 거부 우선순위 검사를 유지했다. Windows owner-SID helper의 ctypes 서명 6개와 native direct 회귀 1개만 추가했다. 전체 OS/Python 4개 조합과 전체 pytest는 유지한다.
+- Native Latest/Chat/Extra High `[0,3,3]` 최대 검토: A PLAN REVISE3의 지정 수정 반영, 별도 B1 PLAN GO, 21개 전체 관련 소스의 FINAL GO/REQUIRED0 및 원본 identity-bound 회수. 변경하지 않은 프로젝트 checker에서 현재 FINAL record exit0을 확인했다. UI 동작 변경 없는 이 범위의 새 Gemini는 N/A다.
+- 로컬 A 전체 pytest는 B1 전 `2345 passed, 9 skipped, 2 warnings`; loopback 권한을 갖춘 launcher `16 passed`로 해당 6개 환경 skip을 별도 확인했다. B1 후 secure-file `14 passed, 2 skipped`이며 두 native Windows 검사는 이 macOS에서 실행되지 않았다. 변경 Python Ruff, compile, projection lint, TOML parse PASS. 이를 실제 Windows 성공으로 확대하지 않는다.
+- 보완 커밋 `950931d3d86686e5e5d42500839bf22d67713d9b`를 기존 [PR #13](https://github.com/Just-Simple0/Syllva/pull/13)에 push하고 네 조합 Actions를 재실행했다. 같은 소스를 후속 [PR #14](https://github.com/Just-Simple0/Syllva/pull/14)에 일반 merge로 반영한다. 현재 실제 CI 판정·run/job/head 및 남은 결함은 `.insane-review/gui23-20261002/ci-corrections-20261004/progress.json`에 이어 기록한다. 이 문서 커밋 시점에는 CI 전체 통과·전체 PR 수락을 선언하지 않는다.
+- 첫 실제 재검사에서 Windows 두 Python 조합은 `232 failed, 2100 passed, 23 skipped`로 같은 결과였다(이전 `267 failed, 2070 passed, 13 skipped, 4 errors`). macOS는 `2351 passed, 4 skipped`다. `-rs`의 실패 요약 누락은 `-ra`로 보완해 별도 Native FINAL GO/원본 gate PASS를 확인하고 실패 이름·원인을 포함한 재검사를 이어간다. 변경 없는 20개 소스 의견과 현재 workflow 의견을 결합해 21개 현재 source coverage를 확인했다. 전체 CI 통과는 아니다.
+- Windows 공통 credential admission/CLI(B2)는 별도 계획 상태이며 아직 구현하지 않았다. 디렉터리 durability·native 보안 동등성과 고정 3개 소스 pin의 새 인간 범위 결정이 남았다. checker 코드/컴파일된 9핀/전역 설정은 불변이다. GUI23 기존 UI 지적 3건과 GUI4·5 대기는 유지한다. 근거 원문·전체 해시·실제 검사·부모 처분은 같은 private CI 작업 기록에 보존했다. 아래 절은 이전 게시 snapshot이다.
+
+## 게시 완료 및 추가 PR 리뷰·CI 보완 대기 — 2026-10-04
+
+- 커밋·push 완료: GUI-2·3 `e464e814961963808dce28a48ab5306f7a57e20a`, 프로젝트 전용 검사기 `4bc17f44b0f9d05dcad1b3841a0d0a86a19ac1b3`. 원격 세 브랜치 SHA를 실제 확인했다. [PR #13](https://github.com/Just-Simple0/Syllva/pull/13)은 GUI-1 기준 `codex/gui1-reviewed-base`와 비교하고, [PR #14](https://github.com/Just-Simple0/Syllva/pull/14)는 GUI-2·3과 비교한다. 기존 `main` 대비 36개 누적 커밋은 이 두 PR의 변경 범위 밖이며, 기준 브랜치도 `main`에 병합되지 않았다.
+- GitHub Codex의 추가 리뷰는 두 원본 커밋에서 완료됐다. #14는 주요 지적 없음. #13은 복구 버튼과 가능한 transaction branch의 불일치, 불완전 Canvas identity/registry의 Ready 표시, 최초 등록 실패에 기존 credential 보존 문구 표시의 세 지적이다. 총괄이 실제 소스와 대조했고, 동일 Luna/max 담당자에게 읽기 전용 진단·구체 수정안을 배정했다. 동일 Gemini ultra는 해당 GUI-2·3 UX 지적을 독립 판정한다. 이 추가 GitHub 리뷰의 실제 모델·강도는 노출되지 않아 기존 Native Latest/max·Gemini 정책 gate를 대체하지 않는다.
+- CI는 문서 빌드와 다수 macOS 실행을 통과했지만, macOS/Python 3.11의 Google 동시 replacement 한 실행에서 양쪽 `OPERATION_IN_PROGRESS`가 관측됐다. Windows 실행도 인코딩·보안 파일 처리·POSIX 전용 GUI 테스트 등에서 실패했다. 같은 커밋의 다른 macOS 통과를 실패 무시 근거로 삼지 않는다. 아직 CI 전체 통과·새 지적 CLOSED·병합 가능 판정은 없다.
+- 기존 GUI-2·3 범위 수락 증거는 보존하지만 **새 PR 지적·CI 실패에 대한 통합 수락은 대기**다. 제품 코드 추가 수정이나 checker의 고정 9핀 변경은 아직 하지 않았다. GUI-4·5 대기와 실제 secrets/provider 접근 금지를 유지한다. 게시·검사·리뷰 원본과 진단 범위는 `.insane-review/gui23-20261002/publication-20261004.json`, `publication-pr13-findings.md`, `publication-ci-failure-111254320118.txt`, `publication-windows-summary-*.txt`에 기록했다.
+- 게시 결과를 이 인계와 작업 기록에 추가하는 문서 커밋은 검사기 PR에 포함한다. GUI-4 master/mock 수정, 신규 GUI-4 계획서와 `RESEARCH/`는 로컬에 보존한다. 임시 기준 게시 worktree는 recoverable archive로 정리했다. 자동 merge·기존 heartbeat 재활성화는 하지 않았다. 아래 게시 준비·수정 전 수락 문구는 해당 당시 범위다.
+
 ## GUI-2·3 커밋·PR 게시 준비 — 2026-10-04
 
 - 사용자가 커밋·push·PR 생성 및 리뷰 진행을 지시했다. 누적 변경이 크다는 지적에 따라 GUI-1 커밋 `2f39f19`을 `codex/gui1-reviewed-base` 비교 기준으로 보존하고, 수락된 GUI-2·3은 `codex/gui23-settings`, 프로젝트 전용 증거 검사기는 별도 후속 브랜치/PR로 나눈다. 기존 작업을 `main`에 한 번에 합치거나 자동 merge하지 않는다.

@@ -1,5 +1,12 @@
 # Local Settings GUI 작업 기록
 
+## 게시 결과 및 새 리뷰·CI 관측 — 2026-10-04
+
+- GUI-2·3 `e464e814961963808dce28a48ab5306f7a57e20a`와 Syllva checker `4bc17f44b0f9d05dcad1b3841a0d0a86a19ac1b3`를 분리 커밋·push했다. 원격 SHA 일치 확인. [PR #13](https://github.com/Just-Simple0/Syllva/pull/13)은 `codex/gui1-reviewed-base` 기준 48파일 제품 묶음, [PR #14](https://github.com/Just-Simple0/Syllva/pull/14)는 GUI-2·3 기준 checker 7파일과 게시 결과 2문서다. `main` 대비 기존 36개 커밋은 이 변경 범위 밖이다. `main` merge는 없다.
+- 추가 GitHub Codex 리뷰 완료: #14 주요 지적 없음; #13 복구 action/label, Canvas Ready 검증, set 실패 안내의 지적 3개. 해당 두 원본 commit 결속 응답을 보존했다. 실제 GitHub reviewer 모델·강도는 미노출이므로 정책 필수 Native/Gemini gate로 승격하지 않는다. 동일 Luna/max는 합성 재현·수정안, 동일 Gemini ultra는 GUI-2·3 지적의 독립 판정 담당이며 GUI-4·5는 대기한다.
+- CI 문서 빌드와 여러 macOS 실행 통과; macOS3.11 동시 Google replacement 한 실행 실패(1failed/2350passed/3skipped) 및 Windows 실행 실패(267failed/2070passed/13skipped/4errors)를 관측했다. Windows 주요 유형은 기본 텍스트 decoding, OpenProcessToken, unsupported GUI 테스트의 POSIX 기대다. 실제 로그로 분류 중이며 전부 일시 실패나 해결 완료로 주장하지 않는다.
+- 제품 추가 수정·핀 변경·전체 suite 로컬 재실행은 없고, 원본 source/gate/리뷰 증거는 보존한다. 기존 분야 수락과 새 PR 통합 수락을 구분하며 현재 새 지적·CI 조건은 미결이다. 게시 결과 문서 커밋만 추가하고 GUI-4 변경·RESEARCH는 로컬에 남긴다. private 게시 receipt 및 실패/지적 원문은 `.insane-review/gui23-20261002/publication-*`에 보존한다.
+
 ## GUI-2·3 게시 준비 — 2026-10-04
 
 - 사용자 커밋·push·PR 리뷰 지시를 받았다. 변경 누적 지적을 반영해 `2f39f19` 기준 브랜치 → GUI-2·3 제품 PR → 프로젝트 전용 검사기 PR의 순서로 분리한다. GUI-4·5 설계/구현 대기는 유지하며 GUI-4 문서 변경과 `RESEARCH/`는 로컬에 보존한다.
