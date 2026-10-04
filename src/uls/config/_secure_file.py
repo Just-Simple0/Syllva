@@ -54,8 +54,8 @@ _NOFOLLOW_FLAG: Final[int] = getattr(os, "O_NOFOLLOW", 0)
 # ownership rather than ACL trustees).
 _WINDOWS_SYSTEM_SID: Final[str] = "S-1-5-18"
 _WINDOWS_ADMINISTRATORS_SID: Final[str] = "S-1-5-32-544"
-_WINDOWS_USER_ACCESS_MASK: Final[int] = 0x80000000 | 0x40000000 | 0x00010000
-_WINDOWS_ADMIN_ACCESS_MASK: Final[int] = 0x10000000
+_WINDOWS_USER_ACCESS_MASK: Final[int] = 0x0013019F
+_WINDOWS_ADMIN_ACCESS_MASK: Final[int] = 0x001F01FF
 
 
 def secrets_directory() -> Path:
@@ -724,10 +724,6 @@ def _windows_set_canonical_dacl(path: Path) -> None:
     trustee_type_unknown = 0
     set_access = 2  # SET_ACCESS: replace existing entries for this trustee
     no_inheritance = 0
-    generic_all = 0x10000000
-    generic_read = 0x80000000
-    generic_write = 0x40000000
-    delete_right = 0x00010000
     se_file_object = 1
     dacl_security_information = 0x00000004
     protected_dacl_security_information = 0x80000000
@@ -735,37 +731,36 @@ def _windows_set_canonical_dacl(path: Path) -> None:
     current_user = _windows_current_user_sid()
     entries = []
     sid_ptrs = []
-    for sid_string, mask in (
-        (current_user, generic_read | generic_write | delete_right),
-        (_WINDOWS_SYSTEM_SID, generic_all),
-        (_WINDOWS_ADMINISTRATORS_SID, generic_all),
-    ):
-        sid_ptr = wintypes.LPVOID()
-        if not advapi32.ConvertStringSidToSidW(sid_string, ctypes.byref(sid_ptr)):
-            raise OSError(ctypes.get_last_error(), "ConvertStringSidToSidW failed")
-        sid_ptrs.append(sid_ptr)
-        trustee = Trustee(None, 0, trustee_form_sid, trustee_type_unknown,
-                          ctypes.cast(sid_ptr, wintypes.LPWSTR))
-        entries.append(ExplicitAccess(mask, set_access, no_inheritance, trustee))
-
-    array_type = ExplicitAccess * len(entries)
     new_acl = wintypes.LPVOID()
     try:
+        for sid_string, mask in (
+            (current_user, _WINDOWS_USER_ACCESS_MASK),
+            (_WINDOWS_SYSTEM_SID, _WINDOWS_ADMIN_ACCESS_MASK),
+            (_WINDOWS_ADMINISTRATORS_SID, _WINDOWS_ADMIN_ACCESS_MASK),
+        ):
+            sid_ptr = wintypes.LPVOID()
+            if not advapi32.ConvertStringSidToSidW(sid_string, ctypes.byref(sid_ptr)):
+                raise OSError(ctypes.get_last_error(), "ConvertStringSidToSidW failed")
+            sid_ptrs.append(sid_ptr)
+            trustee = Trustee(None, 0, trustee_form_sid, trustee_type_unknown,
+                              ctypes.cast(sid_ptr, wintypes.LPWSTR))
+            entries.append(ExplicitAccess(mask, set_access, no_inheritance, trustee))
+
+        array_type = ExplicitAccess * len(entries)
         entries_array = array_type(*entries)
         result = advapi32.SetEntriesInAclW(len(entries), entries_array, None, ctypes.byref(new_acl))
         if result != 0:
             raise OSError(result, "SetEntriesInAclW failed")
-        try:
-            result = advapi32.SetNamedSecurityInfoW(
-                str(path), se_file_object,
-                dacl_security_information | protected_dacl_security_information,
-                None, None, new_acl, None,
-            )
-            if result != 0:
-                raise OSError(result, "SetNamedSecurityInfoW failed", str(path))
-        finally:
-            kernel32.LocalFree(new_acl)
+        result = advapi32.SetNamedSecurityInfoW(
+            str(path), se_file_object,
+            dacl_security_information | protected_dacl_security_information,
+            None, None, new_acl, None,
+        )
+        if result != 0:
+            raise OSError(result, "SetNamedSecurityInfoW failed", str(path))
     finally:
+        if new_acl:
+            kernel32.LocalFree(new_acl)
         for sid_ptr in sid_ptrs:
             kernel32.LocalFree(sid_ptr)
 
