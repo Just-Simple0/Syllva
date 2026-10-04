@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -33,7 +34,7 @@ class DriveCfg:
     # The v1.3 intake preview is explicitly semester scoped.  These values
     # are provider IDs returned by reviewed static provisioning; they are not
     # discovered by display name and are never used as a retrieval fallback.
-    semester_registries: list["SemesterRegistryCfg"] = field(default_factory=list)
+    semester_registries: list[SemesterRegistryCfg] = field(default_factory=list)
     worker_credentials_path: str = ""
     mcp_credentials_path: str = ""
 
@@ -49,7 +50,7 @@ class NotionCfg:
     automation_queue_db_id: str = ""
     # Current-semester canonical/operational data sources.  The existing
     # *_db_id fields above remain the v1.2 legacy retrieval lane.
-    semester_workspaces: list["SemesterWorkspaceCfg"] = field(default_factory=list)
+    semester_workspaces: list[SemesterWorkspaceCfg] = field(default_factory=list)
 
 
 @dataclass
@@ -212,6 +213,10 @@ class UlsConfig:
     # default to "environment" at CredentialResolver construction time, not
     # here. See docs/plans/credential-resolver.md.
     credentials: dict[str, str] = field(default_factory=dict)
+    # Local Settings role slug -> random non-secret revision written by every
+    # credential operation (GUI-2 R2); never derived from a credential value.
+    credential_revisions: dict[str, str] = field(default_factory=dict)
+    canvas: dict[str, Any] = field(default_factory=dict)
     google_worker_credentials_path: str = ""
     google_mcp_credentials_path: str = ""
 
@@ -252,10 +257,10 @@ __all__ = [
     "RemoteMcpCfg",
     "RemoteOAuthCfg",
     "RetrievalCfg",
-    "StorageCfg",
-    "StudyNotesCfg",
     "SemesterRegistryCfg",
     "SemesterWorkspaceCfg",
+    "StorageCfg",
+    "StudyNotesCfg",
     "SystemCfg",
     "UlsConfig",
     "WorkerCfg",

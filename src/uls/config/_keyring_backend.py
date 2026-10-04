@@ -108,4 +108,45 @@ def read_keyring_credential(service: str, account: str, *, platform: str | None 
     return value
 
 
-__all__ = ["expected_backend_module", "explicit_os_keyring", "read_keyring_credential"]
+def write_keyring_credential(service: str, account: str, value: str, *, backend: Any = None,
+                             platform: str | None = None) -> None:
+    """Set one keyring entry through the verified backend and require exact readback.
+
+    Shared by `uls credential set` and Local Settings. backend accepts an
+    injected fake for tests; production callers omit it.
+    """
+
+    if not value:
+        raise ConfigurationError("secret_value_empty")
+    target = backend if backend is not None else explicit_os_keyring(platform)
+    try:
+        target.set_password(service, account, value)
+        stored = target.get_password(service, account)
+    except Exception as exc:
+        raise ConfigurationError("keyring_backend_unavailable") from exc
+    if stored != value:
+        raise ConfigurationError("keyring_backend_unavailable")
+
+
+def delete_keyring_credential(service: str, account: str, *, backend: Any = None,
+                              platform: str | None = None) -> None:
+    """Delete one keyring entry and require that it reads back as missing."""
+
+    target = backend if backend is not None else explicit_os_keyring(platform)
+    try:
+        if target.get_password(service, account) is not None:
+            target.delete_password(service, account)
+        remaining = target.get_password(service, account)
+    except Exception as exc:
+        raise ConfigurationError("keyring_delete_failed") from exc
+    if remaining is not None:
+        raise ConfigurationError("keyring_delete_failed")
+
+
+__all__ = [
+    "delete_keyring_credential",
+    "expected_backend_module",
+    "explicit_os_keyring",
+    "read_keyring_credential",
+    "write_keyring_credential",
+]

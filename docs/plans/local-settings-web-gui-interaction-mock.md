@@ -218,6 +218,37 @@ The same pattern applies to Canvas and Notion: non-secret fields stay populated,
 fields clear, a polite live region announces the fixed redacted error/remediation, and the current
 known-good credential remains active/recoverable until replacement commits successfully.
 
+GUI-2 clarifications (see `local-settings-gui-2-worker-plan.md`):
+
+```text
+Notion
+Retrieval (read-only)     Provided by NOTION_MCP_TOKEN          [Test]
+                          [Use a Syllva-managed credential instead]
+                          Remove it from the environment to stop using it.
+Worker (intake writes)    Not configured                        [Configure]
+
+Google Drive · Retrieval  Key file you manage: …/my-key.json     [Test]
+                          [Use a Syllva-managed credential instead]  [Stop using this credential…]
+
+Google Drive · Worker                                             [Configure]
+Service account key file  [Choose file…]   (JSON, up to 64 KB)
+                                               [Cancel]  [Verify and save]
+
+Google Drive · Worker                                             [Not saved]
+Google could not be reached, so the key was not checked. Nothing changed.
+The selected file was cleared.                     [Try again]
+
+Notion (on Linux)
+Not available on this computer: Syllva cannot store credentials securely here yet.
+Use environment variables instead.                 [Test]
+```
+
+`Stop using this credential…` appears only for a key file named in Settings' configuration. It removes
+only that setting; the key file you manage yourself is never read, changed, or deleted. A credential
+supplied by an environment variable can be stopped only by removing that variable. Retrieval and worker must use
+different credentials; a duplicate is refused before anything is saved. Tests are read-only and show
+only `Verified`, `Invalid credential`, `Access missing`, or `Provider unavailable` with a check time.
+
 ## 5. Save review and concurrent/partial failure
 
 Before apply, Settings shows a redacted semantic diff:

@@ -24,6 +24,10 @@ class ConfigFileLock:
 
     def __init__(self, config_path: str | os.PathLike[str], *, timeout: float | None = CONFIG_LOCK_WAIT_SECONDS) -> None:
         path = Path(config_path).expanduser().absolute()
+        # Match the journal binding and share one lock through directory aliases
+        # (notably /tmp -> /private/tmp on macOS). Keep the final entry unresolved
+        # so the config reader still rejects a symlink target with O_NOFOLLOW.
+        path = Path(os.path.realpath(path.parent)) / path.name
         lock_path = path.with_name(f".{path.name}.uls-config.lock")
         self.config_path = path
         self._lock = LocalFileLock(lock_path)

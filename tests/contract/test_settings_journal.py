@@ -46,9 +46,9 @@ def _credential_binding(kind, tmp_path, profile="default"):
     binding = {"provider": "canvas", "profile": profile, "role": "token",
                "store_locator": str(tmp_path / "active.bin"),
                "config_path": str(tmp_path / "config.yaml"), "config_dir_id": "1:2"}
-    if kind in {"credential_enrollment", "credential_replacement"}:
+    if kind in {"fake_credential_enrollment", "fake_credential_replacement"}:
         binding["staging_locator"] = str(tmp_path / "staged.bin")
-    if kind == "credential_replacement":
+    if kind == "fake_credential_replacement":
         binding["backup_locator"] = str(tmp_path / "backup.bin")
     return binding
 
@@ -69,7 +69,7 @@ def test_records_are_private_secret_free_and_schema_bound(tmp_path):
         operation.update(secret_value="nope")
 
 
-@pytest.mark.parametrize("kind", ["credential_enrollment", "credential_replacement", "credential_forget"])
+@pytest.mark.parametrize("kind", ["fake_credential_enrollment", "fake_credential_replacement", "fake_credential_forget"])
 def test_credential_actions_are_deferred_but_their_schemas_validate(tmp_path, kind):
     journal = JournalStore(tmp_path)
     with pytest.raises(JournalError) as error:
@@ -239,7 +239,7 @@ journal = JournalStore(sys.argv[1])
 binding = {'provider': 'canvas', 'profile': 'default', 'role': 'token', 'store_locator': 'a',
            'staging_locator': 's', 'backup_locator': 'b', 'config_path': 'c', 'config_dir_id': '1:2'}
 with journal.role_locks([sys.argv[2]]) as roles:
-    journal.create_operation(action_kind='credential_replacement', binding=binding,
+    journal.create_operation(action_kind='fake_credential_replacement', binding=binding,
                              original_generation='0' * 64, candidate_hash='1' * 64, fields=[],
                              role_locks=roles, allow_unreleased=True)
 """
@@ -256,11 +256,11 @@ def test_unresolved_role_record_blocks_overlapping_operation_across_processes(tm
     def enroll(binding, lock_key):
         with journal.role_locks([lock_key]) as roles:
             return journal.create_operation(
-                action_kind="credential_enrollment", binding=binding, original_generation="0" * 64,
+                action_kind="fake_credential_enrollment", binding=binding, original_generation="0" * 64,
                 candidate_hash="1" * 64, fields=[], role_locks=roles, allow_unreleased=True)
 
     with journal.role_locks([ROLE]) as roles, pytest.raises(OperationInProgress) as error:
-        journal.create_operation(action_kind="credential_enrollment", binding=same_role,
+        journal.create_operation(action_kind="fake_credential_enrollment", binding=same_role,
                                  original_generation="0" * 64, candidate_hash="1" * 64, fields=[],
                                  role_locks=roles, allow_unreleased=True)
     assert error.value.code == "OPERATION_IN_PROGRESS"
@@ -271,7 +271,7 @@ def test_unresolved_role_record_blocks_overlapping_operation_across_processes(tm
     other_role = {**same_role, "provider": "notion", "role": "worker"}
     enroll(other_role, "notion/default/worker")
     with pytest.raises(RuntimeError):
-        journal.create_operation(action_kind="credential_enrollment", binding=same_role,
+        journal.create_operation(action_kind="fake_credential_enrollment", binding=same_role,
                                  original_generation="0" * 64, candidate_hash="1" * 64, fields=[],
                                  role_locks=journal.role_locks([ROLE]), allow_unreleased=True)
 

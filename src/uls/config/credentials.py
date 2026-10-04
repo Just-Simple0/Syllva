@@ -20,13 +20,14 @@ from types import MappingProxyType
 from typing import Any, Final
 
 from uls.config._keyring_backend import read_keyring_credential
-from uls.config._secure_file import read_secure_file, secret_file_path
+from uls.config._secure_file import is_reserved_secret_locator, read_secure_file, secret_file_path
 from uls.config.errors import ConfigurationError
 
 # Fixed, code-owned. Never read from YAML. A config entry may only choose
 # among the sources already allowed here for that credential name.
 ALLOWED_SOURCES: Final[dict[str, frozenset[str]]] = {
     "NOTION_MCP_TOKEN": frozenset({"environment", "keyring"}),
+    "CANVAS_PAT": frozenset({"keyring"}),
     "GITHUB_READ_TOKEN": frozenset({"environment", "keyring"}),
     "LLM_API_KEY": frozenset({"environment", "keyring"}),
     "NOTION_WORKER_TOKEN": frozenset({"environment", "file"}),
@@ -75,6 +76,13 @@ GOOGLE_CREDENTIAL_PATH_NAMES: Final[frozenset[str]] = frozenset(
 GOOGLE_CREDENTIAL_PATH_MAX_BYTES: Final[int] = 65536
 
 DEFAULT_SOURCE: Final[str] = "environment"
+
+
+def canvas_keyring_locator(profile_id: str) -> tuple[str, str]:
+    import re
+    if not isinstance(profile_id, str) or not re.fullmatch(r"c[a-f0-9]{32}", profile_id):
+        raise ConfigurationError("canvas_profile_required")
+    return "Syllva Canvas", "profile:" + profile_id
 
 
 @dataclass(frozen=True)
@@ -278,12 +286,18 @@ class CredentialResolver:
         return self._declared_sources.get(name, DEFAULT_SOURCE)
 
     def _diagnose_one(self, name: str) -> tuple[CredentialDiagnostic, str | None, GoogleCredentialPayload | None]:
+        if name == "CANVAS_PAT":
+            return CredentialDiagnostic("error", "canvas_profile_required"), None, None
         source = self._source_for(name)
         if name in GOOGLE_CREDENTIAL_PATH_NAMES:
             value = self._path_overrides.get(name) or self._environ.get(name, '')
             if not value:
                 return CredentialDiagnostic('absent'), None, None
             expanded = Path(value).expanduser()
+            if is_reserved_secret_locator(expanded):
+                # Staging/backup copies and writer temporaries in the secrets
+                # directory are never runtime credentials (GUI-2 R5).
+                return CredentialDiagnostic('error', detail='google_credential_reserved_path'), None, None
             try:
                 raw = read_secure_file(expanded, max_bytes=GOOGLE_CREDENTIAL_PATH_MAX_BYTES)
             except ConfigurationError as exc:

@@ -58,9 +58,9 @@ def _binding(kind: str, tmp_path: Path) -> dict[str, str]:
     binding = {"provider": "canvas", "profile": "default", "role": "token",
                "store_locator": str(tmp_path / "active.bin"),
                "config_path": str(tmp_path / "config.bin"), "config_dir_id": "1:2"}
-    if kind in {"credential_enrollment", "credential_replacement"}:
+    if kind in {"fake_credential_enrollment", "fake_credential_replacement"}:
         binding["staging_locator"] = str(tmp_path / "staged.bin")
-    if kind == "credential_replacement":
+    if kind == "fake_credential_replacement":
         binding["backup_locator"] = str(tmp_path / "backup.bin")
     return binding
 
@@ -114,7 +114,7 @@ def _recover(journal, operation_id):
 
 def _enroll(journal, tmp_path, fault=None):
     Slot(tmp_path / "config.bin").write(CFG0)
-    operation_id = _create(journal, "credential_enrollment", tmp_path)
+    operation_id = _create(journal, "fake_credential_enrollment", tmp_path)
     s = _slots(journal.read(operation_id))
     with journal.operation(operation_id) as op:
         op.run_effect("credential_stage", pre_state=s["staged"].state(), intended_post_state=_sha(NEW),
@@ -256,7 +256,7 @@ def test_successful_enrollment_completes_with_every_store_verified(tmp_path):
 def _replace(journal, tmp_path, fault=None, *, stop_before=None):
     Slot(tmp_path / "config.bin").write(CFG0)
     Slot(tmp_path / "active.bin").write(OLD)
-    operation_id = _create(journal, "credential_replacement", tmp_path)
+    operation_id = _create(journal, "fake_credential_replacement", tmp_path)
     s = _slots(journal.read(operation_id))
     with journal.operation(operation_id) as op:
         op.run_effect("credential_stage", pre_state=s["staged"].state(), intended_post_state=_sha(NEW),
@@ -409,8 +409,8 @@ def test_pre_commit_continuation_is_manual_unless_config_is_exactly_original(tmp
 
 # ------------------------------------------- config effects bound to the record
 
-CONFIG_EFFECT = {"credential_enrollment": "config_commit", "credential_replacement": "config_commit",
-                 "credential_forget": "config_detach"}
+CONFIG_EFFECT = {"fake_credential_enrollment": "config_commit", "fake_credential_replacement": "config_commit",
+                 "fake_credential_forget": "config_detach"}
 
 
 def _advance_to_config_effect(journal, kind, tmp_path):
@@ -419,10 +419,10 @@ def _advance_to_config_effect(journal, kind, tmp_path):
     operation_id = _create(journal, kind, tmp_path)
     s = _slots(journal.read(operation_id))
     with journal.operation(operation_id) as op:
-        if kind != "credential_forget":
+        if kind != "fake_credential_forget":
             op.run_effect("credential_stage", pre_state=ABSENT_STATE, intended_post_state=_sha(NEW),
                           perform=lambda: s["staged"].write(NEW), observe=s["staged"].state)
-        if kind == "credential_replacement":
+        if kind == "fake_credential_replacement":
             op.run_effect("credential_backup", pre_state=ABSENT_STATE, intended_post_state=_sha(OLD),
                           perform=lambda: s["backup"].write(OLD), observe=s["backup"].state)
             op.run_effect("credential_promote", pre_state=_sha(OLD), intended_post_state=_sha(NEW),
@@ -460,9 +460,9 @@ def test_config_effects_must_carry_the_record_generations(tmp_path, kind, pre, i
 @pytest.mark.parametrize("generations", [("g", "1" * 64), ("0" * 64, "0" * 64), ("0" * 64, "XYZ")])
 def test_credential_records_require_distinct_sha256_generations(tmp_path, generations):
     journal = JournalStore(tmp_path)
-    binding = _binding("credential_enrollment", tmp_path)
+    binding = _binding("fake_credential_enrollment", tmp_path)
     with journal.role_locks([canonical_role_key(binding)]) as roles, pytest.raises(ValueError):
-        journal.create_operation(action_kind="credential_enrollment", binding=binding,
+        journal.create_operation(action_kind="fake_credential_enrollment", binding=binding,
                                  original_generation=generations[0], candidate_hash=generations[1],
                                  fields=[], role_locks=roles, allow_unreleased=True)
 
@@ -482,7 +482,7 @@ def test_replacement_with_unexpected_versions_stays_manual(tmp_path):
 def test_replacement_backup_must_capture_the_active_version(tmp_path):
     journal = JournalStore(tmp_path)
     Slot(tmp_path / "active.bin").write(OLD)
-    operation_id = _create(journal, "credential_replacement", tmp_path)
+    operation_id = _create(journal, "fake_credential_replacement", tmp_path)
     s = _slots(journal.read(operation_id))
     with journal.operation(operation_id) as op:
         op.run_effect("credential_stage", pre_state=ABSENT_STATE, intended_post_state=_sha(NEW),
@@ -502,7 +502,7 @@ def test_forget_detaches_config_before_deleting_and_deletion_must_read_back_abse
     journal = JournalStore(tmp_path)
     Slot(tmp_path / "config.bin").write(CFG0)
     Slot(tmp_path / "active.bin").write(OLD)
-    operation_id = _create(journal, "credential_forget", tmp_path)
+    operation_id = _create(journal, "fake_credential_forget", tmp_path)
     s = _slots(journal.read(operation_id))
     with journal.operation(operation_id) as op:
         with pytest.raises(JournalError) as order:
@@ -525,22 +525,22 @@ def test_forget_detaches_config_before_deleting_and_deletion_must_read_back_abse
 
 def test_role_lock_must_equal_the_binding_derivation(tmp_path):
     journal = JournalStore(tmp_path)
-    binding = _binding("credential_replacement", tmp_path)
+    binding = _binding("fake_credential_replacement", tmp_path)
     assert canonical_role_key(binding) == "canvas/default/token"
     for keys in (["canvas/other/token"], ["canvas/default/token", "notion/default/worker"]):
         with journal.role_locks(keys) as roles, pytest.raises(JournalError) as error:
-            journal.create_operation(action_kind="credential_replacement", binding=binding,
+            journal.create_operation(action_kind="fake_credential_replacement", binding=binding,
                                      original_generation="0" * 64, candidate_hash="1" * 64, fields=[],
                                      role_locks=roles, allow_unreleased=True)
         assert error.value.code == "ROLE_BINDING_MISMATCH"
     with pytest.raises(JournalError):
-        journal.create_operation(action_kind="credential_replacement", binding=binding,
+        journal.create_operation(action_kind="fake_credential_replacement", binding=binding,
                                  original_generation="0" * 64, candidate_hash="1" * 64, fields=[],
                                  allow_unreleased=True)
     with pytest.raises(ValueError):
         canonical_role_key({**binding, "profile": "bad profile/../x"})
     with pytest.raises(JournalError) as deferred, journal.role_locks(["canvas/default/token"]) as roles:
-        journal.create_operation(action_kind="credential_replacement", binding=binding,
+        journal.create_operation(action_kind="fake_credential_replacement", binding=binding,
                                  original_generation="0" * 64, candidate_hash="1" * 64, fields=[],
                                  role_locks=roles)
     assert deferred.value.code == "FEATURE_DEFERRED"
@@ -550,14 +550,14 @@ def test_same_binding_role_is_reserved_whatever_lock_a_caller_submits(tmp_path):
     journal = JournalStore(tmp_path)
     with pytest.raises(SimulatedCrash):
         _replace(journal, tmp_path, _crash_at("after_credential_promote_recorded"))
-    other_locators = {**_binding("credential_enrollment", tmp_path),
+    other_locators = {**_binding("fake_credential_enrollment", tmp_path),
                       "store_locator": str(tmp_path / "elsewhere.bin")}
     with journal.role_locks(["canvas/default/token"]) as roles, pytest.raises(OperationInProgress):
-        journal.create_operation(action_kind="credential_enrollment", binding=other_locators,
+        journal.create_operation(action_kind="fake_credential_enrollment", binding=other_locators,
                                  original_generation="0" * 64, candidate_hash="1" * 64, fields=[],
                                  role_locks=roles, allow_unreleased=True)
     with journal.role_locks(["canvas/default/other"]) as roles, pytest.raises(JournalError) as error:
-        journal.create_operation(action_kind="credential_enrollment", binding=other_locators,
+        journal.create_operation(action_kind="fake_credential_enrollment", binding=other_locators,
                                  original_generation="0" * 64, candidate_hash="1" * 64, fields=[],
                                  role_locks=roles, allow_unreleased=True)
     assert error.value.code == "ROLE_BINDING_MISMATCH"
@@ -565,12 +565,12 @@ def test_same_binding_role_is_reserved_whatever_lock_a_caller_submits(tmp_path):
 
 # ------------------------------------------ sealed branch transitions (REQ1)
 
-@pytest.mark.parametrize(("kind", "branch"), [("credential_enrollment", "abandon"),
-                                               ("credential_replacement", "restore")])
+@pytest.mark.parametrize(("kind", "branch"), [("fake_credential_enrollment", "abandon"),
+                                               ("fake_credential_replacement", "restore")])
 def test_generic_update_cannot_forge_a_branch_switch_after_the_config_write(tmp_path, kind, branch):
     journal = JournalStore(tmp_path)
     with pytest.raises(SimulatedCrash):
-        (_enroll if kind == "credential_enrollment" else _replace)(
+        (_enroll if kind == "fake_credential_enrollment" else _replace)(
             journal, tmp_path, _crash_at("after_config_commit"))
     [pending] = journal.unresolved()
     path = journal.directory / f"{pending['operation_id']}.json"

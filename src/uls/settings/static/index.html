@@ -8,7 +8,7 @@
   <script src="static/app.js" defer></script>
 </head>
 <body>
-  <header class="topbar">
+  <header id="topbar" class="topbar">
     <a class="brand" href="#overview" aria-label="Syllva Settings home">Syllva <span>Settings</span></a>
     <div class="top-actions">
       <button id="keepalive" type="button" data-mutation disabled>Keep this session open</button>
@@ -54,6 +54,7 @@
     <p id="step-detail" class="step-detail"></p>
 
     <p id="notice" class="notice" role="status" aria-live="polite"></p>
+    <p id="fake-mode" class="replaced-notice" role="status" hidden>Test mode — fake credential stores. Nothing is saved to this computer's Keychain or secrets folder.</p>
 
     <section id="overview-panel" class="panel">
       <div class="section-title"><div><p class="eyebrow">AT A GLANCE</p><h2>Overview</h2></div>
@@ -70,7 +71,7 @@
       <div class="card-grid">
         <button class="nav-card" type="button" data-panel="general"><span>General</span><small>Time zone</small></button>
         <button class="nav-card" type="button" data-panel="advanced"><span>Advanced</span><small>Bounded retrieval and normalization limits</small></button>
-        <article class="deferred-card"><span>Connections</span><small>Credential and provider actions are not available in this version.</small></article>
+        <button class="nav-card" type="button" data-panel="connections"><span>Connections</span><small>Notion, Google Drive and Canvas LMS</small></button>
         <article class="deferred-card"><span>Academic</span><small>Course and mapping changes are read-only.</small></article>
         <article class="deferred-card"><span>Automation</span><small>Automation controls are read-only.</small></article>
         <article class="deferred-card"><span>Remote access</span><small>Remote MCP and access settings are read-only.</small></article>
@@ -119,6 +120,51 @@
       </div>
     </section>
 
+    <section id="connections-panel" class="panel" hidden>
+      <button class="back-link" type="button" data-panel="overview">← Overview</button>
+      <p class="eyebrow">CONNECTIONS</p><h2 tabindex="-1">Connections</h2>
+      <p>Retrieval credentials serve read-only MCP. Worker credentials are separate. Tests only read provider metadata.</p>
+      <p class="muted">These checks see the Settings process environment. Running services may use a different environment.</p>
+      <div id="credential-cards" class="card-grid"></div>
+      <article id="canvas-card" class="summary-card">
+        <h3>Canvas LMS <span id="canvas-status" class="status-pill">Not checked</span></h3>
+        <p id="canvas-details">Connect an account, then select courses. Sync is not available yet.</p>
+        <label for="canvas-origin">Canvas address</label>
+        <input id="canvas-origin" type="url" autocomplete="off" placeholder="https://canvas.example.edu">
+        <p id="canvas-origin-error" class="field-error" hidden></p>
+        <div id="canvas-actions"></div>
+        <div id="canvas-course-area" aria-live="polite" hidden>
+          <p id="canvas-course-status">Saved selection.</p>
+          <label for="canvas-term">Term</label><select id="canvas-term"></select>
+          <p id="canvas-selection-count">0 of 20 selected</p>
+          <div id="canvas-courses"></div>
+          <button id="canvas-review" type="button">Review course selection</button>
+          <div id="canvas-registry-preview" class="preview" hidden><h4>Review course selection</h4><ul></ul>
+            <button id="canvas-apply" type="button">Apply selection</button>
+            <button id="canvas-edit" type="button">Keep editing</button>
+          </div>
+        </div>
+      </article>
+    </section>
+    <section id="credential-dialog" class="credential-dialog" role="dialog" aria-modal="true" aria-labelledby="credential-dialog-heading" aria-describedby="credential-dialog-help" hidden>
+      <h2 id="credential-dialog-heading" tabindex="-1">Configure connection</h2>
+      <p id="credential-dialog-help"></p>
+      <a id="canvas-token-link" target="_blank" rel="noopener noreferrer" hidden>Open Canvas account settings</a>
+      <label id="credential-secret-label" for="credential-secret">Credential (write-only)</label>
+      <input id="credential-secret" type="password" data-secret autocomplete="new-password" spellcheck="false">
+      <label id="credential-file-label" for="credential-file">Service-account JSON file (64 KiB maximum)</label>
+      <input id="credential-file" type="file" data-secret accept="application/json,.json">
+      <p id="credential-file-error" class="field-error" hidden></p>
+      <p id="credential-dialog-message" role="status" aria-live="polite"></p>
+      <button id="credential-confirm" type="button">Verify and save</button>
+      <button id="credential-cancel" class="quiet-button" type="button">Cancel</button>
+    </section>
+    <section id="canvas-term-dialog" class="term-change-dialog" role="dialog" aria-modal="true" aria-labelledby="canvas-term-dialog-heading" aria-describedby="canvas-term-dialog-help" hidden>
+      <h2 id="canvas-term-dialog-heading">Change course term?</h2>
+      <p id="canvas-term-dialog-help"></p>
+      <button id="canvas-term-cancel" class="quiet-button" type="button">Cancel</button>
+      <button id="canvas-term-confirm" type="button">Confirm term change</button>
+    </section>
     <footer><span>Local-only Settings</span><span>No provider calls are made when this page opens.</span></footer>
   </main>
 </body>

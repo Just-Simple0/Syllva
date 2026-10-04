@@ -54,8 +54,8 @@ _NOFOLLOW_FLAG: Final[int] = getattr(os, "O_NOFOLLOW", 0)
 # ownership rather than ACL trustees).
 _WINDOWS_SYSTEM_SID: Final[str] = "S-1-5-18"
 _WINDOWS_ADMINISTRATORS_SID: Final[str] = "S-1-5-32-544"
-_WINDOWS_USER_ACCESS_MASK: Final[int] = 0x80000000 | 0x40000000 | 0x00010000
-_WINDOWS_ADMIN_ACCESS_MASK: Final[int] = 0x10000000
+_WINDOWS_USER_ACCESS_MASK: Final[int] = 0x0013019F
+_WINDOWS_ADMIN_ACCESS_MASK: Final[int] = 0x001F01FF
 
 
 def secrets_directory() -> Path:
@@ -80,6 +80,85 @@ def secrets_directory() -> Path:
 
 def secret_file_path(filename: str) -> Path:
     return secrets_directory() / filename
+
+
+# ---------------------------------------------------------------------------
+# Reserved, non-active names in the secrets directory
+# ---------------------------------------------------------------------------
+
+RESERVED_SUFFIXES: Final[tuple[str, ...]] = (".staging", ".backup", ".lock", ".reservation")
+TEMP_PREFIX: Final[str] = ".tmp_"
+
+
+def temporary_secret_name(target_name: str) -> str:
+    """The one temporary-file name format used by write_secure_file."""
+
+    return TEMP_PREFIX + target_name + "_" + str(os.getpid())
+
+
+def is_reserved_secret_name(name: str) -> bool:
+    """True for staging/backup copies, writer temporaries and admission files."""
+
+    return name.startswith(TEMP_PREFIX) or name.endswith(RESERVED_SUFFIXES)
+
+
+def is_reserved_secret_locator(path: str | os.PathLike[str], *, root: Path | None = None) -> bool:
+    """True when path names a reserved, never-active entry in the secrets directory.
+
+    Covers .staging/.backup copies, write_secure_file's .tmp_<target>_<pid>
+    temporaries (including those of staging/backup targets), and the
+    admission folder's .lock/.reservation files. Paths outside the secrets
+    directory (and its admission/ subfolder) are never reserved.
+    """
+
+    try:
+        base = root if root is not None else secrets_directory()
+    except ConfigurationError:
+        return False
+    try:
+        real = Path(os.path.realpath(Path(path).expanduser()))
+        base_real = Path(os.path.realpath(base))
+    except (OSError, ValueError):
+        return False
+    if real.parent not in {base_real, base_real / "admission"}:
+        return False
+    return is_reserved_secret_name(real.name)
+
+
+def delete_secure_file(path: Path) -> None:
+    """Delete one protected file after the same directory/file identity checks as reads.
+
+    A missing file is not an error (the slot is already absent). The parent
+    directory is fsynced after unlinking. POSIX only; Windows is out of scope.
+    """
+
+    if IS_WINDOWS:
+        raise ConfigurationError("secret_platform_unsupported")
+    directory = path.parent
+    try:
+        dir_fd = os.open(str(directory), os.O_RDONLY | _DIRECTORY_FLAG | _NOFOLLOW_FLAG)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise ConfigurationError("secret_dir_is_symlink") from exc
+        raise ConfigurationError("secret_dir_missing") from exc
+    try:
+        _posix_verify_directory(dir_fd)
+        try:
+            info = os.stat(path.name, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if stat.S_ISLNK(info.st_mode):
+            raise ConfigurationError("secret_file_is_symlink")
+        if not stat.S_ISREG(info.st_mode):
+            raise ConfigurationError("secret_file_not_regular")
+        if info.st_uid != os.getuid():
+            raise ConfigurationError("secret_file_owner_mismatch")
+        os.unlink(path.name, dir_fd=dir_fd)
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 # ---------------------------------------------------------------------------
@@ -173,12 +252,12 @@ def _read_all_fd(fd: int, max_bytes: int) -> bytes:
 # ---------------------------------------------------------------------------
 
 
-def write_secure_file(path: Path, data: bytes) -> None:
+def write_secure_file(path: Path, data: bytes, *, max_bytes: int = MAX_SECRET_BYTES) -> None:
     """Atomically write data to path (see write contract above)."""
 
     if len(data) == 0:
         raise ConfigurationError("secret_value_empty")
-    if len(data) > MAX_SECRET_BYTES:
+    if len(data) > max_bytes:
         raise ConfigurationError("secret_value_too_large")
     directory = path.parent
     directory.mkdir(parents=True, exist_ok=True)
@@ -200,7 +279,7 @@ def write_secure_file(path: Path, data: bytes) -> None:
             _posix_verify_directory(dir_fd)
         finally:
             os.close(dir_fd)
-    tmp_path = directory / (".tmp_" + path.name + "_" + str(os.getpid()))
+    tmp_path = directory / temporary_secret_name(path.name)
     if IS_WINDOWS:
         _windows_atomic_write(tmp_path, path, data)
         return
@@ -446,6 +525,25 @@ def _windows_default_owner_sid() -> str:
 
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.GetCurrentProcess.argtypes = ()
+    advapi32.OpenProcessToken.restype = wintypes.BOOL
+    advapi32.OpenProcessToken.argtypes = (
+        wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE),
+    )
+    advapi32.GetTokenInformation.restype = wintypes.BOOL
+    advapi32.GetTokenInformation.argtypes = (
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID,
+        wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+    )
+    advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+    advapi32.ConvertSidToStringSidW.argtypes = (
+        wintypes.LPVOID, ctypes.POINTER(ctypes.c_wchar_p),
+    )
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.LocalFree.restype = wintypes.HLOCAL
+    kernel32.LocalFree.argtypes = (wintypes.HLOCAL,)
     token_query = 0x0008
     token_owner = 4
 
@@ -626,10 +724,6 @@ def _windows_set_canonical_dacl(path: Path) -> None:
     trustee_type_unknown = 0
     set_access = 2  # SET_ACCESS: replace existing entries for this trustee
     no_inheritance = 0
-    generic_all = 0x10000000
-    generic_read = 0x80000000
-    generic_write = 0x40000000
-    delete_right = 0x00010000
     se_file_object = 1
     dacl_security_information = 0x00000004
     protected_dacl_security_information = 0x80000000
@@ -637,37 +731,36 @@ def _windows_set_canonical_dacl(path: Path) -> None:
     current_user = _windows_current_user_sid()
     entries = []
     sid_ptrs = []
-    for sid_string, mask in (
-        (current_user, generic_read | generic_write | delete_right),
-        (_WINDOWS_SYSTEM_SID, generic_all),
-        (_WINDOWS_ADMINISTRATORS_SID, generic_all),
-    ):
-        sid_ptr = wintypes.LPVOID()
-        if not advapi32.ConvertStringSidToSidW(sid_string, ctypes.byref(sid_ptr)):
-            raise OSError(ctypes.get_last_error(), "ConvertStringSidToSidW failed")
-        sid_ptrs.append(sid_ptr)
-        trustee = Trustee(None, 0, trustee_form_sid, trustee_type_unknown,
-                          ctypes.cast(sid_ptr, wintypes.LPWSTR))
-        entries.append(ExplicitAccess(mask, set_access, no_inheritance, trustee))
-
-    array_type = ExplicitAccess * len(entries)
     new_acl = wintypes.LPVOID()
     try:
+        for sid_string, mask in (
+            (current_user, _WINDOWS_USER_ACCESS_MASK),
+            (_WINDOWS_SYSTEM_SID, _WINDOWS_ADMIN_ACCESS_MASK),
+            (_WINDOWS_ADMINISTRATORS_SID, _WINDOWS_ADMIN_ACCESS_MASK),
+        ):
+            sid_ptr = wintypes.LPVOID()
+            if not advapi32.ConvertStringSidToSidW(sid_string, ctypes.byref(sid_ptr)):
+                raise OSError(ctypes.get_last_error(), "ConvertStringSidToSidW failed")
+            sid_ptrs.append(sid_ptr)
+            trustee = Trustee(None, 0, trustee_form_sid, trustee_type_unknown,
+                              ctypes.cast(sid_ptr, wintypes.LPWSTR))
+            entries.append(ExplicitAccess(mask, set_access, no_inheritance, trustee))
+
+        array_type = ExplicitAccess * len(entries)
         entries_array = array_type(*entries)
         result = advapi32.SetEntriesInAclW(len(entries), entries_array, None, ctypes.byref(new_acl))
         if result != 0:
             raise OSError(result, "SetEntriesInAclW failed")
-        try:
-            result = advapi32.SetNamedSecurityInfoW(
-                str(path), se_file_object,
-                dacl_security_information | protected_dacl_security_information,
-                None, None, new_acl, None,
-            )
-            if result != 0:
-                raise OSError(result, "SetNamedSecurityInfoW failed", str(path))
-        finally:
-            kernel32.LocalFree(new_acl)
+        result = advapi32.SetNamedSecurityInfoW(
+            str(path), se_file_object,
+            dacl_security_information | protected_dacl_security_information,
+            None, None, new_acl, None,
+        )
+        if result != 0:
+            raise OSError(result, "SetNamedSecurityInfoW failed", str(path))
     finally:
+        if new_acl:
+            kernel32.LocalFree(new_acl)
         for sid_ptr in sid_ptrs:
             kernel32.LocalFree(sid_ptr)
 

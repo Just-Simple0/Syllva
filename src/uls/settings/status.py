@@ -27,7 +27,8 @@ def settings_overview(store: ConfigStore, journal: JournalStore) -> dict[str, An
     pending = []
     for item in journal.unresolved():
         item = dict(item)
-        item["same_target"] = item.pop("binding", {}) == binding
+        target = item.pop("binding", {})
+        item["same_target"] = all(target.get(key) == value for key, value in binding.items())
         pending.append(item)
     return {
         "local_runtime_healthy": runtime_status.get("status") == "ok",
@@ -82,6 +83,12 @@ def setup_steps(config: Any) -> list[dict[str, str]]:
               "Remote MCP is on; it has not been verified here." if config.remote_mcp.enabled
               else "Remote MCP is off, but no explicit Skip choice has been saved."),
     ]
+    canvas = getattr(config, "canvas", {})
+    profile, registry = canvas.get("profile", {}), canvas.get("registry", {})
+    canvas_ready = bool(profile.get("id") and profile.get("user_id") and registry.get("term_id") and registry.get("courses"))
+    steps[1] = _step("Canvas", READY if canvas_ready else PARTIAL,
+                     "Verified account and course selection saved." if canvas_ready
+                     else "Connect a Canvas account and save a course selection.")
     proven = all(step["state"] == READY for step in steps)
     steps.append(_step("Check", READY if proven else PARTIAL,
                        "All required steps are proven." if proven
