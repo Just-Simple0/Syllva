@@ -64,6 +64,14 @@ PINNED_SOURCE_PINS = MappingProxyType(
         ),
     }
 )
+PINNED_DOCUMENT_PINS = MappingProxyType(
+    {
+        "docs/plans/credential-secret-file-launcher.md": (
+            "c94b94b19e98bc928969d359f59ad0f01ba48b527eb751d8f4c75b20f4568fa8",
+            48413,
+        ),
+    }
+)
 
 
 class InvalidRecord(Exception):
@@ -127,13 +135,21 @@ def _read_relative(root: Path, value: Any, *, size_limit: int | None = None) -> 
 
 
 def _pinned_source_components(value: Any) -> tuple[PurePosixPath, str, int]:
-    _require(isinstance(value, str) and value in PINNED_SOURCE_PINS)
+    _require(isinstance(value, str))
+    if value in PINNED_SOURCE_PINS:
+        pins = PINNED_SOURCE_PINS
+        expected_suffix = ".py"
+    elif value in PINNED_DOCUMENT_PINS:
+        pins = PINNED_DOCUMENT_PINS
+        expected_suffix = ".md"
+    else:
+        raise InvalidRecord
     _require("\x00" not in value and "\\" not in value)
     _require(not value.startswith(("/", "~")) and not re.match(r"^[A-Za-z]:", value))
     ref = PurePosixPath(value)
     _require(str(ref) == value and not ref.is_absolute())
     _require(all(part not in {"", ".", ".."} for part in ref.parts))
-    _require(ref.suffix == ".py" and bool(ref.parts))
+    _require(ref.suffix == expected_suffix and bool(ref.parts))
     for part in ref.parts[:-1]:
         lower = part.lower()
         _require(lower != ".env" and not lower.startswith(".env."))
@@ -143,7 +159,7 @@ def _pinned_source_components(value: Any) -> tuple[PurePosixPath, str, int]:
     lower_basename = basename.lower()
     _require(lower_basename != ".env" and not lower_basename.startswith(".env."))
     _require(not lower_basename.endswith((".pem", ".p12", ".pfx", ".key")))
-    digest, size = PINNED_SOURCE_PINS[value]
+    digest, size = pins[value]
     _require(HEX256.fullmatch(digest) is not None)
     _require(type(size) is int and 0 < size <= PINNED_SOURCE_MAX_BYTES)
     return ref, digest, size
@@ -362,7 +378,7 @@ def _verify_sources(root: Path, record: dict[str, Any]) -> str:
         _require(path not in seen)
         seen.add(path)
         source_paths.append(path)
-        if path in PINNED_SOURCE_PINS:
+        if path in PINNED_SOURCE_PINS or path in PINNED_DOCUMENT_PINS:
             contents = _read_pinned_source(root, path, entry.get("sha256"))
         else:
             _safe_relative(path)

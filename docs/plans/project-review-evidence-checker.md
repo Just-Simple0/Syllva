@@ -1,5 +1,17 @@
 # Syllva 프로젝트 전용 리뷰 증거 검사기
 
+## 현재 적용 — 정상 설계 문서 한 개의 예외 추가 (2026-10-04)
+
+사용자 “예외 추가하고 실제 3.11, 3.14는 CI 통해서 할 거지?” 결정에 따라, 독립 검토된 정확한 후보를 이 프로젝트에만 적용했다.
+
+- 현재 checker SHA-256: `dac0e6f7f5b6c54ae0a7bc7b0ba5af1c4575c706d3cc9d79ba2c2c649c7b700d`.
+- 기존 정확한 Python source 9개 pin은 그대로이며 별도 immutable document map에 `docs/plans/credential-secret-file-launcher.md` 한 개만 추가했다. 문서 SHA-256 `c94b94b19e98bc928969d359f59ad0f01ba48b527eb751d8f4c75b20f4568fa8`, 48,413 bytes, 기존 canonical root device/inode 제한을 유지한다.
+- `_pinned_source_components` 및 `_verify_sources`만 문서 분기에 맞게 변경했다. descriptor-bound reader, artifact 경로 guard, 일반 Markdown 동작, Native/Gemini/identity/argv/model/effort/hash 검증은 불변이다. `.env`나 실제 자격증명 파일, 전역 검사기·hooks·설정 및 다른 프로젝트는 추가 허용하지 않는다.
+- 계획의 REQUIRED1(일반 Markdown 동작 유지) 반영 후 Native 최종 후보 GO/REQUIRED0 및 현재 DACL/CI SOURCE GO/REQUIRED0를 받았다. 관련 전체 소스 22개, 원본 identity-bound 응답과 최대 slider 증거는 `.insane-review/gui23-20261002/ci-corrections-20261004/final-corrected-scopes/`에 보존한다.
+- 기존 검사와 새 문서 합성 회귀는 36tests/113subtests PASS, 테스트 Ruff PASS, 기존 checker Ruff 진단3 유지·새 진단0이다. 적용 후 원본 gate와 실제 Windows3.11/3.14 CI 판정은 별도 작업 기록으로 이어 확인한다. 이 문서나 checker 성공은 제품 수락·인간 승인 발급을 뜻하지 않는다.
+
+아래의 `a1004f…` 및 9개 source 설명은 2026-10-03 최초 적용 당시의 역사 기록이다. 현재 명령은 동일한 프로젝트 경로에서 위 SHA의 9 Python + 1 document checker를 실행한다.
+
 2026-10-03 사용자 결정: **“아니. 이 프로젝트 내에서만.”** 전역 적용 제안을 거절하고, 이미 검토된 동일 검사기를 Syllva 프로젝트 내부에서만 사용한다. 개인 전역 검사기·hook·설정은 변경하지 않는다.
 
 ## 실행

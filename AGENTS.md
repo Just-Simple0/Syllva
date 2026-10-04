@@ -20,7 +20,7 @@ python3 -B scripts/review_evidence_checker_candidate/state_check.py \
   --root /Users/admin/Project/Syllva --record <relative-task-record-path>
 ```
 
-This project-specific command replaces the global consistency-check command for this workspace only. It does not waive any other safety, independent-review, evidence-integrity or human-approval requirement. The approved local checker SHA-256 is `a1004ffae36d06378ffe44a9b242699bc2c7c2109272a0ef6f0abe5c5892b836`; its nine source exceptions are independently compiled exact path/SHA/size pins bound to this root's device/inode. Do not refresh those pins from records or the review-only inventory. Changes require applicable review and a new human scope decision.
+This project-specific command replaces the global consistency-check command for this workspace only. It does not waive any other safety, independent-review, evidence-integrity or human-approval requirement. The approved local checker SHA-256 is `dac0e6f7f5b6c54ae0a7bc7b0ba5af1c4575c706d3cc9d79ba2c2c649c7b700d`; its nine Python source exceptions and the single document `docs/plans/credential-secret-file-launcher.md` are independently compiled exact path/SHA/size pins bound to this root's device/inode. Do not refresh those pins from records or the review-only inventory. Changes require applicable review and a new human scope decision.
 
 Keep `/Users/admin/.codex/safety/state_check.py`, personal hooks/configuration and other projects unchanged. Checker success is consistency evidence, not human approval or product acceptance. See `docs/plans/project-review-evidence-checker.md` for the adoption decision, review evidence and remaining record consistency conditions.
 

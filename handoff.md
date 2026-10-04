@@ -1,5 +1,12 @@
 # Syllva 인계 — Local Settings GUI-2/GUI-3
 
+## Windows DACL 수정·프로젝트 문서 예외 적용 완료 / CI 게시 준비 — 2026-10-04
+
+- 사용자 “세가지 모두 진행”에 따라 같은 담당자 `gpt-6-luna/max`가 Windows specific mask, directory/file 양쪽의 독립 raw ACL 검증, missing/extra 권한 거부 회귀를 구현했다. Native에서 추가로 발견한 부분 SID 변환 실패의 메모리 해제 누락도 같은 담당자가 보완했다. 현재 source SHA는 `_secure_file.py` `325e7a970e02210d12c04e1c87edf77ac7244b71b9b3ea916729303648735559`, test SHA는 `31b3461ad2a4ebd330beb3c97cd0863732a197fbb6dee32569eb2bfcf2cc666f`다. 부모 확인 `15 passed, 3 Windows-only skipped`, owning Ruff와 diff-check PASS다.
+- 현재 CI는 기존 OS/Python 4개 matrix와 전체 pytest를 유지하면서 full-suite 성공·실패 뒤 Windows secure-file 집중 검사를 실행한다. 전체 22개 관련 소스의 Native Latest/Chat/Extra High `[0,3,3]` 최대 FINAL에서 **DACL·CI SOURCE GO / REQUIRED0**, 별도 **문서 pin 후보 GO / REQUIRED0**를 받았다. Pro effort 부재 근거와 원본 결속 회수는 `.insane-review/gui23-20261002/ci-corrections-20261004/final-corrected-scopes/`에 보존한다. Gemini는 UI/flow 변경 없음으로 N/A다.
+- 기존 오탐 보완은 정확한 Python 9개 source pin에 한정됐다. 이번 정상 설계 문서 `docs/plans/credential-secret-file-launcher.md`는 기존 예외 밖이었다. 사용자 “예외 추가하고 실제 3.11, 3.14는 CI 통해서 할 거지?” 결정 후, 한 문서의 exact path/SHA/48,413 bytes만 독립 immutable map으로 추가한 검토본 `dac0e6f7f5b6c54ae0a7bc7b0ba5af1c4575c706d3cc9d79ba2c2c649c7b700d`를 프로젝트 내부에 적용하고 AGENTS·채택 문서를 정합화했다. 적용 위치에서 `36 passed, 113 subtests passed`, 신규 test Ruff PASS, 실제 active checker의 `applied-current-task-record.json` exit0을 확인했다. 기존 9핀·reader·artifact/review gates 및 전역 설정은 불변이다. 적용 전 원본 기록/정책은 보존하고 전체 22개 패키지 source와 적용된 정확 bytes의 별도 mapping을 감사했다.
+- 제품/CI 정확한 3파일은 커밋 `6b4b28cdd182add99a685c5b7a1e2ece4d6656cb`로 기존 PR #13에 push했고 원격 head를 확인했다. 실제 GitHub Actions `37166278082`(pull_request)와 `37166275847`(push)가 새 소스로 진행 중이다. Windows3.11/3.14 집중 검사의 실제 결과는 아직 없다. PR #14에는 프로젝트 검사기 예외·문서 커밋과 이 제품 커밋의 일반 merge를 반영한다. 이전 PR #14 head `2386b44b25f7296a3e7947ef6d3d4892e6c1517c`의 Windows 실패는 새 소스의 결과가 아니다. 실제 runner 판정은 같은 CI progress에 이어 기록한다. Windows admission/journal/config(B2)와 기존 GUI PR 지적은 이 DACL 소스 GO로 완료되지 않는다. GUI4·5는 설계부터 대기를 유지한다.
+
 ## CI 보완 A+B1 게시·실제 재검사 — 2026-10-04
 
 - 사용자 “CI 보완 해서 재테스트 해보자”에 따라 동일 Luna/max 담당자가 7개 파일을 보완했다. CI `web` extra·Windows 한정 `tzdata`·fixture/Node UTF-8·정확한 POSIX GUI lifecycle 10개 Windows skip·portable 인증/nonce 및 거부 우선순위 검사를 유지했다. Windows owner-SID helper의 ctypes 서명 6개와 native direct 회귀 1개만 추가했다. 전체 OS/Python 4개 조합과 전체 pytest는 유지한다.
