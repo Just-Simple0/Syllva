@@ -1,16 +1,86 @@
-## 현재 인수인계 — 2026-10-07 P1 완료 / P2 구현 전, 로컬 커밋
+# Syllva 인수인계 — 현재 상태 (2026-10-07)
 
-사용자 명시 지시로 현재 수락된 GUI-2/3·P1 개발 결과와 관련 문서를 로컬 커밋한다. 상세 인수인계는 `docs/plans/p1-p2-handoff-20261007.md`. P1 Native/Intake FINAL 통합 기술 수락, 커밋 전145검사PASS 및8파일동결/GUI5파일/17핀+1문서 현재bytes 일치. P2 r2는 독립 재검토 전 초안이며 제품 구현0. 단일 source 예외 후보는 Native PLAN/FINAL GO0 필수지적,33tests113subtests/후보consistencyPASS지만 활성 미적용·별도 exactSHA 인간 결정 대기다. 활성 checker는 a82d0a…ef08/17핀을 유지한다. 예약PAUSED, 별도 동기화·push·PR 없음. 이번 로컬 커밋 허용은 School실제flow수락 또는 이후게시 승인이 아니다.
+기준일: 2026-10-07. 현재 결과는 `a3e32472142a09b0bb5a7adda885ffcbd9e9c85d` (`codex/gui23-pr13-followups`)로 로컬 커밋 완료했다. 최신 인계와 재개 기준은 이 `handoff.md`가 직접 제공한다. 별도 파일 동기화는 하지 않는다. 기존 School 전체 흐름 통과 전 커밋 보류는 이번 명시 지시의 현재 로컬 커밋 범위에 한해 해제한다. push·PR·공개 배포·실제 provider 작업은 승인하지 않았다.
 
-## 현재 상태 — 2026-10-07 직접 진행 / 단일 source 예외 후보
+## 현재 단계
 
-사용자 `예외 후보 지정`으로 tests/contract/test_doctor_credential_resolver.py의 정확 path/SHA/4845bytes 한 항목에 대한 inactive 검사기 후보 PLAN/FINAL 준비를 허용했다. 9전문 입력 준비 완료, 두 Native 슬롯이 다른 프로젝트 점유라 pack/송신0 상태에서 기다리는 중. 기존17핀+1문서 및 active checker 불변, 적용은 검토된 후보 SHA에 대한 별도 인간 결정 필요. 예약PAUSED 유지, 총괄 직접 진행. P1 기술수락 유지, P2 r2 초안19509bytes와6source inventory를 실제 bytes로 확인했으며 독립 재검토 전 DRAFT이고 구현0이다. 최신 checkpoint exception_candidate/current_followup과 작업기록을 따른다.
+| 범위 | 실제 상태 | 다음 작업 |
+|---|---|---|
+| GUI-2/3 후속 수정 | 독립 Native/Gemini FINAL과 검사, 인간 승인된 기존 checker 적용 뒤 로컬 기술 수락 완료 | 기존 수락 근거 보존 |
+| P1 Drive 개인정보 보강 | 개발·필수 지적 수정·Native 두 FINAL 범위 통합 기술 수락 완료 | 완료 소스는 위 로컬 커밋에 보존 |
+| P2 개인용 Drive OAuth | 계획 r2 제출. 제품 코드·OAuth 테스트 구현은 시작하지 않음 | 세 Native PLAN 범위 통합과 변경 흐름 Gemini 재검토 |
+| 단일 테스트 source 예외 | inactive 후보 PLAN/FINAL 기술 GO. 활성 적용은 하지 않음 | 정확 후보 SHA에 관한 별도 인간 적용 결정 |
+| P3 설정 화면 / GUI-4 | OAuth 후속·실제 흐름 수락 대기 | P2 승인·구현·FINAL 이후 진행 |
+| School 실제 전체 흐름 | 아직 통과하지 않음 | 필요한 계정·권한·데이터는 인간이 준비 |
 
-## 현재 상태 — 2026-10-07 P1 수락 / P2 PLAN
+제품 방향은 개인용, Python·MCP 중심·local-primary이다. 본인 Google Cloud Desktop client를 사용하고 오픈소스 공개를 지향한다. 비개발자 대상 운영·공용 OAuth 앱·Google 심사·배포 준비는 이후 확장 단계다.
 
-사용자 “그럼 다음 단계 진행해”로 후속 재개. P1 Native FINAL-r2 GO0/0와 Intake FINAL GO0/1을 정식 회수·전문 원본 대조·Syllva consistency ok 뒤 총괄 기술 수락했다. parent145tests와8파일 SHA일치/핀17+doc1불변 확인; 전체 School 흐름·제품·인간 승인·게시 수락은 아직 아니다. 현재 P2 docs/plans/drive-oauth-p2.md의 settings/runtime 두 전문 묶음 PLAN 준비 및 Gemini ultra 인증 흐름 검토 단계. credential_service.py 보호핀 변경은 별도 exact 검토와 인간 결정 전 적용 금지. 최신 checkpoint current_followup/p2 및 GUI task-record를 따른다. 과거 실패 기록은 현재 장애로 재단정하지 않는다.
+## P1 완료 범위와 증거
 
-# Syllva 인계 — Local Settings GUI-2/GUI-3
+승인 계획은 `docs/plans/drive-privacy-p1-r3.md`이며 SHA-256은 `df19797c6218d9589406f00afac3e9313007e3914185c0bb1d82705ee6ffd677`, 12,563 bytes다. 연속 기술 담당은 Euler, 실제 배정 `gpt-6-luna/max`다. 선정 근거와 실제 runtime 관측은 기존 작업 기록에 보존했다.
+
+완료 소스는 `src/uls/adapters/drive/worker.py`, `src/uls/worker.py`, `src/uls/intake/worker.py`, `src/uls/ingestion/transcript_ingest.py`와 다음 네 테스트다: `test_c2_drive_marker_recovery.py`, `test_native_runtime.py`, `test_intake_registry.py`, `test_intake_worker_preview.py`.
+
+Drive metadata의 driveId와 개인정보 경계, derivative 생성 후·게시 전 재검증, 모호한 write의 비재시도 오류 분류, Intake 재사용 후보와 direct claim의 layout 검증을 보강했다. Native 예외는 문자열 prefix가 아니라 `isinstance`로 분류하고 `transcript_ingest`가 실제 예외 객체를 전달한다. 두 번째·세 번째 readback 실패 회귀를 추가했다.
+
+- Native FINAL-r2: GO / REQUIRED0 / OPTIONAL0. 원본 manifest와 assistant 본문·패키지·현재 소스 전문 일치 확인, 정식 회수 및 활성 Syllva consistency 통과.
+- Intake FINAL: GO / REQUIRED0 / OPTIONAL1. 추가 test oracle 선택 지적은 실제 정상 구현 대조 후 보류했고, 범위를 제한해 통합 수락했다.
+- 기존 총괄 검사 145개 통과와 동결 8파일 inventory를 재사용했다. 이번 커밋 직전 동일 다섯 테스트 파일 실행은 **145 passed in 3.32s**였다. 첫 호출은 ordering 테스트 파일명을 잘못 지정해 수집 전 종료했고, 실제 파일명으로 수정한 실행이 통과했다.
+- Ruff는 기존 14건/HEAD baseline15건, 새 진단0이다. 전체 저장소 lint clean이나 전체 플랫폼 수락을 뜻하지 않는다.
+- durable ambiguity 상태 기록 자체가 실패하면 NEEDS_REVIEW 대신 FAILED/PERMANENT로 남을 수 있다. 해당 fault 관측에서 pointer/processing record 및 다음 tick 재시도는 0이었다. 새 durable-state 설계는 범위 밖이다.
+
+로컬 상세 원본은 `.insane-review/drive-oauth-20261005/native-final-p1-native-r2/`, `native-final-p1-intake/`, `p1-parent-r2-candidate.json`, `p1-parent-final-r2-checks.json`, `p1-euler-final-r2-completion.json`이다. `.insane-review/`는 Git 제외이므로 이 문서의 수락 요약과 기존 작업 기록을 함께 읽는다.
+
+## P2 계획과 남은 검토
+
+원래 계획 `drive-oauth-p2.md`는 17,844 bytes / SHA `a30b8064c82765ed799df60047630bd7a1f08b82b87c0e775483d8af009f5757`로 보존한다. 보완 초안 `drive-oauth-p2-r2.md`는 19,509 bytes / SHA `87ba2b3ff958f828c3517af4ab476f12d3dddb7ea18f89da86b091084a3f468e`다. 초안이며 구현 GO가 아니다.
+
+Native Settings는 REQUIRED7/OPTIONAL1, Runtime은 REQUIRED3/OPTIONAL0였다. callback/result gate 분리, pair lock 안 fresh 계정 검증과 CAS, replace 양방향·외부 source 조건, credential type dispatch·recovery, committing lifecycle/drain, 실제 launcher 조립 순서를 r2에 반영했다. resolver의 JSON→Mapping 경계 때문에 raw duplicate-member runtime 거부 주장은 제거하고 canonical persisted OAuth 지원 경로로 좁혔다. fresh WORKER gate는 authorized_user에만 적용해 기존 SA 경로를 보존한다.
+
+Worker 전문 묶음은 기존 18파일에 두 composition 본문을 더한 20파일로 준비했지만 **미송신**이다. Runtime에 빠졌던 동적 설치·coordinator의 실제 효과 경계는 이 companion 범위와 함께 확인해야 한다. Settings 21파일, Runtime 13파일은 원본 결속 송신·정식 회수·전문 감사가 끝났다. 모든 묶음은 전문·무압축이며 실측 120,000토큰 이하로 제한한다.
+
+독립 Russell `google-antigravity/gemini-3.8-flash/ultra`는 원래 P2의 9파일 전문을 새로 읽어 GO0/0를 제출했고 실제 read 범위·SHA·runtime을 총괄이 확인했다. 그 GO는 변경된 r2 흐름의 승인이 아니다. r2에 대한 새 Gemini PLAN과 추후 FINAL은 남는다. 초기 미완독 보고는 원본으로 보존하며 현재 인증 실패로 재단정하지 않는다.
+
+P2 구현 후보 중 `src/uls/settings/credential_service.py`는 기존 보호핀과 교차한다. 해당 파일의 변경·핀 갱신은 구체 후보 검토와 별도 인간 결정 전에 적용하지 않는다.
+
+## 정확 단일 source 예외 후보 — 미적용
+
+활성 검사기는 SHA `a82d0a88a2a35fe53293c433210029895a0e674d15231a2d9e1ed1a8f378ef08`의 기존17 source+1문서 상태다. Runtime consistency는 아래 기존 합성 테스트가 보호명 패턴에 걸리며 compiled 예외에 없어 HOLD다. 실제 비밀 파일·Native 송신·인증 실패가 아니다.
+
+추가 후보는 정확히 다음 항목 하나다.
+
+| path | SHA-256 | bytes |
+|---|---|---:|
+| tests/contract/test_doctor_credential_resolver.py | 76571c52fb7aafabe5f67f4faced89a87ff36d7beb13806c8f96a33a4906fe6a | 4845 |
+
+사용자 `예외 후보 지정`, `리뷰 파트부터 다시 진행`으로 inactive 후보 준비·검토를 수행했다. 후보 checker SHA는 `64d6ea9d5dfe3672f90154f6d01eebfb771c3dcc9674daefaf82191d4af57119`, 28,048 bytes다. 위 tuple 137 bytes 삽입 외 baseline 바이트가 동일하고 기존17핀·문서·root device16777230/inode22556999 및 모든 guard/reader는 보존한다.
+
+- Native PLAN: 9전문 / 45,449토큰, GO REQUIRED0/OPTIONAL2. 두 선택 지적은 byte-only insertion oracle과 후보 테스트 두 파일 고정으로 채택했다.
+- Native FINAL: 11전문 / 48,954토큰, GO REQUIRED0/OPTIONAL0. 슬롯2 원본 manifest 정식 회수·body/identity/current source 감사 완료.
+- 실제 모델은 Chat/최신, Extra High·slider[0,3,3]였다. Pro 추론 단계 부재를 첨부 전후 확인한 정책상 fallback이며 Pro 실행으로 표현하지 않는다.
+- 후보 검사 33tests/113subtests, 새 테스트 Ruff 통과. 후보로 실행한 PLAN·FINAL·P2 Runtime consistency가 통과했지만 **활성 검사기 PASS가 아니다**.
+- Gemini N/A는 내부 리터럴 source 읽기 예외에만 해당한다. P2 사용자 인증 흐름의 Gemini 필수 검토는 유지한다.
+
+원본 대화: [PLAN](https://chatgpt.com/g/g-p-6a9fdbd2dc3081919990a6607f8fe7c4-syllva-eeb93c01/c/6ac61670-70dc-83ee-876a-2eb6a8de918f), [FINAL](https://chatgpt.com/g/g-p-6a9fdbd2dc3081919990a6607f8fe7c4-syllva-eeb93c01/c/6ac618a1-8e50-83ee-9a18-638d57d8bd41). 로컬 후보 `.insane-review/drive-oauth-20261005/one-pin-candidate/`와 원본 증거는 Git 제외이며 **완료한 로컬 커밋은 이 후보를 적용하지 않았다**. 후속은 exact 후보 SHA에 대한 인간 적용 결정부터다.
+
+## 재개 순서와 보존 조건
+
+1. 최신 인간 지시와 실제 파일을 확인한다. 예약 `syllva-oauth`는 PAUSED이며 자동으로 재활성화하지 않는다.
+2. 단일 예외 후보의 별도 정확 적용 결정을 확인한다. 승인 전 활성 검사기·inventory·AGENTS의 핀 수를 변경하지 않는다.
+3. P2 Worker 미송신 범위와 r2 Native/Gemini 검토를 수행하고 필수 지적을 닫아 총괄 PLAN을 수락한다. 이미 보낸 요청은 재전송하지 않고 같은 manifest로 회수한다.
+4. 보호파일 변경은 별도 구체 인간 결정을 거친 뒤, 같은 적합 담당에게 구현·검사·필수 FINAL까지 맡긴다.
+5. 실제 로그인·동의·권한·자료 준비는 인간이 맡는다. School ACL·owner_only·전역 설정·다른 프로젝트·실제 `.env`와 비밀은 보존한다.
+
+명확한 전송 전 로컬 인자·파서·sandbox 오류는 근거를 확인해 제한적으로 보완한다. 새 인증/runtime/안전 훅/불확실 송신/필수 리뷰 실패는 기록 후 인간에게 알리고 반복 실행하지 않는다. 정상 생성 중·담당 작업 중·다른 작업 슬롯 점유는 오류와 구별한다.
+
+
+커밋 직전 추가 확인: 현재 GUI 관련 9개 테스트 파일의 동일 수락 범위를 `PYTHONPATH=. ./.venv/bin/pytest ...`로 재실행해 **447 passed, 1 warning in 14.15s**를 확인했다. 기존 Starlette deprecation warning 1건이다. 첫 수집에서는 PYTHONPATH가 없어 tests 모듈 import가 실패했고, 기존 수락 명령과 동일한 경로 설정으로 수정한 실행이 통과했다. 제품 소스 수정 없이 현재 검토 동결 SHA를 확인한 검사다.
+
+---
+
+아래는 이전 시점의 기록이다. 과거 “현재”, 진행 중, 미커밋 문구는 당시 상태이며 위 최신 인계를 우선한다.
+
+## 이전 인계 기록 — 역사 자료
 
 - **Drive OAuth 현재 gate — 2026-10-06:** 재설계 진행 중(`docs/plans/drive-oauth-redesign-proposal-20261006.md`). 사용자 결정: 저장 단계 단순화·네트워크 제한 단순화 채택, P1 먼저, 그리고 후속 "음 복잡하네. 그냥 내 개인 전용으로 scope 줄이자."로 배포 범위를 개인 전용으로 축소(본인 Cloud 프로젝트·Desktop client, Google 심사·배포 준비 gate 제외). P1 `docs/plans/drive-privacy-p1.md`(11097bytes) Native Pro 검토 중(`.insane-review/drive-oauth-20261005/p1-review-progress-checkpoint.json`). P2 OAuth 핵심 v11은 같은 Luna/max 담당이 개인 전용 범위로 작성. 구현/커밋/PR 없음, approved17pin·School ACL·owner_only·전역 유지. 후속 결정 "오픈소스로 공개하는 방향으로 하고, 내가 비개발자 대상으로 운영하는 건 이후 확장하는 단계로 보자": 저장소에 client 값 없음, 사용자별 Desktop client를 config로 설정, 비개발자 운영(공용 client·Google 검증)은 확장 단계, 공개 전환·라이선스는 별도 사람 결정.
 

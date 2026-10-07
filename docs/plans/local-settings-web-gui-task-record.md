@@ -832,3 +832,8 @@ Boyle이 drive-privacy-p1-r3.md(12563bytes/SHA df19797c…d677)를 제출했다.
 사용자 최신 지시로 School 전체 흐름 전 로컬 commit 보류를 이번 현재 수락 결과에 한해 해제한다. 별도 파일 동기화는 취소, push/PR 권한 없음. 단일 예외 FINAL GO REQUIRED0/OPTIONAL0 원본slot2 harvest session63047, audit11전문/body/current identity 및 candidate FINAL consistency ok. 활성checker17핀불변·후보18핀미적용, 별도 인간 exactSHA 적용 게이트 유지. 실제P1 지정4+transcript ordering145PASS(3.32s), 현재8파일/GUI5파일/17핀+1doc SHA대조PASS. 상세 인수인계 docs/plans/p1-p2-handoff-20261007.md.
 
 커밋 전 GUI 관련447PASS(14.15s)/기존deprecation1, P1145PASS(3.32s). 첫 GUI 수집의 PYTHONPATH 누락은 기존 수락 명령과 동일하게 수정해 해소했다. 현재 수락 source SHA와 핀 불변, candidate18은 ignored 미적용 상태로 보존. 67파일 명시 inventory로만 stage/commit하며 RESEARCH 및 ignored local/runtime 자료는 포함하지 않는다.
+
+
+### 2026-10-07 — 기존 handoff.md에 인계 통합
+
+사용자 지적에 따라 상세 인계를 루트 handoff.md에 직접 통합했다. P1 완료·P2 미구현·후보 미적용·검사·커밋·후속 순서를 해당 파일만으로 확인할 수 있다. 중복된 과거 현재상태 요약 대신 역사 경계를 표시했다. 개별 p1-p2 문서는 첫 커밋의 역사 스냅샷으로 표시하고 추가 최신화하지 않는다. 문서 정합화만 수행, 소스/핀 변경0이며 앞선 검사 근거를 재사용한다.
