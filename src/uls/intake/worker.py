@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -21,6 +21,7 @@ from uls.adapters.drive.worker import (
     DriveMetadata,
     DriveWorkerPort,
     ensure_marked_folder,
+    require_private_ownership,
 )
 from uls.adapters.notion.intake import NotionIntakeWriter, NotionWorkerPort
 from uls.config.intake import (
@@ -86,6 +87,16 @@ INTAKE_OPERATIONS = frozenset(
 
 class IntakeReconcileRequired(UlsError):
     code = "RECONCILE_REQUIRED"
+
+
+@dataclass(frozen=True)
+class _LayoutValidationContext:
+    """Proof that each listed semester layout passed a fresh provider read."""
+
+    workspace_fingerprints: tuple[tuple[str, str], ...]
+
+    def fingerprint_for(self, semester: str) -> str | None:
+        return dict(self.workspace_fingerprints).get(semester)
 
 
 class IntakeWorker:
@@ -198,6 +209,7 @@ class IntakeWorker:
         for semester, workspaces in self._group_workspaces().items():
             workspace = workspaces[0]
             validate_registered_drive_layout(self.drive, workspaces)
+            layout_context = self._context_for_validated_workspaces(workspaces)
             config_fingerprint = self._config_fingerprint(workspaces)
             workspace_fingerprint = self._workspace_fingerprint(workspaces)
             self.state.register_semester_registration(
@@ -233,7 +245,13 @@ class IntakeWorker:
                 if item.status == IntakeStatus.NEEDS_INPUT.value and self.provider_account_binding_id:
                     request_type = self._initial_request_type(item)
                     try:
-                        self.create_input_request(item.intake_id, request_type=request_type)
+                        self._create_input_request_with_context(
+                            item,
+                            workspace,
+                            request_type=request_type,
+                            target_snapshot=None,
+                            layout_context=layout_context,
+                        )
                     except (
                         IntakeReconcileRequired,
                         ProviderUnavailableError,
@@ -245,6 +263,7 @@ class IntakeWorker:
                             workspace,
                             exc,
                             default_status=IntakeStatus.NEEDS_INPUT,
+                            layout_context=layout_context,
                         )
         return total
 
@@ -258,12 +277,30 @@ class IntakeWorker:
         try:
             discovered = self._sync_unlocked() if sync else 0
             processed = failed = needs_input = 0
+            run_layout_context: _LayoutValidationContext | None = None
             if process:
+                try:
+                    run_layout_context = self._fresh_layout_context(
+                        self._run_layout_workspaces()
+                    )
+                except Exception:  # noqa: BLE001 - fail closed before any request-page access
+                    return {
+                        "status": "failed",
+                        "discovered": discovered,
+                        "processed": 0,
+                        "failed": 1,
+                        "needs_input": 0,
+                        "request_extensions": {},
+                    }
                 for request_key in self._submitted_request_keys()[:max_jobs]:
                     try:
-                        self._claim_request_unlocked(request_key)
+                        self._claim_request_unlocked(
+                            request_key, layout_context=run_layout_context
+                        )
                     except RequestValidationError as exc:
-                        self._record_request_error(request_key, exc)
+                        self._record_request_error(
+                            request_key, exc, layout_context=run_layout_context
+                        )
                         needs_input += 1
                     except (
                         IntakeReconcileRequired,
@@ -271,7 +308,9 @@ class IntakeWorker:
                         SourceUnavailableError,
                         NotImplementedError,
                     ) as exc:
-                        self._record_request_error(request_key, exc)
+                        self._record_request_error(
+                            request_key, exc, layout_context=run_layout_context
+                        )
                         failed += 1
                 jobs = [
                     job
@@ -283,8 +322,15 @@ class IntakeWorker:
                     job = self.state.claim_job(pending.id)
                     if job is None:
                         continue
+                    item_layout_context: _LayoutValidationContext | None = None
                     try:
-                        result = self._process_item_unlocked(job.target_entity_id)
+                        item = self._require_item(job.target_entity_id)
+                        workspace = self._workspace_for_item(item)
+                        item_layout_context = self._fresh_item_layout_context(workspace)
+                        result = self._process_item_unlocked(
+                            job.target_entity_id,
+                            layout_context=item_layout_context,
+                        )
                         status = result.get("status", IntakeStatus.ORGANIZED.value)
                         content_status = result.get("content_status")
                         self.state.complete_job(
@@ -294,10 +340,17 @@ class IntakeWorker:
                         self._mark_request_applied(job.target_entity_id, result)
                         processed += 1
                     except RequestValidationError as exc:
-                        self._record_job_error(job, exc, default_status=IntakeStatus.NEEDS_INPUT)
+                        self._record_job_error(
+                            job,
+                            exc,
+                            default_status=IntakeStatus.NEEDS_INPUT,
+                            layout_context=item_layout_context,
+                        )
                         needs_input += 1
                     except Exception as exc:  # noqa: BLE001 - worker records a safe durable failure
-                        self._record_job_error(job, exc)
+                        self._record_job_error(
+                            job, exc, layout_context=item_layout_context
+                        )
                         failed += 1
             extensions: dict[str, Any] = {}
             if process:
@@ -372,6 +425,7 @@ class IntakeWorker:
         error: BaseException,
         *,
         default_status: IntakeStatus | str = IntakeStatus.RETRYABLE_ERROR,
+        layout_context: _LayoutValidationContext | None = None,
     ) -> IntakeItem:
         """Persist an actionable intake failure and project File Intake.
 
@@ -393,7 +447,9 @@ class IntakeWorker:
                 item.intake_id,
                 content_status="Partial",
             )
-        if self.notion is not None:
+        if self.notion is not None and self._layout_context_allows(
+            layout_context, workspace
+        ):
             try:
                 self._project_file_intake(item, workspace, self._semester_workspace_fingerprint(workspace.semester))
             except (IntakeReconcileRequired, PolicyDeniedError, ProviderUnavailableError, SourceUnavailableError):
@@ -402,7 +458,13 @@ class IntakeWorker:
                 pass
         return item
 
-    def _record_request_error(self, request_key: str, error: BaseException) -> None:
+    def _record_request_error(
+        self,
+        request_key: str,
+        error: BaseException,
+        *,
+        layout_context: _LayoutValidationContext | None = None,
+    ) -> None:
         """Record a request failure without touching USER input fields."""
 
         receipt = self.state.get_request_receipt(request_key)
@@ -413,8 +475,18 @@ class IntakeWorker:
             workspace = self._workspace_for_item(item)
         except (IntakeConfigurationError, SourceUnavailableError):
             return
-        self._record_item_error(item, workspace, error, default_status=IntakeStatus.NEEDS_INPUT)
-        if self.notion is None or not receipt.provider_page_id:
+        self._record_item_error(
+            item,
+            workspace,
+            error,
+            default_status=IntakeStatus.NEEDS_INPUT,
+            layout_context=layout_context,
+        )
+        if (
+            self.notion is None
+            or not receipt.provider_page_id
+            or not self._layout_context_allows(layout_context, workspace)
+        ):
             return
         page = self.notion.read_record("input_request", receipt.provider_page_id)
         if page is None:
@@ -459,6 +531,7 @@ class IntakeWorker:
         error: BaseException,
         *,
         default_status: IntakeStatus | str = IntakeStatus.RETRYABLE_ERROR,
+        layout_context: _LayoutValidationContext | None = None,
     ) -> None:
         """Persist a safe job failure and its File Intake/request projection."""
 
@@ -472,7 +545,13 @@ class IntakeWorker:
                 except IntakeConfigurationError:
                     workspace = None
         if item is not None and workspace is not None:
-            self._record_item_error(item, workspace, error, default_status=default_status)
+            self._record_item_error(
+                item,
+                workspace,
+                error,
+                default_status=default_status,
+                layout_context=layout_context,
+            )
 
         error_class = _error_class(error)
         message = _safe_error_text(error)
@@ -505,7 +584,9 @@ class IntakeWorker:
         if item is not None and item.plan_revision:
             receipt = self._receipt_for_plan(self.state.get_intake_plan(item.plan_revision)) if self.state.get_intake_plan(item.plan_revision) else None
             if receipt is not None:
-                self._record_request_error(receipt.request_key, error)
+                self._record_request_error(
+                    receipt.request_key, error, layout_context=layout_context
+                )
 
     def _mark_request_applied(self, intake_id: str, result: Mapping[str, Any]) -> None:
         """Close the claimed request only after the intake path succeeds."""
@@ -559,6 +640,29 @@ class IntakeWorker:
 
         item = self._require_item(intake_id)
         workspace = self._workspace_for_item(item)
+        self._require_binding()
+        if self.notion is None:
+            raise SourceUnavailableError("Notion worker port is not configured")
+        layout_context = self._fresh_item_layout_context(workspace)
+        return self._create_input_request_with_context(
+            item,
+            workspace,
+            request_type=request_type,
+            target_snapshot=target_snapshot,
+            layout_context=layout_context,
+        )
+
+    def _create_input_request_with_context(
+        self,
+        item: IntakeItem,
+        workspace: ResolvedSemesterWorkspace,
+        *,
+        request_type: str,
+        target_snapshot: Mapping[str, Any] | None,
+        layout_context: _LayoutValidationContext,
+    ) -> RequestReceipt:
+        if not self._layout_context_allows(layout_context, workspace):
+            raise IntakeReconcileRequired("Input Request layout context is stale or missing")
         self._require_binding()
         if self.notion is None:
             raise SourceUnavailableError("Notion worker port is not configured")
@@ -706,7 +810,12 @@ class IntakeWorker:
         finally:
             self.state.release_local_worker_lock()
 
-    def _claim_request_unlocked(self, request_key: str) -> dict[str, Any]:
+    def _claim_request_unlocked(
+        self,
+        request_key: str,
+        *,
+        layout_context: _LayoutValidationContext | None = None,
+    ) -> dict[str, Any]:
         """Validate one USER-submitted request and enqueue its immutable plan."""
 
         receipt = self.state.get_request_receipt(request_key)
@@ -716,6 +825,10 @@ class IntakeWorker:
         workspace = self._workspace_for_item(item_hint)
         if receipt.input_requests_data_source_id != workspace.input_requests_data_source_id:
             raise IntakeReconcileRequired("request belongs to a different current workspace")
+        if layout_context is None:
+            layout_context = self._fresh_item_layout_context(workspace)
+        elif not self._layout_context_allows(layout_context, workspace):
+            raise IntakeReconcileRequired("request claim layout context is stale or missing")
         page = self.notion.read_record("input_request", receipt.provider_page_id) if self.notion else None
         if page is None:
             raise SourceUnavailableError("submitted Input Request page is unavailable")
@@ -825,9 +938,12 @@ class IntakeWorker:
                     attempt_operation=INTAKE_REQUEST_SYNC_OPERATION,
                 )
                 self.state.update_request_receipt(request_key, state="Applied")
-                next_receipt = self.create_input_request(
-                    item.intake_id,
+                next_receipt = self._create_input_request_with_context(
+                    self._require_item(item.intake_id),
+                    workspace,
                     request_type=RequestType.FILE_DETAILS.value,
+                    target_snapshot=None,
+                    layout_context=layout_context,
                 )
                 plans.append({"intake_id": item.intake_id, "next_request_key": next_receipt.request_key})
                 continue
@@ -865,7 +981,12 @@ class IntakeWorker:
         finally:
             self.state.release_local_worker_lock()
 
-    def _process_item_unlocked(self, intake_id: str) -> dict[str, Any]:
+    def _process_item_unlocked(
+        self,
+        intake_id: str,
+        *,
+        layout_context: _LayoutValidationContext | None = None,
+    ) -> dict[str, Any]:
         """Execute a previously claimed plan, preserving the ordered gates."""
 
         item = self._require_item(intake_id)
@@ -878,6 +999,10 @@ class IntakeWorker:
         if receipt is None or not receipt.provider_page_id:
             raise SourceUnavailableError("plan has no submitted request receipt")
         workspace = self._workspace_for_item(item)
+        if layout_context is None:
+            layout_context = self._fresh_item_layout_context(workspace)
+        elif not self._layout_context_allows(layout_context, workspace):
+            raise IntakeReconcileRequired("item processing layout context is stale or missing")
         request_page = self.notion.read_record("input_request", receipt.provider_page_id) if self.notion else None
         if request_page is None:
             raise SourceUnavailableError("request receipt page is unavailable")
@@ -1612,11 +1737,20 @@ class IntakeWorker:
         if len(matches) > 1:
             raise IntakeReconcileRequired("multiple derivative marker matches require reconciliation")
         if matches:
-            result = matches[0]
-            if result.parents != (parent_id,) or result.app_properties != marker:
-                raise IntakeReconcileRequired("derivative marker tuple does not match target")
-            if self.drive.download(result.file_id) != content:
-                raise IntakeReconcileRequired("existing derivative content does not match immutable tuple")
+            candidate = matches[0]
+            try:
+                result = self.drive.read_metadata(candidate.file_id)
+                self._check_derivative_metadata(
+                    result, candidate.file_id, parent_id, marker
+                )
+                if self.drive.download(candidate.file_id) != content:
+                    raise IntakeReconcileRequired(
+                        "existing derivative content does not match immutable tuple"
+                    )
+            except Exception:  # noqa: BLE001 - a selected marker candidate must fail closed
+                raise IntakeReconcileRequired(
+                    "existing derivative marker candidate could not be verified"
+                ) from None
             if prior is None:
                 self.state.record_provider_write_attempt(operation=INTAKE_DERIVATIVE_OPERATION, operation_key=op_key, provider=self.provider, target_id=result.file_id, response_state="READBACK_OK", readback_json=asdict(result))
             else:
@@ -1630,18 +1764,54 @@ class IntakeWorker:
         self.state.record_intake_stage_event("stage_write_attempt_started", intake_id=item.intake_id, operation_key=op_key)
         try:
             result = self.drive.create_file_with_marker(parent_id, name, "text/markdown", content, marker)
-        except Exception:
-            self.state.update_provider_write_attempt(op_key, response_state="UNKNOWN", error_class="PROVIDER_UNAVAILABLE")
-            raise
-        self.state.update_provider_write_attempt(op_key, target_id=result.file_id, dispatched_at=_utc_now(), response_state="DISPATCHED")
-        readback = self.drive.read_metadata(result.file_id)
-        _check_private_drive_metadata(readback)
-        if readback.file_id != result.file_id or readback.parents != (parent_id,) or readback.app_properties != marker or self.drive.download(readback.file_id) != content:
-            self.state.update_provider_write_attempt(op_key, response_state="UNKNOWN")
-            raise SourceUnavailableError("staged derivative full readback failed")
+        except Exception:  # noqa: BLE001 - the dispatched create outcome is indeterminate
+            self.state.update_provider_write_attempt(
+                op_key, response_state="UNKNOWN", error_class="AMBIGUOUS"
+            )
+            raise IntakeReconcileRequired(
+                "derivative create outcome is indeterminate after dispatch"
+            ) from None
+        try:
+            file_id = result.file_id
+            self.state.update_provider_write_attempt(
+                op_key,
+                target_id=file_id,
+                dispatched_at=_utc_now(),
+                response_state="DISPATCHED",
+            )
+            readback = self.drive.read_metadata(file_id)
+            self._check_derivative_metadata(readback, file_id, parent_id, marker)
+            if self.drive.download(file_id) != content:
+                raise IntakeReconcileRequired("staged derivative bytes differ from intent")
+        except Exception:  # noqa: BLE001 - post-create verification must fail closed
+            self.state.update_provider_write_attempt(
+                op_key, response_state="UNKNOWN", error_class="AMBIGUOUS"
+            )
+            raise IntakeReconcileRequired(
+                "staged derivative create readback is indeterminate"
+            ) from None
         self.state.update_provider_write_attempt(op_key, response_state="READBACK_OK", readback_json=asdict(readback))
         self.state.record_intake_stage_event("stage_validate_readback", intake_id=item.intake_id, operation_key=op_key)
         return readback
+
+    @staticmethod
+    def _check_derivative_metadata(
+        metadata: DriveMetadata,
+        file_id: str,
+        parent_id: str,
+        marker: Mapping[str, str],
+    ) -> None:
+        if (
+            metadata.file_id != file_id
+            or metadata.trashed
+            or metadata.mime_type != "text/markdown"
+            or metadata.parents != (parent_id,)
+            or metadata.app_properties != dict(marker)
+        ):
+            raise IntakeReconcileRequired(
+                "Drive derivative identity, parent, MIME, marker, or trash state mismatch"
+            )
+        require_private_ownership(metadata, context="Drive derivative")
 
     def _move_after_freshness(
         self,
@@ -2310,6 +2480,97 @@ class IntakeWorker:
             result.setdefault(workspace.semester, []).append(workspace)
         return result
 
+    def _context_for_validated_workspaces(
+        self, workspaces: Sequence[ResolvedSemesterWorkspace]
+    ) -> _LayoutValidationContext:
+        fingerprints = tuple(
+            sorted(
+                (
+                    semester,
+                    self._workspace_fingerprint(rows),
+                )
+                for semester, rows in _group_workspace_rows(workspaces).items()
+            )
+        )
+        return _LayoutValidationContext(fingerprints)
+
+    def _fresh_layout_context(
+        self, workspaces: Sequence[ResolvedSemesterWorkspace]
+    ) -> _LayoutValidationContext:
+        grouped = _group_workspace_rows(workspaces)
+        for rows in grouped.values():
+            validate_registered_drive_layout(self.drive, rows)
+        return self._context_for_validated_workspaces(workspaces)
+
+    def _fresh_item_layout_context(
+        self, workspace: ResolvedSemesterWorkspace
+    ) -> _LayoutValidationContext:
+        return self._fresh_layout_context(self._semester_workspaces(workspace.semester))
+
+    def _layout_context_allows(
+        self,
+        context: _LayoutValidationContext | None,
+        workspace: ResolvedSemesterWorkspace,
+    ) -> bool:
+        return (
+            context is not None
+            and context.fingerprint_for(workspace.semester)
+            == self._semester_workspace_fingerprint(workspace.semester)
+        )
+
+    def _run_layout_workspaces(self) -> list[ResolvedSemesterWorkspace]:
+        """Resolve the complete local request/job scope without provider reads."""
+
+        rows_by_course = {workspace.course_key: workspace for workspace in self.workspaces}
+        items = self.state.list_intake_items(limit=10_000)
+        for job in self.state.list_jobs(limit=1000):
+            if (
+                job.operation not in {INTAKE_SESSION_OPERATION, INTAKE_MATERIAL_OPERATION}
+                or str(job.status) != "PENDING"
+            ):
+                continue
+            item = self.state.get_intake_item(job.target_entity_id)
+            if item is None:
+                raise SourceUnavailableError("pending intake job has no local intake item")
+            workspace = self._workspace_for_item(item)
+            rows_by_course.update(
+                {row.course_key: row for row in self._semester_workspaces(workspace.semester)}
+            )
+
+        for receipt in self.state.list_request_receipts(provider=self.provider):
+            if receipt.state in {"Applied", "Cancelled"}:
+                continue
+            matches = [
+                item
+                for item in items
+                if item.pending_request_key == receipt.request_key
+                or (
+                    receipt.provider_page_id is not None
+                    and item.input_request_page_id == receipt.provider_page_id
+                )
+            ]
+            if not matches and receipt.intake_ids_json:
+                try:
+                    intake_ids = json.loads(receipt.intake_ids_json)
+                except (TypeError, json.JSONDecodeError):
+                    intake_ids = []
+                if isinstance(intake_ids, list):
+                    matches = [
+                        item
+                        for intake_id in intake_ids
+                        if isinstance(intake_id, str)
+                        for item in [self.state.get_intake_item(intake_id)]
+                        if item is not None
+                    ]
+            if not matches:
+                raise SourceUnavailableError("nonterminal request receipt has no local intake item")
+            for item in matches:
+                workspace = self._workspace_for_item(item)
+                rows_by_course.update(
+                    {row.course_key: row for row in self._semester_workspaces(workspace.semester)}
+                )
+        return [rows_by_course[key] for key in sorted(rows_by_course)]
+
     def _workspace_for_item(self, item: IntakeItem) -> ResolvedSemesterWorkspace:
         candidates = [workspace for workspace in self.workspaces if workspace.semester == item.semester]
         if not candidates:
@@ -2580,6 +2841,18 @@ def _metadata_source_hash(metadata: DriveMetadata) -> str:
             metadata.size,
         ]
     )
+
+
+def _group_workspace_rows(
+    workspaces: Sequence[ResolvedSemesterWorkspace],
+) -> dict[str, list[ResolvedSemesterWorkspace]]:
+    grouped: dict[str, list[ResolvedSemesterWorkspace]] = {}
+    for workspace in workspaces:
+        grouped.setdefault(workspace.semester, []).append(workspace)
+    return {
+        semester: sorted(rows, key=lambda workspace: workspace.course_key)
+        for semester, rows in grouped.items()
+    }
 
 
 def _check_private_drive_metadata(metadata: DriveMetadata, *, require_move: bool = False) -> None:

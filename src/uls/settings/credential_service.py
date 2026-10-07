@@ -20,6 +20,7 @@ from uls.config.mutation import ConfigFileLock, atomic_replace_config, read_conf
 
 from .config_service import ConfigStore, SettingsServiceError
 from .credential_admission import (
+    CredentialPairAdmission,
     credential_admission,
     credential_pair_admission,
     credential_pair_recovery_admission,
@@ -27,7 +28,14 @@ from .credential_admission import (
 )
 from .credential_roles import ROLES, CredentialRole, role_from_binding
 from .credential_stores import CredentialStores, StoreResolver
-from .journal import TERMINAL_PHASES, JournalStore
+from .journal import (
+    ABSENT_STATE,
+    TERMINAL_PHASES,
+    JournalStore,
+    enrollment_recovery_action,
+    recovery_choices,
+    replacement_recovery_action,
+)
 from .provider_checks import ProviderChecks, failure, structural_credential
 
 
@@ -364,6 +372,84 @@ class CredentialService:
             self._check_store_evidence(op.read())
             op.update(phase="complete", next_action="none")
 
+    def _require_live_recovery(self, record: dict[str, Any], config_generation: str, action: str) -> None:
+        """Recheck recorded live state under admission, role, journal and config locks."""
+
+        if config_generation not in {record["original_generation"], record["candidate_hash"]}:
+            raise failure("MANUAL_REVIEW")
+        latest: dict[str, dict[str, Any]] = {}
+        try:
+            for name in record["planned_effects"]:
+                effect = record["effects"].get(name)
+                if effect is not None:
+                    latest[self.resolver.effect_store(name)] = effect
+            for store, effect in latest.items():
+                actual = self.resolver.observe(record, store)
+                status = effect["status"]
+                if status in {"verified", "verified_by_recovery"}:
+                    expected = {effect["post_state_id"]}
+                elif status == "intent":
+                    expected = {effect["pre_state_id"], effect["intended_post_state_id"]}
+                elif status == "verified_not_applied":
+                    expected = {effect["pre_state_id"]}
+                else:
+                    raise failure("MANUAL_REVIEW")
+                if actual not in expected:
+                    raise failure("MANUAL_REVIEW")
+        except (KeyError, OSError, TypeError, ValueError):
+            raise failure("MANUAL_REVIEW") from None
+
+        kind = record["action_kind"]
+        role = role_from_binding(record["binding"])
+        if kind == "credential_enrollment":
+            stage = record["effects"].get("credential_stage")
+            if stage is not None and stage["status"] == "intent":
+                if (record["branch"] != "primary" or config_generation != record["original_generation"]
+                        or self.stores.state(role, "staged") != stage["intended_post_state_id"]
+                        or self.stores.state(role) != ABSENT_STATE
+                        or "credential_promote" in record["effects"]):
+                    raise failure("MANUAL_REVIEW")
+                decision = "stage_intent"
+            else:
+                decision = enrollment_recovery_action(
+                    record, config_generation=config_generation,
+                    staged_state=self.stores.state(role, "staged"), active_state=self.stores.state(role),
+                )
+                if (decision == "manual_review" and record["branch"] == "abandon"
+                        and record["effects"].get("staged_delete", {}).get("status") in {"verified", "verified_by_recovery"}
+                        and self.stores.state(role, "staged") == ABSENT_STATE
+                        and self.stores.state(role) == ABSENT_STATE
+                        and config_generation == record["original_generation"]):
+                    decision = "continue_abandon"
+            leave_decisions = {"abandon"} if record["branch"] == "primary" else {"continue_abandon"}
+            if decision == "manual_review" or (action == "leave" and decision not in leave_decisions):
+                raise failure("MANUAL_REVIEW")
+        elif kind == "credential_replacement":
+            active_state = self.stores.state(role)
+            backup_state = self.stores.state(role, "backup")
+            decision = replacement_recovery_action(
+                record, active_state=active_state, config_generation=config_generation,
+                backup_state=backup_state,
+            )
+            if (decision == "manual_review" and record["branch"] == "restore"
+                    and record["effects"].get("credential_restore", {}).get("status") in {"verified", "verified_by_recovery"}
+                    and record["effects"].get("backup_delete", {}).get("status") in {"verified", "verified_by_recovery"}
+                    and backup_state == ABSENT_STATE
+                    and active_state == record["effects"]["credential_restore"]["post_state_id"]
+                    and config_generation == record["original_generation"]):
+                decision = "continue_restore"
+            if (record["branch"] in {"primary", "reject"}
+                    and "credential_promote" not in record["effects"]
+                    and active_state != record["binding"]["original_active_id"]):
+                raise failure("MANUAL_REVIEW")
+            if "credential_backup" not in record["effects"] and backup_state != ABSENT_STATE:
+                raise failure("MANUAL_REVIEW")
+            restore_decisions = {"restore_backup"} if record["branch"] == "primary" else {"continue_restore"}
+            if (decision == "manual_review"
+                    or (action == "restore" and decision not in restore_decisions)
+                    or (action == "leave" and decision != "resume_before_promotion")):
+                raise failure("MANUAL_REVIEW")
+
     def _check_store_evidence(self, record: dict[str, Any], *, except_store: str | None = None) -> None:
         last: dict[str, Any] = {}
         for name in record["planned_effects"]:
@@ -424,34 +510,66 @@ class CredentialService:
 
     def recover(self, operation_id: str, action: str) -> dict[str, Any]:
         self._require_platform()
+        if action not in {"resume", "restore", "leave", "retry_delete"}:
+            raise failure("INVALID_REQUEST")
         record = self.journal.read(operation_id)
         if record["schema_version"] != 4 or {key: record["binding"][key] for key in self.config.binding()} != self.config.binding():
             raise failure("MANUAL_REVIEW")
+        if record["phase"] not in TERMINAL_PHASES:
+            choices = {choice["id"] for choice in recovery_choices(record)}
+            if not choices:
+                raise failure("MANUAL_REVIEW")
+            if action not in choices:
+                raise failure("MANUAL_REVIEW")
         role = role_from_binding(record["binding"])
         with self._admission_context(role, recovery_id=operation_id) as admission:
             with self.journal.role_locks([role.role_key]) as roles, self.journal.operation(operation_id) as op, ConfigFileLock(self.config.path) as lock:
                 record = op.read()
                 if record["phase"] in TERMINAL_PHASES:
+                    current = self.config._parse(read_config_bytes(self.config.path))
+                    if isinstance(admission, CredentialPairAdmission):
+                        admission.commit_recovery_maintenance(
+                            operation_id=operation_id, expected_record=record,
+                            role_locks=roles, operation=op, config_lock=lock,
+                        )
                     admission.release(operation_id)
-                    return {"status": "complete", "config_generation": self.config.load().generation}
+                    return {"status": "complete", "config_generation": current.generation}
+                choices = {choice["id"] for choice in recovery_choices(record)}
+                if action not in choices:
+                    raise failure("MANUAL_REVIEW")
                 current = self.config._parse(read_config_bytes(self.config.path))
                 if current.generation not in {record["original_generation"], record["candidate_hash"]}:
                     raise failure("MANUAL_REVIEW")
                 payload = self._candidate_bytes(current.raw, record["binding"]["config_patch"]) if current.generation == record["original_generation"] else None
                 if payload is not None and _digest(payload) != record["candidate_hash"]:
                     raise failure("MANUAL_REVIEW")
+                self._require_live_recovery(record, current.generation, action)
+                if action == "leave" and record["action_kind"] in {"credential_forget", "credential_detach"}:
+                    return {"status": "pending", "code": "LEFT_AS_IS"}
+                if isinstance(admission, CredentialPairAdmission):
+                    admission.commit_recovery_maintenance(
+                        operation_id=operation_id, expected_record=op.read(),
+                        role_locks=roles, operation=op, config_lock=lock,
+                    )
                 if record["effects"].get("credential_stage", {}).get("status") == "intent":
                     staged = self.stores.read(role, "staged")
-                    if staged is None:
-                        raise failure("MANUAL_REVIEW")
                     e = record["effects"]["credential_stage"]
+                    if staged is None or self.stores.state(role, "staged") != e["intended_post_state_id"]:
+                        raise failure("MANUAL_REVIEW")
                     self._effect(op, roles, role, "credential_stage", e["pre_state_id"], e["intended_post_state_id"], lambda: None, None, lock)
                     record = op.read()
+                    self._require_live_recovery(record, current.generation, action)
                 if record["branch"] == "primary" and action in {"restore", "leave"}:
-                    branch = "abandon" if record["action_kind"] == "credential_enrollment" else "restore" if "credential_promote" in record["effects"] else "reject"
+                    if action == "restore":
+                        branch = "restore"
+                    elif record["action_kind"] == "credential_enrollment":
+                        branch = "abandon"
+                    elif record["action_kind"] == "credential_replacement":
+                        branch = "reject"
+                    else:
+                        raise failure("MANUAL_REVIEW")
                     op.switch_branch(branch, role_locks=roles, config_lock=lock, resolver=self.resolver, observe={}, next_action="cleanup")
-                elif action not in {"resume", "retry_delete", "restore", "leave"}:
-                    raise failure("INVALID_REQUEST")
+                    self._require_live_recovery(op.read(), current.generation, action)
                 if op.read()["branch"] == "primary" and record["action_kind"] in {"credential_enrollment", "credential_replacement"}:
                     verify_raw = self.config._parse(payload).raw if payload is not None and role.provider == "canvas" else current.raw
                     staged = self.stores.read(role, "staged")

@@ -1,5 +1,7 @@
 # Phase 3 — Enrichment & Freshness (구현 계획서 · rev3)
 
+> 현재 적용 안내 (2026-10-04): 아래 배정·리뷰·단계·권한 문구는 작성 당시의 역사 기록입니다. 새 작업은 프로젝트 `AGENTS.md`가 참조하는 현행 전역 정책과 `handoff.md`의 최신 재개 기준을 따릅니다. 과거 모델/강도·quota 예외·commit/push 허용을 새 작업으로 승계하지 않습니다. 원래 검토된 bytes와 해시는 당시 Git snapshot/리뷰 패키지의 근거로 유지하며, 이 안내를 추가한 현재 파일을 그 원본과 동일하다고 주장하지 않습니다.
+
 **작성:** 총괄/관리 (Opus 4.8)
 **rev2:** 1차 2중 계획 리뷰(GPT-5.6 Sol High + AGY Gemini 3.8 Flash High, **둘 다 REVISE**) 반영 + Opus 명세 재확인.
 **rev3:** 2차 재검토(AGY=GO, Sol=REVISE) **엇갈림 → Opus 코드 재현 타이브레이크로 Sol 채택**. Sol 잔여 4건(required-kind completeness, top-level symbolic_hints 소비자 정합, §36 enum 이름 drift, Topics option 확정) 반영.

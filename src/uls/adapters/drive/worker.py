@@ -20,9 +20,7 @@ from uls.domain.errors import (
     SourcePartialError,
     SourceUnavailableError,
 )
-
 from uls.intake.identity import validate_private_properties
-
 
 DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
 _FILE_ID = re.compile(r"\A[A-Za-z0-9_-]+\Z")
@@ -597,6 +595,12 @@ def _metadata(value: Any) -> DriveMetadata:
     name = value.get("name")
     mime_type = value.get("mimeType")
     parents = value.get("parents", [])
+    drive_id: str | None = None
+    if "driveId" in value:
+        raw_drive_id = value["driveId"]
+        if not isinstance(raw_drive_id, str):
+            raise SourceUnavailableError("Drive driveId is malformed")
+        drive_id = raw_drive_id
     if not isinstance(file_id, str) or not file_id or not isinstance(name, str) or not name or not isinstance(mime_type, str) or not isinstance(parents, list) or any(not isinstance(item, str) for item in parents):
         raise SourceUnavailableError("Drive metadata identity is malformed")
     properties = value.get("appProperties", {})
@@ -670,7 +674,7 @@ def _metadata(value: Any) -> DriveMetadata:
         owned_by_me=value.get("ownedByMe") if isinstance(value.get("ownedByMe"), bool) else None,
         web_view_link=value.get("webViewLink") if isinstance(value.get("webViewLink"), str) else None,
         md5_checksum=value.get("md5Checksum") if isinstance(value.get("md5Checksum"), str) else None,
-        drive_id=value.get("driveId") if isinstance(value.get("driveId"), str) else None,
+        drive_id=drive_id,
         permission_types=permission_types,
         permission_roles=permission_roles,
         permission_count=permission_count,

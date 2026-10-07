@@ -39,12 +39,12 @@ not erase a previously satisfied durable step predicate. Secret inputs are alway
 The durable step predicates presented to the user are:
 
 ```text
-1 Storage   retrieval roots/bindings saved; enabled write features have worker credentials
+1 Storage   configured values and verification are shown separately; legacy retrieval stays usable
 2 Canvas    verified profile + term + selected-course registry saved
-3 Academic  required mappings for selected courses saved
-4 Automation each automation explicitly Enabled or Disabled; enabled writers are ready
+3 Academic  exact course joins saved; required mappings may be Configured/Unverified, not Ready
+4 Automation each feature explicitly Enabled or Disabled; enabled features need their own readiness
 5 Remote    configured, or explicitly [Skip / keep Remote MCP disabled]
-6 Check     all required durable predicates complete; live failures remain diagnostics
+6 Check     structural config, verification, process state, and live health remain distinct
 ```
 
 If the user runs `uls setup` while Settings is already open, the launcher invalidates the existing
@@ -167,23 +167,64 @@ remains durable and the card shows `Failed — provider unavailable, last succes
 
 ```text
 Academic scope                                                     [Partial]
-Semester: 2026 Fall
+Academic active semester: 2026 Fall
+MCP retrieval scope: legacy_global (independent)                 [Change scope…]
+Changing Academic semester does not change the retrieval selector.
+Shared Drive university root       [ Select… ]                   Not checked
+Drive semester folder              [ Select… ]                   Not checked
+Drive upload root                  [ Select… ]                   Not checked
+Notion semester parent             [ Select… ]                   Not checked
 
 Database Systems
   Canvas                  course 41921                         Ready
+  Drive course folder     [ Select… ]                         Configured/Unverified
   Drive upload folder     [ Select… ]                         Blocked
-  Notion course portal    [ Select… ]                         Blocked
+  Drive Recordings folder [ Select… ]                         Not checked
+  Drive Materials folder  [ Select… ]                         Not checked
+  Notion academic-courses [ Select… ]                         Configured/Unverified
+  Notion sessions         [ Select… ]                         Not checked
+  Notion materials        [ Select… ]                         Not checked
+  Notion file-intake      [ Select… ]                         Not checked
+  Notion input-requests   [ Select… ]                         Not checked
+  Notion course portal    [ Select… ]                         Optional
 
 Capstone Design
   Canvas                  course 41708                         Ready
-  Drive upload folder     [ Select… ]                         Not checked
-  Notion course portal    [ Select… ]                         Not checked
+  Required Drive/Notion mappings …                              Not checked
 
-                                                 [Save mappings]
+[Discover IDs] [Verify for retrieval] [Verify for intake worker]
+Configured IDs can be saved as setup inputs. They do not become active verified bindings
+until the matching server-side purpose check succeeds.
+                                                 [Save as unverified]
 ```
 
-Only verified provider IDs become durable bindings. Display names help selection but never become
-the stored identity. Module/week labels never create Session number/date/completion.
+The editor exposes every mapping required by the current resolver for each selected course, plus
+shared semester roots. This compact sample abbreviates the second course's rows. A manual ID remains
+Configured/Unverified; Save as unverified does not unblock semester retrieval, intake, or study-note
+processing. Retrieval verification and intake-worker verification are separate read-only checks.
+Display names help selection but never become the stored identity. Module/week labels never create
+Session number/date/completion.
+
+### Automation choices and interval
+
+```text
+Automation                                                        [Not checked]
+Intake worker       [Not selected]  Current schema default is not your choice
+                    [Choose Enabled] [Choose Disabled]
+Study-note feature  [Not selected]  Current value is not an explicit choice
+                    [Choose Enabled] [Choose Disabled]
+Desired interval    [ 15 ] minutes  (desired value; scheduler use Not reported)
+Actual schedule     Not reported
+Next run            Not reported
+
+Enabled intake/study processing needs its own mappings and worker-role checks.
+Disabled preserves existing mappings and does not require worker credentials.
+Save choices and interval     [Review changes]
+```
+
+Only an explicit choice is saved as choice evidence. Choosing Enabled does not start a worker,
+scheduler, or provider operation. Existing unsupported positive interval values remain unchanged
+when only a toggle changes; the GUI validates the interval when the user edits that field.
 
 ## 4. Credential card states
 
@@ -204,6 +245,9 @@ worker credentials removes only that local credential after detaching that role;
 academic bindings, and imported/source history remain. For Notion, forgetting retrieval or worker
 credentials removes only the named keyring/protected-file credential after detaching that role;
 Notion pages/databases, academic bindings, and imported/source history remain.
+
+A credential card's Verified result describes that credential check only; it does not verify an
+Academic mapping, choose a semester, or make worker/study processing Ready.
 
 Failed replacement preserves the previously active credential:
 
@@ -255,14 +299,20 @@ Before apply, Settings shows a redacted semantic diff:
 
 ```text
 Review changes
-Academic semester          2026-S1  →  2026-S2
-Canvas sync                Disabled → Enabled
-Canvas access token        Not configured → Configured
-Remote MCP                 no change
+Academic active semester   2026-S1  →  2026-S2
+MCP retrieval scope        legacy_global (no change)
+Intake worker choice       Not selected → Enabled
+Desired poll interval      15 → 30 minutes
 
-Impact: worker restart required
+Impact: show verification/readiness separately from any observed process restart impact
                                       [Back]  [Apply changes]
 ```
+
+For a verified Academic binding, a successful Verify adds server-issued evidence to a new final
+candidate and produces a new candidate hash and redacted diff. The user reviews that final diff
+before Apply; Apply never adds a receipt or choice marker after the review. The separate
+Configured/Unverified save path has its own diff and removes stale proof only if that candidate is
+applied.
 
 If another process edits config while the form is open:
 
@@ -306,17 +356,29 @@ Academic bindings and Notion content are preserved.
 │ Notion retrieval       Ready                                               │
 │ Notion worker          Ready                                               │
 │ Academic scope         Partial      1 course mapping incomplete             │
-│ Intake worker          Disabled                                            │
-│ Remote MCP             Ready        running previous settings               │
+│ Retrieval scope        legacy_global  unchanged by Academic selection       │
+│ Intake worker          Not selected  schema default is not a choice         │
+│ Study-note processing  Disabled      explicit choice                        │
+│ Desired poll interval  15 min       scheduler/next run Not reported          │
+│ Local study-note MCP   Not reported  no successful transport observation    │
+│ Remote MCP             Running with previous settings                        │
 │ AI client E2E          Not checked                                         │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-`Save` never silently restarts a service. `Restart required` is derived from the service's saved
-desired fingerprint differing from its reported/durable applied fingerprint, so it survives closing
-and reopening Settings. `Ready — running previous settings` describes the currently running instance,
-not the newly saved configuration. A failed restart keeps the banner and adds a fixed redacted error;
-an external restart onto the desired fingerprint clears it on the next status refresh.
+`Save` never silently restarts a service. Desired fingerprints come from saved configuration;
+applied fingerprints come from the actual process only after successful load and start. An intake
+one-shot reports only after acquiring its worker lock; an MCP server reports only after its transport
+starts. Object construction, credential presence, and Save never report applied or Running.
+`Not reported`, `Stopped`, `Running with current settings`, and `Running with previous settings` are
+separate runtime states; Running with previous settings is never Ready. A stopped one-shot shows its
+last successful load, and its next invocation uses desired settings. Readiness is a separate
+dependency result. A failed restart keeps the redacted error and prior successful observation; an
+unobservable start remains Not reported.
+
+If Apply is interrupted, exact current bytes equal to the reviewed final candidate mean committed and
+continue readback; bytes still at the original generation mean not committed; any third hash is
+Partial and needs manual review. Settings does not promise rollback after replacement.
 
 ## 7. Remote Access
 

@@ -60,6 +60,7 @@
     steps: [],
     stepOverrides: {},
     currentStep: null,
+    overviewRequest: 0,
     timers: [],
     guard: false,
     reviewed: {},
@@ -71,7 +72,10 @@
     discoveryFresh: false, discoveryId: 0, discoveryRequest: 0, draftDirty: false,
     pendingTerm: null, epoch: 0, loadToken: 0, requestToken: 0, activeRequest: 0,
     submissionEpoch: 0, pendingFileRead: null, readingFile: false,
-    credentialRetry: {}, credentialMessages: {} };
+    credentialRetry: {}, credentialMessages: {}, credentialsReadbackOk: false,
+    credentialMutationFailure: {}, credentialsReadbackToken: 0, credentialsReadbackEpoch: -1,
+    credentialMutationGeneration: {}, credentialPendingGeneration: {}, credentialOutcome: {},
+    credentialPresentationBefore: {}, credentialResultPending: {}, pendingCredentialSubmission: null };
 
   function el(id) { return document.getElementById(id); }
   function all(root, selector) { return Array.prototype.slice.call(root.querySelectorAll(selector)); }
@@ -376,21 +380,25 @@
       var title = make("h3", "Unfinished settings change");
       title.appendChild(make("span", " Partial"));
       card.appendChild(title);
-      card.appendChild(make("p", item.fields && item.fields.length ? "Settings: " + item.fields.join(", ") : "Settings change"));
       if (item.same_target === false) {
-        card.appendChild(make("p", "This item belongs to another settings file. Open Settings for that file to resolve it."));
+        card.appendChild(make("p", "This item could not be safely verified. Open Settings to review it."));
         box.appendChild(card);
         return;
       }
-      card.appendChild(make("p", "Resume repair checks the settings file and finishes the change only if it already reached disk. It never saves values again."));
-      (item.action_kind && item.action_kind.indexOf("credential_") === 0
-        ? [["resume", "Resume repair"], ["restore", "Restore previous credential"], ["leave", "Clean staged copy"], ["retry_delete", "Retry local deletion"]]
-        : [["resume", "Resume repair"], ["leave", "Leave as-is"]]).forEach(function (choice) {
-        var button = make("button", choice[1]);
+      card.appendChild(make("p", item.fields && item.fields.length ? "Settings: " + item.fields.join(", ") : "Settings change"));
+      var credentialRecovery = item.action_kind && item.action_kind.indexOf("credential_") === 0;
+      card.appendChild(make("p", credentialRecovery
+        ? "Choose an available recovery action. Settings checks the current record and local state before continuing."
+        : "Resume repair checks the settings file and finishes the change only if it already reached disk. It never saves values again."));
+      var allowed = { resume: true, restore: true, leave: true, retry_delete: true };
+      (Array.isArray(item.choices) ? item.choices : []).filter(function (choice) {
+        return choice && allowed[choice.id] && typeof choice.label === "string";
+      }).forEach(function (choice) {
+        var button = make("button", choice.label);
         button.type = "button";
         button.setAttribute("data-mutation", "");
         button.disabled = !state.csrf;
-        button.addEventListener("click", function () { recover(item.operation_id, choice[0]); });
+        button.addEventListener("click", function () { recover(item.operation_id, choice.id); });
         card.appendChild(button);
       });
       box.appendChild(card);
@@ -402,14 +410,19 @@
     explicitActivity();
     var result = await api("api/v1/recovery/" + encodeURIComponent(operationId) + "/" + action, { method: "POST", mutation: true, body: {} });
     if (state.ended) { return; }
-    notice(result.ok ? "Recovery item updated." : (result.message || "This recovery item could not be updated."));
+    notice(result.ok && result.data && result.data.code === "LEFT_AS_IS" ? "Recovery item left pending as-is."
+      : result.ok ? "Recovery item updated." : (result.message || "This recovery item could not be updated."));
     await loadOverview();
   }
 
-  async function loadOverview() {
+  async function loadOverview(ownerCurrent) {
+    if (ownerCurrent && !ownerCurrent()) { return; }
+    var request = ++state.overviewRequest;
+    if (ownerCurrent && !ownerCurrent()) { return; }
     var result = await api("api/v1/overview");
+    if (request !== state.overviewRequest || state.ended || (ownerCurrent && !ownerCurrent())) { return; }
     if (result.ok) { renderOverview(result.data); }
-    else if (!state.ended) { notice("The overview could not be loaded. Saved settings were not changed."); }
+    else { notice("The overview could not be loaded. Saved settings were not changed."); }
   }
 
   async function loadGroup(group, keepDirty) {
@@ -642,17 +655,130 @@
     parent.appendChild(button); return button;
   }
 
-  async function loadConnections() {
+  var CREDENTIAL_PENDING_MESSAGE = "Credential change is being checked. The refreshed status will show the result.";
+  var CREDENTIAL_UNCONFIRMED_MESSAGE = "Credential change could not be confirmed. Check the refreshed card and any recovery item before retrying.";
+
+  function credentialGeneration(role) {
+    return connections.credentialMutationGeneration[role] || 0;
+  }
+
+  function captureCredentialMutation(role, action) {
+    var generation = credentialGeneration(role) + 1;
+    connections.credentialMutationGeneration[role] = generation;
+    connections.credentialPresentationBefore[role] = {
+      message: connections.credentialMessages[role],
+      retry: connections.credentialRetry[role],
+      failed: connections.credentialMutationFailure[role],
+      outcome: connections.credentialOutcome[role],
+    };
+    delete connections.credentialOutcome[role];
+    delete connections.credentialResultPending[role];
+    delete connections.credentialRetry[role];
+    connections.credentialPendingGeneration[role] = generation;
+    connections.credentialMutationFailure[role] = true;
+    connections.credentialMessages[role] = CREDENTIAL_PENDING_MESSAGE;
+    connections.pendingCredentialSubmission = { role: role, generation: generation, action: action };
+    renderCredentialCards();
+    notice(CREDENTIAL_PENDING_MESSAGE);
+    return generation;
+  }
+
+  function restoreCredentialMutation(role, generation) {
+    if (credentialGeneration(role) !== generation || connections.credentialPendingGeneration[role] !== generation) { return; }
+    var previous = connections.credentialPresentationBefore[role] || {};
+    if (previous.message === undefined) { delete connections.credentialMessages[role]; }
+    else { connections.credentialMessages[role] = previous.message; }
+    if (previous.retry === undefined) { delete connections.credentialRetry[role]; }
+    else { connections.credentialRetry[role] = previous.retry; }
+    if (previous.failed === undefined) { delete connections.credentialMutationFailure[role]; }
+    else { connections.credentialMutationFailure[role] = previous.failed; }
+    if (previous.outcome === undefined) { delete connections.credentialOutcome[role]; }
+    else { connections.credentialOutcome[role] = previous.outcome; }
+    delete connections.credentialPendingGeneration[role];
+    delete connections.credentialPresentationBefore[role];
+    connections.pendingCredentialSubmission = null;
+    renderCredentialCards();
+    notice(connections.credentialMessages[role] || "");
+  }
+
+  function reconcileCredentialPresentation(cards, ownedReadback, loadToken) {
+    cards.forEach(function (card) {
+      var role = card.role;
+      if (ownedReadback && ownedReadback.role === role &&
+          ownedReadback.generation === credentialGeneration(role)) { return; }
+      var pendingGeneration = connections.credentialPendingGeneration[role];
+      var pendingResult = connections.credentialResultPending[role];
+      if (pendingGeneration === credentialGeneration(role)) {
+        if (pendingResult && pendingResult.generation === pendingGeneration && loadToken >= pendingResult.minimumReadbackToken) {
+          delete connections.credentialPendingGeneration[role];
+          delete connections.credentialPresentationBefore[role];
+          delete connections.credentialResultPending[role];
+          delete connections.credentialRetry[role];
+          connections.credentialMutationFailure[role] = true;
+          connections.credentialMessages[role] = CREDENTIAL_UNCONFIRMED_MESSAGE;
+          connections.credentialOutcome[role] = { confirmed: false, action: pendingResult.action };
+          if (pendingResult.submissionRequestToken === connections.requestToken) {
+            notice(CREDENTIAL_UNCONFIRMED_MESSAGE);
+          }
+          return;
+        } else { return; }
+      }
+      var outcome = connections.credentialOutcome[role];
+      if (!outcome) { return; }
+      var stillMatches = outcome.confirmed && card.pending_operation === null &&
+        (outcome.action === "detach" ? card.source !== "external_file" : card.state === outcome.expectedState);
+      if (stillMatches) { return; }
+      var oldMessage = connections.credentialMessages[role];
+      delete connections.credentialRetry[role];
+      delete connections.credentialMessages[role];
+      delete connections.credentialMutationFailure[role];
+      delete connections.credentialOutcome[role];
+      if (oldMessage && el("notice").textContent === oldMessage) { notice(""); }
+    });
+  }
+
+  async function loadConnections(readback) {
     var loadToken = ++connections.loadToken;
     var interactionEpoch = connections.epoch;
+    if (readback) { readback.ok = false; readback.current = false; readback.token = loadToken; readback.epoch = interactionEpoch; }
+    connections.credentialsReadbackOk = false;
+    connections.credentialsReadbackToken = 0;
+    connections.credentialsReadbackEpoch = -1;
     var cards = await api("api/v1/credentials");
-    if (loadToken !== connections.loadToken) { return null; }
+    if (loadToken !== connections.loadToken || interactionEpoch !== connections.epoch) {
+      if (readback) { readback.ok = false; }
+      renderCredentialCards(); return null;
+    }
+    if (readback) { readback.current = true; }
+    var ownedReadback = Boolean(readback && readback.role &&
+      readback.generation === credentialGeneration(readback.role));
+    connections.credentialsReadbackOk = cards.ok;
+    if (readback) { readback.ok = cards.ok && (!readback.role || ownedReadback); }
+    if (cards.ok) {
+      connections.credentialsReadbackToken = loadToken;
+      connections.credentialsReadbackEpoch = interactionEpoch;
+    }
     if (cards.ok) {
       connections.generation = cards.data.config_generation;
-      connections.cards = cards.data.cards; renderCredentialCards();
+      connections.cards = cards.data.cards;
     }
+    reconcileCredentialPresentation(connections.cards, ownedReadback ? readback : null, loadToken);
+    renderCredentialCards();
     var canvas = await api("api/v1/canvas");
-    if (loadToken !== connections.loadToken || interactionEpoch !== connections.epoch || !canvas.ok) { return null; }
+    if (loadToken !== connections.loadToken) { if (readback) { readback.ok = false; readback.current = false; } return null; }
+    if (interactionEpoch !== connections.epoch) {
+      if (readback) { readback.ok = false; readback.current = false; }
+      connections.credentialsReadbackOk = false;
+      connections.credentialsReadbackToken = 0;
+      connections.credentialsReadbackEpoch = -1;
+      renderCredentialCards();
+      return null;
+    }
+    if (!canvas.ok) {
+      if (readback && readback.role && readback.generation !== credentialGeneration(readback.role)) { readback.ok = false; }
+      if (readback && readback.current) { readback.epoch = connections.epoch; }
+      return null;
+    }
     var oldProfile = connections.canvas && connections.canvas.profile;
     var newProfile = canvas.data.profile;
     var profileChanged = Boolean(oldProfile && newProfile && oldProfile.id !== newProfile.id);
@@ -680,6 +806,9 @@
       renderSavedRegistry();
     }
     renderCanvas();
+    if (connections.credentialsReadbackOk) { connections.credentialsReadbackEpoch = connections.epoch; }
+    if (readback && readback.current) { readback.epoch = connections.epoch; }
+    if (readback && readback.role && readback.generation !== credentialGeneration(readback.role)) { readback.ok = false; }
     return canvas.data;
   }
 
@@ -707,16 +836,21 @@
       var label = (card.provider === "notion" ? "Notion" : "Google Drive") + " · " + (card.purpose === "mcp" ? "Read-only retrieval" : "Worker");
       var heading = make("h3", label); heading.id = "credential-heading-" + card.role; heading.setAttribute("tabindex", "-1");
       box.appendChild(heading);
-      var status = make("p", connections.credentialMessages[card.role] || humanize(card.state));
+      var status = make("p", connections.credentialsReadbackOk ? humanize(card.state) : "Status not refreshed");
       status.id = "credential-status-" + card.role; status.setAttribute("role", "status"); status.setAttribute("aria-live", "polite"); status.setAttribute("tabindex", "-1");
       box.appendChild(status);
+      var message = make("p", connections.credentialMessages[card.role] || "");
+      message.id = "credential-message-" + card.role; message.setAttribute("role", "status"); message.setAttribute("aria-live", "polite");
+      box.appendChild(message);
       box.appendChild(make("p", "Takes effect on next " + card.takes_effect + "."));
       if (card.state === "unsupported_platform") {
         box.appendChild(make("p", "Not available on this computer: Syllva cannot store credentials securely here yet. Use " + card.environment_variable + " instead."));
       } else if (card.source === "environment" && card.state === "external" && card.can_test) {
         box.appendChild(make("p", "Provided by " + card.environment_variable + ". Remove it from the environment to stop using it."));
       }
-      if (card.last_check) { box.appendChild(make("p", card.last_check.message || humanize(card.last_check.code))); }
+      if (card.last_check && !connections.credentialMutationFailure[card.role]) {
+        box.appendChild(make("p", card.last_check.message || humanize(card.last_check.code)));
+      }
       actionButton(box, "Test connection", function () { testConnection(card); }, !card.can_test);
       if (card.can_mutate) {
         var retryAction = connections.credentialRetry[card.role];
@@ -772,6 +906,7 @@
 
   function cancelCredentialSubmission() {
     if (el("credential-dialog").hidden || !el("canvas-term-dialog").hidden) { return; }
+    var pending = connections.pendingCredentialSubmission;
     if (connections.readingFile) {
       connections.requestToken += 1;
       connections.activeRequest = 0;
@@ -779,6 +914,7 @@
       connections.readingFile = false;
       connectionBusy(false);
     }
+    if (pending) { restoreCredentialMutation(pending.role, pending.generation); }
     if (!connections.busy) { closeCredentialDialog(true); }
   }
 
@@ -835,7 +971,9 @@
       ? "In Canvas, open Account → Settings → Approved Integrations → New Access Token, then paste the token here."
       : context.action === "detach" ? "Syllva will stop using this external credential file. The file is kept unchanged."
       : deleting ? "Role: " + context.card.role + ". Stored in " + (context.card.storage_label || "the local credential store") + ". This removes the local credential and stops using it here. Imported history and provider content are kept."
-      : "This field is write-only. Verification only reads provider metadata. A failed replacement keeps the previous credential.";
+      : context.action === "replace"
+      ? "The new credential will be verified before it replaces the configured credential."
+      : "The credential will be verified before it is saved.";
     el("credential-secret").hidden = deleting || google; el("credential-secret-label").hidden = deleting || google;
     el("credential-file").hidden = deleting || !google; el("credential-file-label").hidden = deleting || !google;
     el("canvas-token-link").hidden = !context.canvas || deleting;
@@ -917,19 +1055,142 @@
     if (result.ok && options.applyReadback) { connections.draftDirty = false; }
     ["general", "advanced"].forEach(function (group) { delete state.reviewed[group]; el(group + "-preview").hidden = true; });
     for (var group of ["general", "advanced"]) { if (state.baselines[group]) { await loadGroup(group, true); } }
-    var canvasSnapshot = await loadConnections(); await loadOverview();
-    syncCourseControls();
-    if (options.focusCredentialRole && !state.ended) {
-      var focusId = options.focusCredentialHeading ? "credential-heading-" : "credential-status-";
-      var credentialTarget = el(focusId + options.focusCredentialRole);
-      if (credentialTarget) { credentialTarget.focus(); }
+    var credentialReadback = { ok: false, token: 0, epoch: -1,
+      role: options.credentialRole || null, generation: options.credentialGeneration || null };
+    var canvasSnapshot = await loadConnections(credentialReadback);
+    if (state.ended) { return; }
+    var submissionCurrent = function () {
+      return options.submissionRequestToken === undefined || options.submissionRequestToken === connections.requestToken;
+    };
+    var roleGenerationCurrentNow = function () {
+      return !options.credentialRole || options.credentialGeneration === credentialGeneration(options.credentialRole);
+    };
+    var credentialReadbackCurrentNow = function () {
+      return Boolean(credentialReadback.current && credentialReadback.token === connections.loadToken &&
+        credentialReadback.epoch === connections.epoch);
+    };
+    var overviewOwnerCurrent = function () {
+      return submissionCurrent() && roleGenerationCurrentNow() && credentialReadbackCurrentNow();
+    };
+    if (overviewOwnerCurrent()) { await loadOverview(overviewOwnerCurrent); }
+    if (state.ended) { return; }
+    var credentialMessage = null;
+    var role = options.credentialRole;
+    var roleGenerationCurrent = Boolean(role && options.credentialGeneration === credentialGeneration(role));
+    var credentialReadbackCurrent = credentialReadbackCurrentNow();
+    var presentationCurrent = submissionCurrent();
+    var credentialStateReadbackCurrent = Boolean(credentialReadbackCurrent && credentialReadback.ok &&
+      credentialReadback.token === connections.credentialsReadbackToken &&
+      credentialReadback.epoch === connections.credentialsReadbackEpoch && connections.credentialsReadbackOk);
+    if (role && ["set", "replace"].includes(options.credentialAction)) {
+      if (!roleGenerationCurrent || !credentialReadbackCurrent || state.ended) { return; }
+      if (connections.credentialPendingGeneration[role] === options.credentialGeneration) {
+        delete connections.credentialPendingGeneration[role];
+      }
+      if (connections.credentialResultPending[role] &&
+          connections.credentialResultPending[role].generation === options.credentialGeneration) {
+        delete connections.credentialResultPending[role];
+      }
+      delete connections.credentialPresentationBefore[role];
+      var role = options.credentialRole;
+      var expectedState = result.ok || options.credentialAction === "replace" ? "configured" : "not_configured";
+      var matchingCards = connections.cards.filter(function (card) { return card.role === role; });
+      var cardMatches = matchingCards.length === 1 && matchingCards[0].pending_operation === null &&
+        matchingCards[0].state === expectedState;
+      var confirmedFailure = !result.ok && result.code === "INVALID_CREDENTIAL" && credentialStateReadbackCurrent && cardMatches;
+      var confirmedSuccess = result.ok && credentialStateReadbackCurrent && cardMatches;
+      connections.credentialMutationFailure[role] = !result.ok || !confirmedSuccess;
+      if (confirmedFailure) {
+        connections.credentialRetry[role] = options.credentialAction;
+      } else {
+        delete connections.credentialRetry[role];
+      }
+      credentialMessage = confirmedSuccess ? "Credential saved and verified."
+        : confirmedFailure ? options.credentialAction === "set"
+          ? "Credential verification failed. No credential was saved."
+          : "Credential verification failed. The previous credential is unchanged."
+        : CREDENTIAL_UNCONFIRMED_MESSAGE;
+      connections.credentialOutcome[role] = {
+        confirmed: confirmedSuccess || confirmedFailure,
+        expectedState: expectedState,
+        action: options.credentialAction,
+      };
+      connections.credentialMessages[role] = credentialMessage;
+      renderCredentialCards();
+      syncCourseControls();
+      if (presentationCurrent && options.focusCredentialRole) {
+        var focusId = confirmedSuccess ? "credential-status-" : "credential-heading-";
+        var credentialTarget = el(focusId + options.focusCredentialRole);
+        if (credentialTarget) { credentialTarget.focus(); }
+      }
+      if (presentationCurrent) { notice(credentialMessage); }
+      return;
     }
+    if (role && ["forget", "detach"].includes(options.credentialAction)) {
+      if (!roleGenerationCurrent || !credentialReadbackCurrent || state.ended) { return; }
+      if (connections.credentialPendingGeneration[role] === options.credentialGeneration) {
+        delete connections.credentialPendingGeneration[role];
+      }
+      if (connections.credentialResultPending[role] &&
+          connections.credentialResultPending[role].generation === options.credentialGeneration) {
+        delete connections.credentialResultPending[role];
+      }
+      delete connections.credentialPresentationBefore[role];
+      var removalCard = connections.cards.find(function (card) { return card.role === role; });
+      var removalConfirmed = result.ok && removalCard && removalCard.pending_operation === null &&
+        (options.credentialAction === "detach" ? removalCard.source !== "external_file" : removalCard.state === "not_configured");
+      if (removalConfirmed) {
+        delete connections.credentialRetry[role];
+        delete connections.credentialMutationFailure[role];
+        connections.credentialMessages[role] = "Credential removed.";
+        connections.credentialOutcome[role] = { confirmed: true, expectedState: "not_configured", action: options.credentialAction };
+        credentialMessage = "Credential removed.";
+      } else {
+        connections.credentialMutationFailure[role] = true;
+        connections.credentialMessages[role] = CREDENTIAL_UNCONFIRMED_MESSAGE;
+        connections.credentialOutcome[role] = { confirmed: false, action: options.credentialAction };
+        credentialMessage = CREDENTIAL_UNCONFIRMED_MESSAGE;
+      }
+      renderCredentialCards();
+      syncCourseControls();
+      if (presentationCurrent && options.focusCredentialRole) {
+        var removalTarget = el("credential-heading-" + options.focusCredentialRole);
+        if (removalTarget) { removalTarget.focus(); }
+      }
+      if (presentationCurrent) { notice(credentialMessage); }
+      return;
+    }
+    if (options.canvasAction && ["connect", "replace", "forget"].includes(options.canvasAction)) {
+      var canvasPending = canvasSnapshot && Array.isArray(canvasSnapshot.pending_operations)
+        ? canvasSnapshot.pending_operations.length > 0 : true;
+      var canvasCanMutate = Boolean(canvasSnapshot && canvasSnapshot.can_mutate === true && !canvasPending);
+      var canvasProfile = canvasSnapshot && canvasSnapshot.profile;
+      var canvasTargetMatches = Boolean(canvasProfile && options.canvasExpectedOrigin &&
+        canvasProfile.origin === options.canvasExpectedOrigin &&
+        (options.canvasAction === "connect" ||
+          (options.canvasAction === "replace" && options.canvasExpectedProfileId &&
+            canvasProfile.id === options.canvasExpectedProfileId)));
+      var confirmedCanvas = result.ok && credentialStateReadbackCurrent && canvasCanMutate && canvasSnapshot &&
+        (options.canvasAction === "forget"
+          ? !canvasProfile && canvasSnapshot.state === "not_configured" && canvasSnapshot.credential_present === false
+          : ["partial", "ready"].includes(canvasSnapshot.state) && canvasSnapshot.credential_present === true &&
+            canvasTargetMatches);
+      var canvasNotices = {
+        connect: ["Canvas account connected.", "Canvas connection could not be confirmed. Check the refreshed Canvas status before retrying."],
+        replace: ["Canvas credential replacement completed.", "Canvas credential replacement could not be confirmed. Check the refreshed Canvas status and any recovery item before retrying."],
+        forget: ["Canvas connection forgotten.", "Canvas forget could not be confirmed. Check the refreshed Canvas status and any recovery item before retrying."],
+      };
+      if (presentationCurrent) { notice(canvasNotices[options.canvasAction][confirmedCanvas ? 0 : 1]); }
+      return;
+    }
+    syncCourseControls();
+    if (!presentationCurrent) { return; }
     if (result.ok && options.applyReadback) {
       notice(registryMatchesReadback(canvasSnapshot, options.expectedRegistry)
         ? options.successMessage
         : "The apply request succeeded, but the saved course selection could not be confirmed. Reopen Connections to check it.");
     } else if (result.ok) { notice(options.successMessage || result.data.message || "Saved locally. Running services use the credential when they next start."); }
-    else { notice(result.message || "The change could not be completed. The previous credential is kept; inspect unfinished changes if shown."); }
+    else { notice(result.message || "The change could not be completed. Inspect the refreshed status and any recovery item before retrying."); }
   }
 
   function registryMatchesReadback(snapshot, expected) {
@@ -965,7 +1226,7 @@
     explicitActivity();
     var secret = el("credential-secret").value;
     var file = el("credential-file").files && el("credential-file").files[0];
-    var requestToken, submissionEpoch = ++connections.submissionEpoch;
+    var requestToken, roleGeneration = null, submissionEpoch = ++connections.submissionEpoch;
     var readsGoogleFile = context.card && context.card.provider === "google" && (context.action === "set" || context.action === "replace");
     if (readsGoogleFile) {
       if (!file) { showCredentialFileError("Choose a service-account JSON file."); return; }
@@ -975,7 +1236,10 @@
         return;
       }
       clearCredentialFileError();
-      requestToken = beginConnectionRequest("Reading and checking the credential file…");
+      if (!context.canvas && context.card && ["set", "replace", "forget", "detach"].includes(context.action)) {
+        roleGeneration = captureCredentialMutation(context.card.role, context.action);
+      }
+      requestToken = beginConnectionRequest(roleGeneration !== null ? CREDENTIAL_PENDING_MESSAGE : "Reading and checking the credential file…");
       connections.readingFile = true;
       syncConnectionControls();
       var fileRead;
@@ -990,7 +1254,10 @@
         fileRead = null;
         if (ownsFailedRead) {
           connections.pendingFileRead = null; connections.readingFile = false;
-          if (finishConnectionRequest(requestToken)) { showCredentialFileError("The selected service-account file could not be read."); }
+          if (finishConnectionRequest(requestToken)) {
+            if (roleGeneration !== null) { restoreCredentialMutation(context.card.role, roleGeneration); }
+            showCredentialFileError("The selected service-account file could not be read.");
+          }
         }
         secret = null; file = null;
         return;
@@ -1003,7 +1270,10 @@
       }
       connections.pendingFileRead = null; connections.readingFile = false;
     } else {
-      requestToken = beginConnectionRequest("Checking and saving the credential…");
+      if (!context.canvas && context.card && ["set", "replace", "forget", "detach"].includes(context.action)) {
+        roleGeneration = captureCredentialMutation(context.card.role, context.action);
+      }
+      requestToken = beginConnectionRequest(roleGeneration !== null ? CREDENTIAL_PENDING_MESSAGE : "Checking and saving the credential…");
     }
     el("credential-secret").value = ""; el("credential-file").value = "";
     syncConnectionControls();
@@ -1022,16 +1292,14 @@
     var result = await api(route, { method: "POST", mutation: true, body: body, raw: raw, headers: headers });
     secret = null; body = null; file = null;
     if (!finishConnectionRequest(requestToken)) { return; }
-    if (!context.canvas && context.card) {
-      var credentialRole = context.card.role;
-      if (result.ok) {
-        delete connections.credentialRetry[credentialRole];
-        connections.credentialMessages[credentialRole] = context.action === "forget" || context.action === "detach"
-          ? "Credential removed." : "Credential saved and verified.";
-      } else if (context.action === "set" || context.action === "replace") {
-        connections.credentialRetry[credentialRole] = context.action;
-        connections.credentialMessages[credentialRole] = "Credential verification failed. The previous credential is unchanged.";
-      }
+    if (connections.pendingCredentialSubmission && connections.pendingCredentialSubmission.generation === roleGeneration) {
+      connections.pendingCredentialSubmission = null;
+    }
+    if (roleGeneration !== null && !context.canvas && context.card) {
+      connections.credentialResultPending[context.card.role] = {
+        generation: roleGeneration, action: context.action, minimumReadbackToken: connections.loadToken + 1,
+        submissionRequestToken: requestToken,
+      };
     }
     closeCredentialDialog(false);
     if (state.ended) { return; }
@@ -1039,7 +1307,14 @@
     var verificationFailure = !result.ok && (context.action === "set" || context.action === "replace");
     await refreshAfterCredential(result, {
       focusCredentialRole: !context.canvas && context.card ? context.card.role : null,
-      focusCredentialHeading: verificationFailure
+      credentialRole: !context.canvas && context.card && ["set", "replace", "forget", "detach"].includes(context.action)
+        ? context.card.role : null,
+      credentialAction: context.action,
+      credentialGeneration: roleGeneration,
+      submissionRequestToken: requestToken,
+      canvasAction: context.canvas ? context.action : null,
+      canvasExpectedProfileId: context.canvas ? context.profileId || null : null,
+      canvasExpectedOrigin: context.canvas ? context.origin || null : null,
     });
   }
 
@@ -1048,6 +1323,8 @@
     var requestToken = beginConnectionRequest("Checking the connection with read-only requests…");
     var result = await api("api/v1/connections/" + card.provider + "/" + card.purpose + "/test", { method: "POST", mutation: true, body: {} });
     if (!finishConnectionRequest(requestToken) || state.ended) { return; }
+    delete connections.credentialMessages[card.role];
+    delete connections.credentialMutationFailure[card.role];
     await loadConnections(); notice(result.ok ? result.data.message : result.message);
   }
 
@@ -1079,7 +1356,8 @@
     if (unsupported) { actions.appendChild(make("p", "Canvas credential storage is not supported on Linux yet.")); return; }
     if (!profile) { actionButton(actions, "Test & connect", function (button) { var origin = normalizedCanvasOrigin(); if (origin) { openCredentialDialog({ canvas: true, label: "Canvas LMS", action: "connect", origin: origin }, button); } }); return; }
     if (data.can_mutate === false) { actions.appendChild(make("p", "Resolve the unfinished local change in Overview first.")); return; }
-    actionButton(actions, "Replace token", function (button) { openCredentialDialog({ canvas: true, label: "Canvas LMS", action: "replace", origin: profile.origin }, button); });
+    actionButton(actions, "Replace token", function (button) { openCredentialDialog({ canvas: true, label: "Canvas LMS", action: "replace",
+      profileId: profile.id, origin: profile.origin }, button); });
     actionButton(actions, "Forget local token", function (button) {
       openCredentialDialog({ canvas: true, label: "Canvas LMS at " + profile.origin, action: "forget",
         profileId: profile.id, origin: profile.origin, userId: profile.user_id,

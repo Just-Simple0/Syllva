@@ -26,6 +26,101 @@ OLD = "PAT_OLD_SENTINEL"
 NEW = "PAT_NEW_SENTINEL"
 
 
+def _saved_canvas_metadata() -> dict[str, Any]:
+    return {
+        "profile": {"id": canvas_profile_id(ORIGIN, "42"), "origin": ORIGIN,
+                    "user_id": "42", "display_name": "Student N.", "credential": "keyring"},
+        "registry": {"term_id": "1", "courses": [
+            {"course_id": "12", "term_id": "1", "name": "Algorithms", "code": "A101"}]},
+    }
+
+
+@pytest.mark.parametrize("defect", [
+    "valid", "wrong_profile_id", "unsafe_origin", "noncanonical_origin", "profile_extra",
+    "profile_wrong_store", "user_nonascii", "user_nonnumeric", "registry_extra",
+    "term_nonascii", "course_nonascii", "course_term_mismatch", "duplicate_course",
+    "course_extra", "course_wrong_text_type", "empty_courses", "too_many_courses",
+])
+def test_saved_canvas_readiness_matches_service_validation_without_io(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, defect: str,
+) -> None:
+    import socket
+    from dataclasses import replace
+
+    from uls.settings import canvas_checks, canvas_service
+    from uls.settings.status import setup_steps
+
+    h = make_harness(tmp_path)
+    loaded = h.config.load()
+    canvas = _saved_canvas_metadata()
+    profile, registry = canvas["profile"], canvas["registry"]
+    row = registry["courses"][0]
+    if defect == "wrong_profile_id":
+        profile["id"] = "c" + "0" * 32
+    elif defect == "unsafe_origin":
+        profile["origin"] = "http://canvas.example.edu"
+    elif defect == "noncanonical_origin":
+        profile["origin"] = ORIGIN + "/"
+    elif defect == "profile_extra":
+        profile["unrecognized"] = "value"
+    elif defect == "profile_wrong_store":
+        profile["credential"] = "environment"
+    elif defect == "user_nonascii":
+        profile["user_id"] = "４２"
+    elif defect == "user_nonnumeric":
+        profile["user_id"] = "user42"
+    elif defect == "registry_extra":
+        registry["unrecognized"] = "value"
+    elif defect == "term_nonascii":
+        registry["term_id"] = "１"
+    elif defect == "course_nonascii":
+        row["course_id"] = "１２"
+    elif defect == "course_term_mismatch":
+        row["term_id"] = "2"
+    elif defect == "duplicate_course":
+        registry["courses"].append(copy.deepcopy(row))
+    elif defect == "course_extra":
+        row["unrecognized"] = "value"
+    elif defect == "course_wrong_text_type":
+        row["name"] = 123
+    elif defect == "empty_courses":
+        registry["courses"] = []
+    elif defect == "too_many_courses":
+        registry["courses"] = [dict(row, course_id=str(n)) for n in range(21)]
+    original = copy.deepcopy(canvas)
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("Saved Canvas metadata validation performed external or credential I/O")
+
+    monkeypatch.setattr(socket, "getaddrinfo", forbidden)
+    monkeypatch.setattr(socket, "socket", forbidden)
+    monkeypatch.setattr(canvas_checks, "open_canvas_connection", forbidden)
+    monkeypatch.setattr(canvas_service, "verify_canvas_user", forbidden)
+    monkeypatch.setattr(canvas_service, "discover_canvas_courses", forbidden)
+    monkeypatch.setattr(h.stores, "read", forbidden)
+    monkeypatch.setattr(h.service, "verifier", forbidden)
+    monkeypatch.setattr(h.service, "discoverer", forbidden)
+    monkeypatch.setattr(h.service, "selection_reader", forbidden)
+    if defect == "valid":
+        assert h.service._profile({"canvas": canvas}) == profile
+        assert h.service._registry(canvas) == registry
+    else:
+        with pytest.raises(SettingsServiceError):
+            h.service._profile({"canvas": canvas})
+            h.service._registry(canvas)
+    step = next(s for s in setup_steps(replace(loaded.config, canvas=canvas)) if s["name"] == "Canvas")
+    assert step["state"] == ("Ready" if defect == "valid" else "Partial")
+    assert canvas == original
+
+
+def test_shared_canvas_validators_preserve_valid_metadata_without_service_construction() -> None:
+    from uls.settings.canvas_service import validated_canvas_profile, validated_canvas_registry
+
+    canvas = _saved_canvas_metadata()
+    assert validated_canvas_profile({"canvas": canvas}) == canvas["profile"]
+    assert validated_canvas_registry(canvas) == canvas["registry"]
+
+
 class FakeCanvas:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, tuple[str, ...]]] = []
@@ -417,9 +512,15 @@ def test_replacement_recovers_each_effect_boundary_in_fresh_service(tmp_path: Pa
     assert not h.journal.unresolved()
 
 
-@pytest.mark.parametrize("point", ["before_config_detach", "after_config_detach", "after_config_detach_recorded",
-                                   "before_credential_delete", "after_credential_delete", "after_credential_delete_recorded"])
-def test_forget_recovers_without_provider_in_fresh_service(tmp_path: Path, point: str) -> None:
+@pytest.mark.parametrize(("point", "action"), [
+    ("before_config_detach", "resume"),
+    ("after_config_detach", "resume"),
+    ("after_config_detach_recorded", "retry_delete"),
+    ("before_credential_delete", "retry_delete"),
+    ("after_credential_delete", "retry_delete"),
+    ("after_credential_delete_recorded", "resume"),
+])
+def test_forget_recovers_without_provider_in_fresh_service(tmp_path: Path, point: str, action: str) -> None:
     h = make_harness(tmp_path)
     h.connect()
     profile = h.profile
@@ -428,7 +529,7 @@ def test_forget_recovers_without_provider_in_fresh_service(tmp_path: Path, point
         h.service.forget(profile["id"], h.generation)
     restarted = fresh_service(h)
     h.api.calls.clear()
-    restarted.credentials.recover(h.journal.unresolved()[0]["operation_id"], "retry_delete")
+    restarted.credentials.recover(h.journal.unresolved()[0]["operation_id"], action)
     assert h.config.load().raw["canvas"] == {"sync_enabled": False}
     assert h.stores.read(canvas_role(profile["id"])) is None
     assert h.api.calls == []

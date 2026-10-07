@@ -32,10 +32,11 @@ from uls.config.schema import (
     SemesterWorkspaceCfg,
     UlsConfig,
 )
-from uls.domain.errors import PolicyDeniedError, ProviderUnavailableError
-from uls.intake.identity import provider_binding_id
+from uls.domain.errors import PolicyDeniedError, ProviderUnavailableError, SourceUnavailableError
+from uls.intake.identity import derivative_marker, provider_binding_id
 from uls.intake.models import RequestType
-from uls.intake.worker import IntakeReconcileRequired
+from uls.intake.registry import StaticLayoutReconcileRequired
+from uls.intake.worker import INTAKE_DERIVATIVE_OPERATION, IntakeReconcileRequired
 from uls.retrieval.chunking import derivative_parts, page_chunks
 from uls.runtime import build_intake_worker
 from uls.state.reader import ReadOnlyState
@@ -756,3 +757,528 @@ def test_ai_study_note_moved_into_upload_is_never_registered_as_source(tmp_path:
         drive.files[file_id] = replace(drive.files[file_id], app_properties={"uls_r": "AI_STUDY_NOTE"})
         assert system["worker"].sync() == 0
         assert system["state"].get_intake_item_by_provider_file("google_drive", file_id) is None
+
+
+def _drift_course_layout(drive: InMemoryDriveWorker) -> None:
+    course_id = "synthetic-course-0"
+    drive.files[course_id] = replace(drive.files[course_id], parents=("wrong-parent",))
+
+
+@pytest.mark.parametrize("complete", [False, True], ids=["required-input-missing", "normal-request"])
+def test_direct_claim_validates_layout_before_any_request_effect(
+    tmp_path: Path, complete: bool
+) -> None:
+    with _system(tmp_path) as harness:
+        worker, state, notion, drive = (
+            harness["worker"], harness["state"], harness["notion"], harness["drive"]
+        )
+        worker.run_once(process=False)
+        page = _assign_request(notion)
+        page["Submitted"] = True
+        if complete:
+            page["Course"] = ["synthetic-course-page-0"]
+        receipt = state.get_request_receipt(page["Request Key"])
+        assert receipt is not None
+        receipts_before = state.list_request_receipts()
+        jobs_before = state.list_jobs(limit=1000)
+        notion.events.clear()
+        _drift_course_layout(drive)
+
+        with pytest.raises(StaticLayoutReconcileRequired):
+            worker.claim_request(receipt.request_key)
+
+        assert notion.events == []
+        assert state.get_request_receipt(receipt.request_key) == receipt
+        assert state.list_request_receipts() == receipts_before
+        assert state.list_jobs(limit=1000) == jobs_before
+
+
+def test_direct_create_input_request_validates_before_pending_intent_or_notion(
+    tmp_path: Path,
+) -> None:
+    with _system(tmp_path) as harness:
+        worker, state, notion, drive = (
+            harness["worker"], harness["state"], harness["notion"], harness["drive"]
+        )
+        worker.run_once(process=False)
+        item = state.list_intake_items()[0]
+        item_before = item
+        receipts_before = state.list_request_receipts()
+        notion.events.clear()
+        _drift_course_layout(drive)
+
+        with pytest.raises(StaticLayoutReconcileRequired):
+            worker.create_input_request(
+                item.intake_id, request_type=RequestType.FILE_DETAILS.value
+            )
+
+        assert notion.events == []
+        assert state.get_intake_item(item.intake_id) == item_before
+        assert state.list_request_receipts() == receipts_before
+
+
+def test_direct_process_item_validates_layout_before_request_page_read(tmp_path: Path) -> None:
+    with _system(tmp_path) as harness:
+        worker, state, notion, drive = (
+            harness["worker"], harness["state"], harness["notion"], harness["drive"]
+        )
+        worker.run_once(process=False)
+        assign = _assign_request(notion)
+        assign.update({"Course": ["synthetic-course-page-0"], "Submitted": True})
+        worker.claim_request(assign["Request Key"])
+        details = _details_request(notion)
+        details.update(
+            {
+                "Course": ["synthetic-course-page-0"],
+                "Kind": "TRANSCRIPT",
+                "Actual Date": {"start": "2026-09-01", "end": None},
+                "Session Mode": "NEW",
+                "Submitted": True,
+            }
+        )
+        worker.claim_request(details["Request Key"])
+        item_id = state.list_jobs(limit=1000)[0].target_entity_id
+        receipts_before = state.list_request_receipts()
+        jobs_before = state.list_jobs(limit=1000)
+        notion.events.clear()
+        _drift_course_layout(drive)
+
+        with pytest.raises(StaticLayoutReconcileRequired):
+            worker.process_item(item_id)
+
+        assert notion.events == []
+        assert state.list_request_receipts() == receipts_before
+        assert state.list_jobs(limit=1000) == jobs_before
+
+
+def test_run_layout_barrier_precedes_request_scan_and_preserves_local_claims(
+    tmp_path: Path,
+) -> None:
+    with _system(tmp_path, duplicate=True) as harness:
+        worker, state, notion, drive = (
+            harness["worker"], harness["state"], harness["notion"], harness["drive"]
+        )
+        worker.run_once(process=False)
+        requests = list(notion.data_sources["synthetic-requests"])
+        first, second = requests[:2]
+        first.update({"Course": ["synthetic-course-page-0"], "Submitted": True})
+        worker.claim_request(first["Request Key"])
+        details = _details_request(notion)
+        details.update(
+            {
+                "Course": ["synthetic-course-page-0"],
+                "Kind": "TRANSCRIPT",
+                "Actual Date": {"start": "2026-09-01", "end": None},
+                "Session Mode": "NEW",
+                "Submitted": True,
+            }
+        )
+        worker.claim_request(details["Request Key"])
+        second.update({"Course": ["synthetic-course-page-1"], "Submitted": True})
+        receipts_before = state.list_request_receipts()
+        jobs_before = state.list_jobs(limit=1000)
+        assert any(_job_status(job) == "PENDING" for job in jobs_before)
+
+        notion.events.clear()
+        readiness_calls: list[bool] = []
+        worker.readiness = lambda: readiness_calls.append(True) or {}
+        _drift_course_layout(drive)
+        result = worker.run_once(sync=False)
+
+        assert result["status"] == "failed"
+        assert notion.events == []
+        assert readiness_calls == []
+        assert state.list_request_receipts() == receipts_before
+        assert state.list_jobs(limit=1000) == jobs_before
+
+
+def test_item_layout_failure_suppresses_later_request_reads_and_error_projection(
+    tmp_path: Path,
+) -> None:
+    with _system(tmp_path) as harness:
+        worker, state, notion, drive = (
+            harness["worker"], harness["state"], harness["notion"], harness["drive"]
+        )
+        worker.run_once(process=False)
+        assign = _assign_request(notion)
+        assign.update({"Course": ["synthetic-course-page-0"], "Submitted": True})
+        worker.claim_request(assign["Request Key"])
+        details = _details_request(notion)
+        details.update(
+            {
+                "Course": ["synthetic-course-page-0"],
+                "Kind": "TRANSCRIPT",
+                "Actual Date": {"start": "2026-09-01", "end": None},
+                "Session Mode": "NEW",
+                "Submitted": True,
+            }
+        )
+        worker.claim_request(details["Request Key"])
+        receipts_before = state.list_request_receipts()
+        jobs_before = state.list_jobs(limit=1000)
+        assert any(_job_status(job) == "PENDING" for job in jobs_before)
+
+        notion.events.clear()
+        original_fresh_item_context = worker._fresh_item_layout_context
+
+        def drift_before_item_validation(workspace: Any) -> Any:
+            _drift_course_layout(drive)
+            return original_fresh_item_context(workspace)
+
+        worker._fresh_item_layout_context = drift_before_item_validation
+        result = worker.run_once(sync=False)
+
+        assert result["failed"] == 1
+        assert notion.events == [("list", "synthetic-requests")]
+        assert not any(
+            event[0] == "read" and event[1] == "synthetic-requests"
+            for event in notion.events
+        )
+        assert not any(event[1] == "synthetic-intake" for event in notion.events)
+        assert state.list_request_receipts() == receipts_before
+        jobs_after = state.list_jobs(limit=1000)
+        assert len(jobs_after) == len(jobs_before)
+        assert all(_job_status(job) != "PENDING" for job in jobs_after)
+        assert state.list_intake_items()[0].last_error_code is not None
+
+
+@pytest.mark.parametrize(
+    ("failure", "error_type", "prior_attempt"),
+    [
+        pytest.param("metadata-source", SourceUnavailableError, False, id="metadata-source-no-prior"),
+        pytest.param("metadata-source", SourceUnavailableError, True, id="metadata-source-prior"),
+        pytest.param("metadata-provider", ProviderUnavailableError, False, id="metadata-provider-no-prior"),
+        pytest.param("metadata-provider", ProviderUnavailableError, True, id="metadata-provider-prior"),
+        pytest.param("content", SourceUnavailableError, False, id="content-read-no-prior"),
+        pytest.param("content", SourceUnavailableError, True, id="content-read-prior"),
+        pytest.param("metadata-tuple", None, False, id="metadata-tuple-no-prior"),
+        pytest.param("metadata-tuple", None, True, id="metadata-tuple-prior"),
+        pytest.param("metadata-private", None, False, id="metadata-private-no-prior"),
+        pytest.param("metadata-private", None, True, id="metadata-private-prior"),
+        pytest.param("content-mismatch", None, False, id="content-mismatch-no-prior"),
+        pytest.param("content-mismatch", None, True, id="content-mismatch-prior"),
+    ],
+)
+def test_existing_derivative_candidate_readback_failure_needs_review_without_requeue(
+    tmp_path: Path,
+    failure: str,
+    error_type: type[Exception] | None,
+    prior_attempt: bool,
+) -> None:
+    with _system(tmp_path) as harness:
+        worker, state, notion, drive = (
+            harness["worker"], harness["state"], harness["notion"], harness["drive"]
+        )
+        worker.run_once(process=False)
+        assign = _assign_request(notion)
+        assign.update({"Course": ["synthetic-course-page-0"], "Submitted": True})
+        worker.claim_request(assign["Request Key"])
+        details = _details_request(notion)
+        details.update(
+            {
+                "Course": ["synthetic-course-page-0"],
+                "Kind": "TRANSCRIPT",
+                "Actual Date": {"start": "2026-09-01", "end": None},
+                "Session Mode": "NEW",
+                "Submitted": True,
+            }
+        )
+        worker.claim_request(details["Request Key"])
+
+        original_stage = worker._stage_derivative
+        captured: dict[str, str] = {}
+
+        def seed_candidate(**kwargs: Any) -> DriveMetadata:
+            item = kwargs["item"]
+            source_hash = kwargs["source_hash"]
+            source_version = kwargs["source_version"]
+            entity_id = kwargs["entity_id"]
+            schema = kwargs["schema"]
+            processor_version = kwargs["processor_version"]
+            artifact_role = kwargs["artifact_role"]
+            marker = derivative_marker(
+                provider=worker.provider,
+                source_file_id=item.provider_file_id,
+                source_hash=source_hash,
+                source_version=source_version,
+                entity_app_id=entity_id,
+                normalized_schema=schema,
+                processor_version=processor_version,
+                artifact_role=artifact_role,
+            )
+            parent_id = kwargs["parent_id"]
+            candidate_id = "seeded-derivative"
+            content = kwargs["content"]
+            drive.files[candidate_id] = DriveMetadata(
+                file_id=candidate_id,
+                name=kwargs["name"],
+                mime_type="text/markdown",
+                parents=(parent_id,),
+                size=len(content),
+                app_properties=marker,
+                **_privacy(),
+            )
+            drive.contents[candidate_id] = content
+            captured["attempt_key"] = worker._operation_key(
+                INTAKE_DERIVATIVE_OPERATION,
+                worker.provider,
+                item.provider_file_id,
+                source_hash,
+                source_version,
+                entity_id,
+                schema,
+                processor_version,
+                artifact_role,
+            )
+            if prior_attempt:
+                state.record_provider_write_attempt(
+                    operation=INTAKE_DERIVATIVE_OPERATION,
+                    operation_key=captured["attempt_key"],
+                    provider=worker.provider,
+                    target_id=None,
+                    response_state="PREPARED",
+                )
+            else:
+                assert state.get_provider_write_attempt(captured["attempt_key"]) is None
+            original_read_metadata = drive.read_metadata
+            original_download = drive.download
+
+            def failing_read_metadata(file_id: str) -> DriveMetadata:
+                if file_id == candidate_id and failure in {
+                    "metadata-source",
+                    "metadata-provider",
+                }:
+                    raise error_type("synthetic candidate metadata read failure")
+                metadata = original_read_metadata(file_id)
+                if file_id == candidate_id and failure == "metadata-tuple":
+                    return replace(metadata, parents=("unexpected-parent",))
+                if file_id == candidate_id and failure == "metadata-private":
+                    return replace(metadata, owned_by_me=False)
+                return metadata
+
+            def failing_download(file_id: str) -> bytes:
+                if file_id == candidate_id and failure == "content":
+                    raise error_type("synthetic candidate content read failure")
+                if file_id == candidate_id and failure == "content-mismatch":
+                    return original_download(file_id) + b"changed after marker selection"
+                return original_download(file_id)
+
+            drive.read_metadata = failing_read_metadata
+            drive.download = failing_download
+            return original_stage(**kwargs)
+
+        worker._stage_derivative = seed_candidate
+        notion.events.clear()
+        result = worker.run_once(sync=False)
+
+        assert result["failed"] == 1
+        attempt = state.get_provider_write_attempt(captured["attempt_key"])
+        if prior_attempt:
+            assert attempt is not None and attempt.response_state == "PREPARED"
+        else:
+            assert attempt is None
+        failed_jobs = state.list_jobs(limit=1000)
+        assert len(failed_jobs) == 1
+        assert _job_status(failed_jobs[0]) == "NEEDS_REVIEW"
+        assert failed_jobs[0].error_class == "AMBIGUOUS"
+        assert state.list_intake_items()[0].status == "RECONCILE_REQUIRED"
+        assert notion.data_sources["synthetic-sessions"][0].get("Recording Status") != "Ready"
+        assert not any(
+            event[0] == "create"
+            and len(event) > 4
+            and event[4].get("uls_r") == "normalized_transcript"
+            for event in drive.events
+        )
+        assert not any(
+            event[0] == "update" and event[1] == "synthetic-sessions"
+            for event in notion.events
+        )
+
+        derivative_creates_before = [
+            event
+            for event in drive.events
+            if event[0] == "create"
+            and len(event) > 4
+            and event[4].get("uls_r") == "normalized_transcript"
+        ]
+        session_pointer_updates_before = [
+            event
+            for event in notion.events
+            if event[0] == "update"
+            and event[1] == "synthetic-sessions"
+            and "Normalized Transcript" in event[3]
+        ]
+        second = worker.run_once(sync=False)
+        assert second["processed"] == 0
+        assert [
+            event
+            for event in drive.events
+            if event[0] == "create"
+            and len(event) > 4
+            and event[4].get("uls_r") == "normalized_transcript"
+        ] == derivative_creates_before
+        assert [
+            event
+            for event in notion.events
+            if event[0] == "update"
+            and event[1] == "synthetic-sessions"
+            and "Normalized Transcript" in event[3]
+        ] == session_pointer_updates_before == []
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "dispatch",
+        "metadata-read",
+        "content-read",
+        "content-mismatch",
+        "metadata-tuple",
+        "metadata-private",
+    ],
+)
+def test_new_derivative_uncertainty_needs_review_without_requeue(
+    tmp_path: Path, failure: str
+) -> None:
+    with _system(tmp_path) as harness:
+        worker, state, notion, drive = (
+            harness["worker"], harness["state"], harness["notion"], harness["drive"]
+        )
+        worker.run_once(process=False)
+        assign = _assign_request(notion)
+        assign.update({"Course": ["synthetic-course-page-0"], "Submitted": True})
+        worker.claim_request(assign["Request Key"])
+        details = _details_request(notion)
+        details.update(
+            {
+                "Course": ["synthetic-course-page-0"],
+                "Kind": "TRANSCRIPT",
+                "Actual Date": {"start": "2026-09-01", "end": None},
+                "Session Mode": "NEW",
+                "Submitted": True,
+            }
+        )
+        worker.claim_request(details["Request Key"])
+
+        original_stage = worker._stage_derivative
+        original_create = drive.create_file_with_marker
+        original_read_metadata = drive.read_metadata
+        original_download = drive.download
+        candidate_ids: list[str] = []
+        captured: dict[str, str] = {}
+
+        def create_then_fail_if_selected(
+            parent_id: str,
+            name: str,
+            mime_type: str,
+            content: bytes,
+            marker: dict[str, str],
+        ) -> DriveMetadata:
+            created = original_create(parent_id, name, mime_type, content, marker)
+            if mime_type == "text/markdown":
+                candidate_ids.append(created.file_id)
+                if failure == "dispatch":
+                    raise ProviderUnavailableError("synthetic lost derivative create response")
+            return created
+
+        def fail_stage(**kwargs: Any) -> DriveMetadata:
+            item = kwargs["item"]
+            captured["attempt_key"] = worker._operation_key(
+                INTAKE_DERIVATIVE_OPERATION,
+                worker.provider,
+                item.provider_file_id,
+                kwargs["source_hash"],
+                kwargs["source_version"],
+                kwargs["entity_id"],
+                kwargs["schema"],
+                kwargs["processor_version"],
+                kwargs["artifact_role"],
+            )
+            assert state.get_provider_write_attempt(captured["attempt_key"]) is None
+            drive.create_file_with_marker = create_then_fail_if_selected
+
+            def read_metadata_with_failure(file_id: str) -> DriveMetadata:
+                if file_id in candidate_ids and failure == "metadata-read":
+                    raise ProviderUnavailableError("synthetic derivative metadata read failure")
+                metadata = original_read_metadata(file_id)
+                if file_id in candidate_ids and failure == "metadata-tuple":
+                    return replace(metadata, parents=("unexpected-parent",))
+                if file_id in candidate_ids and failure == "metadata-private":
+                    return replace(metadata, owned_by_me=False)
+                return metadata
+
+            def download_with_failure(file_id: str) -> bytes:
+                if file_id in candidate_ids and failure == "content-read":
+                    raise SourceUnavailableError("synthetic derivative content read failure")
+                content = original_download(file_id)
+                if file_id in candidate_ids and failure == "content-mismatch":
+                    return content + b"changed after create"
+                return content
+
+            drive.read_metadata = read_metadata_with_failure
+            drive.download = download_with_failure
+            return original_stage(**kwargs)
+
+        worker._stage_derivative = fail_stage
+        notion.events.clear()
+        result = worker.run_once(sync=False)
+
+        assert result["failed"] == 1
+        assert len(candidate_ids) == 1
+        derivative_creates = [
+            event
+            for event in drive.events
+            if event[0] == "create"
+            and len(event) > 4
+            and event[4].get("uls_r") == "normalized_transcript"
+        ]
+        assert len(derivative_creates) == 1
+        attempt = state.get_provider_write_attempt(captured["attempt_key"])
+        assert attempt is not None
+        assert attempt.response_state == "UNKNOWN"
+        assert attempt.error_class == "AMBIGUOUS"
+        failed_jobs = state.list_jobs(limit=1000)
+        assert len(failed_jobs) == 1
+        assert _job_status(failed_jobs[0]) == "NEEDS_REVIEW"
+        assert failed_jobs[0].error_class == "AMBIGUOUS"
+        assert state.list_intake_items()[0].status == "RECONCILE_REQUIRED"
+        assert notion.data_sources["synthetic-sessions"][0].get("Recording Status") != "Ready"
+        assert not any(
+            event[0] == "update" and event[1] == "synthetic-sessions"
+            for event in notion.events
+        )
+        assert not any(event[0] == "move" for event in drive.events)
+
+        second = worker.run_once(sync=False)
+        assert second["processed"] == 0
+        assert [
+            event
+            for event in drive.events
+            if event[0] == "create"
+            and len(event) > 4
+            and event[4].get("uls_r") == "normalized_transcript"
+        ] == derivative_creates
+        assert not any(
+            event[0] == "update" and event[1] == "synthetic-sessions"
+            for event in notion.events
+        )
+
+
+def test_in_memory_trashed_marker_is_not_searchable_and_metadata_read_fails(
+    tmp_path: Path,
+) -> None:
+    with _system(tmp_path) as harness:
+        drive = harness["drive"]
+        marker = {"uls_v": "1", "uls_t": "trashed-marker", "uls_r": "normalized_transcript"}
+        drive.files["trashed-derivative"] = DriveMetadata(
+            file_id="trashed-derivative",
+            name="trashed.md",
+            mime_type="text/markdown",
+            parents=("synthetic-derived",),
+            trashed=True,
+            app_properties=marker,
+            **_privacy(),
+        )
+        assert drive.search_marker(marker) == []
+        with pytest.raises(SourceUnavailableError):
+            drive.read_metadata("trashed-derivative")

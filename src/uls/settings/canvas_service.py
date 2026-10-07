@@ -92,6 +92,43 @@ def _display(value: object, token: str) -> str:
     return value[:2048]
 
 
+def validated_canvas_profile(raw: dict[str, Any]) -> dict[str, str]:
+    """Validate saved profile metadata without credential or provider I/O."""
+    profile = raw.get("canvas", {}).get("profile")
+    if (not isinstance(profile, dict) or set(profile) != {
+            "id", "origin", "user_id", "display_name", "credential"}
+            or not all(isinstance(value, str) for value in profile.values())):
+        raise failure("NOT_CONFIGURED")
+    try:
+        normalized = validate_canvas_origin(profile["origin"]).origin
+    except CanvasCheckError:
+        normalized = ""
+    if (normalized != profile["origin"] or profile["credential"] != "keyring"
+            or canvas_profile_id(normalized, _identifier(profile["user_id"])) != profile["id"]):
+        raise failure("NOT_CONFIGURED")
+    return profile
+
+
+def validated_canvas_registry(section: dict[str, Any]) -> dict[str, Any]:
+    """Validate saved course metadata without credential or provider I/O."""
+    registry = section.get("registry")
+    if not isinstance(registry, dict) or set(registry) != {"term_id", "courses"}:
+        raise failure("NOT_CONFIGURED")
+    term = _identifier(registry["term_id"])
+    rows = registry["courses"]
+    if not isinstance(rows, list) or not 1 <= len(rows) <= 20:
+        raise failure("NOT_CONFIGURED")
+    ids: set[str] = set()
+    for row in rows:
+        if (not isinstance(row, dict) or set(row) != {"course_id", "term_id", "name", "code"}
+                or _identifier(row["term_id"]) != term
+                or _identifier(row["course_id"]) in ids
+                or not isinstance(row["name"], str) or not isinstance(row["code"], str)):
+            raise failure("NOT_CONFIGURED")
+        ids.add(row["course_id"])
+    return registry
+
+
 class CanvasService:
     def __init__(self, credential_service: CredentialService, *,
                  verifier: Verifier = verify_canvas_user,
@@ -132,37 +169,10 @@ class CanvasService:
         return loaded
 
     def _profile(self, raw: dict[str, Any]) -> dict[str, str]:
-        profile = raw.get("canvas", {}).get("profile")
-        if (not isinstance(profile, dict) or set(profile) != {
-                "id", "origin", "user_id", "display_name", "credential"}
-                or not all(isinstance(value, str) for value in profile.values())):
-            raise failure("NOT_CONFIGURED")
-        try:
-            normalized = validate_canvas_origin(profile["origin"]).origin
-        except CanvasCheckError:
-            normalized = ""
-        if (normalized != profile["origin"] or profile["credential"] != "keyring"
-                or canvas_profile_id(normalized, _identifier(profile["user_id"])) != profile["id"]):
-            raise failure("NOT_CONFIGURED")
-        return profile
+        return validated_canvas_profile(raw)
 
     def _registry(self, section: dict[str, Any]) -> dict[str, Any]:
-        registry = section.get("registry")
-        if not isinstance(registry, dict) or set(registry) != {"term_id", "courses"}:
-            raise failure("NOT_CONFIGURED")
-        term = _identifier(registry["term_id"])
-        rows = registry["courses"]
-        if not isinstance(rows, list) or not 1 <= len(rows) <= 20:
-            raise failure("NOT_CONFIGURED")
-        ids: set[str] = set()
-        for row in rows:
-            if (not isinstance(row, dict) or set(row) != {"course_id", "term_id", "name", "code"}
-                    or _identifier(row["term_id"]) != term
-                    or _identifier(row["course_id"]) in ids
-                    or not isinstance(row["name"], str) or not isinstance(row["code"], str)):
-                raise failure("NOT_CONFIGURED")
-            ids.add(row["course_id"])
-        return registry
+        return validated_canvas_registry(section)
 
     def _token_bytes(self, token: str) -> bytes:
         if (not isinstance(token, str) or not token or len(token) > 4096

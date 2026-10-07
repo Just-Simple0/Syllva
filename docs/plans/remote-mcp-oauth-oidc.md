@@ -1,5 +1,7 @@
 # Remote MCP OAuth 2.0 / OIDC 인증 전환 설계 (계획서 · rev3)
 
+> 현재 적용 안내 (2026-10-04): 아래 배정·리뷰·단계·권한 문구는 작성 당시의 역사 기록입니다. 새 작업은 프로젝트 `AGENTS.md`가 참조하는 현행 전역 정책과 `handoff.md`의 최신 재개 기준을 따릅니다. 과거 모델/강도·quota 예외·commit/push 허용을 새 작업으로 승계하지 않습니다. 원래 검토된 bytes와 해시는 당시 Git snapshot/리뷰 패키지의 근거로 유지하며, 이 안내를 추가한 현재 파일을 그 원본과 동일하다고 주장하지 않습니다.
+
 **작성:** Astra (총괄) · **상태:** rev3 (rev2에 대한 독립 리뷰 2건 모두 반영)
 **리뷰 기록 (rev2, 2026-09-18):**
 - insane-review (웹 ChatGPT GPT-5.6 Sol 매우 높음): **REVISE** (.insane-review/response_Syllva_20260918_001955_64120_2e0daa.md).

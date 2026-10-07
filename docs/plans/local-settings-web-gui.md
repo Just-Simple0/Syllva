@@ -1,8 +1,15 @@
 # Syllva Local Settings Web GUI — implementation plan
 
-Date: 2026-09-27. Status: **Plan accepted (web ChatGPT and Gemini GO). GUI-1 implemented; Gemini
-final rereview GO; web Pro rereview closed every finding except 5C, whose fix (credential journal
-machines and role binding) awaits rereview.**
+Date: 2026-09-27. Current status (2026-10-04): **GUI-1/2/3 implemented and integrated locally.
+The accepted bounded GUI-2/3 bundle and the three later PR13 findings are separate; those later
+findings remain unresolved. GUI-4 has an unaccepted draft and resumes after the newly requested
+actual-material flow validation. GUI-5 remains paused. Current state and human scope are recorded
+in `handoff.md` and `local-settings-web-gui-task-record.md`.**
+
+Model/profile selection, skills, independent-review applicability and effort, safety, notifications,
+and delivery permissions follow the current global Codex policies referenced by `AGENTS.md`.
+Dated review outcomes and assignments below preserve historical observations, not current routing
+or authorization. Earlier reviewed document bytes remain in their original packages/Git snapshots.
 
 Supported platforms for GUI-1: macOS and Linux. **GUI-1 is unavailable on Windows**: `uls setup`
 refuses to start there before creating any runtime state or listener. Windows replacement support is
@@ -13,13 +20,16 @@ Windows reparse-point/owner-check work is designed, reviewed, and accepted (pend
 
 - Risk: high. This work joins credential enrollment, provider identity, configuration mutation,
   remote-access settings, and a new user-facing flow.
-- Technical worker assignment: `gpt-6-luna` / max, selected for local HTTP session security,
-  cross-process locking/CAS, and crash-safe multi-store recovery. Astra/root retains plan acceptance.
-- Required plan reviews: independent web ChatGPT review through `insane-review`; independent
-  `gemini-3.8-flash-high` UI-flow review.
+- Historical technical worker assignment: `gpt-6-luna` / max, selected for local HTTP session security,
+  cross-process locking/CAS, and crash-safe multi-store recovery. The current orchestrator retains
+  plan acceptance; resolve its identity from the installed global profile and runtime.
+- Required new plan/final reviews follow current global policy: independent native web ChatGPT,
+  plus independent Gemini ultra for material UI/design/flow changes. Historical Gemini high
+  observations below are not evidence that a new ultra gate passed.
 - Gemini plan review (2026-09-27): **REVISE**. This revision integrates its ten required findings.
-- Web ChatGPT plan review (2026-09-28): **REVISE** with required findings R1-R3. This revision
-  integrates those findings; targeted rereview is pending and the plan is not yet accepted.
+- Web ChatGPT plan review (2026-09-28, historical): **REVISE** with required findings R1-R3.
+  This revision integrated those findings; targeted rereview was pending at that checkpoint.
+  Later scope-specific acceptance is recorded in the current task record.
 - Interaction evidence for the user-facing flow is frozen separately in
   `docs/plans/local-settings-web-gui-interaction-mock.md` and must be included in UI-flow rereviews.
 - Current implementation candidate under `scripts/knu_lms_*` is not accepted and must not be
@@ -62,7 +72,7 @@ The GUI must not change the frozen ULS rules:
   and are never promoted by this UI.
 - worker credentials and read-only MCP credentials remain separate where the provider supports it.
 - no public sharing is introduced for convenience.
-- provider/source identity is verified before it becomes a durable academic binding.
+- A provider ID may be saved as Configured/Unverified for setup, but only exact read-only identity evidence can make it a verified active academic binding. Credential presence and manual ID entry never establish readiness or authorize a consumer.
 - the settings server is never exposed through Remote MCP or the Cloudflare Tunnel.
 
 The first version is not a generic YAML editor, an arbitrary secret manager, a Notion schema
@@ -183,20 +193,25 @@ saved steps; secret fields themselves are never repopulated.
 
 Each step has a durable completion predicate independent of transient live-check health:
 
-- **Storage roots / Notion parent** — the required retrieval-side credential declarations and verified
-  provider/root IDs are durably bound. Worker credentials are required here only when the corresponding
-  write/intake feature is enabled.
+- **Storage roots / Notion parent** — durable configured values and live verification are shown as
+  separate facts. Keep the existing `legacy_global` retrieval path usable without new Academic fields.
+  Worker credentials are required only when the corresponding feature is explicitly enabled.
 - **Canvas** — the Canvas profile identity, selected term, and selected course registry are durably
   bound for the active setup path.
-- **Academic scope** — every selected course has the required durable Drive/Notion mappings for the
-  features the user enabled.
-- **Automation** — each automation has an explicit durable Enabled/Disabled choice; enabling a
-  write-capable automation additionally requires its worker credential/readiness prerequisites.
+- **Academic scope** — the saved Canvas term/course IDs join exact Course Keys, and every mapping
+  required by the explicitly enabled feature path is present. Manual or discovered IDs may be saved
+  as Configured/Unverified, but that state is not verified readiness and cannot be consumed by
+  semester retrieval or worker processing.
+- **Automation** — each feature has an explicit durable Enabled/Disabled choice; the schema default
+  `worker.enabled=True` is not a user choice. Enabled intake/study processing additionally requires
+  the exact selected-semester mappings and purpose-specific worker readiness. Disabled features need
+  no worker credentials and keep their existing mappings editable.
 - **Remote Access** — either a valid Remote MCP setup is durably configured, or the user explicitly
   chooses `Skip / keep Remote MCP disabled`. Skipping completes this optional step without enabling
   public remote access.
-- **Check** — all required durable predicates above are complete. Current live checks are shown as
-  diagnostics but a later transient provider outage does not erase previously completed setup steps.
+- **Check** — show structural setup, verified binding, runtime state, and transient health separately.
+  A transient provider outage does not erase a previously verified receipt, but an unverified mapping
+  or absent process observation never becomes Ready by inference.
 
 Every card distinguishes four facts instead of one ambiguous "connected" badge:
 
@@ -332,14 +347,29 @@ study-note path does not use it.
 
 ### 5.6 Academic settings
 
-The Academic page joins already-verified provider identities; it does not infer them from names.
+The Academic page uses exact saved Canvas registry IDs and does not infer identity from names. It may
+save structurally valid manual or discovered provider IDs as Configured/Unverified. Only an explicit
+read-only provider verification can make an exact mapping a verified active binding.
 
-- active semester;
+- Academic active semester for course and worker context;
+- the independent MCP retrieval lane/semester selector (`retrieval.notion_lane` and
+  `retrieval.semester`), shown separately with its own reviewed diff; changing Academic semester
+  never changes retrieval scope, and retrieval defaults remain `legacy_global` with an empty semester;
 - Canvas course selection and its verified provider IDs;
 - Syllva course keys/names/codes/sections;
-- Drive course-folder binding;
-- Notion course portal/data-source binding;
+- all Drive and Notion mappings required by the enabled feature path, including the current
+  `resolve_semester_workspace` worker-required set when intake/study processing is enabled;
+- optional portal/upload mappings when configured, without making them prerequisites unless an
+  accepted consumer contract requires them;
 - per-course readiness status.
+
+Readiness is purpose-specific: `legacy_global` retrieval remains independent of Academic selection,
+Canvas joins, and Academic receipts; `semester_workspace` retrieval requires only the selected
+workspace's verified read-side mappings. Enabled intake/study processing additionally requires the
+explicit Academic semester, full current worker resolver mappings, and separate worker-role evidence.
+Credential presence and syntactically valid IDs alone never promote readiness. Existing configs with
+no Academic active-semester field remain loadable and are not silently migrated; the GUI shows
+Not selected and withholds Academic/worker readiness until the user chooses and verifies one.
 
 Module position, `1주차` labels, file names, and LMS titles never auto-create Session No, lecture
 date, completion state, or content approval.
@@ -349,14 +379,17 @@ date, completion state, or content approval.
 Expose user-meaningful controls:
 
 - intake worker enabled/disabled;
-- poll interval within validated bounds;
+- a desired poll interval, validated to exact integer 1–1440 only when the interval itself changes;
+  toggle-only edits preserve an existing positive legacy value and its YAML scalar bytes;
 - study-note feature enabled/disabled;
 - Canvas scheduled sync only after its separate ingestion bundle is accepted;
-- last run, next run, current lock/busy state, and actionable failure summary when available.
+- last run, next run only when an external scheduler provides verified readback, current lock/busy
+  state, and actionable failure summary when observed. Otherwise schedule/next run is Not reported.
 
 Turning a feature on must not silently run a live provider mutation during the settings POST.
 Activation is saved first; the UI then presents the explicit start/restart action and readiness
-requirements.
+requirements. Saving never starts a process or scheduler. Manual provider IDs remain
+Configured/Unverified until the purpose-specific read-only check succeeds.
 
 ### 5.8 Remote Access
 
@@ -396,8 +429,11 @@ Treat the existing config file as canonical for core non-secret settings.
    overwriting concurrent manual/operator edits. The frontend preserves all dirty non-secret form
    values and offers a reload/reapply flow rather than discarding them.
 5. Before final apply, show a redacted semantic diff containing only allowlisted non-secret changes,
-   secret readiness transitions (`Not configured -> Configured`) and restart impact. Never render
-   submitted secret values, protected-file contents, or provider payloads in the diff.
+   secret readiness transitions (`Not configured -> Configured`) and restart impact. For GUI-4
+   verified bindings, server-issued receipts and choice evidence are included before the final
+   candidate hash/diff is generated; the user reviews that final candidate, and Apply cannot append
+   fields afterward. Never render submitted secret values, protected-file contents, or provider
+   payloads in the diff.
 6. Acquire the shared cross-process config lock before the final raw-byte reread. Inside that critical
    section, recompute the generation, compare it to the caller's expected generation, bind the already
    validated candidate to that exact generation, then write through a same-directory owner-only
@@ -405,6 +441,19 @@ Treat the existing config file as canonical for core non-secret settings.
    ownership targets.
 7. Read the file back and validate again while still holding the lock before reporting `Saved`, then
    release the lock. All other GUI/CLI config writers must use this same primitive.
+
+GUI-4 keeps structurally valid Configured/Unverified mappings on a separate Apply path without proof;
+changed mappings invalidate their old receipts in that reviewed candidate and do not unblock
+semester consumers. In the verified path, the server proof binds the pre-receipt candidate, original
+generation, transaction, exact mapping/purpose, provider identity, and credential-role revisions.
+The backend adds the receipt and a non-circular digest of the explicit Enabled/Disabled choice tuple,
+computes final candidate H1, and presents H1's redacted diff. Apply rechecks and commits those exact
+bytes; any draft, proof, or choice change requires a fresh preview/review.
+
+After an interrupted replace, compare authoritative raw config bytes with both the exact reviewed H1
+and the original raw snapshot for its generation. H1 means committed and requires exact readback;
+the original means not committed and permits only journal-safe recovery; a third hash is Partial and
+requires manual review. Do not promise rollback or that old bytes survive a crash after replacement.
 
 Do not accept arbitrary JSON-pointer/YAML-path writes from the browser.
 
@@ -508,14 +557,23 @@ reviewed cross-platform service controller exists.
 
 For every restart-scoped service, define a stable fingerprint over exactly the settings that service
 loads. Settings records/derives the **desired** fingerprint from the saved config. The worker and
-Remote MCP process report or durably record the **applied/loaded** fingerprint only after successful
-startup with that configuration; the setup process exposes its current startup fingerprint directly.
-`Restart required` is derived from desired != applied, never from an in-browser dirty flag. It clears
-only after observing the service successfully running with the desired fingerprint. A failed restart
-retains the mismatch and the fixed error state; a service that is stopped is distinct from one that is
-running the previous fingerprint. If a service is currently healthy under an older fingerprint, the UI
-may show `Ready — running previous settings` plus the separate `Restart required` modifier; it must not
-imply that newly saved settings are active.
+Remote MCP process report or durably record the **applied/loaded** fingerprint only from the
+process that successfully loaded the settings and reached its actual execution boundary: after a
+one-shot worker acquires its worker lock, or after an MCP transport successfully enters service.
+Constructing a worker/server, Settings Save, credential presence, or a matching config hash cannot
+report applied. The setup process exposes its own startup fingerprint directly.
+`Restart required` is derived from desired != the fingerprint loaded by a confirmed active
+restart-scoped service, never from an in-browser dirty flag. It clears only after observing that
+service successfully running with the desired fingerprint. A failed restart retains the mismatch and
+fixed error state; a service that is stopped is distinct from one running the previous fingerprint.
+Show `Not reported`, `Stopped`, `Running with current settings`, and
+`Running with previous settings` as distinct states; a previous fingerprint never receives a
+Ready label. For a one-shot worker, an active older run is Running with previous settings and the
+next invocation loads desired values; after it exits, show Stopped with last-load details and do not
+invent a daemon restart requirement. If a restart-scoped MCP process is stopped, show Stopped plus the
+explicit start action and desired/last-loaded difference. Readiness remains separate from process
+state. Failed or unobservable startup does not replace the last successful observation or fabricate a
+current one.
 
 For every GUI-2/GUI-3 credential change, state whether the new credential is consumed live or include
 a non-secret credential revision in the affected service's desired/applied fingerprint. Never derive
@@ -667,7 +725,9 @@ No LMS source download/import in this bundle.
 
 ### GUI-4 — Academic and automation settings
 
-Course/semester bindings, worker/study-note toggles, restart-required state, readiness dependency graph.
+Academic active semester and exact course bindings; independent MCP retrieval scope; worker/study-note
+toggles; desired interval; purpose-specific verification; truthful stopped/current/previous/unreported
+runtime observations and restart state; feature-gated readiness dependency graph.
 
 ### GUI-5 — Remote MCP settings
 
@@ -742,6 +802,16 @@ Security/contract tests must prove at least:
   close/relaunch, clears after a successful external/explicit restart onto the desired fingerprint,
   remains after failed restart, and handles multiple saves before restart; `Save` never silently
   restarts services;
+- applied fingerprints originate only from successful process loads at the worker-lock or MCP
+  serving boundary; stopped, previous-fingerprint, and unreported states remain distinct from
+  readiness, and no state is inferred from Save, credentials, or object construction;
+- Academic active semester and MCP retrieval scope have separate values/diffs; legacy_global remains
+  usable without Academic selection, while semester_workspace requires only its own read-side proof;
+- manual provider IDs can be saved as Configured/Unverified but cannot be consumed as verified
+  bindings; worker/study readiness follows enabled-feature dependencies and explicit user choices;
+- GUI-only interval edits reject non-integer/out-of-range changes while toggle-only saves preserve
+  legacy positive YAML interval bytes; scheduler cadence and next run remain Not reported without
+  verified scheduler readback;
 - first-run step 1 cannot request course-specific mappings before Canvas course selection exists;
 - first-run durable completion predicates are deterministic: disabled optional Remote Access can be
   skipped without enabling it, worker credentials block only enabled write/intake features, and a

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import pathlib
 import sys
+from types import SimpleNamespace
 from typing import Any
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
@@ -33,8 +34,10 @@ from uls.adapters.drive.worker import (
     DRIVE_FOLDER_MIME,
     DriveMetadata,
     DriveWorkerCapabilities,
+    GoogleDriveWorkerAdapter,
     InMemoryDriveWorker,
     ensure_marked_folder,
+    require_private_ownership,
 )
 from uls.domain.errors import (
     PolicyDeniedError,
@@ -200,6 +203,55 @@ def test_response_loss_then_recovery_finds_and_reuses_the_durably_created_folder
     )
     assert recovered.file_id == create_events_before[0][1]
     assert len([event for event in port.events if event[0] == "create"]) == 1
+
+
+class _RawMetadataService:
+    def __init__(self, metadata: dict[str, Any]) -> None:
+        self.metadata = metadata
+
+    def files(self) -> _RawMetadataService:
+        return self
+
+    def get(self, **_: Any) -> SimpleNamespace:
+        return SimpleNamespace(execute=lambda: dict(self.metadata))
+
+
+def _raw_metadata() -> dict[str, Any]:
+    return {
+        "id": "drive-file-1",
+        "name": "Drive file",
+        "mimeType": "text/plain",
+        "parents": [],
+        "trashed": False,
+        "ownedByMe": True,
+        "permissions": [{"type": "user", "role": "owner"}],
+        "capabilities": {"canEdit": True, "canMoveItemWithinDrive": True},
+        "appProperties": {},
+    }
+
+
+def test_google_metadata_parser_treats_only_absent_drive_id_as_personal() -> None:
+    metadata = GoogleDriveWorkerAdapter(_RawMetadataService(_raw_metadata())).read_metadata(
+        "drive-file-1"
+    )
+    assert metadata.drive_id is None
+
+
+@pytest.mark.parametrize("drive_id", [None, False, 0, 1, [], {}, ("shared",)])
+def test_google_metadata_parser_rejects_present_non_string_drive_id(drive_id: Any) -> None:
+    raw = _raw_metadata()
+    raw["driveId"] = drive_id
+    with pytest.raises(SourceUnavailableError, match="Drive driveId is malformed"):
+        GoogleDriveWorkerAdapter(_RawMetadataService(raw)).read_metadata("drive-file-1")
+
+
+def test_google_metadata_parser_preserves_shared_drive_id_for_private_guard() -> None:
+    raw = _raw_metadata()
+    raw["driveId"] = "shared-drive-1"
+    metadata = GoogleDriveWorkerAdapter(_RawMetadataService(raw)).read_metadata("drive-file-1")
+    assert metadata.drive_id == "shared-drive-1"
+    with pytest.raises(PolicyDeniedError, match="shared drive"):
+        require_private_ownership(metadata)
 
 
 class _FailingSearchPort:

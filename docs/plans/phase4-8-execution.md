@@ -1,5 +1,7 @@
 # Phase 4–8 execution record
 
+> 현재 적용 안내 (2026-10-04): 아래 배정·리뷰·단계·권한 문구는 작성 당시의 역사 기록입니다. 새 작업은 프로젝트 `AGENTS.md`가 참조하는 현행 전역 정책과 `handoff.md`의 최신 재개 기준을 따릅니다. 과거 모델/강도·quota 예외·commit/push 허용을 새 작업으로 승계하지 않습니다. 원래 검토된 bytes와 해시는 당시 Git snapshot/리뷰 패키지의 근거로 유지하며, 이 안내를 추가한 현재 파일을 그 원본과 동일하다고 주장하지 않습니다.
+
 Updated: 2026-09-09. Active scope is **Phase4 only**; Phase5–8 and push are excluded.
 
 Current implementation rev10 fixes both root-confirmed rev9 web blockers: incomplete bounded page coverage and false audit after human restoration during effect-marker persistence. Full tests pass **866 per Python3.11.16/3.14.7**; both exact126-file source-copy and actual attachment reconstructions pass **731 tests**. Root full-flow, crash/recovery and before/after probes, compilation and projection checks pass. Ruff188/mypy74 remain non-clean; no new normalized type errors.

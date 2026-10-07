@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 
 import pytest
-from _settings_support import FETCH, HOST, NAVIGATE, ORIGIN, make_harness
+from _settings_support import FETCH, HOST, NAVIGATE, ORIGIN, make_harness, reviewed_apply
 from starlette.testclient import TestClient
 
 from uls.settings.security import BOOTSTRAP_TTL_SECONDS, SESSION_COOKIE
@@ -325,3 +325,77 @@ def test_overview_reports_replacement_notice_and_separates_runtime_health(tmp_pa
     assert isinstance(data["local_runtime_healthy"], bool)
     assert "status" not in data
     assert data["doctor"]["credential_readiness"] == "Not checked in Local Settings"
+
+
+def test_overview_projects_schema3_recovery_choices_without_journal_binding(tmp_path):
+    h = make_harness(tmp_path)
+    h.signed_in()
+    generation = h.store.load().generation
+    preview = h.store.preview("general", {"system.timezone": "UTC"}, generation)
+
+    def interrupt(point):
+        if point == "after_config_replace_recorded":
+            raise RuntimeError("simulated interruption")
+
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        h.store.apply("general", {"system.timezone": "UTC"}, generation, h.journal,
+                      candidate_hash=preview["candidate_hash"], fault_hook=interrupt)
+
+    response = h.client.get("/api/v1/overview", headers=FETCH)
+    assert response.status_code == 200, response.text
+    pending = response.json()["pending_operations"]
+    assert len(pending) == 1
+    assert pending[0]["action_kind"] == "config_apply"
+    assert pending[0]["same_target"] is True
+    assert pending[0]["choices"] == [
+        {"id": "resume", "label": "Resume repair"},
+        {"id": "leave", "label": "Leave as-is"},
+    ]
+    assert "binding" not in pending[0]
+    assert "config_path" not in str(pending[0])
+
+
+def test_overview_uses_only_second_read_and_omits_record_that_became_terminal(tmp_path, monkeypatch):
+    h = make_harness(tmp_path)
+    h.signed_in()
+    applied = reviewed_apply(h.store, "general", {"system.timezone": "UTC"}, h.journal)
+    operation_id = applied["operation_id"]
+    assert h.journal.read(operation_id)["phase"] == "complete"
+    monkeypatch.setattr(h.journal, "unresolved", lambda: [{
+        "operation_id": operation_id,
+        "action_kind": "credential_replacement",
+        "phase": "repair_required",
+        "fields": ["stale-private-field"],
+        "binding": h.store.binding(),
+    }])
+
+    response = h.client.get("/api/v1/overview", headers=FETCH)
+
+    assert response.status_code == 200
+    assert response.json()["pending_operations"] == []
+
+
+def test_overview_sanitizes_unreadable_and_foreign_recovery_projections(tmp_path, monkeypatch):
+    h = make_harness(tmp_path)
+    h.signed_in()
+    local = h.store.binding()
+    foreign = {**local, "config_path": str(tmp_path / "other.yaml")}
+    private_marker = "projection-private-field-7d3c"
+    monkeypatch.setattr(h.journal, "unresolved", lambda: [
+        {"operation_id": "f" * 32, "action_kind": "credential_replacement", "phase": "staged",
+         "fields": [private_marker], "binding": local},
+        {"operation_id": "e" * 32, "action_kind": "config_apply", "phase": "config_replaced",
+         "fields": [private_marker], "binding": foreign},
+    ])
+
+    response = h.client.get("/api/v1/overview", headers=FETCH)
+
+    assert response.status_code == 200
+    pending = response.json()["pending_operations"]
+    assert len(pending) == 2
+    assert all(item == {"same_target": False, "choices": []} for item in pending)
+    assert private_marker not in response.text
+    assert "operation_id" not in response.text
+    assert "action_kind" not in response.text
+    assert "phase" not in response.text
+    assert "config_path" not in response.text

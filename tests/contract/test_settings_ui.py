@@ -37,7 +37,14 @@ def test_write_only_secret_cleared_on_cancel_and_failure(scenario):
 def test_failed_credential_verification_focuses_row_and_retries_with_empty_secret():
     result = _scenario("credential_failure")
     assert result["focusedAfterCredential"] == "credential-heading-notion-mcp"
-    assert "verification failed" in result["credentialStatus"].lower()
+    assert result["credentialState"] == "Not configured"
+    assert result["credentialMessage"] == "Credential verification failed. No credential was saved."
+    assert result["notice"] == "Credential verification failed. No credential was saved."
+    assert result["dialogHelpBeforePost"] == "The credential will be verified before it is saved."
+    assert "previous credential" not in result["dialogTextBeforePost"].lower()
+    assert "unchanged" not in result["dialogTextBeforePost"].lower()
+    assert "previous credential" not in result["visibleTextAfterCredential"].lower()
+    assert "unchanged" not in result["visibleTextAfterCredential"].lower()
     assert result["retryLabel"] == "Try again"
     assert result["focusOnRetry"] == "credential-secret" and result["secretEmptyOnRetry"]
 
@@ -45,14 +52,295 @@ def test_failed_credential_verification_focuses_row_and_retries_with_empty_secre
 def test_successful_credential_save_focuses_live_status_row():
     result = _scenario("credential_success")
     assert result["focusedAfterCredential"] == "credential-status-notion-mcp"
-    assert result["credentialStatus"] == "Credential saved and verified."
+    assert result["credentialState"] == "Configured"
+    assert result["credentialMessage"] == "Credential saved and verified."
+    assert result["credentialStatus"] == "Configured"
+
+
+def test_initial_worker_rejection_with_unconfigured_canvas_uses_fresh_empty_card_copy():
+    result = _scenario("credential_failure_unconfigured_worker")
+    assert result["canvasProfileMissing"]
+    assert result["credentialState"] == "Not configured"
+    assert result["credentialMessage"] == "Credential verification failed. No credential was saved."
+    assert result["notice"] == result["credentialMessage"]
+    assert "previous credential" not in result["visibleTextAfterCredential"].lower()
+    assert "unchanged" not in result["visibleTextAfterCredential"].lower()
+    assert result["secretValue"] == "" and not result["secretInText"] and not result["secretInUrl"]
 
 
 def test_failed_credential_replacement_offers_replacement_retry():
     result = _scenario("credential_replace_failure")
     assert result["focusedAfterCredential"] == "credential-heading-notion-mcp"
+    assert result["dialogHelpBeforePost"] == "The new credential will be verified before it replaces the configured credential."
+    assert "previous credential" not in result["dialogTextBeforePost"].lower()
+    assert "unchanged" not in result["dialogTextBeforePost"].lower()
+    assert result["credentialState"] == "Configured"
+    assert result["credentialMessage"] == "Credential verification failed. The previous credential is unchanged."
+    assert result["notice"] == "Credential verification failed. The previous credential is unchanged."
     assert result["retryLabel"] == "Retry replacement"
     assert result["focusOnRetry"] == "credential-secret" and result["secretEmptyOnRetry"]
+
+
+@pytest.mark.parametrize("scenario", [
+    "credential_failure_card_refresh_failed", "credential_failure_pending", "credential_failure_generic",
+])
+def test_uncertain_credential_failure_uses_neutral_copy_and_never_claims_storage_outcome(scenario):
+    result = _scenario(scenario)
+    assert result["credentialMessage"] == "Credential change could not be confirmed. Check the refreshed card and any recovery item before retrying."
+    assert result["notice"] == result["credentialMessage"]
+    assert "no credential was saved" not in result["visibleTextAfterCredential"].lower()
+    assert "previous credential" not in result["visibleTextAfterCredential"].lower()
+    assert "unchanged" not in result["visibleTextAfterCredential"].lower()
+    assert "nothing changed" not in result["visibleTextAfterCredential"].lower()
+    assert result["secretValue"] == "" and not result["secretInText"] and not result["secretInUrl"]
+    if scenario == "credential_failure_card_refresh_failed":
+        assert result["credentialReadbackFailed"]
+        assert result["credentialState"] == "Status not refreshed"
+
+
+def test_superseded_credential_get_cannot_confirm_initial_set_outcome():
+    result = _scenario("credential_failure_superseded_readback")
+    assert result["credentialReadbackCount"] == 3
+    assert result["credentialMessage"] == "Credential change could not be confirmed. Check the refreshed card and any recovery item before retrying."
+    assert result["notice"] == result["credentialMessage"]
+    assert "no credential was saved" not in result["visibleTextAfterCredential"].lower()
+    assert "nothing changed" not in result["visibleTextAfterCredential"].lower()
+    assert result["secretValue"] == "" and not result["secretInText"] and not result["secretInUrl"]
+
+
+def test_independent_credential_reconcile_cannot_replace_newer_canvas_submission_notice():
+    result = _scenario("credential_independent_readback_canvas_b")
+    pending = "Checking and saving the credential…"
+    neutral = "Credential change could not be confirmed. Check the refreshed card and any recovery item before retrying."
+    assert result["aOwnedReadbackHeld"] and result["independentReadbackHeld"]
+    assert result["canvasBPostHeld"] and result["pendingNotice"] == pending
+    assert result["pendingDialogOpen"] and result["pendingSecretCleared"]
+    assert result["pendingCanvasAction"] == "Configure Canvas LMS"
+    assert result["afterIndependentCredentialMessage"] == neutral
+    assert result["afterIndependentNotice"] == pending
+    assert result["afterIndependentDialogOpen"] and result["afterIndependentSecretCleared"]
+    assert result["afterStaleOwnedReadbackNotice"] == pending
+    assert result["finalNotice"] == "Canvas account connected."
+    assert result["finalDialogOpen"] is False and result["finalSecretCleared"]
+    assert result["canvasReadback"]["state"] == "partial"
+    assert result["canvasReadback"]["credential_present"] is True
+
+
+def test_credential_outcome_invalidation_does_not_clear_newer_canvas_notice():
+    result = _scenario("credential_reconcile_clear_canvas_b")
+    pending = "Checking and saving the credential…"
+    neutral = "Credential change could not be confirmed. Check the refreshed card and any recovery item before retrying."
+    assert result["aOwnedReadbackHeld"] and result["firstIndependentReadbackHeld"]
+    assert result["afterNoBIndependentNotice"] == neutral
+    assert result["secondIndependentReadbackHeld"] and result["canvasBPostHeld"]
+    assert result["pendingNotice"] == pending and result["pendingDialogOpen"]
+    assert result["afterOutcomeInvalidationNotice"] == pending
+    assert result["afterOutcomeInvalidationCardMessage"] == ""
+    assert result["finalNotice"] == "Canvas account connected."
+    assert result["finalDialogOpen"] is False and result["finalSecretCleared"]
+
+
+def test_recovery_cards_render_only_server_choices_with_kind_specific_help():
+    result = _scenario("recovery_projection")
+    assert len(result["recoveryCards"]) == 2
+    config_apply, credential = result["recoveryCards"]
+    assert "Resume repair checks the settings file" in config_apply["text"]
+    assert config_apply["labels"] == ["Resume repair", "Leave as-is"]
+    assert "Choose an available recovery action" in credential["text"]
+    assert "Resume repair checks the settings file" not in credential["text"]
+    assert credential["labels"] == ["Continue credential replacement", "Restore previous credential"]
+
+
+def test_older_overview_response_cannot_restore_a_recovery_card():
+    result = _scenario("overview_ordering")
+    assert result["pendingLabels"] == []
+    assert "stale-overview-operation" not in result["pendingText"]
+
+
+def test_new_credential_submission_supersedes_late_prior_result_and_focus():
+    result = _scenario("credential_generation_race")
+    pending = "Credential change is being checked. The refreshed status will show the result."
+    assert result["aReadbackHeld"]
+    assert result["pendingMessage"] == pending and result["pendingNotice"] == pending
+    assert result["pendingRetry"] == [] and result["pendingFocus"] == "credential-secret"
+    assert "no credential was saved" not in result["pendingVisible"].lower()
+    assert "previous credential" not in result["pendingVisible"].lower()
+    assert result["afterLateAMessage"] == result["afterLateANotice"] == pending
+    assert result["afterLateARetry"] == [] and result["afterLateAFocus"] == "credential-secret"
+    assert "no credential was saved" not in result["afterLateAVisible"].lower()
+    assert "previous credential" not in result["afterLateAVisible"].lower()
+    assert result["secretFieldAfterRace"] == ""
+
+
+@pytest.mark.parametrize("scenario", [
+    "credential_overview_after_b",
+    "credential_overview_inflight_b_success",
+    "credential_overview_inflight_b_failure",
+])
+def test_role_refresh_cannot_publish_overview_after_newer_credential_submission(scenario):
+    result = _scenario(scenario)
+    pending = "Credential change is being checked. The refreshed status will show the result."
+    assert result["bPostHeld"] and result["pendingNotice"] == pending
+    assert result["pendingMessage"] == pending and result["pendingRetry"] == []
+    assert result["pendingDialogOpen"] and result["pendingSecretCleared"]
+    assert result["pendingFocus"] == "credential-secret"
+    assert result["afterANotice"] == pending and result["afterAMessage"] == pending
+    assert result["afterARetry"] == [] and result["afterADialogOpen"] and result["afterASecretCleared"]
+    assert result["afterAFocus"] == "credential-secret"
+    if scenario.endswith("_success"):
+        assert result["staleOverviewLabels"] == []
+    elif scenario == "credential_overview_after_b":
+        assert result["overviewCountAfterA"] == 1
+
+
+def test_independent_configured_readback_clears_stale_set_failure_before_canvas_response():
+    result = _scenario("credential_independent_refresh")
+    assert result["beforeIndependentMessage"] == "Credential verification failed. No credential was saved."
+    assert result["beforeIndependentRetry"] == ["Try again"]
+    assert result["independentCanvasHeld"]
+    assert "no credential was saved" not in result["duringIndependentCanvasVisible"].lower()
+    assert "try again" not in [label.lower() for label in result["duringIndependentCanvasButtons"]]
+    assert "Replace credential" in result["duringIndependentCanvasButtons"]
+    assert "No credential was saved" not in result["duringIndependentCanvasMessage"]
+    assert "no credential was saved" not in result["afterIndependentCanvasVisible"].lower()
+    assert "Replace credential" in result["afterIndependentCanvasButtons"]
+
+
+@pytest.mark.parametrize(("action", "outcome", "expected"), [
+    ("connect", "success", "Canvas account connected."),
+    ("connect", "failure", "Canvas connection could not be confirmed. Check the refreshed Canvas status before retrying."),
+    ("replace", "success", "Canvas credential replacement completed."),
+    ("replace", "failure", "Canvas credential replacement could not be confirmed. Check the refreshed Canvas status and any recovery item before retrying."),
+    ("forget", "success", "Canvas connection forgotten."),
+    ("forget", "failure", "Canvas forget could not be confirmed. Check the refreshed Canvas status and any recovery item before retrying."),
+])
+def test_canvas_actions_use_fixed_action_specific_success_and_neutral_notices(action, outcome, expected):
+    result = _scenario("canvas_notice_" + action + "_" + outcome)
+    assert result["notice"] == expected
+    assert result["notice"] in result["visibleTextAfterAction"]
+    assert "The previous credential is unchanged." not in result["visibleTextAfterAction"]
+    assert "Nothing changed." not in result["visibleTextAfterAction"]
+    assert result["secretCleared"]
+
+
+def test_canvas_success_with_missing_readback_uses_neutral_copy_and_keeps_origin_guidance():
+    unconfirmed = _scenario("canvas_notice_connect_unconfirmed")
+    assert unconfirmed["notice"] == "Canvas connection could not be confirmed. Check the refreshed Canvas status before retrying."
+    assert "The previous credential is unchanged." not in unconfirmed["visibleTextAfterAction"]
+    origin = _scenario("canvas_destination_not_allowed")
+    assert origin["canvasOriginError"] == "Error: Only public Canvas addresses are supported."
+    assert origin["canvasOriginError"] in origin["visibleTextAfterAction"]
+
+
+def test_canvas_success_matches_production_partial_ready_and_forget_snapshot_shapes():
+    connected = _scenario("canvas_notice_connect_success")
+    assert connected["notice"] == "Canvas account connected."
+    assert connected["canvasReadback"]["state"] == "partial"
+    assert connected["canvasReadback"]["profile"]["origin"] == "https://canvas.example.edu"
+    assert connected["canvasReadback"]["credential_present"] is True
+    assert connected["canvasReadback"]["can_mutate"] is True
+    assert connected["canvasReadback"]["pending_operations"] == []
+
+    replaced = _scenario("canvas_notice_replace_success")
+    assert replaced["notice"] == "Canvas credential replacement completed."
+    assert replaced["canvasReadback"]["state"] == "ready"
+    assert replaced["canvasReadback"]["profile"]["id"] == "p1"
+    assert replaced["canvasReadback"]["profile"]["origin"] == "https://canvas.example.edu"
+    assert replaced["canvasReadback"]["credential_present"] is True
+    assert replaced["canvasReadback"]["can_mutate"] is True
+    assert replaced["canvasReadback"]["pending_operations"] == []
+
+    forgotten = _scenario("canvas_notice_forget_success")
+    assert forgotten["notice"] == "Canvas connection forgotten."
+    assert forgotten["canvasReadback"]["state"] == "not_configured"
+    assert forgotten["canvasReadback"]["profile"] is None
+    assert forgotten["canvasReadback"]["credential_present"] is False
+    assert forgotten["canvasReadback"]["pending_operations"] == []
+
+
+@pytest.mark.parametrize(("scenario", "state", "present", "can_mutate", "pending_count"), [
+    ("canvas_notice_connect_missing", "partial", False, True, 0),
+    ("canvas_notice_connect_pending", "partial", True, False, 1),
+    ("canvas_notice_connect_error", "error", False, True, 0),
+    ("canvas_notice_replace_wrong_profile", "partial", True, True, 0),
+])
+def test_canvas_success_stays_neutral_without_current_production_snapshot_proof(scenario, state, present, can_mutate, pending_count):
+    result = _scenario(scenario)
+    snapshot = result["canvasReadback"]
+    assert snapshot["state"] == state
+    assert snapshot["credential_present"] is present
+    assert snapshot["can_mutate"] is can_mutate
+    assert len(snapshot["pending_operations"]) == pending_count
+    if scenario == "canvas_notice_replace_wrong_profile":
+        assert snapshot["profile"]["id"] == "other-profile"
+    assert result["notice"].endswith("before retrying.")
+    assert "The previous credential is unchanged." not in result["visibleTextAfterAction"]
+    assert "Nothing changed." not in result["visibleTextAfterAction"]
+
+
+def test_canvas_success_with_superseded_readback_stays_neutral():
+    result = _scenario("canvas_notice_connect_superseded")
+    assert result["supersededReadbackHeld"] is True
+    assert result["canvasReadback"]["state"] == "partial"
+    assert result["notice"] == "Canvas connection could not be confirmed. Check the refreshed Canvas status before retrying."
+    assert "The previous credential is unchanged." not in result["visibleTextAfterAction"]
+
+
+def test_canvas_readback_session_expiry_keeps_terminal_session_surface_visible():
+    result = _scenario("canvas_notice_connect_session_ended")
+    assert result["connectionVisible"] is True
+    assert result["ordinaryHeaderHidden"] is True
+    assert "session" in result["endedMessage"].lower()
+    assert result["endedMessage"] in result["visibleTextAfterAction"]
+    assert "Canvas connection could not be confirmed." not in result["visibleTextAfterAction"]
+
+
+@pytest.mark.parametrize(("action", "outcome", "expected"), [
+    ("connect", "success", "Canvas account connected."),
+    ("connect", "neutral", "Canvas account connected."),
+    ("replace", "success", "Canvas credential replacement completed."),
+    ("replace", "neutral", "Canvas credential replacement completed."),
+    ("forget", "success", "Canvas connection forgotten."),
+    ("forget", "neutral", "Canvas connection forgotten."),
+])
+def test_new_canvas_submission_owns_notice_and_dialog_over_late_action_result(action, outcome, expected):
+    result = _scenario(f"canvas_mutation_race_{action}_{outcome}")
+    pending = "Checking and saving the credential…"
+    assert result["aReadbackHeld"] and result["bPostHeld"]
+    assert result["pendingNotice"] == pending
+    assert result["pendingDialogOpen"] and result["pendingSecretCleared"]
+    assert result["pendingFocus"] == ("credential-cancel" if action == "forget" else "credential-secret")
+    assert result["afterANotice"] == pending
+    assert result["afterADialogOpen"] and result["afterASecretCleared"]
+    assert result["afterAFocus"] == result["pendingFocus"]
+    assert result["finalNotice"] == expected
+    assert result["finalDialogOpen"] is False and result["finalSecretCleared"]
+
+
+def test_late_canvas_notice_cannot_replace_new_credential_submission_notice():
+    result = _scenario("canvas_notice_connect_credential_b")
+    pending = "Credential change is being checked. The refreshed status will show the result."
+    assert result["aReadbackHeld"] and result["bPostHeld"]
+    assert result["pendingNotice"] == pending and result["pendingDialogOpen"]
+    assert result["pendingSecretCleared"] and result["pendingFocus"] == "credential-secret"
+    assert result["afterANotice"] == pending and result["afterADialogOpen"]
+    assert result["afterASecretCleared"] and result["afterAFocus"] == "credential-secret"
+    assert result["finalNotice"] == "Credential verification failed. No credential was saved."
+    assert result["finalDialogOpen"] is False
+
+
+def test_successful_credential_forget_keeps_existing_removed_message():
+    result = _scenario("credential_forget_success")
+    assert result["notice"] == "Credential removed."
+    assert result["credentialMessage"] == "Credential removed."
+    assert result["credentialState"] == "Not configured"
+
+
+def test_successful_external_file_detach_keeps_removed_message_when_environment_source_remains():
+    result = _scenario("credential_detach_external_success")
+    assert result["notice"] == "Credential removed."
+    assert result["credentialMessage"] == "Credential removed."
+    assert result["credentialState"] == "External"
 
 
 @pytest.mark.parametrize("scenario", ["credential_session_replaced", "credential_session_expired", "credential_session_unreachable"])

@@ -987,6 +987,79 @@ def reconcile_operation(
     return {"effects": classification, "next_action": next_action or "complete"}
 
 
+_CREDENTIAL_RECOVERY_KINDS = frozenset({
+    "credential_enrollment", "credential_replacement", "credential_forget", "credential_detach",
+})
+_DELETE_EFFECTS = frozenset({"backup_delete", "credential_delete", "staged_delete", "staging_cleanup"})
+
+
+def recovery_choices(record: dict[str, Any]) -> list[dict[str, str]]:
+    """Return fixed UI recovery actions justified by the validated record shape.
+
+    This is a projection, not proof that current stores still match the record.
+    CredentialService.recover re-evaluates it while holding the role, record,
+    and config locks, then applies the existing live branch/effect guards.
+    """
+
+    if not isinstance(record, dict) or record.get("phase") in TERMINAL_PHASES:
+        return []
+    action_kind = record.get("action_kind")
+    schema_version = record.get("schema_version")
+    branch = record.get("branch")
+    planned = record.get("planned_effects")
+    effects = record.get("effects")
+    schema = ACTION_SCHEMAS.get(action_kind) if isinstance(action_kind, str) else None
+    if (schema is None or not isinstance(planned, list) or not isinstance(effects, dict)
+            or branch not in schema["branches"] or planned != list(schema["branches"][branch])):
+        return []
+
+    if action_kind == "config_apply" and schema_version == 3 and branch == "primary":
+        return [{"id": "resume", "label": "Resume repair"},
+                {"id": "leave", "label": "Leave as-is"}]
+    if action_kind not in _CREDENTIAL_RECOVERY_KINDS or schema_version != 4:
+        return []
+
+    def verified(name: str) -> bool:
+        effect = effects.get(name)
+        return isinstance(effect, dict) and effect.get("status") in _VERIFIED
+
+    remaining: list[str] = []
+    for index, name in enumerate(planned):
+        if not verified(name):
+            remaining = planned[index:]
+            break
+
+    if branch == "restore":
+        resume_label = "Continue credential restoration"
+    elif branch in {"abandon", "reject"}:
+        resume_label = "Retry staged cleanup"
+    else:
+        resume_label = {
+            "credential_enrollment": "Finish credential setup",
+            "credential_replacement": "Continue credential replacement",
+            "credential_forget": "Continue credential removal",
+            "credential_detach": "Finish external credential detach",
+        }[action_kind]
+
+    choices = [{"id": "resume", "label": resume_label}]
+    if branch == "primary":
+        if action_kind == "credential_enrollment":
+            if verified("credential_stage") and not verified("config_commit") and "credential_promote" not in effects:
+                choices.append({"id": "leave", "label": "Remove staged credential"})
+        elif action_kind == "credential_replacement":
+            if verified("credential_stage") and not any(name in effects for name in (
+                    "credential_backup", "credential_promote", "config_commit")):
+                choices.append({"id": "leave", "label": "Discard staged replacement"})
+            if verified("credential_promote") and not verified("config_commit"):
+                choices.append({"id": "restore", "label": "Restore previous credential"})
+        elif action_kind in {"credential_forget", "credential_detach"}:
+            choices.append({"id": "leave", "label": "Leave as-is"})
+
+    if remaining and all(name in _DELETE_EFFECTS for name in remaining):
+        choices.append({"id": "retry_delete", "label": "Retry local deletion"})
+    return choices
+
+
 def replacement_recovery_action(
     record: dict[str, Any], *, active_state: str, config_generation: str,
     backup_state: str | None = None,

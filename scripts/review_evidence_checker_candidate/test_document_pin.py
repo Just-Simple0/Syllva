@@ -57,7 +57,7 @@ def test_compiled_document_pin_is_one_exact_independent_entry():
         DOCUMENT_PATH: (COMPILED_DOCUMENT_SHA256, COMPILED_DOCUMENT_SIZE)
     }
     assert DOCUMENT_PATH not in CANDIDATE.PINNED_SOURCE_PINS
-    assert len(CANDIDATE.PINNED_SOURCE_PINS) == 9
+    assert len(CANDIDATE.PINNED_SOURCE_PINS) == 11
     assert CANDIDATE.PINNED_SOURCE_ROOT == "/Users/admin/Project/Syllva"
     assert CANDIDATE.PINNED_SOURCE_ROOT_DEVICE == 16777230
     assert CANDIDATE.PINNED_SOURCE_ROOT_INODE == 22556999

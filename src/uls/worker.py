@@ -9,12 +9,14 @@ import hashlib
 import io
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from uls.adapters.drive.google import GoogleDriveReader
 from uls.adapters.drive.worker import (
     DRIVE_FOLDER_MIME,
+    DriveMetadata,
     GoogleDriveWorkerAdapter,
     require_private_ownership,
 )
@@ -65,6 +67,59 @@ def load_sources(path: Path, course_keys: set[str]) -> list[dict[str, Any]]:
     return raw
 
 
+_DERIVED_OUTCOME_UNKNOWN_PREFIX = "DERIVED_OUTCOME_UNKNOWN:"
+
+
+class DerivedOutcomeUnknownError(RuntimeError):
+    """A dispatched derivative write did not pass exact provider readback."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(f"{_DERIVED_OUTCOME_UNKNOWN_PREFIX} {message}")
+
+
+class _NativeIngestStateAdapter:
+    """Map this native writer's ambiguous failure to the frozen job outcome."""
+
+    def __init__(self, state: Any) -> None:
+        self._state = state
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._state, name)
+
+    def fail_job(
+        self,
+        job_id: str,
+        error_class: str | None = None,
+        last_error: str | None = None,
+        *,
+        error: str | BaseException | None = None,
+    ) -> Any:
+        if isinstance(error, DerivedOutcomeUnknownError):
+            return self._state.complete_job(
+                job_id,
+                status="NEEDS_REVIEW",
+                error_class="AMBIGUOUS",
+                last_error="Derived Drive write outcome requires reconciliation",
+            )
+        return self._state.fail_job(
+            job_id,
+            error_class=error_class,
+            last_error=last_error,
+            error=error,
+        )
+
+
+@dataclass(frozen=True)
+class _DerivedExpectation:
+    source_provider: str
+    source_file_id: str
+    entity_id: str
+    parent_id: str
+    marker: tuple[tuple[str, str], ...]
+    mime_type: str
+    content: bytes
+
+
 class DerivedDriveWriter:
     """Create immutable staged derivatives; never overwrite an originating file."""
     def __init__(self, service: Any, reader: GoogleDriveReader, folder_id: str) -> None:
@@ -73,6 +128,7 @@ class DerivedDriveWriter:
         # parsing/ownership boundary enforced for the semester intake layout,
         # instead of duplicating a second, looser Drive metadata read here.
         self._metadata_port = GoogleDriveWorkerAdapter(service)
+        self._expectations: dict[str, _DerivedExpectation] = {}
 
     def write_staged_derived(self, source_ref: SourceRef, entity_id: str, content: str) -> SourceRef:
         from googleapiclient.http import MediaIoBaseUpload  # type: ignore[import-untyped]
@@ -81,31 +137,86 @@ class DerivedDriveWriter:
         # after initial setup (or the configured ID can simply be wrong), so
         # this is re-verified on every write rather than assumed once.
         folder = self._metadata_port.read_metadata(self.folder_id)
-        if folder.mime_type != DRIVE_FOLDER_MIME:
+        if folder.file_id != self.folder_id or folder.trashed or folder.mime_type != DRIVE_FOLDER_MIME:
             raise SourceUnavailableError('Derived folder is unavailable')
         require_private_ownership(folder, context='Derived folder')
-        result = self._files.create(body={
+        marker = {'uls_entity': entity_id, 'uls_source': source_ref.file_id}
+        content_bytes = content.encode('utf-8')
+        request = self._files.create(body={
             'name': entity_id + '.staged.md', 'parents': [self.folder_id],
-            'mimeType': 'text/markdown', 'appProperties': {'uls_entity': entity_id, 'uls_source': source_ref.file_id},
-        }, media_body=MediaIoBaseUpload(io.BytesIO(content.encode()), mimetype='text/markdown', resumable=False),
-            fields='id', supportsAllDrives=True).execute()
-        file_id = result['id']
-        if file_id == source_ref.file_id:
-            raise PolicyDeniedError('Derived upload returned the original source identity')
+            'mimeType': 'text/markdown', 'appProperties': marker,
+        }, media_body=MediaIoBaseUpload(io.BytesIO(content_bytes), mimetype='text/markdown', resumable=False),
+            fields='id', supportsAllDrives=True)
+        try:
+            result = request.execute()
+        except Exception:  # noqa: BLE001 - a dispatched request may have an unknown outcome
+            raise DerivedOutcomeUnknownError('Derived create outcome is indeterminate') from None
+        file_id = result.get('id') if isinstance(result, dict) else None
+        if not isinstance(file_id, str) or not file_id or file_id == source_ref.file_id:
+            raise DerivedOutcomeUnknownError('Derived create returned an invalid new identity')
+        expectation = _DerivedExpectation(
+            source_provider=source_ref.provider,
+            source_file_id=source_ref.file_id,
+            entity_id=entity_id,
+            parent_id=self.folder_id,
+            marker=tuple(sorted(marker.items())),
+            mime_type='text/markdown',
+            content=content_bytes,
+        )
+        self._verify_readback(file_id, expectation)
+        self._expectations[file_id] = expectation
         return SourceRef('google_drive', file_id, f'https://drive.google.com/file/d/{file_id}/view')
 
     def validate_derived(self, staged_ref: SourceRef, content: str) -> bool:
-        return self.reader.download(staged_ref.file_id).decode('utf-8') == content
+        expectation = self._expectation_for(staged_ref)
+        if content.encode('utf-8') != expectation.content:
+            raise DerivedOutcomeUnknownError('Staged derivative content differs from its writer intent')
+        self._verify_readback(staged_ref.file_id, expectation)
+        return True
 
     def publish_staged_derived(self, staged_ref: SourceRef, source_ref: SourceRef,
                               entity_id: str, content: str) -> SourceRef:
         if staged_ref.provider != 'google_drive' or staged_ref.file_id == source_ref.file_id:
             raise PolicyDeniedError('Publication cannot overwrite a canonical source')
+        expectation = self._expectation_for(staged_ref)
+        if (
+            source_ref.provider != expectation.source_provider
+            or source_ref.file_id != expectation.source_file_id
+            or entity_id != expectation.entity_id
+        ):
+            raise DerivedOutcomeUnknownError('Publication source or entity differs from writer intent')
         # Publication is an immutable file reference, then Notion atomically
         # replaces its URL property. Old derivatives remain recoverable.
         if not self.validate_derived(staged_ref, content):
             raise SourceUnavailableError('Staged derivative readback failed')
         return staged_ref
+
+    def _expectation_for(self, staged_ref: SourceRef) -> _DerivedExpectation:
+        if not isinstance(staged_ref, SourceRef) or staged_ref.provider != 'google_drive':
+            raise DerivedOutcomeUnknownError('Staged derivative reference is not a Drive identity')
+        expectation = self._expectations.get(staged_ref.file_id)
+        if expectation is None:
+            raise DerivedOutcomeUnknownError('Staged derivative has no writer-local intent')
+        return expectation
+
+    def _verify_readback(self, file_id: str, expected: _DerivedExpectation) -> None:
+        try:
+            metadata: DriveMetadata = self._metadata_port.read_metadata(file_id)
+            if (
+                metadata.file_id != file_id
+                or metadata.trashed
+                or metadata.parents != (expected.parent_id,)
+                or metadata.mime_type != expected.mime_type
+                or metadata.app_properties != dict(expected.marker)
+            ):
+                raise DerivedOutcomeUnknownError('Derived metadata differs from writer intent')
+            require_private_ownership(metadata, context='Derived file')
+            if self.reader.download(file_id) != expected.content:
+                raise DerivedOutcomeUnknownError('Derived bytes differ from writer intent')
+        except DerivedOutcomeUnknownError:
+            raise
+        except Exception:  # noqa: BLE001 - metadata/content verification must fail closed
+            raise DerivedOutcomeUnknownError('Derived metadata or content readback is unavailable') from None
 
 
 class TranscriptNotionWriter:
@@ -213,13 +324,22 @@ class NativeWorker:
             ref = json.loads(row['output_ref_json'])
             if isinstance(ref, dict) and ref.get('provider') == 'google_drive':
                 previous_pointers.add(ref.get('web_url') or f"https://drive.google.com/file/d/{ref['file_id']}/view")
-        return ingest_transcript(data, entity_id=job.target_entity_id, course_key=job.course_key,
-            source_ref=SourceRef('google_drive', spec['file_id']), source_hash=digest,
-            source_version=version, state_store=self.state,
+        return ingest_transcript(
+            data,
+            entity_id=job.target_entity_id,
+            course_key=job.course_key,
+            source_ref=SourceRef('google_drive', spec['file_id']),
+            source_hash=digest,
+            source_version=version,
+            state_store=_NativeIngestStateAdapter(self.state),
             processor_version=self.config.normalization.processor_version,
-            drive_writer=DerivedDriveWriter(self.drive_service, self.drive, spec['derived_folder_id']),
-            notion_writer=TranscriptNotionWriter(self.notion_client, self.notion, spec,
-                                                 frozenset(previous_pointers)))
+            drive_writer=DerivedDriveWriter(
+                self.drive_service, self.drive, spec['derived_folder_id']
+            ),
+            notion_writer=TranscriptNotionWriter(
+                self.notion_client, self.notion, spec, frozenset(previous_pointers)
+            ),
+        )
 
 
 def build_worker(config: Any, credentials: ResolvedCredentials) -> Any:

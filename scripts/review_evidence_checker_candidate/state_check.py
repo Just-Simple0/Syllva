@@ -35,8 +35,8 @@ PINNED_SOURCE_PINS = MappingProxyType(
             20347,
         ),
         "src/uls/settings/credential_admission.py": (
-            "9b72fa7d3ff333f643c203f064025f2a5e5edfe9dfc27d6d53ee2a5c5e03da87",
-            29151,
+            "725b8098c8653b62853a5b15b1e93a30f2817058d4d25d87ab65e47b23586ff7",
+            50977,
         ),
         "src/uls/settings/credential_roles.py": (
             "f9f3ea23807747cc42ad7c08a9947ac255942619660218695e0e84eb58d763c9",
@@ -47,8 +47,8 @@ PINNED_SOURCE_PINS = MappingProxyType(
             5608,
         ),
         "src/uls/settings/credential_service.py": (
-            "d70bf1b5fcb63cb7d4c2f774a675be1b1d617b46a60bb4f932d3a7c831c62852",
-            28058,
+            "76537fcee777553cfd71c627b028d378ea666c091117956aed540f3468a5902c",
+            34900,
         ),
         "tests/unit/test_credential_set_cli.py": (
             "a36d47e6cb0e66dd341512cd0833416e56de85cab42900e439dcfa130b6a61d1",
@@ -59,8 +59,40 @@ PINNED_SOURCE_PINS = MappingProxyType(
             38729,
         ),
         "tests/contract/test_settings_credential_admission.py": (
-            "2a06ec2fc45494d89f84cf519cf619c1b738a7bee15ce168d23aefa7fe0d4bae",
-            32402,
+            "9a9676ef0d59f3b7d66fb4e80313b6fb1d3e80af98382c4019b856e7794583c3",
+            76850,
+        ),
+        "tests/contract/test_settings_credential_journal.py": (
+            "c18e9da27c482fd3c794472e2b32091b1a16f08963532d5abfee4ebed3b0583c",
+            41015,
+        ),
+        "tests/contract/test_settings_credential_http.py": (
+            "c2c2608c302a30ef6be4ec66c9528ab8d9959297c4eeba4883effc61229f7327",
+            18390,
+        ),
+        'tests/unit/test_runtime_google_credentials.py': (
+            '0f88130c489f2484ec15d9b837e9922e91c04ca04ec31726803b7734904dab14',
+            4365,
+        ),
+        'tests/unit/test_credential_resolver.py': (
+            'b9201fa1b57fff0d40769f33e47a80d3def1c4b15d9cf01d7f664eb00854557d',
+            14712,
+        ),
+        'tests/unit/test_credential_resolver_file_source.py': (
+            '3fbc2182a08c0049e80a80952622773d933de845a34a31c943cd9f7dd95febc8',
+            5804,
+        ),
+        'tests/unit/test_config_loader_credentials.py': (
+            'cb9bbfc0f2be069f421fc6974f687c51e88ee97ba5ac7e00acc9309df0bd7f7b',
+            4065,
+        ),
+        'tests/contract/test_settings_credential_roles.py': (
+            '1754e0c64bef14ac2432f27935be6d0ee4c7dd56e514e1df6d265fa67c7641cc',
+            1134,
+        ),
+        'tests/contract/test_settings_credential_stores.py': (
+            '2eaeafc4102dc9ab7220b98150502e247e17e36dbb3703b9f69be3ea1b15cfc2',
+            1333,
         ),
     }
 )

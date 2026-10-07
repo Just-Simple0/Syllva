@@ -36,3 +36,19 @@ python3 -B scripts/review_evidence_checker_candidate/state_check.py \
 2026-10-03 사용자 후속 진행에 따라 원본 구형 CLI/peer 기록과 리뷰 원문을 보존하고 별도 파생 정책 기록을 작성했다. 스키마의 Pro 선호 target과 인간의 Latest/최대 요청·실제 extra_high 실행을 구별해 기록했다. 실제 모델/강도/slider 및 원본 결속 응답은 불변이며 Pro 실행을 주장하지 않는다. 파생 두 기록과 unchanged R2/R3 FINAL/corrective PLAN은 이 프로젝트 명령 exit0이다. UI는 변경 없는19소스에 한해 의견을 재사용하고 backend3을 최신27소스 리뷰로 대체했으며 동일 Gemini ultra가 재사용 GO0을 확인했다. 상세 `.insane-review/gui23-20261002/reconciled-20261003/parent-disposition.md`. 프로젝트 전용 사용 선택만으로 수락한 것이 아니라, 현재 리뷰·소스·검사·재사용 범위 확인 후 GUI23 묶음을 부모가 수락했다. 전체 ULS 프로젝트/릴리스 완료는 아니다.
 
 이 검사기는 sandbox·secret detector·승인 발급기가 아니다. 허용된 source path의 bytes는 해시 검증을 위해 읽으므로, 공격자가 일반 파일로 바꾼 내용을 읽기 전 기밀성까지 보장하지 않는다.
+
+
+## GUI-2/GUI-3 후속 exact source pin 적용 후보 — 2026-10-05
+
+이 절의 활성 반영은 새 현재 작업의 인간 exact scope/hash 결정 이후에만 허용된다. 프로젝트 전용 후보 SHA-256은 `cfc8ed6ff508b5c676c87cb146f7b35a07a1db011a97f8a8424d0c5784c9ce98`이며 대상 root는 `/Users/admin/Project/Syllva`(device `16777230`, inode `22556999`)다. 기존 `credential_service.py`, `credential_admission.py`, `test_settings_credential_admission.py`의 exact SHA/size 3쌍을 현재 독립 검증된 동결본으로 교체하고 `test_settings_credential_journal.py`, `test_settings_credential_http.py`의 source 예외 2개를 추가한다. 다른 Python 6핀, 문서 1핀, root identity 및 모든 guard/reader 로직은 그대로다.
+
+검토 가능한 exact 적용 bundle·문서 preview는 `.insane-review/gui23-pr13-fixes-20261004/checker-application-proposal-v3.json`에 기록한다. 후보 회귀는 45 tests 및 113 subtests 통과이며, Native FINAL 원본·인간 결정·적용 후 consistency 결과는 동일 작업 기록을 따른다. `source_pins.json`은 검토용 inventory이고 runtime authority가 아니다. `checker_active_baseline.py`는 old active bytes를 보존한 회귀 fixture로 활성 검사가 참조하지 않는다. 전역 checker/hooks/config와 다른 프로젝트는 변경하지 않는다. reviewer GO와 checker PASS는 인간 승인 또는 제품 전체 수락을 만들지 않는다.
+
+
+## Drive OAuth 검토용 기존 테스트 source 6개 예외 후보 — 2026-10-05
+
+이 절은 새로운 인간 Syllva-only exact scope/hash 결정 후에만 활성 적용한다. 후보 SHA는 `a82d0a88a2a35fe53293c433210029895a0e674d15231a2d9e1ed1a8f378ef08`, Python source pin은 17개이며 기존 11개 및 문서 1개/root/모든 guard는 보존한다. 추가하는 것은 기존 Google runtime/resolver/file-source/config-loader 및 credential roles/stores 합성 테스트 여섯 파일의 정확 path/SHA/size다. 일반 비밀 파일 접근 권한을 추가하지 않는다. 전역 checker/hooks/config와 다른 프로젝트는 변경하지 않는다.
+
+정확한 적용 bundle·문서 preview는 `.insane-review/drive-oauth-20261005/six-pin-adoption-proposal.json`에 있다. 독립 Native PLAN/FINAL 기술 GO0이며 candidate17는 98 tests/113 subtests, preserved current11는 45 tests/113 subtests를 각각 통과했다. 11-pin의 기존 테스트 helper는 역사적 검증 맥락으로 보존한다. 17-pin의 현재 owning 검사 맥락은 `.insane-review/drive-oauth-20261005/six-pin-candidate-v3/candidate17/`이며 적용 후에는 활성 checker가 이 검토된 후보와 byte-identical인지 먼저 확인한 뒤 해당 맥락의 검사와 실제 활성 명령의 현재 OAuth 기록 검사를 연결한다. 과거 11-pin 테스트를 17-pin의 현재 실행 결과로 보고하지 않는다.
+
+기술 GO와 private consistency PASS는 인간 승인이나 활성 적용을 만들지 않는다. OAuth 제품 구현 변경의 source pin, School ACL 정리, 전체 flow 통과와 commit/push/PR은 이 결정에 포함되지 않는다. 적용 전 11-pin baseline을 보존하고, 적용 후에는 후보 적용 receipt와 현재 코드/자료 검토 기록을 별도로 남긴다. 적용 전 baseline 비교용 native 기록은 적용 이후의 현재 파일 상태를 인증하는 기록으로 재사용하지 않는다.

@@ -7,9 +7,24 @@ const vm = require("node:vm");
 
 const STATIC = process.argv[2];
 const SCENARIO = process.argv[3];
+const CREDENTIAL_ROLE = SCENARIO === "credential_failure_unconfigured_worker" ? "notion-worker" : "notion-mcp";
+const CREDENTIAL_PURPOSE = CREDENTIAL_ROLE.endsWith("-worker") ? "worker" : "mcp";
+const roleOverviewRace = new Set([
+  "credential_overview_after_b", "credential_overview_inflight_b_success", "credential_overview_inflight_b_failure",
+]).has(SCENARIO);
+const canvasMutationRace = /^canvas_mutation_race_(connect|replace|forget)_(success|neutral)$/.exec(SCENARIO);
+const canvasCredentialRace = SCENARIO === "canvas_notice_connect_credential_b";
+const credentialReadbackCanvasRace = SCENARIO === "credential_independent_readback_canvas_b";
+const credentialReconcileClearCanvasRace = SCENARIO === "credential_reconcile_clear_canvas_b";
 const CSRF = "csrf-test-token-value";
 const SECRET = "s3cr3t-value-never-shown";
 const VOID = new Set(["meta", "link", "input", "br", "img"]);
+
+function visibleText(node) {
+  if (node.nodeType === 3) { return node.text; }
+  if (node.nodeType !== 1 || node.hidden) { return ""; }
+  return node.children.map(visibleText).join("");
+}
 
 class Text { constructor(text) { this.nodeType = 3; this.text = text; this.parent = null; } }
 
@@ -98,7 +113,7 @@ function makeDocument() {
   return doc;
 }
 
-const overview = (steps) => ({
+const overview = (steps, pendingOperations) => ({
   local_runtime_healthy: true,
   setup_ready: Boolean(steps) && steps.every((s) => s.state === "Ready"),
   readiness_funnel: {
@@ -109,7 +124,7 @@ const overview = (steps) => ({
   worker_enabled: false,
   remote_enabled: false, doctor: { status: "ok", checks: {} },
   setup_steps: steps || ["Storage", "Canvas", "Academic", "Automation", "Remote", "Check"].map((n) => ({ name: n, state: "Partial", reason: n + " is not proven." })),
-  pending_operations: [], session_notice: null,
+  pending_operations: pendingOperations || [], session_notice: null,
 });
 
 async function run() {
@@ -126,12 +141,34 @@ async function run() {
   let releaseCanvasDiscovery = null;
   let releaseGoogleFile = null;
   let credentialPostMode = null;
+  let failCredentialReadback = false;
+  let credentialPending = null;
+  let credentialSaved = false;
+  let credentialForgotten = false;
+  let credentialDetached = false;
+  let credentialMutationPosted = false;
+  let credentialReadbackCount = 0;
+  let releaseCredentialReadback = null;
+  let releaseOldCredentialReadback = null;
+  let releaseIndependentCredentialReadback = null;
+  let releaseCredentialClearReadback = null;
+  let releaseIndependentCanvas = null;
+  let releaseSecondCredentialPost = null;
+  let releaseCanvasBPost = null;
+  let releaseOldOverview = null;
+  let releaseRoleOverview = null;
+  let releaseSecondCanvasPost = null;
+  let overviewCount = 0;
+  let credentialSetPostCount = 0;
+  let canvasMutationPostCount = 0;
   let canvasActionFailure = null;
   let canvasForgotten = false;
+  let canvasConnected = false;
   let canvasRevision = 0;
   let canvasSnapshotCount = 0;
+  let lastCanvasSnapshot = null;
   let failCanvasReadback = false;
-  let canvasRegistry = ["canvas_saved", "canvas_apply_readback", "canvas_stale_snapshot"].includes(SCENARIO)
+  let canvasRegistry = ["canvas_saved", "canvas_apply_readback", "canvas_stale_snapshot", "canvas_notice_replace_success"].includes(SCENARIO)
     ? { term_id: "20", courses: [{ course_id: "10", term_id: "20", name: "Saved course", code: "SAVE" }] }
     : null;
   const sampleCanvasCourses = [
@@ -145,18 +182,37 @@ async function run() {
   const canvasProfileScenarios = new Set(["canvas_forget", "canvas_forget_fake", "canvas_term_dialog",
     "canvas_minimum_one", "canvas_saved", "canvas_apply_readback", "canvas_stale_snapshot",
     "canvas_review_invalidated", "canvas_apply_readback_failed", "canvas_limit20", "canvas_slow_discovery",
-    "canvas_failed_discover", "canvas_failed_test", "canvas_failed_renew", "canvas_link_focus"]);
+    "canvas_failed_discover", "canvas_failed_test", "canvas_failed_renew", "canvas_link_focus",
+    "canvas_notice_replace_success", "canvas_notice_replace_failure", "canvas_notice_replace_wrong_profile",
+    "canvas_notice_forget_success", "canvas_notice_forget_failure"]);
+  if (canvasMutationRace && canvasMutationRace[1] !== "connect") { canvasProfileScenarios.add(SCENARIO); }
   const copy = (value) => JSON.parse(JSON.stringify(value));
-  const canvasSnapshot = () => ({
-    config_generation: "g-canvas-" + canvasRevision,
-    state: !canvasForgotten && canvasProfileScenarios.has(SCENARIO) ? "configured" : "not_configured",
-    profile: !canvasForgotten && canvasProfileScenarios.has(SCENARIO)
-      ? { id: "p1", origin: "https://canvas.example.edu", user_id: "12345", display_name: "Student N." } : null,
-    registry: canvasRegistry ? copy(canvasRegistry) : null,
-    masked_account: !canvasForgotten && canvasProfileScenarios.has(SCENARIO) ? "S•••••• N••" : null,
-    storage_label: SCENARIO === "canvas_forget_fake" ? "the fake test store" : "this Mac's Keychain",
-    lease: { state: "not_issued" }, can_mutate: true,
-  });
+  const canvasSnapshot = () => {
+    const hasProfile = !canvasForgotten && (canvasConnected || canvasProfileScenarios.has(SCENARIO));
+    const profile = hasProfile ? { id: SCENARIO === "canvas_notice_replace_wrong_profile" && canvasRevision > 0 ? "other-profile" : "p1",
+      origin: "https://canvas.example.edu", user_id: "12345", display_name: "Student N." } : null;
+    const credentialPresent = Boolean(profile) && SCENARIO !== "canvas_notice_connect_missing" &&
+      SCENARIO !== "canvas_notice_connect_error";
+    const pendingOperations = SCENARIO === "canvas_notice_connect_pending" && profile
+      ? [{ operation_id: "fake-canvas-pending", action_kind: "canvas_connect", phase: "verify", next_action: "manual_review" }]
+      : [];
+    let state = profile ? "partial" : "not_configured";
+    if (profile && canvasRegistry && credentialPresent) { state = "ready"; }
+    if (pendingOperations.length) { state = "partial"; }
+    if (profile && SCENARIO === "canvas_notice_connect_error") { state = "error"; }
+    return {
+      config_generation: "g-canvas-" + canvasRevision,
+      state,
+      profile,
+      registry: canvasRegistry ? copy(canvasRegistry) : null,
+      masked_account: profile ? "S•••••• N••" : null,
+      storage_label: SCENARIO === "canvas_forget_fake" ? "the fake test store" : "this Mac's Keychain",
+      lease: { state: "not_issued" },
+      credential_present: credentialPresent,
+      can_mutate: pendingOperations.length === 0,
+      pending_operations: pendingOperations,
+    };
+  };
   const respond = (status, body) => ({ status, ok: status >= 200 && status < 300, json: async () => body });
   async function fetch(rawUrl, opts) {
     // app.js uses prefix-relative URLs ("api/v1/..."); normalize for routing.
@@ -175,15 +231,55 @@ async function run() {
     if (mode === "not_found") { return respond(404, { error: { code: "SESSION_NOT_FOUND" } }); }
     if (mode === "csrf_rejected" && opts && opts.method === "POST") { return respond(403, { error: { code: "CSRF_REJECTED" } }); }
     if (url === "/api/v1/session/csrf") { return respond(200, { csrf_token: CSRF, idle_seconds: 900 }); }
-    if (url === "/api/v1/overview") { return respond(200, overview(steps)); }
+    if (url === "/api/v1/overview") {
+      overviewCount += 1;
+      if (SCENARIO === "credential_overview_after_b" && overviewCount === 2) {
+        return respond(503, { error: { code: "PROVIDER_UNAVAILABLE" } });
+      }
+      if (SCENARIO.startsWith("credential_overview_inflight_b_") && overviewCount === 2) {
+        return await new Promise((resolve) => {
+          releaseRoleOverview = () => resolve(SCENARIO.endsWith("_success")
+            ? respond(200, overview(null, [{ operation_id: "stale-role-overview", action_kind: "config_apply",
+              fields: ["system.timezone"], same_target: true, choices: [{ id: "resume", label: "Resume repair" }] }]))
+            : respond(503, { error: { code: "PROVIDER_UNAVAILABLE" } }));
+        });
+      }
+      if (SCENARIO === "overview_ordering" && overviewCount === 2) {
+        return await new Promise((resolve) => {
+          releaseOldOverview = () => resolve(respond(200, overview(null, [{
+            operation_id: "stale-overview-operation", action_kind: "config_apply", fields: ["stale"],
+            same_target: true, choices: [{ id: "resume", label: "Resume repair" }],
+          }])));
+        });
+      }
+      if (SCENARIO === "overview_ordering" && overviewCount === 3) {
+        return respond(200, overview(null, []));
+      }
+      const pending = SCENARIO === "recovery_projection" ? [
+        { operation_id: "config-op", action_kind: "config_apply", fields: ["system.timezone"], same_target: true,
+          choices: [{ id: "resume", label: "Resume repair" }, { id: "leave", label: "Leave as-is" }] },
+        { operation_id: "credential-op", action_kind: "credential_replacement", fields: ["notion-mcp"], same_target: true,
+          choices: [{ id: "resume", label: "Continue credential replacement" }, { id: "restore", label: "Restore previous credential" }] },
+      ] : [];
+      return respond(200, overview(steps, pending));
+    }
     if (url === "/api/v1/credentials") {
-      const fakeForget = SCENARIO === "credential_fake_forget";
+      credentialReadbackCount += 1;
+      if (failCredentialReadback) { return respond(503, { error: { code: "PROVIDER_UNAVAILABLE" } }); }
+      const fakeForget = SCENARIO === "credential_fake_forget" || SCENARIO === "credential_forget_success";
+      const externalCredential = SCENARIO === "credential_detach_external_success" && !credentialDetached;
+      const environmentFallback = SCENARIO === "credential_detach_external_success" && credentialDetached;
       const managedReplace = SCENARIO === "credential_replace_failure";
-      const notion = { role: "notion-mcp", provider: "notion", purpose: "mcp",
-        state: fakeForget || managedReplace ? "configured" : SCENARIO === "linux_card" ? "unsupported_platform" : "not_configured",
-        source: fakeForget || managedReplace ? "keyring" : "environment", managed: fakeForget || managedReplace, can_mutate: SCENARIO !== "linux_card",
-        can_test: fakeForget || managedReplace, can_detach: false, environment_variable: "NOTION_MCP_TOKEN",
-        storage_label: fakeForget || managedReplace ? "the fake test store" : "the Settings process environment", takes_effect: "MCP restart" };
+      const configured = !credentialForgotten && (externalCredential || environmentFallback || fakeForget || managedReplace || credentialSaved);
+      const source = externalCredential ? "external_file" : environmentFallback ? "environment" : configured ? "keyring" : "environment";
+      const notion = { role: CREDENTIAL_ROLE, provider: "notion", purpose: CREDENTIAL_PURPOSE,
+        state: credentialPending ? "partial" : configured ? (source === "environment" ? "external" : "configured") : SCENARIO === "linux_card" ? "unsupported_platform" : "not_configured",
+        source: source, managed: configured && !externalCredential, can_mutate: SCENARIO !== "linux_card",
+        can_test: configured, can_detach: externalCredential, environment_variable: "NOTION_MCP_TOKEN",
+        storage_label: configured ? "the fake test store" : "the Settings process environment", takes_effect: "MCP restart",
+        pending_operation: credentialPending,
+        last_check: SCENARIO === "credential_failure_generic"
+          ? { code: "PROVIDER_UNAVAILABLE", message: "The provider could not be reached. Nothing changed." } : null };
       const cards = [notion];
       if (SCENARIO.startsWith("google_file_")) {
         cards.push({ role: "google-drive-mcp", provider: "google", purpose: "mcp", state: "not_configured",
@@ -191,13 +287,42 @@ async function run() {
           environment_variable: "GOOGLE_DRIVE_MCP_CREDENTIALS", storage_label: "this computer's protected secrets folder",
           takes_effect: "MCP restart" });
       }
-      return respond(200, { config_generation: "g-canvas-" + canvasRevision, cards });
+      const payload = { config_generation: "g-canvas-" + canvasRevision, cards };
+      if (SCENARIO === "credential_failure_superseded_readback" && credentialMutationPosted && credentialReadbackCount === 2) {
+        return await new Promise((resolve) => { releaseCredentialReadback = () => resolve(respond(200, payload)); });
+      }
+      if ((credentialReadbackCanvasRace || credentialReconcileClearCanvasRace) && credentialMutationPosted && credentialReadbackCount === 2) {
+        return await new Promise((resolve) => { releaseOldCredentialReadback = () => resolve(respond(200, payload)); });
+      }
+      if ((credentialReadbackCanvasRace || credentialReconcileClearCanvasRace) && credentialMutationPosted && credentialReadbackCount === 3) {
+        return await new Promise((resolve) => { releaseIndependentCredentialReadback = () => resolve(respond(200, payload)); });
+      }
+      if (credentialReconcileClearCanvasRace && credentialReadbackCount === 4) {
+        return await new Promise((resolve) => { releaseCredentialClearReadback = () => resolve(respond(200, payload)); });
+      }
+      if (SCENARIO === "credential_generation_race" && credentialMutationPosted && credentialReadbackCount === 2) {
+        return await new Promise((resolve) => { releaseOldCredentialReadback = () => resolve(respond(200, payload)); });
+      }
+      if (SCENARIO === "credential_overview_after_b" && credentialMutationPosted && credentialReadbackCount === 2) {
+        return await new Promise((resolve) => { releaseOldCredentialReadback = () => resolve(respond(200, payload)); });
+      }
+      return respond(200, payload);
     }
     if (url === "/api/v1/canvas") {
       canvasSnapshotCount += 1;
+      if (SCENARIO === "canvas_notice_connect_session_ended" && canvasSnapshotCount === 2) {
+        return respond(401, { error: { code: "SESSION_EXPIRED" } });
+      }
       if (failCanvasReadback) { return respond(503, { error: { code: "PROVIDER_UNAVAILABLE" } }); }
       const snapshot = canvasSnapshot();
-      if (SCENARIO === "canvas_stale_snapshot" && canvasSnapshotCount === 1) {
+      lastCanvasSnapshot = snapshot;
+      if (SCENARIO === "credential_independent_refresh" && canvasSnapshotCount === 3) {
+        return await new Promise((resolve) => { releaseIndependentCanvas = () => resolve(respond(200, snapshot)); });
+      }
+      if ((canvasMutationRace && canvasSnapshotCount === 2) ||
+          (canvasCredentialRace && canvasSnapshotCount === 2) ||
+          (SCENARIO === "canvas_stale_snapshot" && canvasSnapshotCount === 1) ||
+          (SCENARIO === "canvas_notice_connect_superseded" && canvasSnapshotCount === 2)) {
         return await new Promise((resolve) => { releaseCanvasSnapshot = () => resolve(respond(200, snapshot)); });
       }
       return respond(200, snapshot);
@@ -211,6 +336,59 @@ async function run() {
       }
       return respond(200, { courses: copy(canvasCourses), terms: [{ term_id: "20", name: "Demo term" }, { term_id: "21", name: "Later term" }] });
     }
+    if (url.startsWith("/api/v1/canvas/") && opts && opts.method === "POST" && url !== "/api/v1/canvas/discover") {
+      const action = url.split("/").pop();
+      if ((credentialReadbackCanvasRace || credentialReconcileClearCanvasRace) && action === "connect") {
+        return await new Promise((resolve) => {
+          releaseCanvasBPost = () => {
+            canvasConnected = true;
+            canvasRevision += 1;
+            resolve(respond(200, { status: "complete" }));
+          };
+        });
+      }
+      if (canvasCredentialRace && action === "connect") {
+        canvasConnected = true;
+        canvasRevision += 1;
+        return respond(200, { status: "complete" });
+      }
+      if (canvasMutationRace && action === canvasMutationRace[1]) {
+        canvasMutationPostCount += 1;
+        if (canvasMutationPostCount === 2) {
+          return await new Promise((resolve) => {
+            releaseSecondCanvasPost = () => {
+              if (action === "connect") { canvasConnected = true; }
+              if (action === "forget") { canvasForgotten = true; canvasRegistry = null; }
+              canvasRevision += 1;
+              resolve(respond(200, { status: "complete" }));
+            };
+          });
+        }
+        if (canvasMutationRace[2] === "neutral") {
+          return respond(503, { error: { code: "PROVIDER_UNAVAILABLE", message: "Nothing changed." } });
+        }
+        if (action === "connect") { canvasConnected = true; }
+        if (action === "forget") { canvasForgotten = true; canvasRegistry = null; }
+        canvasRevision += 1;
+        return respond(200, { status: "complete" });
+      }
+      const scenarioAction = SCENARIO.startsWith("canvas_notice_") ? SCENARIO.slice("canvas_notice_".length).split("_")[0] : null;
+      const scenarioOutcome = SCENARIO.startsWith("canvas_notice_") ? SCENARIO.slice("canvas_notice_".length).slice(scenarioAction.length + 1) : null;
+      if (SCENARIO === "canvas_destination_not_allowed" && action === "connect") {
+        return respond(400, { error: { code: "DESTINATION_NOT_ALLOWED", message: "Provider refused the destination." } });
+      }
+      if (scenarioAction === action && scenarioOutcome === "failure") {
+        return respond(503, { error: { code: "PROVIDER_UNAVAILABLE", message: "Nothing changed. The previous Canvas credential is unchanged." } });
+      }
+      if (scenarioAction === action && ["success", "unconfirmed", "missing", "pending", "error", "superseded", "wrong_profile"].includes(scenarioOutcome)) {
+        if (action === "connect") { canvasConnected = true; }
+        if (action === "forget") { canvasForgotten = true; canvasRegistry = null; }
+        canvasRevision += 1;
+        if (scenarioOutcome === "unconfirmed") { failCanvasReadback = true; }
+        return respond(200, { status: "complete", message: "The previous credential is unchanged." });
+      }
+      if (url === "/api/v1/canvas/forget") { canvasForgotten = true; canvasRegistry = null; canvasRevision += 1; return respond(200, { status: "complete" }); }
+    }
     if (url === "/api/v1/canvas/forget") { canvasForgotten = true; canvasRegistry = null; canvasRevision += 1; return respond(200, { status: "complete" }); }
     if (url === "/api/v1/settings/canvas_registry/validate") { return respond(200, { candidate_hash: "c".repeat(64) }); }
     if (url === "/api/v1/settings/canvas_registry/apply") {
@@ -220,9 +398,39 @@ async function run() {
       if (SCENARIO === "canvas_apply_readback_failed") { failCanvasReadback = true; }
       return respond(200, { status: "complete", code: "APPLIED", config_generation: "g-canvas-" + canvasRevision });
     }
-    if (url === "/api/v1/credentials/notion-mcp/set") {
-      if (SCENARIO === "credential_success") { return respond(200, { status: "complete", message: "Credential saved." }); }
+    if (url === "/api/v1/credentials/" + CREDENTIAL_ROLE + "/set") {
+      credentialMutationPosted = true;
+      credentialSetPostCount += 1;
+      if ((SCENARIO === "credential_generation_race" || roleOverviewRace) && credentialSetPostCount === 2) {
+        return await new Promise((resolve) => {
+          releaseSecondCredentialPost = () => resolve(respond(409, { error: { code: "INVALID_CREDENTIAL",
+            message: "The credential was rejected. The previous credential is kept." } }));
+        });
+      }
+      if (canvasCredentialRace && credentialSetPostCount === 1) {
+        return await new Promise((resolve) => {
+          releaseSecondCredentialPost = () => resolve(respond(409, { error: { code: "INVALID_CREDENTIAL",
+            message: "The credential was rejected. The previous credential is kept." } }));
+        });
+      }
+      if (SCENARIO === "credential_success") { credentialSaved = true; return respond(200, { status: "complete", message: "Credential saved." }); }
+      if (SCENARIO === "credential_failure_card_refresh_failed") { failCredentialReadback = true; }
+      if (SCENARIO === "credential_failure_pending") {
+        credentialPending = { operation_id: "pending-op", phase: "repair_required" };
+        return respond(409, { error: { code: "MANUAL_REVIEW", message: "The previous credential is unchanged." } });
+      }
+      if (SCENARIO === "credential_failure_generic") {
+        return respond(503, { error: { code: "PROVIDER_UNAVAILABLE", message: "The previous credential is unchanged." } });
+      }
       return respond(409, { error: { code: "INVALID_CREDENTIAL", message: "The credential was rejected. The previous credential is kept." } });
+    }
+    if (url === "/api/v1/credentials/notion-mcp/forget" && SCENARIO === "credential_forget_success") {
+      credentialForgotten = true;
+      return respond(200, { status: "complete", message: "Credential removed." });
+    }
+    if (url === "/api/v1/credentials/notion-mcp/detach" && SCENARIO === "credential_detach_external_success") {
+      credentialDetached = true;
+      return respond(200, { status: "complete", code: "DETACHED", message: "Credential removed." });
     }
     if (url === "/api/v1/credentials/notion-mcp/replace" && SCENARIO === "credential_replace_failure") {
       return respond(409, { error: { code: "INVALID_CREDENTIAL", message: "The credential was rejected. The previous credential is kept." } });
@@ -305,16 +513,294 @@ async function run() {
   };
   out.startedEnabled = doc.querySelectorAll("[data-mutation]").some((b) => !b.disabled);
 
-  if (["credential_cancel", "credential_failure", "credential_success", "credential_fake_forget", "credential_session_replaced",
+  if (SCENARIO === "overview_ordering") {
+    $("recheck-steps").click(); await flush();
+    $("recheck-steps").click(); await flush();
+    if (releaseOldOverview) { releaseOldOverview(); }
+    await flush();
+    out.pendingLabels = $("recovery-list").querySelectorAll("button").map(button => button.textContent);
+    out.pendingText = visibleText($("recovery-list"));
+  } else if (["credential_cancel", "credential_failure", "credential_failure_unconfigured_worker", "credential_failure_superseded_readback", "credential_failure_card_refresh_failed",
+       "credential_failure_pending", "credential_failure_generic", "credential_success", "credential_fake_forget", "credential_forget_success", "credential_detach_external_success", "credential_session_replaced",
        "credential_session_expired", "credential_session_unreachable", "credential_replace_failure", "linux_card", "canvas_origin", "google_file_cancel",
        "google_file_cancel_replace_race", "google_file_missing", "google_file_oversize", "google_file_read_error",
-       "credential_environment_absent"].includes(SCENARIO) ||
+       "credential_environment_absent", "credential_independent_refresh", "credential_generation_race",
+       "credential_overview_after_b", "credential_overview_inflight_b_success", "credential_overview_inflight_b_failure",
+       "credential_independent_readback_canvas_b",
+       "credential_reconcile_clear_canvas_b",
+       "canvas_notice_connect_success", "canvas_notice_connect_failure", "canvas_notice_connect_unconfirmed",
+       "canvas_notice_connect_missing", "canvas_notice_connect_pending", "canvas_notice_connect_error",
+       "canvas_notice_connect_superseded", "canvas_notice_connect_session_ended", "canvas_notice_connect_credential_b",
+       "canvas_notice_replace_success", "canvas_notice_replace_failure", "canvas_notice_replace_wrong_profile",
+       "canvas_notice_forget_success", "canvas_notice_forget_failure",
+       "canvas_destination_not_allowed"].includes(SCENARIO) || Boolean(canvasMutationRace) ||
       ["canvas_forget", "canvas_forget_fake", "canvas_term_dialog", "canvas_minimum_one", "canvas_saved", "canvas_apply_readback",
        "canvas_apply_readback_failed", "canvas_stale_snapshot", "canvas_review_invalidated", "canvas_limit20",
-       "canvas_slow_discovery", "canvas_failed_discover", "canvas_failed_test", "canvas_failed_renew", "canvas_link_focus"].includes(SCENARIO)) {
+       "canvas_slow_discovery", "canvas_failed_discover", "canvas_failed_test", "canvas_failed_renew", "canvas_link_focus",
+       "recovery_projection"].includes(SCENARIO)) {
     doc.querySelectorAll("[data-panel]").find((b) => b.getAttribute("data-panel") === "connections").click();
     await flush();
-    if (SCENARIO === "credential_fake_forget") {
+    if (roleOverviewRace) {
+      const submitSet = async (value) => {
+        $("credential-cards").querySelectorAll("button").find(b => b.textContent === "Configure").click();
+        $("credential-secret").value = value;
+        $("credential-confirm").click();
+        await flush();
+      };
+      await submitSet("fake-A");
+      out.aReadbackHeld = Boolean(releaseOldCredentialReadback);
+      out.aOverviewHeld = Boolean(releaseRoleOverview);
+      await submitSet("fake-B");
+      out.bPostHeld = Boolean(releaseSecondCredentialPost);
+      out.pendingNotice = $("notice").textContent;
+      out.pendingMessage = $("credential-message-" + CREDENTIAL_ROLE).textContent;
+      out.pendingRetry = $("credential-cards").querySelectorAll("button").map(button => button.textContent)
+        .filter(label => label === "Try again" || label === "Retry replacement");
+      out.pendingDialogOpen = !$('credential-dialog').hidden;
+      out.pendingSecretCleared = $("credential-secret").value === "";
+      out.pendingFocus = doc.activeElement ? doc.activeElement.id : null;
+      if (releaseOldCredentialReadback) { releaseOldCredentialReadback(); }
+      if (releaseRoleOverview) { releaseRoleOverview(); }
+      await flush();
+      out.afterANotice = $("notice").textContent;
+      out.afterAMessage = $("credential-message-" + CREDENTIAL_ROLE).textContent;
+      out.afterARetry = $("credential-cards").querySelectorAll("button").map(button => button.textContent)
+        .filter(label => label === "Try again" || label === "Retry replacement");
+      out.afterADialogOpen = !$('credential-dialog').hidden;
+      out.afterASecretCleared = $("credential-secret").value === "";
+      out.afterAFocus = doc.activeElement ? doc.activeElement.id : null;
+      out.staleOverviewText = visibleText($("recovery-list"));
+      out.staleOverviewLabels = $("recovery-list").querySelectorAll("button").map(button => button.textContent);
+      out.overviewCountAfterA = overviewCount;
+      if (releaseSecondCredentialPost) { releaseSecondCredentialPost(); }
+      await flush();
+    } else if (SCENARIO === "credential_generation_race") {
+      $("credential-cards").querySelectorAll("button").find(b => b.textContent === "Configure").click();
+      $("credential-secret").value = "fake-A"; $("credential-confirm").click(); await flush();
+      out.aReadbackHeld = Boolean(releaseOldCredentialReadback);
+      $("credential-cards").querySelectorAll("button").find(b => b.textContent === "Configure").click();
+      $("credential-secret").value = "fake-B"; $("credential-confirm").click(); await flush();
+      out.pendingNotice = $("notice").textContent;
+      out.pendingMessage = $("credential-message-" + CREDENTIAL_ROLE).textContent;
+      out.pendingVisible = visibleText(doc.root);
+      out.pendingRetry = $("credential-cards").querySelectorAll("button").map(button => button.textContent)
+        .filter(label => label === "Try again" || label === "Retry replacement");
+      out.pendingFocus = doc.activeElement ? doc.activeElement.id : null;
+      if (releaseOldCredentialReadback) { releaseOldCredentialReadback(); }
+      await flush();
+      out.afterLateANotice = $("notice").textContent;
+      out.afterLateAMessage = $("credential-message-" + CREDENTIAL_ROLE).textContent;
+      out.afterLateAVisible = visibleText(doc.root);
+      out.afterLateARetry = $("credential-cards").querySelectorAll("button").map(button => button.textContent)
+        .filter(label => label === "Try again" || label === "Retry replacement");
+      out.afterLateAFocus = doc.activeElement ? doc.activeElement.id : null;
+      if (releaseSecondCredentialPost) { releaseSecondCredentialPost(); }
+      await flush();
+      out.secretFieldAfterRace = $("credential-secret").value;
+    } else if (SCENARIO === "credential_independent_refresh") {
+      $("credential-cards").querySelectorAll("button").find(b => b.textContent === "Configure").click();
+      $("credential-secret").value = SECRET; $("credential-confirm").click(); await flush();
+      out.beforeIndependentMessage = $("credential-message-" + CREDENTIAL_ROLE).textContent;
+      out.beforeIndependentRetry = $("credential-cards").querySelectorAll("button").map(button => button.textContent)
+        .filter(label => label === "Try again" || label === "Retry replacement");
+      credentialSaved = true;
+      doc.querySelectorAll("[data-panel]").find(b => b.getAttribute("data-panel") === "overview").click(); await flush();
+      doc.querySelectorAll("[data-panel]").find(b => b.getAttribute("data-panel") === "connections").click(); await flush();
+      out.independentCanvasHeld = Boolean(releaseIndependentCanvas);
+      out.duringIndependentCanvasMessage = $("credential-message-" + CREDENTIAL_ROLE).textContent;
+      out.duringIndependentCanvasButtons = $("credential-cards").querySelectorAll("button").map(button => button.textContent);
+      out.duringIndependentCanvasVisible = visibleText(doc.root);
+      if (releaseIndependentCanvas) { releaseIndependentCanvas(); }
+      await flush();
+      out.afterIndependentCanvasMessage = $("credential-message-" + CREDENTIAL_ROLE).textContent;
+      out.afterIndependentCanvasButtons = $("credential-cards").querySelectorAll("button").map(button => button.textContent);
+      out.afterIndependentCanvasVisible = visibleText(doc.root);
+    } else if (credentialReadbackCanvasRace) {
+      $("credential-cards").querySelectorAll("button").find(button => button.textContent === "Configure").click();
+      $("credential-secret").value = "fake-credential-A";
+      $("credential-confirm").click(); await flush();
+      out.aOwnedReadbackHeld = Boolean(releaseOldCredentialReadback);
+      $("connections-panel").querySelectorAll("button").find(button => button.getAttribute("class") === "back-link").click(); await flush();
+      $("overview-panel").querySelectorAll("button").find(button => button.getAttribute("data-panel") === "connections").click(); await flush();
+      out.independentReadbackHeld = Boolean(releaseIndependentCredentialReadback);
+      $("canvas-origin").value = "https://canvas.example.edu";
+      $("canvas-actions").querySelectorAll("button").find(button => button.textContent === "Test & connect").click(); await flush();
+      $("credential-secret").value = "fake-canvas-B";
+      $("credential-confirm").click(); await flush();
+      out.canvasBPostHeld = Boolean(releaseCanvasBPost);
+      out.pendingNotice = $("notice").textContent;
+      out.pendingDialogOpen = !$("credential-dialog").hidden;
+      out.pendingSecretCleared = $("credential-secret").value === "";
+      out.pendingCanvasAction = $("credential-dialog-heading").textContent;
+      if (releaseIndependentCredentialReadback) { releaseIndependentCredentialReadback(); }
+      await flush();
+      out.afterIndependentNotice = $("notice").textContent;
+      out.afterIndependentCredentialMessage = $("credential-message-" + CREDENTIAL_ROLE).textContent;
+      out.afterIndependentDialogOpen = !$("credential-dialog").hidden;
+      out.afterIndependentSecretCleared = $("credential-secret").value === "";
+      if (releaseOldCredentialReadback) { releaseOldCredentialReadback(); }
+      await flush();
+      out.afterStaleOwnedReadbackNotice = $("notice").textContent;
+      if (releaseCanvasBPost) { releaseCanvasBPost(); }
+      await flush();
+      out.finalNotice = $("notice").textContent;
+      out.finalDialogOpen = !$("credential-dialog").hidden;
+      out.finalSecretCleared = $("credential-secret").value === "";
+      out.canvasReadback = lastCanvasSnapshot ? copy(lastCanvasSnapshot) : null;
+    } else if (credentialReconcileClearCanvasRace) {
+      $("credential-cards").querySelectorAll("button").find(button => button.textContent === "Configure").click();
+      $("credential-secret").value = "fake-credential-A";
+      $("credential-confirm").click(); await flush();
+      out.aOwnedReadbackHeld = Boolean(releaseOldCredentialReadback);
+      $("connections-panel").querySelectorAll("button").find(button => button.getAttribute("class") === "back-link").click(); await flush();
+      $("overview-panel").querySelectorAll("button").find(button => button.getAttribute("data-panel") === "connections").click(); await flush();
+      out.firstIndependentReadbackHeld = Boolean(releaseIndependentCredentialReadback);
+      if (releaseIndependentCredentialReadback) { releaseIndependentCredentialReadback(); }
+      await flush();
+      out.afterNoBIndependentNotice = $("notice").textContent;
+      if (releaseOldCredentialReadback) { releaseOldCredentialReadback(); }
+      await flush();
+      $("connections-panel").querySelectorAll("button").find(button => button.getAttribute("class") === "back-link").click(); await flush();
+      $("overview-panel").querySelectorAll("button").find(button => button.getAttribute("data-panel") === "connections").click(); await flush();
+      out.secondIndependentReadbackHeld = Boolean(releaseCredentialClearReadback);
+      $("canvas-origin").value = "https://canvas.example.edu";
+      $("canvas-actions").querySelectorAll("button").find(button => button.textContent === "Test & connect").click(); await flush();
+      $("credential-secret").value = "fake-canvas-B";
+      $("credential-confirm").click(); await flush();
+      out.canvasBPostHeld = Boolean(releaseCanvasBPost);
+      out.pendingNotice = $("notice").textContent;
+      out.pendingDialogOpen = !$("credential-dialog").hidden;
+      if (releaseCredentialClearReadback) { releaseCredentialClearReadback(); }
+      await flush();
+      out.afterOutcomeInvalidationNotice = $("notice").textContent;
+      out.afterOutcomeInvalidationCardMessage = $("credential-message-" + CREDENTIAL_ROLE).textContent;
+      if (releaseCanvasBPost) { releaseCanvasBPost(); }
+      await flush();
+      out.finalNotice = $("notice").textContent;
+      out.finalDialogOpen = !$("credential-dialog").hidden;
+      out.finalSecretCleared = $("credential-secret").value === "";
+    } else if (canvasMutationRace) {
+      const action = canvasMutationRace[1];
+      const outcome = canvasMutationRace[2];
+      const startCanvasAction = async () => {
+        if (action === "connect") {
+          $("canvas-origin").value = "https://canvas.example.edu";
+          $("canvas-actions").querySelectorAll("button").find(button => button.textContent === "Test & connect").click();
+          await flush();
+        } else {
+          const label = action === "replace" ? "Replace token" : "Forget local token";
+          $("canvas-actions").querySelectorAll("button").find(button => button.textContent === label).click();
+        }
+        if (action !== "forget") { $("credential-secret").value = "fake-canvas-secret"; }
+        $("credential-confirm").click();
+        await flush();
+      };
+      await startCanvasAction();
+      out.aReadbackHeld = Boolean(releaseCanvasSnapshot);
+      await startCanvasAction();
+      out.bPostHeld = Boolean(releaseSecondCanvasPost);
+      out.pendingNotice = $("notice").textContent;
+      out.pendingDialogOpen = !$("credential-dialog").hidden;
+      out.pendingSecretCleared = $("credential-secret").value === "";
+      out.pendingFocus = doc.activeElement ? doc.activeElement.id : null;
+      out.pendingVisibleText = visibleText(doc.root);
+      if (releaseCanvasSnapshot) { releaseCanvasSnapshot(); }
+      await flush();
+      out.afterANotice = $("notice").textContent;
+      out.afterADialogOpen = !$("credential-dialog").hidden;
+      out.afterASecretCleared = $("credential-secret").value === "";
+      out.afterAFocus = doc.activeElement ? doc.activeElement.id : null;
+      out.afterAVisibleText = visibleText(doc.root);
+      if (releaseSecondCanvasPost) { releaseSecondCanvasPost(); }
+      await flush();
+      out.finalNotice = $("notice").textContent;
+      out.finalDialogOpen = !$("credential-dialog").hidden;
+      out.finalSecretCleared = $("credential-secret").value === "";
+      out.finalFocus = doc.activeElement ? doc.activeElement.id : null;
+      out.visibleText = visibleText(doc.root);
+      out.action = action;
+      out.oldOutcome = outcome;
+    } else if (SCENARIO.startsWith("canvas_notice_") || SCENARIO === "canvas_destination_not_allowed") {
+      const action = SCENARIO.startsWith("canvas_notice_") ? SCENARIO.slice("canvas_notice_".length).split("_")[0] : "connect";
+      if (action === "connect") {
+        $("canvas-origin").value = "https://canvas.example.edu";
+        $("canvas-actions").querySelectorAll("button").find(button => button.textContent === "Test & connect").click();
+        await flush();
+      } else {
+        const label = action === "replace" ? "Replace token" : "Forget local token";
+        $("canvas-actions").querySelectorAll("button").find(button => button.textContent === label).click();
+      }
+      if (action !== "forget") { $("credential-secret").value = SECRET; }
+      $("credential-confirm").click(); await flush();
+      if (SCENARIO === "canvas_notice_connect_superseded") {
+        out.supersededReadbackHeld = Boolean(releaseCanvasSnapshot);
+        $("connections-panel").querySelectorAll("button").find(button => button.getAttribute("class") === "back-link").click(); await flush();
+        $("overview-panel").querySelectorAll("button").find(button => button.getAttribute("data-panel") === "connections").click(); await flush();
+        if (releaseCanvasSnapshot) { releaseCanvasSnapshot(); }
+        await flush();
+      }
+      if (canvasCredentialRace) {
+        out.aReadbackHeld = Boolean(releaseCanvasSnapshot);
+        $("credential-cards").querySelectorAll("button").find(button => button.textContent === "Configure").click();
+        $("credential-secret").value = "fake-credential-B";
+        $("credential-confirm").click(); await flush();
+        out.bPostHeld = Boolean(releaseSecondCredentialPost);
+        out.pendingNotice = $("notice").textContent;
+        out.pendingDialogOpen = !$("credential-dialog").hidden;
+        out.pendingSecretCleared = $("credential-secret").value === "";
+        out.pendingFocus = doc.activeElement ? doc.activeElement.id : null;
+        if (releaseCanvasSnapshot) { releaseCanvasSnapshot(); }
+        await flush();
+        out.afterANotice = $("notice").textContent;
+        out.afterADialogOpen = !$("credential-dialog").hidden;
+        out.afterASecretCleared = $("credential-secret").value === "";
+        out.afterAFocus = doc.activeElement ? doc.activeElement.id : null;
+        if (releaseSecondCredentialPost) { releaseSecondCredentialPost(); }
+        await flush();
+        out.finalNotice = $("notice").textContent;
+        out.finalDialogOpen = !$("credential-dialog").hidden;
+      }
+      out.notice = $("notice").textContent;
+      out.canvasStatus = $("canvas-status").textContent;
+      out.canvasReadback = lastCanvasSnapshot ? copy(lastCanvasSnapshot) : null;
+      out.canvasOriginError = $("canvas-origin-error").textContent;
+      out.connectionVisible = !$("connection-state").hidden;
+      out.endedMessage = $("connection-message").textContent;
+      out.ordinaryHeaderHidden = $("ordinary-header").hidden;
+      out.visibleTextAfterAction = visibleText(doc.root);
+      out.secretCleared = $("credential-secret").value === "";
+      out.mutationUrl = calls.filter(call => call.method === "POST" && call.url.startsWith("/api/v1/canvas/"))
+        .map(call => call.url.split("/").pop());
+    } else if (SCENARIO === "credential_forget_success") {
+      $("credential-cards").querySelectorAll("button").find(b => b.textContent === "Forget local credential").click();
+      $("credential-confirm").click(); await flush();
+      out.notice = $("notice").textContent;
+      out.credentialMessage = $("credential-message-notion-mcp").textContent;
+      out.credentialState = $("credential-status-notion-mcp").textContent;
+    } else if (SCENARIO === "credential_detach_external_success") {
+      $("credential-cards").querySelectorAll("button").find(b => b.textContent === "Stop using this credential").click();
+      $("credential-confirm").click(); await flush();
+      out.notice = $("notice").textContent;
+      out.credentialMessage = $("credential-message-notion-mcp").textContent;
+      out.credentialState = $("credential-status-notion-mcp").textContent;
+      out.credentialSource = calls.filter(call => call.url === "/api/v1/credentials").length;
+    } else if (SCENARIO === "credential_failure_superseded_readback") {
+      $("credential-cards").querySelectorAll("button").find(b => b.textContent === "Configure").click(); await flush();
+      $("credential-secret").value = SECRET;
+      $("credential-confirm").click(); await flush();
+      doc.querySelectorAll("[data-panel]").find(b => b.getAttribute("data-panel") === "overview").click(); await flush();
+      doc.querySelectorAll("[data-panel]").find(b => b.getAttribute("data-panel") === "connections").click(); await flush();
+      if (releaseCredentialReadback) { releaseCredentialReadback(); }
+      await flush();
+      out.notice = $("notice").textContent;
+      out.credentialMessage = $("credential-message-notion-mcp").textContent;
+      out.credentialState = $("credential-status-notion-mcp").textContent;
+      out.visibleTextAfterCredential = visibleText(doc.root);
+      out.secretValue = $("credential-secret").value;
+      out.secretInText = doc.root.textContent.includes(SECRET);
+      out.secretInUrl = calls.some(c => c.url.includes(SECRET));
+      out.credentialReadbackCount = credentialReadbackCount;
+    } else if (SCENARIO === "credential_fake_forget") {
       const button = $("credential-cards").querySelectorAll("button").find(b => b.textContent === "Forget local credential");
       button.click();
       out.forgetHelp = $("credential-dialog-help").textContent;
@@ -559,6 +1045,12 @@ async function run() {
       out.newerResponseVisible = $("canvas-courses").textContent.includes("Second course");
       releaseCanvasSnapshot(); await flush();
       out.olderResponseIgnored = $("canvas-courses").textContent.includes("Second course") && !$("canvas-courses").textContent.includes("Saved course");
+    } else if (SCENARIO === "recovery_projection") {
+      const cards = $("recovery-list").querySelectorAll("article");
+      out.recoveryCards = cards.map((card) => ({
+        text: visibleText(card),
+        labels: card.querySelectorAll("button").map((button) => button.textContent),
+      }));
     } else if (SCENARIO === "linux_card") {
       out.text = $("credential-cards").textContent;
       out.testDisabled = $("credential-cards").querySelector("button").disabled;
@@ -591,15 +1083,23 @@ async function run() {
       out.dialogHidden = $("credential-dialog").hidden; out.message = $("canvas-origin-error").textContent;
     } else {
       $("credential-cards").querySelectorAll("button").find((b) => ["Configure", "Replace credential"].includes(b.textContent)).click(); await flush();
-      out.focusOnOpen = doc.activeElement.id; $("credential-secret").value = SECRET;
+      out.focusOnOpen = doc.activeElement.id;
+      out.dialogHelpBeforePost = $("credential-dialog-help").textContent;
+      out.dialogTextBeforePost = visibleText($("credential-dialog"));
+      $("credential-secret").value = SECRET;
       $(SCENARIO === "credential_cancel" ? "credential-cancel" : "credential-confirm").click(); await flush();
       out.secretValue = $("credential-secret").value; out.dialogHidden = $("credential-dialog").hidden;
       out.notice = $("notice").textContent; out.secretInUrl = calls.some((c) => c.url.includes(SECRET));
       out.secretPosts = calls.filter((c) => c.body && c.body.secret === SECRET).length;
       out.secretInText = doc.root.textContent.includes(SECRET);
-      if (SCENARIO === "credential_failure" || SCENARIO === "credential_success" || SCENARIO === "credential_replace_failure") {
+      out.visibleTextAfterCredential = visibleText(doc.root);
+      out.credentialState = $("credential-status-" + CREDENTIAL_ROLE).textContent;
+      out.credentialMessage = $("credential-message-" + CREDENTIAL_ROLE) ? $("credential-message-" + CREDENTIAL_ROLE).textContent : "";
+      out.credentialReadbackFailed = calls.some((c) => c.url === "/api/v1/credentials") && failCredentialReadback;
+      out.canvasProfileMissing = Boolean(lastCanvasSnapshot && !lastCanvasSnapshot.profile);
+      if (["credential_failure", "credential_failure_unconfigured_worker", "credential_success", "credential_replace_failure"].includes(SCENARIO)) {
         out.focusedAfterCredential = doc.activeElement ? doc.activeElement.id : null;
-        out.credentialStatus = $("credential-status-notion-mcp").textContent;
+        out.credentialStatus = $("credential-status-" + CREDENTIAL_ROLE).textContent;
         const retryButton = $("credential-cards").querySelectorAll("button").find(b => ["Try again", "Retry replacement"].includes(b.textContent));
         out.retryLabel = retryButton ? retryButton.textContent : null;
         if (retryButton) {

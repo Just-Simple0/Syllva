@@ -1,5 +1,7 @@
 # Remote MCP OAuth broker with Google login
 
+> 현재 적용 안내 (2026-10-04): 아래 배정·리뷰·단계·권한 문구는 작성 당시의 역사 기록입니다. 새 작업은 프로젝트 `AGENTS.md`가 참조하는 현행 전역 정책과 `handoff.md`의 최신 재개 기준을 따릅니다. 과거 모델/강도·quota 예외·commit/push 허용을 새 작업으로 승계하지 않습니다. 원래 검토된 bytes와 해시는 당시 Git snapshot/리뷰 패키지의 근거로 유지하며, 이 안내를 추가한 현재 파일을 그 원본과 동일하다고 주장하지 않습니다.
+
 Status: PLAN rev2, previous independent reviews returned REVISE; fixes below await targeted rereview.
 Date: 2026-09-21.
 Owner: Astra orchestration; implementation fit: `gpt-5.6-sol` high (auth/protocol integration).

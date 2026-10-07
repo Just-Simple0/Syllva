@@ -2,8 +2,9 @@
   "purpose": "review-only source inventory; not runtime permission input",
   "repository_root": "/Users/admin/Project/Syllva",
   "provenance": {
-    "owner_frozen_inventory": ".insane-review/gui23-20261002/owner-freeze-peer-preservation.json",
-    "path_finding": ".insane-review/gui23-20261002/state-check-path-finding.md"
+    "active_baseline": "checker_active_baseline.py (exact historical checker; no runtime use)",
+    "current_11_snapshot": "source_pins-current11.json and state_check-current11.py are byte-identical snapshots of the active CFC11 baseline",
+    "exact_additions": "Six exact path/SHA/size entries reviewed in checker-six-source-pin-plan-v3.json; inventory is review-only and never supplies runtime pins."
   },
   "sources": [
     {
@@ -18,8 +19,8 @@
     },
     {
       "path": "src/uls/settings/credential_admission.py",
-      "sha256": "9b72fa7d3ff333f643c203f064025f2a5e5edfe9dfc27d6d53ee2a5c5e03da87",
-      "size_bytes": 29151
+      "sha256": "725b8098c8653b62853a5b15b1e93a30f2817058d4d25d87ab65e47b23586ff7",
+      "size_bytes": 50977
     },
     {
       "path": "src/uls/settings/credential_roles.py",
@@ -33,8 +34,8 @@
     },
     {
       "path": "src/uls/settings/credential_service.py",
-      "sha256": "d70bf1b5fcb63cb7d4c2f774a675be1b1d617b46a60bb4f932d3a7c831c62852",
-      "size_bytes": 28058
+      "sha256": "76537fcee777553cfd71c627b028d378ea666c091117956aed540f3468a5902c",
+      "size_bytes": 34900
     },
     {
       "path": "tests/unit/test_credential_set_cli.py",
@@ -48,8 +49,48 @@
     },
     {
       "path": "tests/contract/test_settings_credential_admission.py",
-      "sha256": "2a06ec2fc45494d89f84cf519cf619c1b738a7bee15ce168d23aefa7fe0d4bae",
-      "size_bytes": 32402
+      "sha256": "9a9676ef0d59f3b7d66fb4e80313b6fb1d3e80af98382c4019b856e7794583c3",
+      "size_bytes": 76850
+    },
+    {
+      "path": "tests/contract/test_settings_credential_journal.py",
+      "sha256": "c18e9da27c482fd3c794472e2b32091b1a16f08963532d5abfee4ebed3b0583c",
+      "size_bytes": 41015
+    },
+    {
+      "path": "tests/contract/test_settings_credential_http.py",
+      "sha256": "c2c2608c302a30ef6be4ec66c9528ab8d9959297c4eeba4883effc61229f7327",
+      "size_bytes": 18390
+    },
+    {
+      "path": "tests/unit/test_runtime_google_credentials.py",
+      "sha256": "0f88130c489f2484ec15d9b837e9922e91c04ca04ec31726803b7734904dab14",
+      "size_bytes": 4365
+    },
+    {
+      "path": "tests/unit/test_credential_resolver.py",
+      "sha256": "b9201fa1b57fff0d40769f33e47a80d3def1c4b15d9cf01d7f664eb00854557d",
+      "size_bytes": 14712
+    },
+    {
+      "path": "tests/unit/test_credential_resolver_file_source.py",
+      "sha256": "3fbc2182a08c0049e80a80952622773d933de845a34a31c943cd9f7dd95febc8",
+      "size_bytes": 5804
+    },
+    {
+      "path": "tests/unit/test_config_loader_credentials.py",
+      "sha256": "cb9bbfc0f2be069f421fc6974f687c51e88ee97ba5ac7e00acc9309df0bd7f7b",
+      "size_bytes": 4065
+    },
+    {
+      "path": "tests/contract/test_settings_credential_roles.py",
+      "sha256": "1754e0c64bef14ac2432f27935be6d0ee4c7dd56e514e1df6d265fa67c7641cc",
+      "size_bytes": 1134
+    },
+    {
+      "path": "tests/contract/test_settings_credential_stores.py",
+      "sha256": "2eaeafc4102dc9ab7220b98150502e247e17e36dbb3703b9f69be3ea1b15cfc2",
+      "size_bytes": 1333
     }
   ],
   "runtime_authority": "none; any future candidate implementation must independently hard-code and review these exact pins",
