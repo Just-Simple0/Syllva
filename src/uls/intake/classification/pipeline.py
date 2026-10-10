@@ -47,6 +47,24 @@ NOTE_SOURCE_TOO_LARGE: Final[str] = "SOURCE_TOO_LARGE"
 NOTE_SOURCE_UNAVAILABLE: Final[str] = "SOURCE_UNAVAILABLE"
 NOTE_UNSUPPORTED: Final[str] = "UNSUPPORTED_FORMAT"
 NOTE_AUTO_UNAVAILABLE: Final[str] = "AUTO_NOT_ENABLED"
+# Stage A (plan §3.4) blockers: why an item cannot get an AUTO_CLASSIFICATION plan.
+BLOCK_NOT_DECIDED: Final[str] = "AUTO_BLOCK_NOT_DECIDED"
+BLOCK_UNSUPPORTED: Final[str] = "AUTO_BLOCK_UNSUPPORTED"
+BLOCK_COURSE_UNRESOLVED: Final[str] = "AUTO_BLOCK_COURSE_UNRESOLVED"
+BLOCK_CALENDAR: Final[str] = "AUTO_BLOCK_CALENDAR"
+BLOCK_HANDLING: Final[str] = "AUTO_BLOCK_HANDLING"
+BLOCK_ORIGIN_UNKNOWN: Final[str] = "AUTO_BLOCK_ORIGIN_UNKNOWN"
+BLOCK_BYTES_UNPROVEN: Final[str] = "AUTO_BLOCK_BYTES_UNPROVEN"
+BLOCK_DUPLICATE_CONTENT: Final[str] = "DUPLICATE_CONTENT"
+BLOCK_DUPLICATE_UNPROVEN: Final[str] = "AUTO_BLOCK_DUPLICATE_UNPROVEN"
+BLOCK_PLAN_SUPERSEDED: Final[str] = "AUTO_PLAN_SUPERSEDED"
+BLOCK_PLAN_RECONCILE: Final[str] = "AUTO_PLAN_RECONCILE_REQUIRED"
+BLOCK_PLAN_CONFLICT: Final[str] = "AUTO_PLAN_CONFLICT"
+BLOCK_CANVAS_COURSE: Final[str] = "AUTO_BLOCK_CANVAS_COURSE"
+BLOCK_ALIAS_EVIDENCE: Final[str] = "AUTO_BLOCK_ALIAS_EVIDENCE"
+BLOCK_SESSION_UNKNOWN: Final[str] = "AUTO_BLOCK_SESSION_UNKNOWN"
+BLOCK_SESSION_AMBIGUOUS: Final[str] = "AUTO_BLOCK_SESSION_AMBIGUOUS"
+BLOCK_SESSION_OCCUPIED: Final[str] = "AUTO_BLOCK_SESSION_OCCUPIED"
 
 
 @dataclass(frozen=True)
@@ -93,9 +111,42 @@ class ClassificationOutcome:
 
     @property
     def needs_human(self) -> bool:
-        """P-B1: every item still needs a HUMAN request (AUTO arrives in P-B2)."""
+        """True unless stage A finds no blocker (the caller still checks bytes/duplicates)."""
 
-        return True
+        return bool(self.stage_a_blockers())
+
+    def stage_a_blockers(self) -> tuple[str, ...]:
+        """Pure part of plan §3.4 stage A: Kind, course, calendar, handling and origin.
+
+        Byte proof and the duplicate-content gate need state and are checked by the
+        worker; a TRANSCRIPT needs a MATCHED calendar (NEW Session), any Material
+        needs a PROFESSOR_SOURCE origin (UNKNOWN-origin Materials are never
+        published, §9), and the handling mode must be NORMALIZE or opaque.
+        """
+
+        blockers: list[str] = []
+        if self.kind is None:
+            return (BLOCK_NOT_DECIDED,)
+        if self.kind is Kind.UNSUPPORTED:
+            return (BLOCK_UNSUPPORTED,)
+        if self.course_key is None:
+            blockers.append(BLOCK_COURSE_UNRESOLVED)
+        if self.kind is Kind.TRANSCRIPT:
+            if self.calendar is None or self.calendar.status is not MatchStatus.MATCHED:
+                blockers.append(BLOCK_CALENDAR)
+        elif self.origin is not Origin.PROFESSOR_SOURCE:
+            blockers.append(BLOCK_ORIGIN_UNKNOWN)
+        if self.handling not in (HandlingMode.NORMALIZE, HandlingMode.REGISTER_OPAQUE_NO_RETRIEVAL):
+            blockers.append(BLOCK_HANDLING)
+        return tuple(blockers)
+
+    @property
+    def session_mode(self) -> str | None:
+        """NEW only for a calendar-matched transcript; Materials have none."""
+
+        if self.kind is Kind.TRANSCRIPT and self.calendar is not None and self.calendar.status is MatchStatus.MATCHED:
+            return "NEW"
+        return None
 
     @property
     def material_type_initial(self) -> str | None:
@@ -215,8 +266,6 @@ def classify_upload_item(
             )
             if handling is HandlingMode.S3:
                 notes.append(NOTE_FORMAT_KIND_MISMATCH)
-    # P-B1 has no automatic execution path: the item always goes to a HUMAN draft.
-    notes.append(NOTE_AUTO_UNAVAILABLE)
     suggestion_source = (
         f"rule:{decision.rule_id}" if decision.decided
         else "calendar" if calendar_match is not None and calendar_match.status is MatchStatus.MATCHED
@@ -242,6 +291,14 @@ def classify_upload_item(
 
 
 __all__ = [
+    "BLOCK_BYTES_UNPROVEN",
+    "BLOCK_CALENDAR",
+    "BLOCK_COURSE_UNRESOLVED",
+    "BLOCK_DUPLICATE_CONTENT",
+    "BLOCK_HANDLING",
+    "BLOCK_NOT_DECIDED",
+    "BLOCK_ORIGIN_UNKNOWN",
+    "BLOCK_UNSUPPORTED",
     "NOTE_AUTO_UNAVAILABLE",
     "NOTE_CALENDAR_AMBIGUOUS",
     "NOTE_CALENDAR_MISMATCH",

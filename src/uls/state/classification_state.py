@@ -280,6 +280,8 @@ CHUNK_TAG_SOURCES = frozenset({"rule", "model"})
 REQUIRED_TAG_QUESTION = "assignment"
 MATERIAL_BACKFILL_MARKER = "material_ai_kind_backfill_snapshot"
 AUTO_RESOLVABLE_REQUEST_TYPES = frozenset({"ASSIGN_COURSE", "FILE_DETAILS"})
+# The File Intake error code owned by an unresolved automatic closure (cleared with its terminal commit).
+AUTO_CLOSE_RECONCILE_CODE = "AUTO_RESOLVE_RECONCILE"
 # Approved S2/S4 thresholds (user decision 2026-10-10; ClassificationCfg defaults).  A
 # model yes/no below them is never a resolved decision (plan §3.2 / §3.6).
 MODEL_MIN_CONFIDENCE = 0.80
@@ -539,6 +541,176 @@ class ClassificationStateMixin:
                 "SELECT * FROM classification_records WHERE record_id = ?", (record_id,)
             ).fetchone()
             return None if row is None else ClassificationRecord(**dict(row))
+
+    def list_classification_records_by_bytes(self, byte_sha256: str) -> list[ClassificationRecord]:
+        """Every record holding these exact bytes (duplicate-content gate, plan §3.4 r6 R2)."""
+
+        with self._transaction() as connection:
+            rows = connection.execute(
+                "SELECT * FROM classification_records WHERE byte_sha256 = ? ORDER BY rowid",
+                (byte_sha256,),
+            ).fetchall()
+        return [ClassificationRecord(**dict(row)) for row in rows]
+
+    def list_intake_plans(
+        self, *, plan_authority: str | None = None, status: str | None = None, intake_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        query, params = "SELECT * FROM intake_plans", []
+        clauses = []
+        if intake_id is not None:
+            clauses.append("intake_id = ?"); params.append(intake_id)
+        if plan_authority is not None:
+            clauses.append("plan_authority = ?"); params.append(plan_authority)
+        if status is not None:
+            clauses.append("status = ?"); params.append(status)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        with self._transaction() as connection:
+            return [dict(r) for r in connection.execute(query + " ORDER BY created_at, plan_id", params).fetchall()]
+
+    def supersede_intake_plan(self, plan_revision: str, reason: str) -> int:
+        """Close an AUTO plan a human overtook: status SUPERSEDED and its jobs VOID (plan §3.4).
+
+        The status change and the job VOID transition commit in one transaction, and a
+        plan that is already closed still voids any job left behind, so a crash between
+        the two can never leave a runnable job of a dead plan (P-B2a r1 R8).
+        """
+
+        return self._close_auto_plan(plan_revision, "SUPERSEDED", reason)
+
+    def reconcile_intake_plan(self, plan_revision: str, reason: str) -> int:
+        """Park an AUTO plan whose preflight failed (plan §3.5): RECONCILE_REQUIRED, jobs VOID."""
+
+        return self._close_auto_plan(plan_revision, "RECONCILE_REQUIRED", reason)
+
+    def _close_auto_plan(self, plan_revision: str, status: str, reason: str) -> int:
+        with self._transaction(immediate=True) as connection:
+            cursor = connection.execute(
+                "UPDATE intake_plans SET status = ? WHERE plan_revision = ? "
+                "AND plan_authority = 'AUTO_CLASSIFICATION' AND status IN ('AUTO_PENDING', 'PLANNED')",
+                (status, plan_revision),
+            )
+            changed = cursor.rowcount
+            row = connection.execute(
+                "SELECT status FROM intake_plans WHERE plan_revision = ? "
+                "AND plan_authority = 'AUTO_CLASSIFICATION' ORDER BY created_at DESC LIMIT 1",
+                (plan_revision,),
+            ).fetchone()
+            if row is not None and row["status"] in ("SUPERSEDED", "RECONCILE_REQUIRED"):
+                self._void_plan_jobs(connection, plan_revision, reason)
+                # The item hands the authority back in the SAME transaction, so no crash can
+                # leave a closed plan next to an item that still claims CLASSIFIED.
+                connection.execute(
+                    "UPDATE intake_items SET classification_state = 'HUMAN' WHERE intake_id = ("
+                    "SELECT intake_id FROM intake_plans WHERE plan_revision = ? "
+                    "AND plan_authority = 'AUTO_CLASSIFICATION' ORDER BY created_at DESC LIMIT 1) "
+                    "AND classification_state = 'CLASSIFIED'",
+                    (plan_revision,),
+                )
+        return int(changed)
+
+    def get_auto_resolve_rollback(self, intent_id: str) -> dict[str, Any] | None:
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM auto_resolve_rollbacks WHERE intent_id = ?", (intent_id,)
+            ).fetchone()
+            return None if row is None else dict(row)
+
+    def duplicate_content_candidates(
+        self, *, intake_id: str, provider: str, provider_file_id: str, byte_sha256: str,
+        byte_md5: str | None, size: int | None,
+    ) -> dict[str, list[str]]:
+        """Plan §3.4 duplicate-content gate, complete over the whole store (P-B2a r1 R1, r2 R1).
+
+        ``proven`` lists other provider file IDs whose bytes are known to equal these
+        (an md5 observation, or a classification record proven for the item's *current*
+        source version).  ``unproven`` lists every other item whose bytes cannot be
+        proven different: no current-version byte proof and no md5, and a declared size
+        that is unknown or equal to this payload.  Terminal items (ORGANIZED with a
+        canonical binding, UNSUPPORTED) are judged like any other; the caller fails
+        closed on anything unproven.
+        """
+
+        proven: list[str] = []
+        unproven: list[str] = []
+        with self._transaction() as connection:
+            rows = connection.execute(
+                "SELECT i.intake_id, i.provider_file_id, i.source_hash, i.status, i.source_version, "
+                "(SELECT c.byte_sha256 FROM classification_records c WHERE c.intake_id = i.intake_id "
+                " AND c.byte_sha256 IS NOT NULL AND c.source_version = i.source_version "
+                " AND c.provider_file_id = i.provider_file_id ORDER BY c.rowid DESC LIMIT 1) AS proven_sha, "
+                "(SELECT CASE WHEN json_type(o.metadata_json, '$.size') = 'integer' "
+                " THEN json_extract(o.metadata_json, '$.size') END FROM intake_observations o "
+                " WHERE o.intake_id = i.intake_id AND o.source_version = i.source_version "
+                " ORDER BY o.observed_at DESC LIMIT 1) AS size "
+                "FROM intake_items i WHERE i.provider = ? AND i.intake_id != ?",
+                (provider, intake_id),
+            ).fetchall()
+        for row in rows:
+            file_id = str(row["provider_file_id"])
+            source_hash = str(row["source_hash"] or "")
+            if row["proven_sha"] == byte_sha256 or (byte_md5 and source_hash == "md5:" + byte_md5):
+                proven.append(file_id)
+                continue
+            if row["proven_sha"] is not None or source_hash.startswith("md5:"):
+                continue  # bytes known for the current version and different
+            other_size = row["size"]
+            if size is None or other_size is None or type(other_size) is not int or other_size < 0 or other_size == size:
+                unproven.append(file_id)  # size unknown or equal, bytes unknown: cannot rule out
+        # Canonical bindings that no longer have an intake row (r11 R2): a Canvas binding
+        # carries the byte hash (equal → proven duplicate); a Session source binding carries
+        # none, so its content cannot be shown to differ → unproven (fail closed).
+        known = {str(row["provider_file_id"]) for row in rows}
+        with self._transaction() as connection:
+            canvas = connection.execute(
+                "SELECT drive_file_id, byte_sha256 FROM canvas_drive_bindings WHERE drive_file_id != ?",
+                (provider_file_id,),
+            ).fetchall()
+            sessions = connection.execute(
+                "SELECT provider_file_id, created_at FROM session_source_bindings "
+                "WHERE provider = ? AND provider_file_id != ?",
+                (provider, provider_file_id),
+            ).fetchall()
+            latest = {
+                (str(o["intake_id"]), int(o["source_version"])): o["at"]
+                for o in connection.execute(
+                    "SELECT intake_id, source_version, MAX(observed_at) AS at FROM intake_observations "
+                    "GROUP BY intake_id, source_version"
+                ).fetchall()
+            }
+            observed = {
+                str(row["provider_file_id"]): latest.get((str(row["intake_id"]), int(row["source_version"])))
+                for row in rows
+            }
+        for bound in canvas:
+            other = str(bound["drive_file_id"])
+            # Independent of the file's current intake row: the binding records the bytes the
+            # canonical material was built from (r14 R1).
+            if bound["byte_sha256"] == byte_sha256:
+                proven.append(other)
+        for bound in sessions:
+            other = str(bound["provider_file_id"])
+            if other in proven:
+                continue
+            if other not in known:
+                unproven.append(other)  # no row at all: its content cannot be shown to differ
+                continue
+            seen_at = observed.get(other)
+            if seen_at is None or str(bound["created_at"]) <= str(seen_at):
+                # The binding predates the file's current observation, so it may describe
+                # older bytes that the row's current proof says nothing about (r15 R1).
+                unproven.append(other)
+        return {"proven": sorted(set(proven)), "unproven": sorted(set(unproven))}
+
+    def list_auto_resolve_intents(self, *, states: Iterable[str] = ("PENDING", "RECONCILE")) -> list[AutoResolveIntent]:
+        wanted = tuple(states)
+        with self._transaction() as connection:
+            rows = connection.execute(
+                "SELECT * FROM auto_resolve_intents WHERE state IN (" + ",".join("?" for _ in wanted) + ") "
+                "ORDER BY rowid",
+                wanted,
+            ).fetchall()
+        return [AutoResolveIntent(**dict(r)) for r in rows]
 
     def latest_classification_record(self, intake_id: str) -> ClassificationRecord | None:
         with self._transaction() as connection:
@@ -1070,6 +1242,16 @@ class ClassificationStateMixin:
             ).fetchone()
             return dict(row)
 
+    def session_source_binding_for(self, course_key: str, session_id: str) -> dict[str, Any] | None:
+        """The canonical source binding of a Session, when one exists (occupancy proof)."""
+
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM session_source_bindings WHERE course_key = ? AND session_id = ?",
+                (course_key, session_id),
+            ).fetchone()
+            return None if row is None else dict(row)
+
     def get_canvas_drive_binding(self, drive_file_id: str) -> dict[str, Any] | None:
         with self._transaction() as connection:
             row = connection.execute(
@@ -1241,9 +1423,78 @@ class ClassificationStateMixin:
         if record["intake_id"] != intake_ids[0]:
             raise ValueError("classification record belongs to another intake than the request")
 
+    @staticmethod
+    def _clear_closure_mark(connection: sqlite3.Connection, record_id: str) -> None:
+        """Inside the terminal transaction: drop the closure-owned reconcile mark of the
+        record's intake unless another live intent of that intake still needs it.  An
+        independent reconcile cause (any other error code) is never touched."""
+
+        record = connection.execute(
+            "SELECT intake_id FROM classification_records WHERE record_id = ?", (record_id,)
+        ).fetchone()
+        if record is None:
+            return
+        live = connection.execute(
+            "SELECT 1 FROM auto_resolve_intents i JOIN classification_records c ON c.record_id = i.record_id "
+            "WHERE c.intake_id = ? AND i.state IN ('PENDING', 'RECONCILE')",
+            (record["intake_id"],),
+        ).fetchone()
+        if live is None:
+            connection.execute(
+                "UPDATE intake_items SET status = 'NEEDS_INPUT', last_error_code = NULL, last_error = NULL "
+                "WHERE intake_id = ? AND status = 'RECONCILE_REQUIRED' AND last_error_code = ?",
+                (record["intake_id"], AUTO_CLOSE_RECONCILE_CODE),
+            )
+
+    def abort_auto_resolve_intent_superseding(self, intent_id: str, reason: str) -> AutoResolveIntent:
+        """§3.5 (ii): plan SUPERSEDED + its jobs VOID + item HUMAN + intent ABORTED + the
+        closure's reconcile mark, all in ONE transaction, so no crash can leave a closed
+        intent next to a live AUTO plan (r8 R1).  Idempotent for an already ABORTED intent."""
+
+        with self._transaction(immediate=True) as connection:
+            row = connection.execute("SELECT * FROM auto_resolve_intents WHERE intent_id = ?", (intent_id,)).fetchone()
+            if row is None:
+                raise KeyError(intent_id)
+            if row["state"] not in ("PENDING", "RECONCILE", "ABORTED"):
+                raise ValueError(f"auto resolve intent cannot be aborted from {row['state']}")
+            record = connection.execute(
+                "SELECT intake_id, classification_revision_hash FROM classification_records WHERE record_id = ?",
+                (row["record_id"],),
+            ).fetchone()
+            if record is not None:
+                plans = connection.execute(
+                    "SELECT plan_revision FROM intake_plans WHERE plan_authority = 'AUTO_CLASSIFICATION' "
+                    "AND intake_id = ? AND status IN ('AUTO_PENDING', 'PLANNED')",
+                    (record["intake_id"],),
+                ).fetchall()
+                for plan in plans:
+                    connection.execute(
+                        "UPDATE intake_plans SET status = 'SUPERSEDED' WHERE plan_revision = ?",
+                        (plan["plan_revision"],),
+                    )
+                    self._void_plan_jobs(connection, plan["plan_revision"], reason)
+                connection.execute(
+                    "UPDATE intake_items SET classification_state = 'HUMAN' WHERE intake_id = ?",
+                    (record["intake_id"],),
+                )
+            if row["state"] != "ABORTED":
+                connection.execute(
+                    "UPDATE auto_resolve_intents SET state = 'ABORTED', updated_at = ? WHERE intent_id = ?",
+                    (_now(), intent_id),
+                )
+            self._clear_closure_mark(connection, row["record_id"])
+            refreshed = connection.execute(
+                "SELECT * FROM auto_resolve_intents WHERE intent_id = ?", (intent_id,)
+            ).fetchone()
+            return AutoResolveIntent(**dict(refreshed))
+
     def create_auto_resolve_intent(
-        self, *, record_id: str, request_key: str, expected_user_snapshot_hash: str
+        self, *, record_id: str, request_key: str, expected_user_snapshot_hash: str,
+        pre_close_snapshot_hash: str | None = None,
     ) -> AutoResolveIntent:
+        """Durable PENDING intent; the pre-close snapshot (when given) is written in the
+        same transaction so no crash window separates the two (P-B2a r2 O1)."""
+
         with self._transaction(immediate=True) as connection:
             existing = connection.execute(
                 "SELECT * FROM auto_resolve_intents WHERE request_key = ? AND record_id = ?",
@@ -1252,6 +1503,8 @@ class ClassificationStateMixin:
             if existing is not None:
                 if existing["expected_user_snapshot_hash"] != expected_user_snapshot_hash:
                     raise ValueError("auto resolve intent inputs are immutable")
+                if pre_close_snapshot_hash is not None and existing["pre_close_snapshot_hash"] not in (None, pre_close_snapshot_hash):
+                    raise ValueError("pre_close_snapshot_hash is immutable once recorded")
                 if existing["state"] in ("PENDING", "RECONCILE"):
                     # A live intent is only re-read while its binding still holds: a
                     # receipt a human moved to Submitted/Claimed or a terminal state is
@@ -1276,9 +1529,9 @@ class ClassificationStateMixin:
             now = _now()
             connection.execute(
                 "INSERT INTO auto_resolve_intents(intent_id, record_id, request_key, "
-                "expected_user_snapshot_hash, state, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, 'PENDING', ?, ?)",
-                (intent_id, record_id, request_key, expected_user_snapshot_hash, now, now),
+                "expected_user_snapshot_hash, pre_close_snapshot_hash, state, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?)",
+                (intent_id, record_id, request_key, expected_user_snapshot_hash, pre_close_snapshot_hash, now, now),
             )
             row = connection.execute(
                 "SELECT * FROM auto_resolve_intents WHERE intent_id = ?", (intent_id,)
@@ -1377,6 +1630,8 @@ class ClassificationStateMixin:
                 "UPDATE auto_resolve_intents SET state = ?, updated_at = ? WHERE intent_id = ?",
                 (state, _now(), intent_id),
             )
+            if state in ("DONE", "ABORTED"):
+                self._clear_closure_mark(connection, row["record_id"])
             refreshed = connection.execute(
                 "SELECT * FROM auto_resolve_intents WHERE intent_id = ?", (intent_id,)
             ).fetchone()
@@ -1426,6 +1681,11 @@ class ClassificationStateMixin:
                 "WHERE intent_id = ? AND state IN ('PENDING', 'RECONCILE')",
                 (_now(), intent_id),
             )
+            intent_row = connection.execute(
+                "SELECT record_id FROM auto_resolve_intents WHERE intent_id = ?", (intent_id,)
+            ).fetchone()
+            if intent_row is not None:
+                self._clear_closure_mark(connection, intent_row["record_id"])
             row = connection.execute(
                 "SELECT * FROM auto_resolve_rollbacks WHERE intent_id = ?", (intent_id,)
             ).fetchone()
@@ -1760,12 +2020,16 @@ class ClassificationStateMixin:
         """Persistently retire every unfinished job of a superseded plan (r8 R2, r9 O1)."""
 
         with self._transaction(immediate=True) as connection:
-            cursor = connection.execute(
-                "UPDATE jobs SET voided_at = ?, void_reason = ?, updated_at = ? "
-                "WHERE plan_revision = ? AND voided_at IS NULL AND completed_at IS NULL",
-                (_now(), reason, _now(), plan_revision),
-            )
-            return int(cursor.rowcount)
+            return self._void_plan_jobs(connection, plan_revision, reason)
+
+    @staticmethod
+    def _void_plan_jobs(connection: sqlite3.Connection, plan_revision: str, reason: str) -> int:
+        cursor = connection.execute(
+            "UPDATE jobs SET voided_at = ?, void_reason = ?, updated_at = ? "
+            "WHERE plan_revision = ? AND voided_at IS NULL AND completed_at IS NULL",
+            (_now(), reason, _now(), plan_revision),
+        )
+        return int(cursor.rowcount)
 
 
 __all__ = [

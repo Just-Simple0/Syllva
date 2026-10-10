@@ -25,6 +25,16 @@
 
 ## P-B2 — AUTO 권한 활성화·Draft 자동 종료·AUTO 실행 (§3.4, §3.5, §3.7, §6.1 opaque)
 
+P-B2는 리뷰 단위로 다시 둘로 나눈다.
+
+### P-B2a — 단계 A·AUTO_PENDING·Draft 자동 종료·장벽 (실행 없음)
+- 단계 A 적격성(순수 `ClassificationOutcome.stage_a_blockers()` + worker의 바이트 증명·중복 콘텐츠 게이트): 통과 항목만 `AUTO_PENDING` plan(`plan_revision = sha256(auto-plan, classification_revision_hash, workspace_fingerprint)`, 멱등)을 받고 `classification_state=CLASSIFIED`가 되며 **HUMAN draft를 만들지 않는다**; 하나라도 막히면 S3(HUMAN)로 draft + 제안 + 차단 사유 코드(`AUTO_BLOCK_*`, `DUPLICATE_CONTENT`, `AUTO_NOT_ENABLED`).
+- §3.5 자동 종료: 같은 intake의 untouched Draft(상태 Draft·체크박스 false·USER 필드 blank·revision hash 일치)에 한해 preflight(바이트 재증명·source version) → PENDING intent(+pre_close snapshot) → `Auto Resolved`/`Result Reference` 쓰기(write-attempt ledger) → readback → **receipt+intent 원자 커밋**. 사람이 손댄 Draft/Submitted/Claimed는 AUTO plan `SUPERSEDED`(+job VOID) + HUMAN 유지.
+- 복구 (i)~(iv)는 틱 시작(발견·claim 이전)에 수행; PENDING intent는 `_submitted_request_keys()`·`claim_request()`의 영속 장벽. `_run_layout_workspaces()`/큐의 터미널에 `AutoResolved` 포함. readiness에 `auto_enabled`, `auto_pending_plans`, `pending_auto_resolve_intents`.
+- 실행·승격은 없다: `AUTO_PENDING` plan은 P-B2b까지 대기한다(기본 `enabled=false`라 운영 영향 없음).
+
+### P-B2b — 단계 B 승격·AUTO 실행 컨텍스트·preflight·opaque 등록
+
 1. 단계 A(`AUTO_PENDING` 적격성): Kind·과목·달력/Session 근거·probe·바이트 동일성(`byte_sha256`/`byte_md5`)·중복 콘텐츠 게이트·provenance·alias 근거. 실패 → S3/RECONCILE, Draft 불변.
 2. 단계 B: §3.5 Auto Resolved intent(preflight → PENDING intent → Notion 쓰기 → readback → receipt+intent 원자 커밋) → `promote_auto_plan`. 복구 (i)~(iv)와 rollback intent.
 3. 실행: `ClassificationExecutionContext`, `_process_item_unlocked()`의 authority 분기, mutation preflight와 각 쓰기 직전 (a)~(d) 재확인, `_workspace_for_item()`의 AUTO 과목 결속, job claim 시 plan revision/authority 삼자 검사, SUPERSEDED → job VOID.
@@ -40,3 +50,7 @@
 3. ASSIGN_COURSE 재실행 보호·교차 권한 인계 재검증.
 
 수용: §9 P-B 행의 잔여 항목 + §6.3 테스트.
+
+## 구현 메모
+
+- `classification_records.course_basis.type`은 구현에서 `upload_folder|config_alias|notion_alias`를 쓴다. Canvas course map은 근거 유형이 아니라 단계 A와 첫 mutation preflight의 교차 검증이며 `canvas_map` 유형은 P-B3에 남긴다(P-B2a r14 O1).
