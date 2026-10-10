@@ -8,9 +8,11 @@ matching folder names.
 
 from __future__ import annotations
 
+import contextlib
 import io
 import re
-from collections.abc import Iterable, Mapping
+import threading
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, runtime_checkable
 
@@ -19,6 +21,11 @@ from uls.domain.errors import (
     ProviderUnavailableError,
     SourcePartialError,
     SourceUnavailableError,
+)
+from uls.intake.attestation import (
+    ReconnectRequiredError,
+    WorkerEntryAttestation,
+    attestation_matches,
 )
 from uls.intake.identity import validate_private_properties
 
@@ -157,11 +164,42 @@ class GoogleDriveWorkerAdapter:
         private_owner_readback=True,
     )
 
-    def __init__(self, service: Any, *, max_bytes: int = 20_000_000, max_files: int = 10_000) -> None:
+    def __init__(self, service: Any, *, max_bytes: int = 20_000_000, max_files: int = 10_000,
+                 attestor: Any | None = None) -> None:
         self._service = service
         self._files = service.files()
         self.max_bytes = max_bytes
         self.max_files = max_files
+        # Personal OAuth compositions share one attestor with the worker. Every
+        # provider call then requires a fresh attestation issued by that exact
+        # object for the current entry (P2 plan §5). Service-account
+        # compositions pass None and keep their existing behaviour.
+        self._attestor = attestor
+        self._context = threading.local()
+
+    @contextlib.contextmanager
+    def attested(self, attestation: WorkerEntryAttestation | None) -> Iterator[None]:
+        """Operation-scoped context carrying the worker's current entry attestation."""
+
+        if self._attestor is not None:
+            self._require_valid(attestation)
+        previous = getattr(self._context, "current", None)
+        self._context.current = attestation
+        try:
+            yield
+        finally:
+            self._context.current = previous
+
+    def _require_valid(self, attestation: WorkerEntryAttestation | None) -> None:
+        # Identity, role, exact scope, binding digest, issued generation and
+        # freshness must all match the attestor this adapter was built with.
+        if self._attestor is None or not attestation_matches(self._attestor, attestation):
+            raise ReconnectRequiredError()
+
+    def _require_attested(self) -> None:
+        if self._attestor is None:
+            return
+        self._require_valid(getattr(self._context, "current", None))
 
     def list_folder(self, folder_id: str) -> list[DriveMetadata]:
         _require_id(folder_id)
@@ -211,6 +249,7 @@ class GoogleDriveWorkerAdapter:
         size = metadata.size
         if size is None or size < 0 or size > self.max_bytes:
             raise SourcePartialError("Drive source is outside the bounded download limit")
+        self._require_attested()
         try:
             from googleapiclient.http import MediaIoBaseDownload  # type: ignore[import-untyped]
 
@@ -222,11 +261,14 @@ class GoogleDriveWorkerAdapter:
             )
             done = False
             while not done:
+                # The attestation context must still be valid before every
+                # provider chunk, not only before the first one.
+                self._require_attested()
                 _, done = downloader.next_chunk(num_retries=0)
                 if output.tell() > self.max_bytes:
                     raise SourcePartialError("Drive source exceeds byte limit")
             data = output.getvalue()
-        except SourcePartialError:
+        except (SourcePartialError, ReconnectRequiredError):
             raise
         except Exception:
             raise ProviderUnavailableError("Drive download failed") from None
@@ -303,6 +345,8 @@ class GoogleDriveWorkerAdapter:
                 fields="id,name,mimeType,parents,modifiedTime,size,md5Checksum,trashed,ownedByMe,webViewLink,driveId,permissions(type,role,allowFileDiscovery),capabilities(canEdit,canMoveItemWithinDrive),appProperties",
                 supportsAllDrives=True,
             )
+        except ReconnectRequiredError:
+            raise
         except Exception:
             raise ProviderUnavailableError("Drive create failed") from None
         metadata = _metadata(result)
@@ -331,6 +375,8 @@ class GoogleDriveWorkerAdapter:
                 fields="id,name,mimeType,parents,modifiedTime,size,md5Checksum,trashed,ownedByMe,webViewLink,driveId,permissions(type,role,allowFileDiscovery),capabilities(canEdit,canMoveItemWithinDrive),appProperties",
                 supportsAllDrives=True,
             )
+        except ReconnectRequiredError:
+            raise
         except Exception:
             raise ProviderUnavailableError("Drive move failed") from None
         moved = _metadata(result)
@@ -370,11 +416,11 @@ class GoogleDriveWorkerAdapter:
         if require_move and metadata.can_move is not True:
             raise PolicyDeniedError("Drive item cannot be moved by the configured worker")
 
-    @staticmethod
-    def _call(method: Any, **kwargs: Any) -> Any:
+    def _call(self, method: Any, **kwargs: Any) -> Any:
+        self._require_attested()
         try:
             return method(**kwargs).execute()
-        except (SourcePartialError, SourceUnavailableError, PolicyDeniedError):
+        except (SourcePartialError, SourceUnavailableError, PolicyDeniedError, ReconnectRequiredError):
             raise
         except Exception:
             raise ProviderUnavailableError("Drive worker operation failed") from None

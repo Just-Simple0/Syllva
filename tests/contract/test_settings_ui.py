@@ -716,3 +716,51 @@ def test_deferred_groups_expose_no_mutation_controls():
     assert 'id="credential-secret" type="password" data-secret' in page
     assert 'autocomplete="new-password"' in page
     assert 'id="credential-file-error"' in page
+
+
+def test_google_sign_in_flow_begins_polls_and_commits_without_exposing_flow_internals():
+    result = _scenario("google_oauth_success")
+    assert result["initialLabels"] == ["Test connection", "Sign in with Google", "Configure"]
+    assert result["beginBody"] == {"generation": "g-canvas-0", "replace": False}
+    assert result["beginCsrf"] == "csrf-test-token-value"
+    assert result["statusAfterBegin"] == "Waiting for Google sign-in in your browser…"
+    assert result["labelsAfterBegin"] == ["Test connection", "Cancel Google sign-in", "Configure"]
+    assert result["statusAfterPoll"] == "Google approved the request. Confirm to save this connection."
+    assert result["labelsAfterPoll"] == ["Test connection", "Confirm Google connection", "Cancel Google sign-in", "Configure"]
+    assert result["commitBody"] == {"flow_id": "f" * 32, "generation": "g-canvas-0", "replace": False}
+    assert result["statusAfterCommit"] == "Google connection saved and verified."
+    assert result["cardStateAfterCommit"] == "Configured"
+    assert result["labelsAfterCommit"] == ["Test connection", "Replace with Google sign-in", "Replace credential", "Forget local credential"]
+    assert result["focusAfterCommit"] == "credential-status-google-mcp"
+    assert result["googleActions"] == ["begin", "f" * 32, "commit"]
+    assert not result["flowIdInText"] and not result["stateInText"]
+
+
+def test_google_sign_in_denied_returns_to_sign_in_with_fixed_message():
+    result = _scenario("google_oauth_denied")
+    assert result["statusAfterPoll"] == "Google access was declined. Nothing changed."
+    assert result["noticeAfterPoll"] == "Google access was declined. Nothing changed."
+    assert result["labelsAfterPoll"] == ["Test connection", "Sign in with Google", "Configure"]
+    assert result["googleActions"] == ["begin", "f" * 32]
+
+
+def test_google_sign_in_cancel_posts_cancel_and_restores_sign_in():
+    result = _scenario("google_oauth_cancel")
+    assert result["cancelBody"] == {"flow_id": "f" * 32, "generation": "g-canvas-0"}
+    assert result["labelsAfterCancel"] == ["Test connection", "Sign in with Google", "Configure"]
+    assert result["noticeAfterCancel"] == "Google sign-in cancelled. Nothing was saved."
+    assert result["googleActions"] == ["begin", "cancel"]
+
+
+def test_google_sign_in_hidden_until_desktop_client_is_configured():
+    result = _scenario("google_oauth_not_ready")
+    assert result["signInMissing"] and result["googleActions"] == []
+    assert "Add your own Google Desktop client to config.yaml" in result["initialText"]
+
+
+def test_google_commit_failure_shows_fixed_message_and_keeps_card_unconfigured():
+    result = _scenario("google_oauth_commit_mismatch")
+    assert result["statusAfterCommit"] == "Both Drive connections must use the same Google account."
+    assert result["cardStateAfterCommit"] == "Not configured"
+    assert result["labelsAfterCommit"] == ["Test connection", "Sign in with Google", "Configure"]
+    assert result["googleActions"] == ["begin", "f" * 32, "commit"]

@@ -415,6 +415,10 @@ class SettingsServer:
         self.clock = clock
         self.shutdown_reason: str | None = None
         self.barrier = MutationBarrier()
+        self.google_oauth: Any = None
+        self._terminating = False
+        self._terminal: tuple[str, Callable[[], None], float] | None = None
+        self._drained = False
         self._server: Any = None
         self._shutdown_task: asyncio.Task[None] | None = None
         self._shutdown_at: float | None = None
@@ -434,7 +438,9 @@ class SettingsServer:
 
     async def _shutdown_after(self, delay: float) -> None:
         # Stop only after the notification window and every in-flight mutation.
-        await asyncio.gather(asyncio.sleep(delay), self.barrier.wait_idle(MUTATION_DRAIN_SECONDS))
+        await asyncio.sleep(delay)
+        while not await self.barrier.wait_idle(MUTATION_DRAIN_SECONDS):
+            pass
         if self._server is not None:
             self._server.should_exit = True
 
@@ -464,12 +470,28 @@ class SettingsServer:
         prefix = new_path_prefix()
         token, security = SessionSecurity.issue()
         self.security = security
+        # The personal-OAuth flow service exists exactly once, after the exact
+        # authority, prefix and session epoch are known (P2 plan §4). Browser
+        # opening reuses the daemon-thread opener; with --no-browser no opener
+        # exists and begin fails closed (the authorization URL is never printed).
+        from .composition import build_google_oauth_service
+
+        def oauth_opener(url: str) -> None:
+            threading.Thread(target=_open_browser, args=(url,), daemon=True).start()
+
+        # --no-browser never prints the authorization URL (it carries state and
+        # the PKCE challenge); without a browser opener begin fails closed.
+        self.google_oauth = build_google_oauth_service(
+            credentials, store, authority=f"{LOOPBACK_HOST}:{port}", prefix=prefix, security=security,
+            opener=oauth_opener if self.open_browser else None, fake_mode=bool(fake_root),
+        )
         app = create_settings_app(
             store, journal, security, f"{LOOPBACK_HOST}:{port}",
             prefix=prefix, barrier=self.barrier,
             on_close=lambda: self.request_shutdown("closed", CLOSE_DRAIN_SECONDS),
             replaced_previous=self.replaced_previous,
             credential_service=credentials, canvas_service=canvas, fake_mode=bool(fake_root),
+            google_oauth_service=self.google_oauth,
         )
         import uvicorn
 
@@ -503,17 +525,54 @@ class SettingsServer:
             sock.close()
         return self.shutdown_reason or "stopped"
 
+    def _terminate(self, reason: str, finish: Callable[[], None], grace: float) -> None:
+        """One lifecycle order for close/replacement/idle (P2 plan §4).
+
+        1. block new OAuth begin/commit and drop pre-commit flows;
+        2. close the mutation barrier so no new mutation enters;
+        3. drain mutations already inside the barrier (a committing save finishes);
+        4. only then end the session (close/replace/expire) and schedule shutdown.
+        """
+
+        if self._terminating:
+            # A replacement commit arriving during another termination is never
+            # ignored: it supersedes the pending finish/grace, or, when the
+            # drain already completed, applies immediately on the shorter grace.
+            if reason == "replaced" and self._terminal is not None and self._terminal[0] != "replaced":
+                self._terminal = (reason, finish, grace)
+                if self._drained:
+                    finish()
+                    self.request_shutdown(reason, grace)
+            return
+        self._terminating = True
+        self._terminal = (reason, finish, grace)
+        if self.google_oauth is not None:
+            self.google_oauth.invalidate_precommit()
+        self.barrier.close()
+
+        async def run() -> None:
+            # A committing save may legitimately outlast one drain window; the
+            # session never ends while a mutation is still inside the barrier.
+            while not await self.barrier.wait_idle(MUTATION_DRAIN_SECONDS):
+                pass
+            self._drained = True
+            assert self._terminal is not None
+            final_reason, final_finish, final_grace = self._terminal
+            final_finish()
+            self.request_shutdown(final_reason, final_grace)
+
+        asyncio.get_running_loop().create_task(run())
+
     def _check_lifecycle(self, security: SessionSecurity) -> None:
-        state = security.lifecycle_state()
-        if state == "bootstrap_expired":
+        pending = security.lifecycle_pending()
+        if pending == "bootstrap_expired":
+            security.expire_bootstrap()
             self.request_shutdown("bootstrap_expired", 0.0)
-        elif state == "expired":
-            self.request_shutdown("expired", EXPIRED_GRACE_SECONDS)
+        elif pending == "expired":
+            self._terminate("expired", security.expire, EXPIRED_GRACE_SECONDS)
 
     def _commit_replacement(self, security: SessionSecurity) -> None:
-        security.replace()
-        self.barrier.close()
-        self.request_shutdown("replaced", REPLACEMENT_DRAIN_SECONDS)
+        self._terminate("replaced", security.replace, REPLACEMENT_DRAIN_SECONDS)
 
     async def _start_control(self, security: SessionSecurity) -> asyncio.AbstractServer | None:
         path = control_socket_path(self.runtime_dir)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -91,3 +92,42 @@ def build_settings_services(
         stores = CredentialStores(runtime_dir / "unsupported-secrets", backend=FakeKeyring())
     credentials = CredentialService(config, journal, stores, ProviderChecks())
     return credentials, CanvasService(credentials)
+
+
+def build_google_oauth_service(
+    credentials: CredentialService, config: ConfigStore, *, authority: str, prefix: str, security: Any,
+    opener: Callable[[str], None] | None, fake_mode: bool = False,
+) -> Any:
+    """Build exactly one personal-OAuth flow service bound to this launch's authority/prefix/session.
+
+    Called by the launcher only after the loopback socket, path prefix and
+    ``SessionSecurity`` exist (P2 plan §4). Fake mode wires a provider-free
+    fake that completes the redirect itself; the real path uses bounded
+    HTTPS exchangers and installs the fresh-grant verifier on the shared
+    ``CredentialService``.
+    """
+
+    from .google_oauth import (
+        FakeGoogleOAuthProvider,
+        GoogleAccountReader,
+        GoogleGrantVerifier,
+        GoogleOAuthFlowService,
+        GoogleTokenExchanger,
+    )
+
+    if fake_mode:
+        fake = FakeGoogleOAuthProvider()
+        credentials.oauth_verifier = fake.verifier
+        service = GoogleOAuthFlowService(
+            credentials, config, authority=authority, prefix=prefix, security=security,
+            opener=fake.opener, exchanger=fake.exchanger, account_reader=fake.account_reader,
+        )
+        fake.service = service
+        service.fake_provider = fake  # type: ignore[attr-defined]
+        return service
+    credentials.oauth_verifier = GoogleGrantVerifier()
+    return GoogleOAuthFlowService(
+        credentials, config, authority=authority, prefix=prefix, security=security,
+        opener=opener, exchanger=GoogleTokenExchanger(),
+        account_reader=GoogleAccountReader(),
+    )

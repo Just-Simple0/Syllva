@@ -1,0 +1,79 @@
+"""Intake classification v2 (docs/plans/intake-classification-v2.md).
+
+P-A exposes the taxonomy, the deterministic rule table and the recording
+calendar as pure modules with no provider, model or state dependencies.
+"""
+
+from .calendar import (
+    CalendarMatch,
+    CourseCalendar,
+    EntryStatus,
+    MatchStatus,
+    RecordingEntry,
+    SemesterRange,
+    build_calendar,
+    match_transcript,
+)
+from .rules import (
+    CourseAliasIndex,
+    ItemSignals,
+    RuleDecision,
+    classify_by_rules,
+    course_aliases_from_config,
+    date_from_text,
+    transcript_signals,
+    week_from_filename,
+    week_from_module_name,
+)
+from .taxonomy import (
+    AI_KIND_OPTIONS,
+    FILE_KINDS_V2,
+    MATERIAL_ROLES_V2,
+    MATERIAL_TYPE_INITIAL,
+    ORIGIN_OPTIONS,
+    RULE_TABLE_VERSION,
+    TAG_VOCAB_VERSION,
+    ChunkTag,
+    DecisionType,
+    HandlingMode,
+    Kind,
+    Origin,
+    handling_mode,
+    kind_from_value,
+    material_type_initial,
+)
+
+__all__ = [
+    "AI_KIND_OPTIONS",
+    "FILE_KINDS_V2",
+    "MATERIAL_ROLES_V2",
+    "MATERIAL_TYPE_INITIAL",
+    "ORIGIN_OPTIONS",
+    "RULE_TABLE_VERSION",
+    "TAG_VOCAB_VERSION",
+    "CalendarMatch",
+    "ChunkTag",
+    "CourseAliasIndex",
+    "CourseCalendar",
+    "DecisionType",
+    "EntryStatus",
+    "HandlingMode",
+    "ItemSignals",
+    "Kind",
+    "MatchStatus",
+    "Origin",
+    "RecordingEntry",
+    "RuleDecision",
+    "SemesterRange",
+    "build_calendar",
+    "classify_by_rules",
+    "course_aliases_from_config",
+    "date_from_text",
+    "handling_mode",
+    "kind_from_value",
+    "match_transcript",
+    "material_type_initial",
+    "transcript_signals",
+    "week_from_filename",
+    "week_from_module_name",
+]

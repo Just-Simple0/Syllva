@@ -13,6 +13,17 @@ from contextlib import suppress
 from typing import Any
 from urllib.parse import urlencode
 
+from uls.config.google_oauth import (
+    AUTHORIZED_USER_TYPE,
+    SERVICE_ACCOUNT_TYPE,
+    AuthorizedUserCredential,
+    GoogleOAuthClient,
+    GoogleOAuthCredentialError,
+    GoogleOAuthPurpose,
+    credential_type,
+    parse_authorized_user_bytes,
+)
+
 from .config_service import SettingsServiceError
 from .credential_roles import CredentialRole
 
@@ -33,11 +44,44 @@ MESSAGES = {
     "DESTINATION_NOT_ALLOWED": "Only public Canvas addresses are supported.",
     "PROFILE_MISMATCH": "The token belongs to a different Canvas account.",
     "RATE_LIMITED": "The provider asked us to wait. Retry check later.",
+    # Personal Google OAuth (P2 plan §2): fixed codes, never provider text.
+    "OAUTH_APP_NOT_READY": "Add your own Google Desktop client to config.yaml (owner-only file) before connecting.",
+    "FLOW_BUSY": "A Google sign-in is already in progress for this connection.",
+    "FLOW_NOT_FOUND": "This Google sign-in is no longer known. Start again.",
+    "FLOW_EXPIRED": "This Google sign-in took too long. Start again.",
+    "FLOW_CANCELLED": "This Google sign-in was cancelled.",
+    "FLOW_STATE_REJECTED": "The Google sign-in response did not match this Settings session.",
+    "OAUTH_ACCESS_DENIED": "Google access was declined. Nothing changed.",
+    "OAUTH_GRANT_MISMATCH": "Google granted a different permission than this connection needs.",
+    "OAUTH_CLIENT_MISMATCH": "The stored credential belongs to a different Google client.",
+    "ACCOUNT_MISMATCH": "Both Drive connections must use the same Google account.",
+    "RECONNECT_REQUIRED": "The Google connection must be set up again.",
+    "COMMIT_IN_PROGRESS": "This Google sign-in is being saved and cannot be cancelled.",
+    "SAVE_FAILED": "The Google connection could not be saved. Nothing changed.",
+    "CREDENTIAL_TYPE_CONFLICT": "Retrieval and worker must use the same kind of Google credential. Forget the other connection first.",
+    "CREDENTIAL_SOURCE_EXTERNAL": "An environment or external credential is configured for this role. Detach it first.",
+    "REPLACE_REQUIRED": "A credential is already stored for this role. Choose replace.",
+    "BROWSER_REQUIRED": "Google sign-in needs a browser. Run uls setup without --no-browser.",
 }
 
 
 def failure(code: str) -> SettingsServiceError:
     return SettingsServiceError(code, MESSAGES.get(code, "This check could not be completed."), 409)
+
+
+def structural_oauth_credential(role: CredentialRole, value: bytes, client: GoogleOAuthClient | None) -> AuthorizedUserCredential:
+    """Exact ``authorized_user`` structure for a Google role; never the SA parser."""
+
+    if role.provider != "google":
+        raise failure("INVALID_CREDENTIAL")
+    if client is None:
+        raise failure("OAUTH_APP_NOT_READY")
+    if not 0 < len(value) <= role.max_bytes:
+        raise failure("INVALID_CREDENTIAL")
+    try:
+        return parse_authorized_user_bytes(value, purpose=GoogleOAuthPurpose.parse(role.purpose), client=client)
+    except GoogleOAuthCredentialError as exc:
+        raise failure(exc.oauth_code if exc.oauth_code in MESSAGES else "INVALID_CREDENTIAL") from None
 
 
 def structural_credential(role: CredentialRole, value: bytes, *, google_loader: Callable[..., Any] | None = None) -> dict[str, Any] | None:
@@ -177,9 +221,11 @@ class LiveReadOnlyTransport:
     """Fixed endpoints, bounded bytes before parsing, no redirects or automatic retries."""
 
     def __init__(self, *, connection_factory: Callable[..., Any] = http.client.HTTPSConnection,
-                 google_loader: Callable[..., Any] | None = None) -> None:
+                 google_loader: Callable[..., Any] | None = None,
+                 oauth_loader: Callable[..., Any] | None = None) -> None:
         self.connection_factory = connection_factory
         self.google_loader = google_loader
+        self.oauth_loader = oauth_loader
 
     def _wire(self, host: str, method: str, target: str, headers: dict[str, str], body: Any,
               budget: TransportCheckBudget, timeout: float) -> tuple[int, bytes]:
@@ -244,11 +290,25 @@ class LiveReadOnlyTransport:
                 payload = json.loads(value)
                 if not isinstance(payload, dict) or payload.get("token_uri") != OAUTH_URL:
                     raise failure("CHECK_NOT_READ_ONLY")
-                loader = self.google_loader
-                if loader is None:
-                    from google.oauth2.service_account import Credentials
-                    loader = Credentials.from_service_account_info
-                credentials = loader(payload, scopes=[READ_ONLY_SCOPE])  # type: ignore[no-untyped-call]
+                if credential_type(payload) == AUTHORIZED_USER_TYPE:
+                    # Personal OAuth: the stored single scope is used as-is; the
+                    # check itself still performs only metadata GETs.
+                    scopes = payload.get("scopes")
+                    if not isinstance(scopes, list) or len(scopes) != 1 or not isinstance(scopes[0], str):
+                        raise failure("INVALID_CREDENTIAL")
+                    loader = self.oauth_loader
+                    if loader is None:
+                        from google.oauth2.credentials import Credentials as UserCredentials
+                        loader = UserCredentials.from_authorized_user_info
+                    credentials = loader(payload, scopes=list(scopes))  # type: ignore[no-untyped-call]
+                elif credential_type(payload) != SERVICE_ACCOUNT_TYPE:
+                    raise failure("INVALID_CREDENTIAL")
+                else:
+                    loader = self.google_loader
+                    if loader is None:
+                        from google.oauth2.service_account import Credentials
+                        loader = Credentials.from_service_account_info
+                    credentials = loader(payload, scopes=[READ_ONLY_SCOPE])  # type: ignore[no-untyped-call]
             except SettingsServiceError:
                 raise
             except Exception:  # noqa: BLE001 - loader diagnostics can contain the submitted key

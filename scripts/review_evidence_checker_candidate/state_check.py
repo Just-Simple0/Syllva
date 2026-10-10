@@ -47,8 +47,8 @@ PINNED_SOURCE_PINS = MappingProxyType(
             5608,
         ),
         "src/uls/settings/credential_service.py": (
-            "76537fcee777553cfd71c627b028d378ea666c091117956aed540f3468a5902c",
-            34900,
+            "ff2c8716b413d484b4bde3e1c70600df395ee0c9703fa2ee479081adeb889a8f",
+            48443,
         ),
         "tests/unit/test_credential_set_cli.py": (
             "a36d47e6cb0e66dd341512cd0833416e56de85cab42900e439dcfa130b6a61d1",

@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from uls.cli.main import doctor, status
+from uls.config.google_oauth import config_file_is_private
 
 from .canvas_service import validated_canvas_profile, validated_canvas_registry
 from .config_service import ConfigStore, SettingsServiceError
@@ -57,8 +58,11 @@ def settings_overview(store: ConfigStore, journal: JournalStore) -> dict[str, An
             "same_target": True,
             "choices": recovery_choices(record),
         })
+    google_client = getattr(config, "google_oauth", None)
     return {
         "local_runtime_healthy": runtime_status.get("status") == "ok",
+        # Presence only (P2 plan §2): never the client values themselves.
+        "google_oauth_configured": google_client is not None and config_file_is_private(store.path),
         "setup_ready": all(step["state"] == READY for step in steps),
         "readiness_funnel": runtime_status.get("readiness_funnel", {}),
         "worker_enabled": bool(runtime_status.get("worker_enabled", False)),

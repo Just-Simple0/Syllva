@@ -442,7 +442,7 @@ def doctor(
             live_mcp = live_snapshot.get_google_payload('GOOGLE_MCP_CREDENTIALS_FILE')
             if live_mcp is None:
                 raise ConfigurationError('GOOGLE_MCP_CREDENTIALS_FILE payload is missing')
-            service = google_service(live_mcp, read_only=True)
+            service = google_service(live_mcp, read_only=True, oauth_client=getattr(config, 'google_oauth', None))
             root = service.files().get(fileId=config.google_drive.university_root_id, fields='id,trashed').execute()
             checks['live_drive_read'] = root.get('id') == config.google_drive.university_root_id and root.get('trashed') is False
         except Exception:  # noqa: BLE001 - health checks report booleans, never provider payloads

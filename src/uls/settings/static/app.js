@@ -75,7 +75,20 @@
     credentialRetry: {}, credentialMessages: {}, credentialsReadbackOk: false,
     credentialMutationFailure: {}, credentialsReadbackToken: 0, credentialsReadbackEpoch: -1,
     credentialMutationGeneration: {}, credentialPendingGeneration: {}, credentialOutcome: {},
-    credentialPresentationBefore: {}, credentialResultPending: {}, pendingCredentialSubmission: null };
+    credentialPresentationBefore: {}, credentialResultPending: {}, pendingCredentialSubmission: null,
+    googleOAuthReady: false, googleFlows: {}, googlePolling: false };
+  var GOOGLE_FLOW_ACTIVE = { pending: true, exchanging: true, awaiting_commit: true, committing: true };
+  var GOOGLE_FLOW_MESSAGES = {
+    OAUTH_ACCESS_DENIED: "Google access was declined. Nothing changed.",
+    OAUTH_GRANT_MISMATCH: "Google granted a different permission than this connection needs. Nothing was saved.",
+    ACCOUNT_MISMATCH: "Both Drive connections must use the same Google account. Nothing was saved.",
+    FLOW_EXPIRED: "The Google sign-in took too long. Start again.",
+    FLOW_CANCELLED: "The Google sign-in was cancelled. Nothing was saved.",
+    FLOW_STATE_REJECTED: "The Google sign-in response did not match this Settings session. Start again.",
+    RECONNECT_REQUIRED: "Google did not confirm the account. Start the sign-in again.",
+    PROVIDER_UNAVAILABLE: "Google could not be reached. Nothing changed.",
+    TIMEOUT: "Google did not respond in time. Nothing changed."
+  };
 
   function el(id) { return document.getElementById(id); }
   function all(root, selector) { return Array.prototype.slice.call(root.querySelectorAll(selector)); }
@@ -761,6 +774,7 @@
     if (cards.ok) {
       connections.generation = cards.data.config_generation;
       connections.cards = cards.data.cards;
+      connections.googleOAuthReady = cards.data.google_oauth_ready === true;
     }
     reconcileCredentialPresentation(connections.cards, ownedReadback ? readback : null, loadToken);
     renderCredentialCards();
@@ -852,6 +866,7 @@
         box.appendChild(make("p", card.last_check.message || humanize(card.last_check.code)));
       }
       actionButton(box, "Test connection", function () { testConnection(card); }, !card.can_test);
+      if (card.provider === "google" && card.can_mutate) { renderGoogleOAuth(box, card); }
       if (card.can_mutate) {
         var retryAction = connections.credentialRetry[card.role];
         var defaultAction = card.managed && card.can_test ? "replace" : "set";
@@ -866,6 +881,128 @@
       }
       list.appendChild(box);
     });
+  }
+
+  // Personal Google OAuth (docs/setup/google-drive-oauth.md): the browser
+  // signs in with Google; the server keeps state/code/tokens and only reports
+  // fixed flow statuses here. Confirmation performs the single protected save.
+  function renderGoogleOAuth(box, card) {
+    var flow = connections.googleFlows[card.role];
+    var replace = Boolean(card.managed && card.can_test);
+    var status = make("p", googleFlowText(flow));
+    status.id = "google-oauth-status-" + card.role; status.setAttribute("role", "status"); status.setAttribute("aria-live", "polite");
+    box.appendChild(status);
+    if (!connections.googleOAuthReady) {
+      box.appendChild(make("p", "Add your own Google Desktop client to config.yaml (owner-only file) to sign in with Google."));
+      return;
+    }
+    if (flow && (flow.status === "pending" || flow.status === "exchanging")) {
+      actionButton(box, "Cancel Google sign-in", function () { cancelGoogleFlow(card, flow); });
+      return;
+    }
+    if (flow && flow.status === "awaiting_commit") {
+      actionButton(box, "Confirm Google connection", function () { commitGoogleFlow(card, flow); });
+      actionButton(box, "Cancel Google sign-in", function () { cancelGoogleFlow(card, flow); });
+      return;
+    }
+    if (flow && flow.status === "committing") { return; }
+    actionButton(box, replace ? "Replace with Google sign-in" : "Sign in with Google", function () { beginGoogleFlow(card, replace); });
+  }
+
+  function googleFlowText(flow) {
+    if (!flow) { return ""; }
+    if (flow.status === "pending" || flow.status === "exchanging") { return "Waiting for Google sign-in in your browser…"; }
+    if (flow.status === "awaiting_commit") { return "Google approved the request. Confirm to save this connection."; }
+    if (flow.status === "committing") { return "Saving the Google connection…"; }
+    if (flow.status === "complete") { return "Google connection saved and verified."; }
+    return flow.message || humanize(flow.error_code || flow.status);
+  }
+
+  function setGoogleFlow(role, flow) {
+    if (flow) { connections.googleFlows[role] = flow; } else { delete connections.googleFlows[role]; }
+    renderCredentialCards();
+  }
+
+  async function beginGoogleFlow(card, replace) {
+    if (connections.busy || state.ended || modalOpen()) { return; }
+    explicitActivity();
+    var requestToken = beginConnectionRequest("Opening Google sign-in in your browser…");
+    var result = await api("api/v1/google-oauth/" + card.purpose + "/begin", { method: "POST", mutation: true,
+      body: { generation: connections.generation, replace: replace } });
+    if (!finishConnectionRequest(requestToken) || state.ended) { return; }
+    if (!result.ok) {
+      setGoogleFlow(card.role, { flow_id: null, status: "failed", error_code: result.code, message: result.message });
+      notice(result.message || humanize(result.code));
+      return;
+    }
+    setGoogleFlow(card.role, { flow_id: result.data.flow_id, purpose: card.purpose, status: result.data.status,
+      error_code: result.data.error_code, generation: connections.generation, replace: replace });
+    startGooglePolling();
+  }
+
+  function startGooglePolling() {
+    if (connections.googlePolling) { return; }
+    connections.googlePolling = true;
+    state.timers.push(setInterval(pollGoogleFlows, 1500));
+  }
+
+  async function pollGoogleFlows() {
+    if (state.ended) { return; }
+    var roles = Object.keys(connections.googleFlows);
+    for (var index = 0; index < roles.length; index += 1) {
+      var role = roles[index];
+      var flow = connections.googleFlows[role];
+      if (!flow || !flow.flow_id || !(flow.status === "pending" || flow.status === "exchanging")) { continue; }
+      var result = await api("api/v1/google-oauth/" + flow.purpose + "/" + flow.flow_id);
+      if (state.ended || connections.googleFlows[role] !== flow) { continue; }
+      if (!result.ok) { continue; }
+      if (result.data.status !== flow.status || result.data.error_code !== flow.error_code) {
+        var updated = { flow_id: flow.flow_id, purpose: flow.purpose, status: result.data.status, error_code: result.data.error_code,
+          generation: flow.generation, replace: flow.replace };
+        if (!GOOGLE_FLOW_ACTIVE[updated.status] && updated.status !== "complete") {
+          updated.message = GOOGLE_FLOW_MESSAGES[updated.error_code] || humanize(updated.error_code || updated.status);
+          notice(updated.message);
+        }
+        setGoogleFlow(role, updated);
+      }
+    }
+  }
+
+  async function commitGoogleFlow(card, flow) {
+    if (connections.busy || state.ended || modalOpen() || flow.status !== "awaiting_commit") { return; }
+    explicitActivity();
+    var requestToken = beginConnectionRequest("Checking and saving the Google connection…");
+    setGoogleFlow(card.role, { flow_id: flow.flow_id, purpose: flow.purpose, status: "committing", error_code: null,
+      generation: flow.generation, replace: flow.replace });
+    var result = await api("api/v1/google-oauth/" + flow.purpose + "/commit", { method: "POST", mutation: true,
+      body: { flow_id: flow.flow_id, generation: flow.generation, replace: flow.replace } });
+    if (!finishConnectionRequest(requestToken) || state.ended) { return; }
+    if (!result.ok) {
+      setGoogleFlow(card.role, { flow_id: null, status: "failed", error_code: result.code, message: result.message });
+      notice(result.message || humanize(result.code));
+      await loadConnections();
+      return;
+    }
+    setGoogleFlow(card.role, { flow_id: null, status: "complete", error_code: null });
+    delete connections.credentialMessages[card.role];
+    delete connections.credentialMutationFailure[card.role];
+    delete connections.credentialRetry[card.role];
+    await loadConnections();
+    notice("Google connection saved and verified.");
+    var statusRow = el("credential-status-" + card.role);
+    if (statusRow) { statusRow.focus(); }
+  }
+
+  async function cancelGoogleFlow(card, flow) {
+    if (connections.busy || state.ended || modalOpen() || !flow.flow_id) { return; }
+    explicitActivity();
+    var requestToken = beginConnectionRequest("Cancelling Google sign-in…");
+    var result = await api("api/v1/google-oauth/" + flow.purpose + "/cancel", { method: "POST", mutation: true,
+      body: { flow_id: flow.flow_id, generation: flow.generation } });
+    if (!finishConnectionRequest(requestToken) || state.ended) { return; }
+    if (!result.ok) { notice(result.message || humanize(result.code)); return; }
+    setGoogleFlow(card.role, null);
+    notice("Google sign-in cancelled. Nothing was saved.");
   }
 
   function dialogInert(on, activeDialog) {

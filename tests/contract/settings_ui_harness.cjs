@@ -160,6 +160,10 @@ async function run() {
   let releaseSecondCanvasPost = null;
   let overviewCount = 0;
   let credentialSetPostCount = 0;
+  const GOOGLE_FLOW_ID = "f".repeat(32);
+  const googleCalls = [];
+  let googleFlowStatus = null;
+  let googleSaved = false;
   let canvasMutationPostCount = 0;
   let canvasActionFailure = null;
   let canvasForgotten = false;
@@ -287,7 +291,15 @@ async function run() {
           environment_variable: "GOOGLE_DRIVE_MCP_CREDENTIALS", storage_label: "this computer's protected secrets folder",
           takes_effect: "MCP restart" });
       }
-      const payload = { config_generation: "g-canvas-" + canvasRevision, cards };
+      if (SCENARIO.startsWith("google_oauth_")) {
+        cards.push({ role: "google-mcp", provider: "google", purpose: "mcp",
+          state: googleSaved ? "configured" : "not_configured", credential_type: googleSaved ? "authorized_user" : null,
+          source: googleSaved ? "file" : "environment", managed: googleSaved, can_mutate: true, can_test: googleSaved,
+          can_detach: false, environment_variable: "GOOGLE_MCP_CREDENTIALS_FILE",
+          storage_label: "this computer's protected secrets folder", takes_effect: "MCP restart", pending_operation: null, last_check: null });
+      }
+      const payload = { config_generation: "g-canvas-" + canvasRevision, cards,
+        google_oauth_ready: SCENARIO.startsWith("google_oauth_") && SCENARIO !== "google_oauth_not_ready" };
       if (SCENARIO === "credential_failure_superseded_readback" && credentialMutationPosted && credentialReadbackCount === 2) {
         return await new Promise((resolve) => { releaseCredentialReadback = () => resolve(respond(200, payload)); });
       }
@@ -424,6 +436,28 @@ async function run() {
       }
       return respond(409, { error: { code: "INVALID_CREDENTIAL", message: "The credential was rejected. The previous credential is kept." } });
     }
+    if (url.startsWith("/api/v1/google-oauth/mcp/")) {
+      const action = url.slice("/api/v1/google-oauth/mcp/".length);
+      googleCalls.push({ action, method: opts && opts.method, body: calls[calls.length - 1].body, headers: calls[calls.length - 1].headers });
+      if (action === "begin") {
+        googleFlowStatus = "pending";
+        return respond(200, { flow_id: GOOGLE_FLOW_ID, purpose: "mcp", status: "pending", error_code: null });
+      }
+      if (action === "cancel") { googleFlowStatus = "cancelled"; return respond(200, { flow_id: GOOGLE_FLOW_ID, purpose: "mcp", status: "cancelled", error_code: "FLOW_CANCELLED" }); }
+      if (action === "commit") {
+        if (SCENARIO === "google_oauth_commit_mismatch") {
+          googleFlowStatus = "account_mismatch";
+          return respond(409, { error: { code: "ACCOUNT_MISMATCH", message: "Both Drive connections must use the same Google account." } });
+        }
+        googleSaved = true; googleFlowStatus = "complete";
+        return respond(200, { status: "complete", code: "VERIFIED", config_generation: "g-canvas-" + canvasRevision, flow_id: GOOGLE_FLOW_ID, purpose: "mcp" });
+      }
+      if (action === GOOGLE_FLOW_ID) {
+        return respond(200, { flow_id: GOOGLE_FLOW_ID, purpose: "mcp", status: googleFlowStatus,
+          error_code: googleFlowStatus === "denied" ? "OAUTH_ACCESS_DENIED" : googleFlowStatus === "failed" ? "OAUTH_GRANT_MISMATCH" : null });
+      }
+      return respond(404, { error: { code: "FLOW_NOT_FOUND" } });
+    }
     if (url === "/api/v1/credentials/notion-mcp/forget" && SCENARIO === "credential_forget_success") {
       credentialForgotten = true;
       return respond(200, { status: "complete", message: "Credential removed." });
@@ -524,6 +558,7 @@ async function run() {
        "credential_failure_pending", "credential_failure_generic", "credential_success", "credential_fake_forget", "credential_forget_success", "credential_detach_external_success", "credential_session_replaced",
        "credential_session_expired", "credential_session_unreachable", "credential_replace_failure", "linux_card", "canvas_origin", "google_file_cancel",
        "google_file_cancel_replace_race", "google_file_missing", "google_file_oversize", "google_file_read_error",
+       "google_oauth_success", "google_oauth_denied", "google_oauth_cancel", "google_oauth_not_ready", "google_oauth_commit_mismatch",
        "credential_environment_absent", "credential_independent_refresh", "credential_generation_race",
        "credential_overview_after_b", "credential_overview_inflight_b_success", "credential_overview_inflight_b_failure",
        "credential_independent_readback_canvas_b",
@@ -810,6 +845,46 @@ async function run() {
     } else if (SCENARIO === "credential_environment_absent") {
       out.text = $("credential-cards").textContent;
       out.testDisabled = $("credential-cards").querySelector("button").disabled;
+    } else if (SCENARIO.startsWith("google_oauth_")) {
+      const googleCard = () => $("credential-cards").querySelectorAll("article").find(card => card.querySelector("h3").textContent.includes("Google Drive"));
+      const labels = () => googleCard().querySelectorAll("button").map(b => b.textContent);
+      const secretsAnywhere = () => doc.root.descendants().map((e) => [e.textContent, e.value, ...e.attrs.values()].join("|")).join("\n");
+      out.initialLabels = labels();
+      out.initialText = visibleText(googleCard());
+      const signIn = googleCard().querySelectorAll("button").find(b => b.textContent === "Sign in with Google");
+      if (!signIn) { out.signInMissing = true; }
+      else {
+        signIn.click(); await flush();
+        out.beginBody = googleCalls.find(c => c.action === "begin") ? googleCalls.find(c => c.action === "begin").body : null;
+        out.beginCsrf = googleCalls.find(c => c.action === "begin") ? googleCalls.find(c => c.action === "begin").headers["X-ULS-CSRF"] : null;
+        out.statusAfterBegin = $("google-oauth-status-google-mcp").textContent;
+        out.labelsAfterBegin = labels();
+        googleFlowStatus = SCENARIO === "google_oauth_denied" ? "denied" : SCENARIO === "google_oauth_cancel" ? "pending" : "awaiting_commit";
+        if (SCENARIO === "google_oauth_cancel") {
+          googleCard().querySelectorAll("button").find(b => b.textContent === "Cancel Google sign-in").click(); await flush();
+          out.cancelBody = googleCalls.find(c => c.action === "cancel").body;
+          out.labelsAfterCancel = labels();
+          out.noticeAfterCancel = $("notice").textContent;
+        } else {
+          intervals.filter(Boolean).forEach((f) => f()); await flush();
+          out.statusAfterPoll = $("google-oauth-status-google-mcp").textContent;
+          out.labelsAfterPoll = labels();
+          out.noticeAfterPoll = $("notice").textContent;
+          const confirm = googleCard().querySelectorAll("button").find(b => b.textContent === "Confirm Google connection");
+          if (confirm) {
+            confirm.click(); await flush();
+            out.commitBody = googleCalls.find(c => c.action === "commit").body;
+            out.statusAfterCommit = $("google-oauth-status-google-mcp").textContent;
+            out.cardStateAfterCommit = $("credential-status-google-mcp").textContent;
+            out.labelsAfterCommit = labels();
+            out.noticeAfterCommit = $("notice").textContent;
+            out.focusAfterCommit = doc.activeElement ? doc.activeElement.id : null;
+          }
+        }
+      }
+      out.googleActions = googleCalls.map(c => c.action);
+      out.flowIdInText = secretsAnywhere().includes(GOOGLE_FLOW_ID);
+      out.stateInText = secretsAnywhere().includes("code_challenge") || secretsAnywhere().includes("refresh");
     } else if (["google_file_cancel", "google_file_cancel_replace_race", "google_file_missing", "google_file_oversize", "google_file_read_error"].includes(SCENARIO)) {
       const googleCard = $("credential-cards").querySelectorAll("article").find(card => card.querySelector("h3").textContent.includes("Google Drive"));
       googleCard.querySelectorAll("button").find(b => b.textContent === "Configure").click();

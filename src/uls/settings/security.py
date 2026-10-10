@@ -16,7 +16,7 @@ import json
 import re
 import secrets
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, MutableMapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, MutableMapping
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
@@ -27,6 +27,14 @@ SESSION_IDLE_SECONDS = 15 * 60.0
 MAX_REQUEST_BODY_BYTES = 16 * 1024
 PREFIX_PATTERN = re.compile(r"^[A-Za-z0-9_-]{22,64}$")
 _FETCH_METADATA = (b"sec-fetch-site", b"sec-fetch-mode", b"sec-fetch-dest", b"sec-fetch-user")
+# Personal Google OAuth (P2 plan §2): the provider redirects the browser back
+# to these two exact loopback routes. They are the only session-cookie-gate
+# bypasses; the callback alone performs OAuth processing, the result page is
+# inert and data-free. Both are exact GET paths under this launch's prefix.
+OAUTH_CALLBACK_SUFFIX = "oauth/google/callback"
+OAUTH_RESULT_SUFFIX = "oauth/google/result"
+OAUTH_CALLBACK_MAX_QUERY_BYTES = 8192
+LOOPBACK_PEERS = frozenset({"127.0.0.1", "::1", "::ffff:127.0.0.1"})
 _ENDED_PAGE = (
     b"<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
     b"<title>Syllva Settings</title></head><body><h1>Settings session ended</h1>"
@@ -63,6 +71,10 @@ class SessionSecurity:
         self._bootstrap_used = False
         self._session: _SessionRecord | None = None
         self._state = "new"
+        # Monotonic session epoch: every session start, expiry, close or
+        # replacement advances it so an OAuth flow begun under one live
+        # session can never commit or complete under another.
+        self._epoch = 0
 
     @classmethod
     def issue(cls, *, clock: Callable[[], float] = time.monotonic) -> tuple[str, SessionSecurity]:
@@ -87,16 +99,35 @@ class SessionSecurity:
         csrf = secrets.token_urlsafe(32)
         self._session = _SessionRecord(_digest(handle), csrf, self._clock())
         self._state = "active"
+        self._epoch += 1
         return handle
+
+    @property
+    def session_epoch(self) -> int:
+        """Current live-session epoch; zero before the first session."""
+
+        return self._epoch
+
+    def live_epoch(self) -> int | None:
+        """The epoch of the current live session, or None when no session is live."""
+
+        if self._state == "replaced" or self._session is None:
+            return None
+        if self._idle_elapsed():
+            # Rejected now; the terminal transition (and epoch bump) is applied
+            # only by the lifecycle coordinator after the mutation drain.
+            return None
+        return self._epoch
+
+    def _idle_elapsed(self) -> bool:
+        return self._session is not None and self._clock() - self._session.last_activity >= self.idle_seconds
 
     def session_code(self, handle: str | None) -> str | None:
         if self._state == "replaced":
             return "SESSION_REPLACED"
         if self._session is None:
             return "SESSION_EXPIRED"
-        if self._clock() - self._session.last_activity >= self.idle_seconds:
-            self._session = None
-            self._state = "expired"
+        if self._idle_elapsed():
             return "SESSION_EXPIRED"
         if handle is None or not hmac.compare_digest(_digest(handle), self._session.handle_digest):
             return "SESSION_EXPIRED"
@@ -122,6 +153,7 @@ class SessionSecurity:
             return False
         self._session = None
         self._state = "closed"
+        self._epoch += 1
         return True
 
     def replace(self) -> None:
@@ -129,6 +161,29 @@ class SessionSecurity:
         self._bootstrap_used = True
         self._bootstrap_digest = b""
         self._state = "replaced"
+        self._epoch += 1
+
+    def lifecycle_pending(self) -> str | None:
+        """Passive look-ahead: the terminal transition that is due, without applying it."""
+
+        if self._state == "new" and self._clock() > self._bootstrap_expires:
+            return "bootstrap_expired"
+        if self._state == "active" and self._idle_elapsed():
+            return "expired"
+        return None
+
+    def expire(self) -> None:
+        """Apply the idle expiry decided earlier by the lifecycle coordinator."""
+
+        if self._state == "active":
+            self._session = None
+            self._state = "expired"
+            self._epoch += 1
+
+    def expire_bootstrap(self) -> None:
+        if self._state == "new":
+            self._bootstrap_used = True
+            self._state = "bootstrap_expired"
 
     def lifecycle_state(self) -> str:
         """Report new/active/bootstrap_expired/expired/closed/replaced for the launcher.
@@ -139,11 +194,10 @@ class SessionSecurity:
         if self._state == "new" and self._clock() > self._bootstrap_expires:
             self._bootstrap_used = True
             self._state = "bootstrap_expired"
-        elif self._state == "active" and self._session is not None and (
-            self._clock() - self._session.last_activity >= self.idle_seconds
-        ):
-            self._session = None
-            self._state = "expired"
+        elif self._state == "active" and self._idle_elapsed():
+            # Reported, not applied: expiry is committed by SessionSecurity.expire()
+            # once the launcher's lifecycle coordinator has drained mutations.
+            return "expired"
         return self._state
 
 
@@ -224,11 +278,23 @@ class SecurityBoundary:
             # Unknown or previous launch prefix: never this session.
             await _send_json(send, 404, {"error": {"code": "SESSION_NOT_FOUND"}})
             return
+        method = scope.get("method")
+        oauth_route = oauth_route_kind(path, self.root)
+        if oauth_route is not None:
+            # Exact loopback provider redirects never carry this launch's
+            # cookie and are not session-gated at all, replacement included:
+            # the callback validates its own one-use state/epoch inside the
+            # flow service and the result page reads nothing.
+            denial = oauth_route_denial(scope, headers, oauth_route, method)
+            if denial is not None:
+                await _send_json(send, denial[0], {"error": {"code": denial[1]}})
+                return
+            await self.app(scope, receive, self._secured(send))
+            return
         if self.security.is_replaced:
             await _send_json(send, 401, {"error": {"code": "SESSION_REPLACED"}})
             return
         site = _single_header(headers, b"sec-fetch-site")
-        method = scope.get("method")
         document = path == self.root and method == "GET"
         allowed_sites = {None, b"same-origin", b"none"} if document else {None, b"same-origin"}
         if site not in allowed_sites:
@@ -288,6 +354,10 @@ class SecurityBoundary:
 
             buffered_receive = replay_body
 
+        await self.app(scope, buffered_receive, self._secured(send))
+
+    @staticmethod
+    def _secured(send: Callable[[dict[str, Any]], Awaitable[None]]) -> Callable[[dict[str, Any]], Awaitable[None]]:
         async def secured_send(message: dict[str, Any]) -> None:
             if message["type"] == "http.response.start":
                 existing = [(key, value) for key, value in message.get("headers", [])
@@ -295,8 +365,45 @@ class SecurityBoundary:
                 existing.extend((key, value) for key, value in _SECURITY_HEADERS.items())
                 message = {**message, "headers": existing}
             await send(message)
+        return secured_send
 
-        await self.app(scope, buffered_receive, secured_send)
+
+def oauth_route_kind(path: str, root: str) -> str | None:
+    if path == root + OAUTH_CALLBACK_SUFFIX:
+        return "callback"
+    if path == root + OAUTH_RESULT_SUFFIX:
+        return "result"
+    return None
+
+
+def oauth_route_denial(scope: Mapping[str, Any], headers: dict[bytes, list[bytes]], kind: str,
+                       method: str | None) -> tuple[int, str] | None:
+    """Fixed, order-independent refusals for the two provider-redirect routes."""
+
+    if method != "GET":
+        return 405, "METHOD_NOT_ALLOWED"
+    client = scope.get("client")
+    peer = client[0] if isinstance(client, (tuple, list)) and client else None
+    if not isinstance(peer, str) or peer not in LOOPBACK_PEERS:
+        return 403, "LOOPBACK_REQUIRED"
+    query = scope.get("query_string", b"")
+    if kind == "result" and query:
+        return 400, "INVALID_REQUEST"
+    if kind == "callback" and len(query) > OAUTH_CALLBACK_MAX_QUERY_BYTES:
+        return 400, "INVALID_REQUEST"
+    present = [name for name in _FETCH_METADATA if headers.get(name)]
+    if not present:
+        return None
+    site = _single_header(headers, b"sec-fetch-site")
+    mode = _single_header(headers, b"sec-fetch-mode")
+    dest = _single_header(headers, b"sec-fetch-dest")
+    user = _single_header(headers, b"sec-fetch-user")
+    if mode != b"navigate" or dest != b"document" or user != b"?1":
+        return 403, "SAME_ORIGIN_REQUIRED"
+    allowed = {b"cross-site"} if kind == "callback" else {b"cross-site", b"same-origin"}
+    if site not in allowed:
+        return 403, "SAME_ORIGIN_REQUIRED"
+    return None
 
 
 _SECURITY_HEADERS: dict[bytes, bytes] = {
@@ -401,7 +508,9 @@ async def _send_bytes(
 
 
 __all__ = [
-    "BOOTSTRAP_TTL_SECONDS", "MAX_REQUEST_BODY_BYTES", "PREFIX_PATTERN", "SESSION_COOKIE",
+    "BOOTSTRAP_TTL_SECONDS", "LOOPBACK_PEERS", "MAX_REQUEST_BODY_BYTES", "OAUTH_CALLBACK_MAX_QUERY_BYTES",
+    "OAUTH_CALLBACK_SUFFIX", "OAUTH_RESULT_SUFFIX", "PREFIX_PATTERN", "SESSION_COOKIE",
     "SESSION_IDLE_SECONDS", "BarrierClosed", "MutationBarrier", "SecurityBoundary",
-    "SessionSecurity", "new_path_prefix", "request_cookie", "same_origin_request", "single_header",
+    "SessionSecurity", "new_path_prefix", "oauth_route_denial", "oauth_route_kind", "request_cookie",
+    "same_origin_request", "single_header",
 ]

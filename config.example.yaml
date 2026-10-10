@@ -23,6 +23,9 @@ google_drive:
   # v1.3 preview — semester-scoped intake. Remove or leave empty to use legacy reader only.
   semester_registries:
     - semester: "2026-2"
+      # Effective semester date range (classification v2 recording calendar).
+      # start_date: "2026-09-01"
+      # end_date: "2026-12-20"
       # Top-level semester folder in Drive.
       folder_id: "<semester-folder-id>"
       # Single shared upload folder where you drop new files.
@@ -80,6 +83,7 @@ retrieval:
   resolution_ttl_seconds: 900
   allow_bounded_llm_rerank: false  # opt-in; deterministic lexical/index retrieval is default
   allow_provisional_material_usage: true  # caller must still opt in per request
+  v2_exposure_gate: false     # classification v2 content stays out of every retrieval intent until explicitly enabled
   material_type_source_class:
     "Lecture Slides": professor_material
     "Professor Notes": professor_material
@@ -137,6 +141,7 @@ courses:
     code: "COURSE001"
     section: "001"
     semester: "2026-2"
+    # aliases: ["예시과목", "EXAMPLE"]   # optional file-name aliases (classification v2)
   # - course_key: "2026-2_COURSE002-001"
   #   name: "두 번째 과목"
   #   code: "COURSE002"
@@ -157,6 +162,14 @@ courses:
 # google_worker_credentials_path: "/path/to/worker-service-account.json"
 # google_mcp_credentials_path: "/path/to/mcp-service-account.json"
 #
+# Personal Google Drive access with your own Google account (docs/setup/google-drive-oauth.md).
+# Create a Google Cloud *Desktop* OAuth client that only you use and put both values
+# here together; leave the whole section out to keep using service-account files.
+# This file then holds a secret: keep it owner-only (chmod 600). Never commit it.
+# google_oauth:
+#   client_id: "1234567890-abc.apps.googleusercontent.com"
+#   client_secret: "GOCSPX-your-desktop-client-secret"
+#
 # Secret storage declarations (file mode 0600 or OS keyring):
 # credentials:
 #   # Main worker unattended secrets (file-backed, mode 0600)
@@ -174,3 +187,22 @@ courses:
 #     source: keyring
 #   REMOTE_MCP_GOOGLE_CLIENT_SECRET:
 #     source: keyring
+
+# Intake classification v2 (docs/plans/intake-classification-v2.md).  Disabled by
+# default: every intake item still goes through a HUMAN Input Request.
+intake:
+  classification:
+    enabled: false
+    # Notion intake schema profile.  Leave "" to keep the current selection
+    # (legacy5 / c5-range-v1).  Set "legacy5-cls" or "c5-range-v2" only after the
+    # classification properties were added in Notion and readback verified; a
+    # profile that does not match the configured data sources fails readiness closed.
+    schema_profile: ""
+    min_confidence: 0.80         # Jev decision confidence floor
+    min_top_probability: 0.70    # Jev top-choice probability floor
+    max_calls_per_tick: 50
+    max_source_bytes: 52428800   # 50 MiB; larger sources are never sent to a model
+    max_terminal_scan: 50
+    # Canvas course id -> course key (classification v2 Canvas origin).
+    canvas_course_map: {}
+    #   67535: "2026-2_LMS67535-001"

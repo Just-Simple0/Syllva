@@ -27,6 +27,8 @@ def route_intake(
     material_role: str | None = None,
     known_course_keys: Iterable[str] = (),
     duplicate_file_ids: Iterable[str] = (),
+    allowed_kinds: Iterable[str] | None = None,
+    material_roles: Iterable[str] = ("Lecture Slides", "Textbook"),
 ) -> RoutingDecision:
     """Resolve only explicitly supplied values; ambiguity remains input."""
 
@@ -62,7 +64,12 @@ def route_intake(
     if selected_kind is None:
         selected_kind = get("observed_kind")
     selected_kind = _kind_value(selected_kind)
-    if selected_kind not in {FileKind.TRANSCRIPT.value, FileKind.MATERIAL_PDF.value}:
+    kinds = (
+        set(allowed_kinds) if allowed_kinds is not None
+        else {FileKind.TRANSCRIPT.value, FileKind.MATERIAL_PDF.value}
+    )
+    roles = tuple(material_roles)
+    if selected_kind not in kinds:
         reasons.append("File kind must be explicitly selected")
 
     if duplicate_file_ids:
@@ -93,9 +100,15 @@ def route_intake(
             reasons.append("Session No must be a positive integer when supplied")
         if material_role:
             reasons.append("Material Role is forbidden for transcript intake")
-    elif selected_kind == FileKind.MATERIAL_PDF.value:
-        if material_role not in {"Lecture Slides", "Textbook"}:
-            reasons.append("PDF material role must be Lecture Slides or Textbook")
+    elif selected_kind in kinds:
+        # MATERIAL_PDF and every v2 Material Kind: a USER role from the profile's
+        # Materials.Type set, never Session fields (plan §5; the HUMAN Kind is preserved).
+        if material_role not in roles:
+            reasons.append(
+                "PDF material role must be Lecture Slides or Textbook"
+                if roles == ("Lecture Slides", "Textbook")
+                else "material role must be one of " + ", ".join(roles)
+            )
         if any(value is not None for value in (actual_date, session_mode, session_id, session_no)):
             reasons.append("date and Session fields are forbidden for PDF intake")
 

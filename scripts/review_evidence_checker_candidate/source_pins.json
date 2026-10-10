@@ -34,8 +34,8 @@
     },
     {
       "path": "src/uls/settings/credential_service.py",
-      "sha256": "76537fcee777553cfd71c627b028d378ea666c091117956aed540f3468a5902c",
-      "size_bytes": 34900
+      "sha256": "ff2c8716b413d484b4bde3e1c70600df395ee0c9703fa2ee479081adeb889a8f",
+      "size_bytes": 48443
     },
     {
       "path": "tests/unit/test_credential_set_cli.py",

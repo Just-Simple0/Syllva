@@ -24,6 +24,7 @@ from uls.adapters.notion.api import NotionAPIReader
 from uls.adapters.notion.base import AutomationActor, enforce_write_policy
 from uls.config.credentials import ResolvedCredentials
 from uls.config.errors import ConfigurationError
+from uls.config.google_oauth import is_authorized_user_info
 from uls.domain.course_identity import resolve_course_relation, validate_course_record
 from uls.domain.errors import PolicyDeniedError, ProviderUnavailableError, SourceUnavailableError
 from uls.domain.ids import parse_course_key, parse_entity_id
@@ -363,6 +364,11 @@ def build_worker(config: Any, credentials: ResolvedCredentials) -> Any:
     worker_payload = credentials.get_google_payload('GOOGLE_WORKER_CREDENTIALS_FILE')
     if worker_payload is None:
         raise ConfigurationError('GOOGLE_WORKER_CREDENTIALS_FILE payload is missing')
-    service = google_service(worker_payload, read_only=False)
+    if is_authorized_user_info(worker_payload.info):
+        # The legacy pipeline has no per-entry attestation gate; personal
+        # OAuth is supported only by the semester intake worker composition.
+        raise ConfigurationError('personal Google OAuth requires the semester intake worker; '
+                                 'configure semester registries and workspaces')
+    service = google_service(worker_payload, read_only=False, oauth_client=getattr(config, 'google_oauth', None))
     client = Client(auth=credentials['NOTION_WORKER_TOKEN'], notion_version='2025-09-03', timeout_ms=20_000)
     return NativeWorker(config, SQLiteStateStore(state_path(config)), service, client, sources)

@@ -8,6 +8,7 @@ MutationBarrier so a handover waits for in-flight mutations to finish.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 from collections.abc import Callable
@@ -26,6 +27,8 @@ from uls.config.mutation import ConfigLockTimeout
 from .config_service import ConfigStore, SettingsServiceError
 from .journal import JournalError, JournalStore
 from .security import (
+    OAUTH_CALLBACK_SUFFIX,
+    OAUTH_RESULT_SUFFIX,
     SESSION_COOKIE,
     BarrierClosed,
     MutationBarrier,
@@ -39,6 +42,15 @@ from .status import settings_overview
 
 _STATIC = Path(__file__).with_name("static")
 _OPERATION_ID = re.compile(r"^[a-f0-9]{32}$")
+# In-flight mutations may wait up to the 5 s config-lock deadline.
+CLOSE_MUTATION_DRAIN_SECONDS = 8.0
+_OAUTH_RESULT_PAGE = (
+    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+    "<meta name=\"referrer\" content=\"no-referrer\"><title>Syllva Settings</title></head>"
+    "<body><h1>Google sign-in finished</h1>"
+    "<p>You can close this tab and return to the Syllva Settings window to continue.</p>"
+    "</body></html>"
+)
 
 
 def create_settings_app(
@@ -54,10 +66,12 @@ def create_settings_app(
     credential_service: Any = None,
     canvas_service: Any = None,
     fake_mode: bool = False,
+    google_oauth_service: Any = None,
 ) -> Any:
     expected_origin = f"http://{expected_host}"
     root = f"/{prefix}/"
     gate = barrier or MutationBarrier()
+    oauth_result_url = root + OAUTH_RESULT_SUFFIX
 
     async def home(request: Request) -> Response:
         raw_query = request.scope.get("query_string", b"").decode("latin-1")
@@ -117,7 +131,8 @@ def create_settings_app(
         except Exception:  # noqa: BLE001 - fixed error code; never echo internals
             return _error("SETTINGS_UNAVAILABLE", 503)
 
-    async def mutate(request: Request, work: Callable[[dict[str, Any]], Any], unavailable: str) -> Response:
+    async def mutate(request: Request, work: Callable[[dict[str, Any]], Any], unavailable: str,
+                     *, code_only: bool = False) -> Response:
         denied = _authorize_mutation(request, security, expected_origin)
         if denied is not None:
             return denied
@@ -132,6 +147,9 @@ def create_settings_app(
         except BarrierClosed:
             return _error("SESSION_REPLACED", 401)
         except SettingsServiceError as exc:
+            # Personal OAuth routes answer with the fixed code only (plan §2).
+            if code_only or getattr(exc, "code_only", False):
+                return _error(exc.code, exc.status_code)
             return _service_error(exc)
         except JournalError as exc:
             return _error(exc.code, 409)
@@ -249,7 +267,11 @@ def create_settings_app(
         role = ROLES.get(f"{request.path_params['provider']}-{request.path_params['purpose']}")
         if role is None or credential_service is None:
             return _error("NOT_FOUND", 404)
-        return await mutate(request, lambda body: credential_service.test(role) if not body else _invalid_body(), "CHECK_UNAVAILABLE")
+        # No credential read happens before authorization and barrier entry;
+        # CredentialService.test marks OAuth-typed failures from the very
+        # snapshot it checked, so the response shape is decided atomically.
+        return await mutate(request, lambda body: credential_service.test(role) if not body else _invalid_body(),
+                            "CHECK_UNAVAILABLE")
 
     async def canvas_snapshot(request: Request) -> Response:
         if canvas_service is None:
@@ -288,6 +310,50 @@ def create_settings_app(
             return canvas_service.save_selection(body["term_id"], body["course_ids"], body["generation"])
         return await mutate(request, work, "CANVAS_UNAVAILABLE")
 
+    async def google_oauth_action(request: Request) -> Response:
+        if google_oauth_service is None:
+            return _error("FEATURE_DEFERRED", 403)
+        purpose = request.path_params["purpose"]
+        action = request.path_params["action"]
+        if action not in {"begin", "cancel", "commit"}:
+            return _error("NOT_FOUND", 404)
+        return await mutate(request, lambda body: getattr(google_oauth_service, action)(purpose, body),
+                            "GOOGLE_OAUTH_UNAVAILABLE", code_only=True)
+
+    async def google_oauth_status(request: Request) -> Response:
+        if google_oauth_service is None:
+            return _error("FEATURE_DEFERRED", 403)
+        if not same_origin_request(request.scope, expected_origin, require_origin=False):
+            return _error("SAME_ORIGIN_REQUIRED", 403)
+        try:
+            return JSONResponse(await run_in_threadpool(
+                google_oauth_service.status, request.path_params["purpose"], request.path_params["flow_id"]))
+        except SettingsServiceError as exc:
+            return _error(exc.code, exc.status_code)
+        except Exception:  # noqa: BLE001 - fixed error code; never echo internals
+            return _error("GOOGLE_OAUTH_UNAVAILABLE", 503)
+
+    async def google_oauth_callback(request: Request) -> Response:
+        # Provider redirect. Every outcome lands on the fixed data-free result
+        # page; the flow records its own fixed status for the live session.
+        if google_oauth_service is not None:
+            raw_query = request.scope.get("query_string", b"").decode("latin-1")
+            pairs = parse_qsl(raw_query, keep_blank_values=True)
+            query: dict[str, str] = {}
+            duplicate = False
+            for key, value in pairs:
+                if key in query:
+                    duplicate = True
+                query[key] = value
+            if not duplicate:
+                # Never echo provider or flow internals; the flow records its own code.
+                with contextlib.suppress(Exception):
+                    await run_in_threadpool(google_oauth_service.callback, query)
+        return RedirectResponse(url=oauth_result_url, status_code=303)
+
+    async def google_oauth_result(_request: Request) -> Response:
+        return Response(_OAUTH_RESULT_PAGE, media_type="text/html; charset=utf-8")
+
     async def keepalive(request: Request) -> Response:
         denied = _authorize_mutation(request, security, expected_origin)
         if denied is not None:
@@ -300,7 +366,16 @@ def create_settings_app(
         denied = _authorize_mutation(request, security, expected_origin)
         if denied is not None:
             return denied
-        security.close(request_cookie(request.scope))
+        # Same order as replacement/idle: block OAuth, close the barrier,
+        # drain any committing save, then end the session.
+        if google_oauth_service is not None:
+            google_oauth_service.invalidate_precommit()
+        gate.close()
+        while not await gate.wait_idle(CLOSE_MUTATION_DRAIN_SECONDS):
+            pass
+        if not security.close(request_cookie(request.scope)):
+            # The idle limit passed during the drain: the session still ends here.
+            security.expire()
         response = JSONResponse({"status": "closed"})
         response.delete_cookie(SESSION_COOKIE, path=root, httponly=True, samesite="strict")
         if on_close is not None:
@@ -328,6 +403,10 @@ def create_settings_app(
         Route(f"{root}api/v1/canvas/{{action:str}}", canvas_action, methods=["POST"]),
         Route(f"{root}api/v1/connections/canvas/test", canvas_action, methods=["POST"], name="canvas_test"),
         Route(f"{root}api/v1/settings/canvas_registry/validate", canvas_registry_validate, methods=["POST"]),
+        Route(f"{root}api/v1/google-oauth/{{purpose:str}}/{{action:str}}", google_oauth_action, methods=["POST"]),
+        Route(f"{root}api/v1/google-oauth/{{purpose:str}}/{{flow_id:str}}", google_oauth_status, methods=["GET"]),
+        Route(root + OAUTH_CALLBACK_SUFFIX, google_oauth_callback, methods=["GET"]),
+        Route(oauth_result_url, google_oauth_result, methods=["GET"]),
     ])
     application = Starlette(debug=False, routes=routes)
     return SecurityBoundary(application, security, expected_host, prefix)
@@ -378,6 +457,8 @@ def _unique_json(data: bytes) -> Any:
 
 def _invalid_body() -> Any:
     raise SettingsServiceError("INVALID_REQUEST", "Choose a listed settings action.")
+
+
 
 
 def _csrf_fetch_allowed(request: Request, expected_origin: str) -> bool:

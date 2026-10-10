@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from .google_oauth import GoogleOAuthClient
+
 
 @dataclass
 class SystemCfg:
@@ -64,6 +66,10 @@ class SemesterRegistryCfg:
     semester: str = ""
     folder_id: str = ""
     upload_folder_id: str = ""
+    # Effective semester date range (ISO ``YYYY-MM-DD``) used by the intake
+    # classification v2 recording calendar; empty means unknown (AMBIGUOUS).
+    start_date: str = ""
+    end_date: str = ""
     course_folder_ids: dict[str, str] = field(default_factory=dict)
     course_static_folder_ids: dict[str, CourseStaticFolderCfg] = field(default_factory=dict)
     optional_course_upload_folder_ids: dict[str, str] = field(default_factory=dict)
@@ -107,6 +113,9 @@ class RetrievalCfg:
     # Enabled preserves the frozen Session contract: callers still need the
     # explicit include_provisional=True request opt-in.
     allow_provisional_material_usage: bool = True
+    # Intake classification v2 (plan §7): new v2 content stays out of every
+    # retrieval path until the P-D fail-closed filters are active.
+    v2_exposure_gate: bool = False
     # Deployment-configured Material Select -> source authority mapping.  It
     # is never inferred from Usage.Role or derivative front matter.
     material_type_source_class: dict[str, str] = field(
@@ -192,6 +201,38 @@ class CourseCfg:
     code: str = ""
     section: str = ""
     semester: str = ""
+    # Extra deterministic aliases for file-name course resolution (plan §2.3).
+    # Aliases shared by two courses in one semester are disabled at startup.
+    aliases: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ClassificationCfg:
+    """Intake classification v2 (docs/plans/intake-classification-v2.md).
+
+    ``enabled`` false keeps the current HUMAN-only intake behaviour.  The
+    thresholds are the user-decided S2 confirmation gates; lowering them is
+    a human decision recorded in config, never a runtime adjustment.
+    """
+
+    enabled: bool = False
+    # Notion intake schema profile: "" keeps the current selection
+    # (legacy5 / c5-range-v1); "legacy5-cls" or "c5-range-v2" enable the
+    # classification properties after a human added them and readback verified.
+    schema_profile: str = ""
+    min_confidence: float = 0.80
+    min_top_probability: float = 0.70
+    max_calls_per_tick: int = 50
+    max_source_bytes: int = 50 * 1024 * 1024
+    max_terminal_scan: int = 50
+    # Verified Canvas course ID -> canonical course_key (plan §2.3). Only
+    # registry rows with verification_state=api_code_verified belong here.
+    canvas_course_map: dict[int, str] = field(default_factory=dict)
+
+
+@dataclass
+class IntakeCfg:
+    classification: ClassificationCfg = field(default_factory=ClassificationCfg)
 
 
 @dataclass
@@ -208,6 +249,7 @@ class UlsConfig:
     remote_mcp: RemoteMcpCfg = field(default_factory=RemoteMcpCfg)
     behavior_contract: BehaviorContractCfg = field(default_factory=BehaviorContractCfg)
     courses: list[CourseCfg] = field(default_factory=list)
+    intake: IntakeCfg = field(default_factory=IntakeCfg)
     # Credential name -> declared source ("environment" | "keyring" | "file").
     # Parsed by config/loader.py's _credentials_section(); missing entries
     # default to "environment" at CredentialResolver construction time, not
@@ -219,6 +261,9 @@ class UlsConfig:
     canvas: dict[str, Any] = field(default_factory=dict)
     google_worker_credentials_path: str = ""
     google_mcp_credentials_path: str = ""
+    # Personal Google Desktop OAuth client (docs/plans/drive-oauth-p2-r2.md).
+    # All-or-none: both strings or None. Never contains tokens.
+    google_oauth: GoogleOAuthClient | None = None
 
     @property
     def drive(self) -> DriveCfg:
@@ -251,6 +296,7 @@ __all__ = [
     "CourseCfg",
     "CourseStaticFolderCfg",
     "DriveCfg",
+    "GoogleOAuthClient",
     "McpCfg",
     "NormalizationCfg",
     "NotionCfg",

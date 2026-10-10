@@ -24,7 +24,7 @@ ADDED = (
 # Pending values cannot pass acceptance and must be independently fixed after
 # the product source and tests have been frozen and reviewed.
 EXPECTED_REVIEWED_DELTA = {
-    REPLACED[0]: ('76537fcee777553cfd71c627b028d378ea666c091117956aed540f3468a5902c', 34900),
+    REPLACED[0]: ('ff2c8716b413d484b4bde3e1c70600df395ee0c9703fa2ee479081adeb889a8f', 48443),
     REPLACED[1]: ('725b8098c8653b62853a5b15b1e93a30f2817058d4d25d87ab65e47b23586ff7', 50977),
     REPLACED[2]: ('9a9676ef0d59f3b7d66fb4e80313b6fb1d3e80af98382c4019b856e7794583c3', 76850),
     ADDED[0]: ('c18e9da27c482fd3c794472e2b32091b1a16f08963532d5abfee4ebed3b0583c', 41015),

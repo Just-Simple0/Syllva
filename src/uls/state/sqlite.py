@@ -32,6 +32,7 @@ from uls.orchestration.retry import (
     should_retry,
 )
 
+from .classification_state import CLASSIFICATION_SCHEMA, ClassificationStateMixin
 from .models import (
     Checkpoint,
     EntityAllocation,
@@ -428,7 +429,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_note_artifacts_one_reusable
 """
 
 
-class SQLiteStateStore(UsageRangeStateMixin):
+class SQLiteStateStore(UsageRangeStateMixin, ClassificationStateMixin):
     """Thread-safe SQLite StateStore with repeatable migrations."""
 
     def __init__(self, db_path: str | os.PathLike[str]) -> None:
@@ -504,6 +505,8 @@ class SQLiteStateStore(UsageRangeStateMixin):
                 )
             self._connection.executescript(_INTAKE_SCHEMA)
             self._connection.executescript(RANGE_REQUEST_SCHEMA)
+            self._connection.executescript(CLASSIFICATION_SCHEMA)
+            self._migrate_classification_columns()
             head_columns = {row[1] for row in self._connection.execute("PRAGMA table_info(range_intent_heads)")}
             for column in ("apply_lease_expires_at", "current_usage_provider", "current_usage_provider_row_id"):
                 if column not in head_columns:
@@ -560,6 +563,177 @@ class SQLiteStateStore(UsageRangeStateMixin):
                     "ALTER TABLE provider_write_attempts ADD COLUMN pre_dispatch_snapshot_json TEXT"
                 )
             self._migrate_c1_entity_reservations()
+
+    def _migrate_classification_columns(self) -> None:
+        """Additive intake classification v2 columns and the generation=1 backfill (P-A)."""
+
+        intake_columns = {row[1] for row in self._connection.execute("PRAGMA table_info(intake_items)")}
+        for column, declaration in (
+            ("origin", "TEXT NOT NULL DEFAULT 'UNKNOWN'"), ("classified_kind", "TEXT"),
+            ("classification_source", "TEXT"), ("classification_record_id", "TEXT"),
+            ("inferred_course_key", "TEXT"), ("inferred_week", "INTEGER"), ("inferred_date", "TEXT"),
+            ("calendar_match", "TEXT"), ("classification_state", "TEXT NOT NULL DEFAULT 'NONE'"),
+        ):
+            if column not in intake_columns:
+                self._connection.execute(f"ALTER TABLE intake_items ADD COLUMN {column} {declaration}")
+        plan_columns = {row[1] for row in self._connection.execute("PRAGMA table_info(intake_plans)")}
+        for column, declaration in (
+            ("plan_authority", "TEXT NOT NULL DEFAULT 'HUMAN_REQUEST'"),
+            ("classification_revision_hash", "TEXT"),
+        ):
+            if column not in plan_columns:
+                self._connection.execute(f"ALTER TABLE intake_plans ADD COLUMN {column} {declaration}")
+        course_columns = {
+            row[1] for row in self._connection.execute("PRAGMA table_info(recording_calendar_courses)")
+        }
+        if "projection_revision_hash" not in course_columns:
+            self._connection.execute(
+                "ALTER TABLE recording_calendar_courses ADD COLUMN projection_revision_hash TEXT"
+            )
+        manifest_columns = {
+            row[1] for row in self._connection.execute("PRAGMA table_info(document_tag_manifests)")
+        }
+        for column in ("chunk_ids_json", "question_ids_json"):
+            if column not in manifest_columns:
+                self._connection.execute(
+                    f"ALTER TABLE document_tag_manifests ADD COLUMN {column} TEXT NOT NULL DEFAULT '[]'"
+                )
+        job_columns = {row[1] for row in self._connection.execute("PRAGMA table_info(jobs)")}
+        for column in ("plan_revision", "plan_authority", "voided_at", "void_reason"):
+            if column not in job_columns:
+                self._connection.execute(f"ALTER TABLE jobs ADD COLUMN {column} TEXT")
+        # An earlier P-A draft declared UNIQUE(request_key) on the generations table,
+        # which silently dropped multi-intake receipts (P-A review R8); rebuild it.
+        unique_on_key = any(
+            row[2] == 1 and any(
+                col[2] == "request_key"
+                for col in self._connection.execute(f"PRAGMA index_info({row[1]})").fetchall()
+            )
+            for row in self._connection.execute(
+                "PRAGMA index_list(intake_request_generations)"
+            ).fetchall()
+        )
+        if unique_on_key:
+            old_columns = {
+                row[1] for row in self._connection.execute("PRAGMA table_info(intake_request_generations)")
+            }
+            # An already classified marker is copied as is; only a table without the
+            # column starts from UNKNOWN and goes through provenance classification (r11 R4).
+            derivation_source = "derivation_version" if "derivation_version" in old_columns else "'UNKNOWN'"
+            self._connection.executescript(
+                f"""
+                ALTER TABLE intake_request_generations RENAME TO intake_request_generations_old;
+                CREATE TABLE intake_request_generations (
+                    intake_id TEXT NOT NULL,
+                    request_type TEXT NOT NULL,
+                    generation INTEGER NOT NULL,
+                    request_key TEXT,
+                    superseded_request_key TEXT,
+                    derivation_version TEXT NOT NULL DEFAULT 'V2',
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (intake_id, request_type, generation)
+                );
+                INSERT INTO intake_request_generations(intake_id, request_type, generation,
+                    request_key, superseded_request_key, derivation_version, created_at)
+                    SELECT intake_id, request_type, generation, request_key,
+                           superseded_request_key, {derivation_source}, created_at
+                    FROM intake_request_generations_old;
+                DROP TABLE intake_request_generations_old;
+                CREATE INDEX IF NOT EXISTS idx_intake_request_generations_key
+                    ON intake_request_generations(request_key);
+                """
+            )
+        # Every pre-v2 request is generation 1 of its (intake, request type);
+        # supersession generations start at 2 (plan §3.4 r8 R1 / r9 R4).  One
+        # ASSIGN_COURSE receipt may cover several intakes: every one is backfilled.
+        generation_columns = {
+            row[1] for row in self._connection.execute("PRAGMA table_info(intake_request_generations)")
+        }
+        if "derivation_version" not in generation_columns:
+            self._connection.execute(
+                "ALTER TABLE intake_request_generations ADD COLUMN derivation_version TEXT NOT NULL DEFAULT 'UNKNOWN'"
+            )
+        # Rows that pre-date the derivation marker (an earlier P-A schema) are classified
+        # from their provenance instead of guessed (r10 R4): a key bound to a receipt that
+        # exists in request_receipts is a legacy request (no v2 request has been created
+        # before P-B), an unbound reservation is V2, anything else stays RECONCILE.
+        for row in self._connection.execute(
+            "SELECT intake_id, request_type, generation, request_key FROM intake_request_generations "
+            "WHERE derivation_version = 'UNKNOWN' AND request_key IS NOT NULL"
+        ).fetchall():
+            # LEGACY needs the receipt to prove the exact key, request type and intake
+            # binding; a key reused under another type/intake proves nothing (r12 R7).
+            proven = False
+            for receipt in self._connection.execute(
+                "SELECT request_type, intake_ids_json FROM request_receipts WHERE request_key = ?",
+                (row["request_key"],),
+            ).fetchall():
+                if receipt["request_type"] != row["request_type"]:
+                    continue
+                bound = _valid_intake_binding(receipt["request_type"], receipt["intake_ids_json"])
+                if bound is not None and row["intake_id"] in bound:
+                    proven = True
+                    break
+            if proven:
+                self._connection.execute(
+                    "UPDATE intake_request_generations SET derivation_version = 'LEGACY' "
+                    "WHERE intake_id = ? AND request_type = ? AND generation = ?",
+                    (row["intake_id"], row["request_type"], row["generation"]),
+                )
+        self._connection.execute(
+            "UPDATE intake_request_generations SET derivation_version = 'V2' "
+            "WHERE derivation_version = 'UNKNOWN' AND request_key IS NULL"
+        )
+        self._connection.execute(
+            "UPDATE intake_request_generations SET derivation_version = 'RECONCILE' "
+            "WHERE derivation_version = 'UNKNOWN'"
+        )
+        # Several legacy receipts of one (intake, type) are consecutive generations in
+        # creation order, each superseding the previous key; a receipt already bound
+        # is skipped so re-runs are idempotent and nothing is silently dropped (r8 R3).
+        receipts = self._connection.execute(
+            "SELECT request_key, request_type, intake_ids_json FROM request_receipts "
+            "WHERE request_type IS NOT NULL AND intake_ids_json IS NOT NULL ORDER BY rowid"
+        ).fetchall()
+        for receipt in receipts:
+            intake_ids = _valid_intake_binding(receipt["request_type"], receipt["intake_ids_json"])
+            if intake_ids is None:
+                continue  # a malformed binding never produces a LEGACY generation (r13 R2)
+            for intake_id in intake_ids:
+                bound = self._connection.execute(
+                    "SELECT 1 FROM intake_request_generations WHERE intake_id = ? "
+                    "AND request_type = ? AND request_key = ?",
+                    (intake_id, receipt["request_type"], receipt["request_key"]),
+                ).fetchone()
+                if bound is not None:
+                    continue
+                latest = self._connection.execute(
+                    "SELECT generation, request_key FROM intake_request_generations "
+                    "WHERE intake_id = ? AND request_type = ? ORDER BY generation DESC LIMIT 1",
+                    (intake_id, receipt["request_type"]),
+                ).fetchone()
+                if latest is not None and latest["request_key"] is None:
+                    continue  # a pending v2 reservation is never overwritten by legacy data
+                generation = 1 if latest is None else int(latest["generation"]) + 1
+                # Every backfilled receipt was derived before v2 regardless of its
+                # generation number: claim-time verification follows this marker (r9 R2).
+                self._connection.execute(
+                    "INSERT INTO intake_request_generations(intake_id, request_type, "
+                    "generation, request_key, superseded_request_key, derivation_version, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, 'LEGACY', ?)",
+                    (intake_id, receipt["request_type"], generation, receipt["request_key"],
+                     None if latest is None else latest["request_key"], _utc_now()),
+                )
+        # Items whose Kind was fixed by a HUMAN plan before v2 are human-labelled and
+        # therefore never auto-reclassified (plan §3.4 last bullet, P-A review R17).
+        # Proof = a plan revision bound to the item plus a selected Kind.
+        self._connection.execute(
+            "UPDATE intake_items SET classification_source = 'human' "
+            "WHERE classification_source IS NULL AND selected_kind IS NOT NULL "
+            "AND plan_revision IS NOT NULL "
+            "AND EXISTS (SELECT 1 FROM intake_plans p WHERE p.intake_id = intake_items.intake_id "
+            "AND p.plan_revision = intake_items.plan_revision)"
+        )
 
     def _migrate_c1_entity_reservations(self) -> None:
         """Upgrade the preview reservation table without losing released history."""
@@ -996,6 +1170,9 @@ class SQLiteStateStore(UsageRangeStateMixin):
             "request_revision_hash", "plan_revision", "pending_request_key", "canonical_entity_id",
             "canonical_source_json", "content_status", "last_error_code", "last_error",
             "last_successful_stage", "last_seen_at",
+            "origin", "classified_kind", "classification_source", "classification_record_id",
+            "inferred_course_key", "inferred_week", "inferred_date", "calendar_match",
+            "classification_state",
         }
         unknown = set(patch) - allowed
         if unknown:
@@ -1218,8 +1395,30 @@ class SQLiteStateStore(UsageRangeStateMixin):
     def create_intake_plan(self, plan: IntakePlan | None = None, **kwargs: Any) -> IntakePlan:
         values = dict(plan.__dict__) if plan is not None else dict(kwargs)
         values.setdefault("plan_id", _new_id("plan_"))
-        values.setdefault("status", "PLANNED")
         values.setdefault("created_at", _utc_now())
+        values.setdefault("plan_authority", "HUMAN_REQUEST")
+        values.setdefault("classification_revision_hash", None)
+        if values["plan_authority"] not in ("HUMAN_REQUEST", "AUTO_CLASSIFICATION"):
+            raise ValueError("unknown plan authority")
+        if values["plan_authority"] == "AUTO_CLASSIFICATION":
+            # An automatic plan starts AUTO_PENDING and is bound to a real
+            # classification record of the same intake (plan §3.4 stage A; P-A R10).
+            values.setdefault("status", "AUTO_PENDING")
+            if values["status"] != "AUTO_PENDING":
+                raise ValueError("an AUTO_CLASSIFICATION plan is created AUTO_PENDING only")
+            revision = values["classification_revision_hash"]
+            if not revision:
+                raise ValueError("an AUTO_CLASSIFICATION plan requires its classification revision hash")
+            with self._transaction() as connection:
+                record = connection.execute(
+                    "SELECT intake_id FROM classification_records "
+                    "WHERE classification_revision_hash = ?",
+                    (revision,),
+                ).fetchone()
+            if record is None or record["intake_id"] != values["intake_id"]:
+                raise ValueError("classification revision hash is not a record of this intake")
+        else:
+            values.setdefault("status", "PLANNED")
         for name in (
             "plan_id", "intake_id", "request_revision_hash", "plan_revision",
             "resolved_workspace_fingerprint", "plan_hash",
@@ -1239,17 +1438,120 @@ class SQLiteStateStore(UsageRangeStateMixin):
                 INSERT INTO intake_plans(
                     plan_id, intake_id, request_revision_hash, plan_revision,
                     resolved_workspace_fingerprint, target_snapshot_json,
-                    plan_hash, status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    plan_hash, status, created_at, plan_authority, classification_revision_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     values["plan_id"], values["intake_id"], values["request_revision_hash"],
                     values["plan_revision"], values["resolved_workspace_fingerprint"],
                     target_json, values["plan_hash"], values["status"], values["created_at"],
+                    values["plan_authority"], values["classification_revision_hash"],
                 ),
             )
             return _intake_plan_from_row(
                 connection.execute("SELECT * FROM intake_plans WHERE plan_id=?", (values["plan_id"],)).fetchone()
+            )
+
+    def promote_auto_plan(self, plan_revision: str) -> IntakePlan:
+        """Stage B (plan §3.4): AUTO_PENDING → PLANNED only when no live HUMAN request remains.
+
+        Every receipt that names this intake must be terminal (Applied, Cancelled or
+        AutoResolved) — i.e. the Draft closure intent finished — before the plan may run.
+        """
+
+        with self._transaction(immediate=True) as connection:
+            plan = connection.execute(
+                "SELECT * FROM intake_plans WHERE plan_revision = ? ORDER BY created_at DESC LIMIT 1",
+                (plan_revision,),
+            ).fetchone()
+            if plan is None:
+                raise KeyError(plan_revision)
+            if plan["plan_authority"] != "AUTO_CLASSIFICATION":
+                raise ValueError("only AUTO_CLASSIFICATION plans are promoted")
+            if plan["status"] != "AUTO_PENDING":
+                raise ValueError("plan is not AUTO_PENDING")
+            record = connection.execute(
+                "SELECT record_id FROM classification_records WHERE classification_revision_hash = ? "
+                "AND intake_id = ?",
+                (plan["classification_revision_hash"], plan["intake_id"]),
+            ).fetchone()
+            if record is None:
+                raise ValueError("the plan's classification record no longer exists for this intake")
+            # Every non-terminal receipt is read with its exact intake binding; a receipt
+            # whose binding cannot be parsed is treated as possibly live (r7 R2).
+            for receipt in connection.execute(
+                "SELECT request_key, state, request_type, intake_ids_json FROM request_receipts "
+                "WHERE state NOT IN ('Applied', 'Cancelled')"
+            ).fetchall():
+                covered = _valid_intake_binding(receipt["request_type"], receipt["intake_ids_json"])
+                if covered is None:
+                    # NULL, broken JSON, [], [""], duplicated ids or a FILE_DETAILS receipt
+                    # over several intakes: the binding of a possibly live request cannot
+                    # be proven, so nothing activates (r8 R1, r13 R2).
+                    raise ValueError("a request receipt without a provable intake binding blocks the plan")
+                if plan["intake_id"] not in covered:
+                    continue
+                if receipt["state"] != "AutoResolved":
+                    raise ValueError("a live HUMAN request blocks the automatic plan")
+                if len(covered) != 1:
+                    raise ValueError("a multi-intake receipt never closes automatically")
+                # A locally AutoResolved receipt only counts when the closure intent
+                # bound to this very classification record finished with its terminal
+                # readback snapshot (plan §3.4 stage B / §3.5; P-A r2 #6).
+                # The receipt is terminal when the intent that actually closed it is DONE
+                # with its terminal snapshot and belongs to a classification record of this
+                # intake; it need not be the record of the plan being promoted, so a later
+                # source version is never blocked by an earlier valid closure (r11 R5).
+                closed_by = connection.execute(
+                    "SELECT i.state, i.terminal_snapshot_hash FROM auto_resolve_intents i "
+                    "JOIN classification_records c ON c.record_id = i.record_id "
+                    "WHERE i.request_key = ? AND c.intake_id = ? AND i.state = 'DONE' "
+                    "AND i.terminal_snapshot_hash IS NOT NULL AND i.terminal_snapshot_hash != ''",
+                    (receipt["request_key"], plan["intake_id"]),
+                ).fetchone()
+                if receipt["request_type"] not in ("ASSIGN_COURSE", "FILE_DETAILS") or closed_by is None:
+                    raise ValueError("AutoResolved receipt without a DONE closure intent blocks the plan")
+            # A HUMAN request generation of this intake that is still unresolved (key not
+            # bound, or bound without a receipt that proves its terminal state) means a
+            # provider create may be in flight: no activation (plan §3.4; r14 R1).
+            for generation in connection.execute(
+                "SELECT request_type, generation, request_key FROM intake_request_generations "
+                "WHERE intake_id = ?",
+                (plan["intake_id"],),
+            ).fetchall():
+                if generation["request_key"] is None:
+                    raise ValueError("a pending HUMAN request generation blocks the automatic plan")
+                receipt = connection.execute(
+                    "SELECT state, request_type, intake_ids_json FROM request_receipts WHERE request_key = ?",
+                    (generation["request_key"],),
+                ).fetchone()
+                if receipt is None:
+                    raise ValueError("a HUMAN request generation without a receipt blocks the automatic plan")
+                # The receipt must be the one this generation names: same request type and a
+                # valid binding that covers this intake; otherwise nothing is proven (r15 R1).
+                covered = _valid_intake_binding(receipt["request_type"], receipt["intake_ids_json"])
+                if receipt["request_type"] != generation["request_type"] or covered is None \
+                        or plan["intake_id"] not in covered:
+                    raise ValueError("a HUMAN request generation is bound to an unproven receipt; no activation")
+                if receipt["state"] not in ("Applied", "Cancelled", "AutoResolved"):
+                    raise ValueError("a live HUMAN request generation blocks the automatic plan")
+                # An AutoResolved receipt was already validated above against its closing intent
+                # because its binding names this intake.
+            live_intent = connection.execute(
+                "SELECT 1 FROM auto_resolve_intents i JOIN classification_records c "
+                "ON c.record_id = i.record_id WHERE c.intake_id = ? "
+                "AND i.state IN ('PENDING', 'RECONCILE')",
+                (plan["intake_id"],),
+            ).fetchone()
+            if live_intent is not None:
+                # A closure intent still in flight (its receipt may not even exist yet)
+                # is an unresolved provider request: no activation (r7 R2).
+                raise ValueError("an unresolved auto resolve intent blocks the automatic plan")
+            connection.execute(
+                "UPDATE intake_plans SET status = 'PLANNED' WHERE plan_id = ?", (plan["plan_id"],)
+            )
+            return _intake_plan_from_row(
+                connection.execute("SELECT * FROM intake_plans WHERE plan_id = ?", (plan["plan_id"],)).fetchone()
             )
 
     def get_intake_plan(self, plan_revision: str) -> IntakePlan | None:
@@ -3482,6 +3784,8 @@ class SQLiteStateStore(UsageRangeStateMixin):
         completed_at: str | None = None,
         processor_version: str | None = None,
         job: Job | None = None,
+        plan_revision: str | None = None,
+        plan_authority: str | None = None,
     ) -> Job:
         """Create or return the row for a deterministic ``job_key``.
 
@@ -3511,6 +3815,8 @@ class SQLiteStateStore(UsageRangeStateMixin):
             updated_at = supplied.updated_at or updated_at
             completed_at = supplied.completed_at
             processor_version = getattr(supplied, "processor_version", processor_version)
+            plan_revision = supplied.plan_revision if plan_revision is None else plan_revision
+            plan_authority = supplied.plan_authority if plan_authority is None else plan_authority
 
         operation = _canonical_operation(operation)
         _require_text(stage, "stage")
@@ -3562,8 +3868,8 @@ class SQLiteStateStore(UsageRangeStateMixin):
                         id, job_key, operation, stage, status,
                         course_key, source_file_id, source_hash, target_entity_id,
                         attempt_count, error_class, last_error,
-                        created_at, updated_at, completed_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        created_at, updated_at, completed_at, plan_revision, plan_authority
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         identifier,
@@ -3581,6 +3887,8 @@ class SQLiteStateStore(UsageRangeStateMixin):
                         created,
                         updated,
                         completed_at,
+                        plan_revision,
+                        plan_authority,
                     ),
                 )
             except sqlite3.IntegrityError:
@@ -3712,7 +4020,7 @@ class SQLiteStateStore(UsageRangeStateMixin):
                 row = connection.execute(
                     """
                     SELECT id FROM jobs
-                    WHERE status = ?
+                    WHERE status = ? AND voided_at IS NULL
                     ORDER BY created_at ASC, id ASC
                     LIMIT 1
                     """,
@@ -3731,9 +4039,10 @@ class SQLiteStateStore(UsageRangeStateMixin):
                 return None
             selected_id = row["id"]
             selected = connection.execute(
-                "SELECT attempt_count FROM jobs WHERE id = ?", (selected_id,)
+                "SELECT attempt_count, voided_at FROM jobs WHERE id = ?", (selected_id,)
             ).fetchone()
-            if selected is None:
+            if selected is None or selected["voided_at"] is not None:
+                # A voided job (superseded plan) is terminal and never claimable.
                 return None
             if int(selected["attempt_count"]) >= DEFAULT_MAX_ATTEMPTS:
                 connection.execute(
@@ -4603,6 +4912,31 @@ def _intake_observation_from_row(row: sqlite3.Row) -> IntakeObservation:
 
 def _request_receipt_from_row(row: sqlite3.Row) -> RequestReceipt:
     return RequestReceipt(**dict(row))
+
+
+def _valid_intake_binding(request_type: Any, intake_ids_json: Any) -> list[str] | None:
+    """The receipt's intake ids when structurally valid, else None (fail closed).
+
+    A binding is a non-empty JSON list of non-empty, unique strings; FILE_DETAILS binds
+    exactly one intake, ASSIGN_COURSE one or more.  Used identically by the migration
+    provenance check, the legacy generation backfill and AUTO plan promotion (r13 R2).
+    """
+
+    if not isinstance(intake_ids_json, str):
+        return None
+    try:
+        bound = json.loads(intake_ids_json)
+    except ValueError:
+        return None
+    if (
+        not isinstance(bound, list) or not bound
+        or not all(isinstance(i, str) and i.strip() for i in bound)
+        or len(set(bound)) != len(bound)
+    ):
+        return None
+    if request_type == "FILE_DETAILS" and len(bound) != 1:
+        return None
+    return list(bound)
 
 
 def _intake_plan_from_row(row: sqlite3.Row) -> IntakePlan:

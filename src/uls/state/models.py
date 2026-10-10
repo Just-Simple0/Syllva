@@ -31,13 +31,24 @@ class Job:
     created_at: str = ""
     updated_at: str = ""
     completed_at: str | None = None
+    # Intake classification v2 (plan §3.4): a job is bound to the exact plan
+    # revision and authority it was enqueued for; a superseded plan voids its
+    # unfinished jobs persistently (VOID is ``voided_at`` being set).
+    plan_revision: str | None = None
+    plan_authority: str | None = None
+    voided_at: str | None = None
+    void_reason: str | None = None
 
     def __post_init__(self) -> None:
         self.status = to_processing_status(self.status)
 
     @property
+    def is_void(self) -> bool:
+        return self.voided_at is not None
+
+    @property
     def is_terminal(self) -> bool:
-        return self.status in {
+        return self.is_void or self.status in {
             JobStatus.READY,
             JobStatus.PARTIAL,
             JobStatus.NEEDS_REVIEW,
@@ -153,6 +164,16 @@ class IntakeItem:
     last_successful_stage: str | None = None
     first_seen_at: str = ""
     last_seen_at: str = ""
+    # Intake classification v2 (plan §5).
+    origin: str = "UNKNOWN"
+    classified_kind: str | None = None
+    classification_source: str | None = None
+    classification_record_id: str | None = None
+    inferred_course_key: str | None = None
+    inferred_week: int | None = None
+    inferred_date: str | None = None
+    calendar_match: str | None = None
+    classification_state: str = "NONE"
 
 
 @dataclass(frozen=True)
@@ -194,6 +215,9 @@ class IntakePlan:
     plan_hash: str
     status: str = "PLANNED"
     created_at: str = ""
+    # Intake classification v2 (plan §3.4): HUMAN_REQUEST | AUTO_CLASSIFICATION.
+    plan_authority: str = "HUMAN_REQUEST"
+    classification_revision_hash: str | None = None
 
 
 @dataclass(frozen=True)

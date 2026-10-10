@@ -19,8 +19,19 @@ from uls.domain.errors import (
     SourcePartialError,
     SourceUnavailableError,
 )
+from uls.intake.classification.taxonomy import (
+    AI_KIND_OPTIONS,
+    FILE_KINDS_V2,
+    MATERIAL_ROLES_V2,
+    ORIGIN_OPTIONS,
+)
 
 INPUT_REQUEST_TYPES = ("ASSIGN_COURSE", "FILE_DETAILS")
+# Intake classification v2 profiles (plan §5): the legacy profiles keep their
+# exact shape; these add the classification properties and the HUMAN Kind /
+# Material Role expansion plus the ``Auto Resolved`` terminal request status.
+CLASSIFICATION_PROFILES = ("legacy5-cls", "c5-range-v2")
+AUTO_RESOLVED_STATUS = "Auto Resolved"
 FILE_KINDS = ("TRANSCRIPT", "MATERIAL_PDF")
 MATERIAL_ROLES = ("Lecture Slides", "Textbook")
 FILE_INTAKE_STATUSES = (
@@ -183,12 +194,54 @@ INTAKE_SCHEMAS: dict[str, dict[str, dict[str, Any]]] = {
     },
 }
 
+def intake_status_groups(profile: str = "legacy5") -> dict[str, dict[str, tuple[str, ...]]]:
+    """Status group contract per profile; cls profiles add ``Auto Resolved`` to complete."""
+
+    groups = deepcopy(STATUS_GROUPS)
+    if profile in CLASSIFICATION_PROFILES:
+        request_groups = groups["input_request"]
+        request_groups["complete"] = (*request_groups["complete"], AUTO_RESOLVED_STATUS)
+    return groups
+
+
+def _apply_classification_profile(schemas: dict[str, dict[str, dict[str, Any]]]) -> None:
+    request = schemas["input_request"]
+    request["Kind"] = _spec("select", ownership="USER", options=FILE_KINDS_V2)
+    request["Material Role"] = _spec("select", ownership="USER", options=MATERIAL_ROLES_V2)
+    status_options = tuple(request["Request Status"]["options"])
+    request["Request Status"] = _spec(
+        "status", required=True, nullable=False, ownership="SYSTEM_CONTROLLED",
+        options=(*status_options, AUTO_RESOLVED_STATUS),
+    )
+    request.update({
+        "Suggested Course": _spec("rich_text", ownership="SYSTEM_DERIVED"),
+        "Suggested Kind": _spec("select", ownership="SYSTEM_DERIVED", options=AI_KIND_OPTIONS),
+        "Suggested Date": _spec("date", ownership="SYSTEM_DERIVED"),
+        "Suggested Week": _spec("number", ownership="SYSTEM_DERIVED"),
+        "Suggestion Source": _spec("rich_text", ownership="SYSTEM_DERIVED"),
+        "Suggestion Note": _spec("rich_text", ownership="SYSTEM_DERIVED"),
+    })
+    schemas["file_intake"].update({
+        "AI Kind": _spec("select", ownership="SYSTEM_DERIVED", options=AI_KIND_OPTIONS),
+        "Origin": _spec("select", ownership="SYSTEM_DERIVED", options=ORIGIN_OPTIONS),
+        "Classification Source": _spec("rich_text", ownership="SYSTEM_DERIVED"),
+        "Classification Record": _spec("rich_text", ownership="SYSTEM_DERIVED"),
+    })
+    schemas["materials"].update({
+        "AI Kind": _spec("select", ownership="SYSTEM_DERIVED", options=AI_KIND_OPTIONS),
+        "Week": _spec("number", ownership="SYSTEM_INITIAL_USER_PRESERVE"),
+    })
+
+
 def intake_schemas(profile: str = "legacy5") -> dict[str, dict[str, dict[str, Any]]]:
     """Return an isolated versioned profile; legacy exact-shape checks stay intact."""
     schemas = deepcopy(INTAKE_SCHEMAS)
     if profile == "legacy5":
         return schemas
-    if profile != "c5-range-v1":
+    if profile == "legacy5-cls":
+        _apply_classification_profile(schemas)
+        return schemas
+    if profile not in ("c5-range-v1", "c5-range-v2"):
         raise ValueError("unsupported intake schema profile")
     request = schemas["input_request"]
     request["Request Type"] = _spec("select", ownership="USER", options=(*INPUT_REQUEST_TYPES, "USAGE_RANGE"))
@@ -225,6 +278,8 @@ def intake_schemas(profile: str = "legacy5") -> dict[str, dict[str, dict[str, An
         "Created": _spec("created_time"), "Updated": _spec("last_edited_time"),
         "Applied At": _spec("date"), "Last Error": _spec("rich_text"),
     }
+    if profile == "c5-range-v2":
+        _apply_classification_profile(schemas)
     return schemas
 
 
@@ -638,33 +693,72 @@ def _validate_data_source_readback(
         if expected_type in {"select", "status"}:
             actual_options = _property_option_names(actual, actual_type)
             expected_options = _expected_options(logical, name, expected, semester)
-            if actual_options != set(expected_options):
+            if actual_options is None or actual_options != set(expected_options):
                 return f"data-source option set mismatch: {logical}.{name}"
         if expected_type == "status" and logical != "automation_queue":
-            expected_groups = STATUS_GROUPS.get(logical)
+            expected_groups = intake_status_groups(schema_profile).get(logical)
             if expected_groups is None:
                 return f"status group contract is missing: {logical}.{name}"
             actual_groups = _status_group_names(actual)
-            if actual_groups != {
-                group: set(values)
-                for group, values in expected_groups.items()
-            }:
+            if not _status_groups_match(actual_groups, expected_groups):
                 return f"data-source status groups mismatch: {logical}.{name}"
     return None
 
 
 def _data_source_parent_page_id(raw: Mapping[str, Any]) -> str | None:
+    """Resolve the configured-parent page ID from legacy or current SDK shapes.
+
+    Legacy: a direct ``parent.page_id`` (or the internal ``_parent_page_id``).
+    Current ``2025-09-03`` data sources report ``parent.database_id`` plus a
+    ``database_parent.page_id``; that page is accepted only when both halves
+    are complete.  Conflicting identifiers across shapes fail closed.
+    """
+
+    candidates: list[str] = []
     for key in ("parent_page_id", "_parent_page_id"):
         value = raw.get(key)
         if isinstance(value, str) and value:
-            return value
+            candidates.append(value)
     parent = raw.get("parent")
+    if "parent" in raw and not isinstance(parent, Mapping):
+        # A present but malformed parent is never bypassed through legacy fields.
+        return None
+    modern = "database_parent" in raw or (
+        isinstance(parent, Mapping) and (parent.get("type") == "database_id" or "database_id" in parent)
+    )
+    if not modern and isinstance(parent, Mapping):
+        # Legacy direct parent: the mapping itself must carry a valid page id,
+        # and an explicit type must be page_id. Other fields never fill it in.
+        if "type" in parent and parent.get("type") != "page_id":
+            return None
+        legacy_ids = [parent.get(key) for key in ("page_id", "parent_page_id") if key in parent]
+        if not legacy_ids or any(not isinstance(value, str) or not value for value in legacy_ids):
+            return None
+    if modern:
+        # Any observed part of the current shape (even a malformed
+        # database_parent value) requires the complete shape; legacy fields
+        # never substitute for it.
+        database_parent = raw.get("database_parent")
+        if (not isinstance(parent, Mapping) or parent.get("type") != "database_id"
+                or not isinstance(database_parent, Mapping)):
+            return None
+        database_id = parent.get("database_id")
+        page_id = database_parent.get("page_id")
+        if (not isinstance(database_id, str) or not database_id
+                or database_parent.get("type") != "page_id" or not isinstance(page_id, str) or not page_id):
+            return None
+        candidates.append(page_id)
     if isinstance(parent, Mapping):
         for key in ("page_id", "parent_page_id"):
             value = parent.get(key)
             if isinstance(value, str) and value:
-                return value
-    return None
+                candidates.append(value)
+    if not candidates:
+        return None
+    first = candidates[0]
+    if any(not _same_provider_id(first, other) for other in candidates[1:]):
+        return None
+    return first
 
 
 def _provider_property_type(value: Mapping[str, Any]) -> str | None:
@@ -699,34 +793,128 @@ def _expected_options(
     return tuple(str(value) for value in spec.get("options", ()))
 
 
-def _property_option_names(value: Mapping[str, Any], actual_type: str | None) -> set[str]:
+def _property_option_names(value: Mapping[str, Any], actual_type: str | None) -> set[str] | None:
+    """Exact option-name set of a select/status property, or None when any entry is malformed.
+
+    A non-mapping option, an empty or non-string name, or a duplicated name
+    fails closed instead of being skipped, so a malformed provider schema can
+    never match the expected set by accident.
+    """
+
     config = value.get(actual_type) if actual_type else None
     if not isinstance(config, Mapping):
-        return set()
+        return None
     options = config.get("options")
     if not isinstance(options, Sequence) or isinstance(options, (str, bytes, bytearray)):
-        return set()
-    return {
-        str(option.get("name"))
-        for option in options
-        if isinstance(option, Mapping) and isinstance(option.get("name"), str)
-    }
+        return None
+    names: set[str] = set()
+    for option in options:
+        name = option.get("name") if isinstance(option, Mapping) else None
+        if not isinstance(name, str) or not name or name in names:
+            return None
+        names.add(name)
+    return names
+
+
+def _canonical_group_key(name: str) -> str:
+    """Map a Notion status group display name onto the STATUS_GROUPS key.
+
+    The live 2025-09-03 API names the built-in groups ``To-do``,
+    ``In progress`` and ``Complete``; the contract (and legacy readbacks) use
+    ``to_do`` / ``in_progress`` / ``complete``.  Case, spaces and hyphens are
+    the only differences that are normalized.
+    """
+
+    return "_".join(name.strip().lower().replace("-", " ").split())
+
+
+def _status_groups_match(actual: Mapping[str, set[str]], expected: Mapping[str, tuple[str, ...]]) -> bool:
+    """Exact option placement; empty groups are contract placeholders.
+
+    Every actual group must be a contract group, and the option sets of all
+    non-empty groups must match exactly.  The contract lists ``current`` /
+    ``future`` with no options, and a live workspace may omit any empty
+    group (Notion only exposes the three built-in ones); neither side can
+    carry an option the other does not.  A malformed readback normalizes to
+    ``{}`` and therefore never matches a contract with options.
+    """
+
+    if not actual or not set(actual) <= set(expected):
+        return False
+    return ({group: names for group, names in actual.items() if names}
+            == {group: set(values) for group, values in expected.items() if values})
 
 
 def _status_group_names(value: Mapping[str, Any]) -> dict[str, set[str]]:
+    """Normalize legacy mapping groups or current ``{id, name, option_ids}`` arrays.
+
+    Both shapes become ``group name -> option names`` for the exact
+    ``STATUS_GROUPS`` comparison.  In the array shape every ``option_ids``
+    entry must resolve to exactly one option of the same property, no option
+    may be referenced twice or left unreferenced, and group names must be
+    unique; anything else yields an empty mapping so the comparison fails.
+    """
+
     config = value.get("status")
     groups = config.get("groups") if isinstance(config, Mapping) else None
-    if not isinstance(groups, Mapping):
+    if isinstance(groups, Mapping):
+        legacy: dict[str, set[str]] = {}
+        for group, options in groups.items():
+            if (not isinstance(group, str) or not group
+                    or not isinstance(options, Sequence) or isinstance(options, (str, bytes, bytearray))):
+                return {}  # a malformed legacy entry is never silently dropped
+            legacy_names: set[str] = set()
+            for option in options:
+                name = option.get("name") if isinstance(option, Mapping) else None
+                if not isinstance(name, str) or not name or name in legacy_names:
+                    return {}
+                legacy_names.add(name)
+            key = _canonical_group_key(group)
+            if not key or key in legacy:
+                return {}
+            legacy[key] = legacy_names
+        return legacy
+    if not isinstance(groups, Sequence) or isinstance(groups, (str, bytes, bytearray)):
         return {}
-    return {
-        str(group): {
-            str(option.get("name"))
-            for option in options
-            if isinstance(option, Mapping) and isinstance(option.get("name"), str)
-        }
-        for group, options in groups.items()
-        if isinstance(options, Sequence) and not isinstance(options, (str, bytes, bytearray))
-    }
+    assert isinstance(config, Mapping)
+    options = config.get("options")
+    if not isinstance(options, Sequence) or isinstance(options, (str, bytes, bytearray)):
+        return {}
+    option_names: dict[str, str] = {}
+    for option in options:
+        option_id = option.get("id") if isinstance(option, Mapping) else None
+        name = option.get("name") if isinstance(option, Mapping) else None
+        if (not isinstance(option_id, str) or not option_id or not isinstance(name, str) or not name
+                or option_id in option_names or name in option_names.values()):
+            return {}
+        option_names[option_id] = name
+    result: dict[str, set[str]] = {}
+    seen_ids: set[str] = set()
+    seen_group_ids: set[str] = set()
+    for group in groups:
+        if not isinstance(group, Mapping):
+            return {}
+        group_id = group.get("id")
+        group_name = group.get("name")
+        option_ids = group.get("option_ids")
+        if (not isinstance(group_id, str) or not group_id or group_id in seen_group_ids
+                or not isinstance(group_name, str) or not group_name
+                or not isinstance(option_ids, Sequence) or isinstance(option_ids, (str, bytes, bytearray))):
+            return {}
+        group_name = _canonical_group_key(group_name)
+        if not group_name or group_name in result:
+            return {}
+        seen_group_ids.add(group_id)
+        names: set[str] = set()
+        for option_id in option_ids:
+            if not isinstance(option_id, str) or option_id not in option_names or option_id in seen_ids:
+                return {}
+            seen_ids.add(option_id)
+            names.add(option_names[option_id])
+        result[group_name] = names
+    if seen_ids != set(option_names):
+        return {}
+    return result
 
 
 def _relation_target_id(value: Mapping[str, Any]) -> str | None:
