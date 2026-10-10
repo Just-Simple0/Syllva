@@ -65,6 +65,7 @@ def _first_request(system):
     worker, state = system["worker"], system["state"]
     worker.run_once()
     item = state.list_intake_items()[0]
+    state.update_request_receipt(item.pending_request_key, state="Cancelled")   # a terminal request to supersede
     return worker, state, item, item.pending_request_key
 
 
@@ -146,3 +147,16 @@ def test_a_v2_generation_whose_record_conflicts_is_reconciled_not_guessed(tmp_pa
         with pytest.raises(IntakeReconcileRequired):
             worker.claim_request(receipt.request_key)
         assert not [r for r in system["notion"].data_sources["synthetic-requests"] if r["Request Type"] == "FILE_DETAILS"]
+
+
+def test_an_open_request_cannot_be_superseded(tmp_path: Path) -> None:
+    with _system(tmp_path) as system:
+        worker, state = system["worker"], system["state"]
+        worker.run_once()
+        item = state.list_intake_items()[0]
+        assert state.get_request_receipt(item.pending_request_key).state == "Draft"
+        with pytest.raises(IntakeReconcileRequired):
+            worker.create_input_request(
+                item.intake_id, request_type=RequestType.ASSIGN_COURSE.value,
+                superseded_request_key=item.pending_request_key)
+        assert len(_assign_pages(system["notion"])) == 1

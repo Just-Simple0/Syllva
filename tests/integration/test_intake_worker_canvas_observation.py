@@ -133,7 +133,8 @@ def test_an_observed_calendar_drives_the_match_end_to_end(tmp_path: Path) -> Non
         semester = SemesterRange(date(2026, 9, 1), date(2026, 12, 20), "config")
         worker.canvas_observer = CanvasObserver(
             system["state"], origin=origin, verified_origin=origin, course_map={67535: COURSE},
-            reader_factory=factory, semester_for=lambda _key: semester)
+            reader_factory=factory, semester_for=lambda _key: semester,
+            profile_provider=lambda: origin, principal_provider=lambda: "user-1")
         cfg.canvas_observation_enabled, cfg.canvas_origin = True, origin
         worker.run_once()
         assert system["state"].recording_calendar_complete(COURSE)
@@ -174,3 +175,20 @@ def test_a_recorded_calendar_without_any_live_proof_provider_is_not_used(tmp_pat
         worker.run_once()
         assert _item(system).calendar_match == "AMBIGUOUS" and _auto_plans(system["state"]) == []
         assert not system["state"].recording_calendar_complete(COURSE)
+
+
+def test_the_observation_rotation_survives_a_rebuilt_worker(tmp_path: Path) -> None:
+    with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        cfg = system["config"].intake.classification
+        cfg.canvas_observation_enabled, cfg.max_canvas_courses_per_tick = True, 1
+        cfg.canvas_course_map = {10: COURSE, 20: "2026-2_B-001"}
+        first = _Observer()
+        worker.canvas_observer = first
+        worker.run_once()
+        assert system["state"].get_classification_cursor("canvas_observation_cursor") == "1"
+        rebuilt = _enable(system)                      # a new worker over the same state
+        second = _Observer()
+        rebuilt.canvas_observer = second
+        rebuilt.run_once()
+        assert first.calls == [10] and second.calls == [20]

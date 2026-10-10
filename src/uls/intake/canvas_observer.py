@@ -181,33 +181,41 @@ class CanvasObserver:
         return {int(k): v for k, v in source.items()}
 
     def current_proof(self, course_key: str) -> str | None:
-        """Evidence that the active Canvas connection (origin and, when available, principal)
-        is the one the course map was verified against for this course key (plan §2.3).  None
-        means no proof: a calendar is then not used."""
+        """Evidence that the active Canvas connection is the one the course map was verified
+        against for this course key (plan §2.3): the origin we read from, the verified origin
+        and the ACTIVE profile origin are one, and the connection principal is readable.  Any
+        missing evidence (no provider, unreadable principal, ambiguous mapping) is no proof."""
 
         mapping = self._course_map
         ids = sorted(cid for cid, key in mapping.items() if key == course_key)
         if len(ids) != 1 or not self.profile_matches():
             return None
+        if self._principal_provider is None:
+            return None
         try:
-            principal = self._principal_provider() if self._principal_provider is not None else ""
+            principal = self._principal_provider()
         except Exception:  # noqa: BLE001 - an unreadable principal is no proof
             return None
-        if principal is None:
+        if not principal:
             return None
         return hashlib.sha256(json.dumps(
             ["canvas-calendar-proof.v1", self._origin, principal, ids[0], course_key],
             ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
     def profile_matches(self) -> bool:
-        """The *current* active Canvas connection origin (read on every call when a provider
-        is injected) must be the origin the course map was verified against."""
+        """The *active* Canvas profile origin (read from the injected provider on every call; no
+        provider means no evidence), the origin we read from and the verified origin are one."""
 
         try:
-            current = self._profile_provider() if self._profile_provider is not None else self._origin
+            if self._profile_provider is None:
+                return False
+            current = self._profile_provider()
             if not current:
                 return False
-            return validate_canvas_origin(current) == validate_canvas_origin(self._verified_origin)
+            return (
+                validate_canvas_origin(current) == validate_canvas_origin(self._origin)
+                == validate_canvas_origin(self._verified_origin)
+            )
         except Exception:  # noqa: BLE001 - an unreadable profile is no evidence (fail closed)
             return False
 

@@ -525,3 +525,81 @@ def test_an_adopted_effect_that_changed_after_the_claim_is_not_taken_over(tmp_pa
         held = state.get_entity_reservation(intake_id=_item(system).intake_id, entity_kind="SESSION")
         assert held.plan_revision != receipt.plan_revision      # ownership was not changed
         assert len(notion.data_sources["synthetic-sessions"]) == 1 and session["Date"] == "2026-09-17"
+
+
+# --- review round 3 -----------------------------------------------------------------------
+
+def test_a_second_change_ends_a_still_live_automatic_plan_too(tmp_path: Path) -> None:
+    with _closed_request(tmp_path) as (system, worker):
+        old = _closed_page(system)
+        old["Course"] = ["synthetic-course-page-0"]
+        worker.run_once()
+        calls = []
+        original = worker._supersede_live_auto_plans
+        worker._supersede_live_auto_plans = lambda item, reason: (calls.append(reason), original(item, reason))[1]
+        old["Kind"] = "TRANSCRIPT"
+        worker.run_once()
+        assert calls and system["state"].terminal_change_counts() == {"CREATED": 1, "CHANGED_AGAIN": 1}
+
+
+def test_the_change_marker_is_never_written_to_a_page_that_is_not_provably_that_request(tmp_path: Path) -> None:
+    with _closed_request(tmp_path) as (system, worker):
+        old = _closed_page(system)
+        old["Course"] = ["synthetic-course-page-0"]
+        worker.run_once()
+        new = next(p for p in _pages(system) if p["Request Key"] != old["Request Key"])
+        new["Intake Items"] = ["some-other-intake-page"]
+        old["Kind"] = "TRANSCRIPT"
+        worker.run_once()
+        assert "Error" not in new and len(_pages(system)) == 2
+
+
+def test_an_organized_material_that_never_finished_is_not_complete(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    from tests.integration.test_intake_worker_classification_pb2b import _material_system
+    from tests.integration.test_intake_worker_preview import _pdf_bytes, _system
+
+    from uls.intake.requests import RequestInput
+    from uls.intake.worker import IntakeReconcileRequired
+
+    raw = _pdf_bytes()
+    with _system(tmp_path, name="Lec.3_networks.pdf", mime_type="application/pdf", raw=raw) as system:
+        _enable(system)
+        worker = _material_system(system, "Lec.3_networks.pdf", raw)
+        worker.run_once()
+        item = _item(system)
+        workspace = worker._workspace_for_item(item)
+        request = RequestInput("k", "FILE_DETAILS", intake_ids=(item.intake_id,), course_key=item.inferred_course_key,
+                               kind="LECTURE_SLIDES", material_role="Lecture Slides")
+        assert worker._handover_gate(item, request, workspace).mode == "COMPLETE"
+        (material,) = system["notion"].data_sources["synthetic-materials"]
+        material["Normalized Source"] = None
+        with pytest.raises(IntakeReconcileRequired):
+            worker._handover_gate(item, request, workspace)
+        assert replace
+
+
+def test_an_adopted_effect_must_still_have_the_exact_type_and_binding_it_had(tmp_path: Path) -> None:
+    from tests.integration.test_intake_worker_classification_pb2a import MATCHED_NAME, RAW
+    from tests.integration.test_intake_worker_preview import _system
+
+    from uls.intake.worker import IntakeReconcileRequired
+
+    with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        _interrupted_auto_run(system, worker)
+        state = system["state"]
+        item = _item(system)
+        held = state.get_entity_reservation(intake_id=item.intake_id, entity_kind="SESSION")
+        (session,) = system["notion"].data_sources["synthetic-sessions"]
+        plan = state.list_intake_plans(plan_authority="AUTO_CLASSIFICATION")[-1]
+        from types import SimpleNamespace
+
+        plan_view = SimpleNamespace(target_snapshot_json=plan["target_snapshot_json"])
+        effect = {"reservation_id": held.reservation_id, "entity_app_id": held.entity_app_id,
+                  "page_id": session["id"], "type": None, "binding_id": None}
+        worker._reverify_adopted(item, plan_view, held, effect, AUTO_COURSE_PAGE)          # as verified: fine
+        with pytest.raises(IntakeReconcileRequired):                                      # a binding that was verified is gone
+            worker._reverify_adopted(item, plan_view, held, {**effect, "binding_id": "binding-1"}, AUTO_COURSE_PAGE)

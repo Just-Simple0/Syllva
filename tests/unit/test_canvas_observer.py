@@ -90,6 +90,7 @@ class Harness:
             self.state, origin=ORIGIN, verified_origin=verified_origin,
             course_map={COURSE_ID: KEY} if course_map is None else course_map,
             reader_factory=factory, semester_for=lambda _key: semester,
+            profile_provider=lambda: ORIGIN, principal_provider=lambda: "user-1",
         )
 
     def run(self) -> ObservationResult:
@@ -424,5 +425,22 @@ def test_the_proof_follows_origin_principal_and_mapping(tmp_path) -> None:
         assert h.observer.current_proof(KEY) is None
         h.observer._map_source[99999] = KEY                   # the live map is re-read: now ambiguous
         assert h.observer.current_proof(KEY) is None
+    finally:
+        h.close()
+
+
+def test_no_proof_without_the_active_profile_and_the_principal(tmp_path) -> None:
+    h = Harness(tmp_path)
+    try:
+        assert h.observer.current_proof(KEY)
+        h.observer._principal_provider = None
+        assert h.observer.current_proof(KEY) is None             # principal unknown: no proof
+        h.observer._principal_provider = lambda: "user-1"
+        h.observer._profile_provider = None
+        assert not h.observer.profile_matches() and h.observer.current_proof(KEY) is None
+        h.observer._profile_provider = lambda: ORIGIN
+        h.observer._verified_origin = "https://other.example.edu"  # we read from A, the map was verified for B
+        assert not h.observer.profile_matches()
+        assert h.run().reason == "PROFILE_MISMATCH"
     finally:
         h.close()

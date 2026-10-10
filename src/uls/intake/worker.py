@@ -572,6 +572,7 @@ class IntakeWorker:
             if len(rows) != 1 or _relation_ids(rows[0].get("Course")) != [course_id]:
                 raise IntakeReconcileRequired(f"the automatic {held.entity_kind} is missing or in another Course")
             row = rows[0]
+            binding = None
             if held.entity_kind == "SESSION":
                 if not target_is_transcript or row.get("Date") != target.get("actual_date"):
                     raise IntakeReconcileRequired("the automatic Session does not match its target")
@@ -594,12 +595,20 @@ class IntakeWorker:
                 wanted = target.get("material_type_initial")
                 if wanted and row.get("Type") != wanted:
                     raise IntakeReconcileRequired("the Material's Type changed after the automatic run")
+                if complete:
+                    opaque = item.exposure_block_reason == "OPAQUE_NO_RETRIEVAL" and row.get("Text Status") == "Needs Review"
+                    finished = row.get("Text Status") in {"Ready", "Partial"} and bool(row.get("Normalized Source"))
+                    if not (opaque or finished):
+                        raise IntakeReconcileRequired("the automatic Material is not in its finished state")
                 if not is_assign and request.material_role not in (None, row.get("Type")):
                     raise IntakeReconcileRequired("the human Material Role differs from the Material's Type")
-            adopted[held.entity_kind] = {
+            effect: dict[str, Any] = {
                 "reservation_id": held.reservation_id, "entity_app_id": held.entity_app_id,
-                "page_id": _page_id(row),
+                "page_id": _page_id(row), "type": row.get("Type"),
             }
+            if held.entity_kind == "SESSION":
+                effect["binding_id"] = (binding or {}).get("binding_id")
+            adopted[held.entity_kind] = effect
         if target_is_transcript and "SESSION" not in adopted and advanced:
             raise IntakeReconcileRequired("the automatic Session effect cannot be proven")
         if complete:
@@ -625,12 +634,15 @@ class IntakeWorker:
             raise IntakeReconcileRequired(f"the adopted {held.entity_kind} changed after the hand-over was verified")
         if held.entity_kind == "SESSION":
             binding = self.state.session_source_binding_for(target.get("course_key") or "", held.entity_app_id)
-            if rows[0].get("Date") != target.get("actual_date") or (binding is not None and (
-                binding.get("reservation_id") != held.reservation_id
-                or binding.get("provider_file_id") != item.provider_file_id
-            )):
+            expected_binding = effect.get("binding_id")
+            if rows[0].get("Date") != target.get("actual_date") or (
+                (expected_binding is not None and (binding is None or binding.get("binding_id") != expected_binding))
+                or (binding is not None and (
+                    binding.get("reservation_id") != held.reservation_id
+                    or binding.get("provider_file_id") != item.provider_file_id))
+            ):
                 raise IntakeReconcileRequired("the adopted Session changed after the hand-over was verified")
-        elif target.get("material_type_initial") and rows[0].get("Type") not in (None, target.get("material_type_initial")):
+        elif rows[0].get("Type") != effect.get("type"):
             raise IntakeReconcileRequired("the adopted Material changed after the hand-over was verified")
 
     def _adopted_reservation(
@@ -703,6 +715,16 @@ class IntakeWorker:
             except Exception:  # noqa: BLE001 - one request never blocks the scan; the next cycle retries
                 self.state.record_intake_stage_event("terminal_scan_error", operation_key=intent.request_key)
             self.state.set_classification_cursor("auto_resolved_scan_cursor", intent.request_key)
+
+    @staticmethod
+    def _terminal_identity_ok(page: Mapping[str, Any], receipt: RequestReceipt, item: IntakeItem) -> bool:
+        return bool(
+            page.get("Request Key") == receipt.request_key
+            and page.get("Request Type") == receipt.request_type
+            and page.get("Request Revision Hash") == receipt.request_revision_hash
+            and item.file_intake_page_id
+            and _relation_ids(page.get("Intake Items")) == [item.file_intake_page_id]
+        )
 
     def _terminal_integrity_ok(self, page: Mapping[str, Any], receipt: RequestReceipt, intake_id: str) -> bool:
         """Key, type, revision and intake binding of a closed request must be the receipt's own;
@@ -796,9 +818,18 @@ class IntakeWorker:
             and other.state not in self._TERMINAL_RECEIPT_STATES and other.request_type == receipt.request_type
         ]
         if later_open or open_requests:
+            # A confirmed human change ends any still-live automatic plan, whether or not a new
+            # generation is opened (idempotent).
+            self._supersede_live_auto_plans(item, "terminal request changed by a human")
             for other in open_requests:
                 page_id = str(other.provider_page_id)
-                if (self.notion.read_record("input_request", page_id) or {}).get("Error") != "TERMINAL_CHANGED_AGAIN":
+                other_page = self.notion.read_record("input_request", page_id)
+                if other_page is None or not self._terminal_identity_ok(other_page, other, item):
+                    # Not provably that request's page: no write (the marker is only a courtesy).
+                    self.state.record_intake_stage_event("terminal_reconcile_required", intake_id=item.intake_id,
+                                                         operation_key=other.request_key)
+                    continue
+                if other_page.get("Error") != "TERMINAL_CHANGED_AGAIN":
                     self.notion.update_system_record("input_request", page_id, {"Error": "TERMINAL_CHANGED_AGAIN"})
             self.state.record_terminal_change(
                 receipt.receipt_id, changed, created_generation=None, created_request_key=None, state="CHANGED_AGAIN")
@@ -857,9 +888,9 @@ class IntakeWorker:
         if not course_ids:
             return
         limit = max(1, int(getattr(classification, "max_canvas_courses_per_tick", 5)))
-        start = self._canvas_cursor % len(course_ids)
+        start = int(self.state.get_classification_cursor("canvas_observation_cursor") or 0) % len(course_ids)
         chosen = [course_ids[(start + offset) % len(course_ids)] for offset in range(min(limit, len(course_ids)))]
-        self._canvas_cursor = (start + len(chosen)) % len(course_ids)
+        self.state.set_classification_cursor("canvas_observation_cursor", str((start + len(chosen)) % len(course_ids)))
         for course_id in chosen:
             try:
                 observer.observe_course(course_id)
@@ -1282,6 +1313,17 @@ class IntakeWorker:
         """Reserve-or-resume the next generation and bind it to its key, before any provider
         create (plan §3.4 r8 R1; idempotent: the same basis returns the same generation)."""
 
+        if self.state.get_generation_superseding(item.intake_id, request_type, superseded_request_key) is None:
+            # A NEW basis: the superseded request must exist for this intake/type and be terminal
+            # (a recovery of an already persisted generation is exempt).
+            old = self.state.get_request_receipt(superseded_request_key)
+            try:
+                bound = json.loads((old.intake_ids_json if old else None) or "null")
+            except ValueError:
+                bound = None
+            if (old is None or old.request_type != request_type or not isinstance(bound, list)
+                    or item.intake_id not in bound or old.state not in self._TERMINAL_RECEIPT_STATES):
+                raise IntakeReconcileRequired("only a terminal request of this intake can be superseded")
         try:
             # The superseded key must be the latest bound generation: record it first when it
             # was created in this process (the open-time backfill has not seen it).
