@@ -541,3 +541,102 @@ def test_the_claimed_job_tuple_itself_must_match_the_stored_job(tmp_path: Path) 
         with pytest.raises(IntakeReconcileRequired):
             worker._process_item_unlocked(item.intake_id, claimed=forged)
         assert _sessions(system) == []
+
+
+def test_an_existing_free_session_is_used_and_a_foreign_pointer_stops_the_write(tmp_path: Path) -> None:
+    # E9: EXISTING execution, and a pointer taken by another transcript between decision and write.
+    with _system(tmp_path / "ok", name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        _seed_session(system["notion"], "TEST102-S01")
+        worker.run_once()
+        (session,) = _sessions(system)
+        assert session["ID"] == "TEST102-S01" and session.get("Normalized Transcript")
+        assert _item(system).status == "ORGANIZED"
+    with _system(tmp_path / "foreign", name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        _seed_session(system["notion"], "TEST102-S01")
+        original = worker._session_pointer_gate
+
+        def gate(context, page, derivative_file_id):
+            system["notion"].data_sources["synthetic-sessions"][0]["Normalized Transcript"] = "https://drive.google.com/file/d/other/view"
+            return original(context, page, derivative_file_id)
+        worker._session_pointer_gate = gate  # type: ignore[method-assign]
+        worker.run_once()
+        assert system["notion"].data_sources["synthetic-sessions"][0]["Normalized Transcript"].endswith("/other/view")
+        assert _auto_plans(system["state"])[0]["status"] == "RECONCILE_REQUIRED"
+        assert _item(system).status != "ORGANIZED"
+
+
+def test_a_foreign_pointer_on_our_new_session_is_refused_too(tmp_path: Path) -> None:
+    # r3 H1: the pointer rule is not EXISTING-only.
+    with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        original = worker._session_pointer_gate
+
+        def gate(context, page, derivative_file_id):
+            row = next(r for r in system["notion"].data_sources["synthetic-sessions"] if r["id"] == page["id"])
+            row["Normalized Transcript"] = "https://drive.google.com/file/d/other/view"
+            return original(context, page, derivative_file_id)
+        worker._session_pointer_gate = gate  # type: ignore[method-assign]
+        worker.run_once()
+        assert _auto_plans(system["state"])[0]["status"] == "RECONCILE_REQUIRED"
+        assert _item(system).status != "ORGANIZED"
+
+
+def test_readiness_reports_the_auto_execution_counters(tmp_path: Path) -> None:
+    with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        block = worker.run_once()["readiness"]["classification"]
+        assert block["planned_auto_plans"] == 1 and block["auto_jobs_pending"] == 0 and block["auto_jobs_failed"] == 0
+
+
+def test_the_v2_marker_exists_before_the_material_page_and_before_any_job_binding(tmp_path: Path) -> None:
+    # r3 R1: Material created and Ready, but the provenance/job binding never happened.
+    from uls.state.reader import ReadOnlyState
+
+    raw = _pdf_bytes()
+    with _system(tmp_path, name="Lec.3_networks.pdf", mime_type="application/pdf", raw=raw) as system:
+        _enable(system)
+        worker = _material_system(system, "Lec.3_networks.pdf", raw)
+
+        def no_binding(**kwargs):
+            raise RuntimeError("crash before the provenance publication")
+        worker._publish_processing_provenance = no_binding  # type: ignore[method-assign]
+        worker.run_once()
+        (material,) = _materials(system)
+        assert material["Text Status"] == "Ready"
+        (job,) = _jobs(system)
+        assert job.bound_kind is None and job.source_file_id is None  # the late binding never happened
+        assert ReadOnlyState(system["state"].db_path).is_v2_material(material["ID"]) is True
+    # the marker is written at the reservation, before any Material page exists
+    with _system(tmp_path / "early", name="Lec.3_networks.pdf", mime_type="application/pdf", raw=raw) as system:
+        _enable(system)
+        worker = _material_system(system, "Lec.3_networks.pdf", raw)
+        original_create = system["notion"].create_record
+
+        def create_record(data_source_id, properties):
+            if data_source_id == "synthetic-materials":
+                raise ConnectionError("down")
+            return original_create(data_source_id, properties)
+        system["notion"].create_record = create_record  # type: ignore[method-assign]
+        worker.run_once()
+        assert _materials(system) == []
+        reservation = system["state"].get_entity_reservation(intake_id=_item(system).intake_id, entity_kind="MATERIAL")
+        assert reservation is not None
+        assert ReadOnlyState(system["state"].db_path).is_v2_material(reservation.entity_app_id) is True
+
+
+def test_the_read_only_state_of_a_database_that_predates_v2_has_no_v2_product(tmp_path: Path) -> None:
+    import sqlite3
+
+    from uls.state.reader import ReadOnlyState
+
+    path = tmp_path / "old.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE jobs(id TEXT, source_file_id TEXT)")
+        connection.execute("CREATE TABLE source_files(source_file_id TEXT, canonical_entity_id TEXT)")
+    assert ReadOnlyState(path).is_v2_material("COMP319-M03") is False

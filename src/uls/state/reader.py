@@ -80,10 +80,17 @@ class ReadOnlyState:
         """True when the Material came in through a v2 Kind — an AUTO run or a HUMAN request with a
         v2 Kind (plan §7, P-B gate).  Legacy Materials carry neither marker."""
 
-        rows = self._rows('''SELECT 1 FROM source_files sf JOIN jobs j ON j.source_file_id = sf.source_file_id
+        tables = {row[0] for row in self._rows("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "v2_material_markers" in tables and self._rows(
+            "SELECT 1 FROM v2_material_markers WHERE entity_app_id=? LIMIT 1", (entity_id,)
+        ):
+            return True  # the reservation-time marker: valid before any job is bound
+        columns = {row[1] for row in self._rows("PRAGMA table_info(jobs)")}
+        if not {"bound_authority", "bound_kind"} <= columns:
+            return False  # a state that predates v2 has no v2 product
+        return bool(self._rows('''SELECT 1 FROM source_files sf JOIN jobs j ON j.source_file_id = sf.source_file_id
             WHERE sf.canonical_entity_id=?
-            AND (j.bound_authority='AUTO_CLASSIFICATION' OR j.bound_kind IS NOT NULL) LIMIT 1''', (entity_id,))
-        return bool(rows)
+            AND (j.bound_authority='AUTO_CLASSIFICATION' OR j.bound_kind IS NOT NULL) LIMIT 1''', (entity_id,)))
 
     def lookup_source_binding(self, entity_id: str, normalized_source_url: str) -> Any:
         return self.binding(entity_id)

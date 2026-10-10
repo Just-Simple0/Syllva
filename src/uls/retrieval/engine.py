@@ -1290,13 +1290,21 @@ class RetrievalEngine:
             return None  # one choke point: context, new capabilities and capability revalidation (plan §9 P-B)
         return result
 
+    def _classification_configured(self) -> bool:
+        section = self.config.get("intake", {}) if isinstance(self.config, Mapping) else getattr(self.config, "intake", None)
+        cls = section.get("classification") if isinstance(section, Mapping) else getattr(section, "classification", None)
+        enabled = cls.get("enabled") if isinstance(cls, Mapping) else getattr(cls, "enabled", False)
+        return enabled is True
+
     def _v2_material_hidden(self, material_id: str) -> bool:
         """A v2 Material (AUTO run or HUMAN v2 Kind) stays unexposed until the v2 gate is switched on."""
 
         if self._config_mapping("v2_exposure_gate", {}) is True:
             return False
         if self.state_store is None:
-            return False  # no durable state at all: nothing can be a v2 product
+            if self._classification_configured():
+                raise SourceUnavailableError("v2 classification is configured but no durable state can classify Materials")
+            return False  # a verified legacy-only configuration: nothing can be a v2 product
         marker = getattr(self.state_store, "is_v2_material", None)
         if marker is None:
             raise SourceUnavailableError("the v2 exposure marker is unavailable")  # fail closed

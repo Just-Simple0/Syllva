@@ -100,3 +100,15 @@ def test_a_human_v2_kind_material_is_hidden_like_an_auto_one() -> None:
         engine.get_material_context("COMP319-M03")
     state.auto_ids.clear()
     assert engine.get_material_context("COMP319-M03").sources
+
+
+def test_a_stateless_engine_refuses_when_v2_classification_is_configured() -> None:
+    # r3 R2: no state cannot prove the absence of v2 Materials once classification is enabled.
+    from uls.domain.errors import SourceUnavailableError
+
+    engine, _ = _engine(set())
+    engine.state_store = None
+    assert engine.get_material_context("COMP319-M03").sources  # a legacy-only configuration is unchanged
+    engine.config.intake.classification.enabled = True
+    with pytest.raises(SourceUnavailableError):
+        engine.get_material_context("COMP319-M03")

@@ -2298,6 +2298,8 @@ class IntakeWorker:
         attempt = self.state.get_provider_write_attempt(op_key)
         if attempt is None:
             return False
+        if attempt.target_id and attempt.target_id != _page_id(rows[0]):
+            return False  # the page with our reserved ID is not the page this attempt created (r3 H2)
         if attempt.response_state != "READBACK_OK":
             # The create may have succeeded without its response: the page is exactly the reserved
             # ID/Course/Date of THIS plan's attempt, so it is ours — confirm the attempt (r2 R4).
@@ -2326,11 +2328,13 @@ class IntakeWorker:
             or _parse_session_day(row.get("Date")) != context.actual_date
             or course_id is None or _relation_ids(row.get("Course")) != [course_id]
         )
-        if not bad and context.session_mode == SessionMode.EXISTING.value and row is not None:
+        if not bad and row is not None:
+            # Both modes: a pointer must be empty or exactly this plan's derivative (r3 H1).
             pointer = row.get("Normalized Transcript")
-            binding = self.state.session_source_binding_for(context.course_key, context.session_id or "")
-            bad = (bool(pointer) and pointer != _drive_link(derivative_file_id)) or (
-                binding is not None and binding.get("provider_file_id") != context.source_file_id)
+            bad = bool(pointer) and pointer != _drive_link(derivative_file_id)
+            if not bad and context.session_mode == SessionMode.EXISTING.value:
+                binding = self.state.session_source_binding_for(context.course_key, context.session_id or "")
+                bad = binding is not None and binding.get("provider_file_id") != context.source_file_id
         if bad:
             self.state.reconcile_intake_plan(context.plan_revision, "SESSION_CHANGED")
             raise IntakeReconcileRequired("the Session no longer matches the decision")
@@ -3458,7 +3462,7 @@ class IntakeWorker:
             entity_app_id=entity_id,
             folder_role="entity",
         )
-        return self.state.reserve_entity(
+        reservation = self.state.reserve_entity(
             reservation_id=reservation_id,
             intake_id=item.intake_id,
             entity_kind="MATERIAL",
@@ -3469,6 +3473,10 @@ class IntakeWorker:
             plan_revision=plan.plan_revision,
             source_file_id=item.provider_file_id,
         )
+        if request.kind in {k.value for k in Kind}:
+            # v2 Kind (AUTO or HUMAN): the exposure marker exists before the Material page does (E15).
+            self.state.mark_v2_material(entity_id, request.kind, item.intake_id, plan.plan_revision)
+        return reservation
 
     def _inventory(self, logical: str, workspace: ResolvedSemesterWorkspace, course_id: str) -> list[dict[str, Any]]:
         if self.notion is None:
