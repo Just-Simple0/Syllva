@@ -2452,3 +2452,30 @@ def test_an_unreadable_first_human_check_parks_the_plan(tmp_path: Path) -> None:
         assert draft["Course"] == ["synthetic-course-page-0"] and draft["Request Status"] == "Draft"
     finally:
         system_cm.__exit__(None, None, None)
+
+
+def test_an_unreadable_closed_sibling_stops_the_next_closure(tmp_path: Path) -> None:
+    # r17 H1: after the first Draft is closed, re-reading it for the second closure fails.
+    from uls.adapters.notion.intake import ProviderUnavailableError
+
+    system_cm, system = _pre_v2_draft(tmp_path)
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        _add_details_draft(worker, system)
+        notion, state = system["notion"], system["state"]
+        original_read = notion.read_record
+        broken = {"on": False}
+
+        def flaky(data_source_id: str, page_id: str):
+            if broken["on"] and data_source_id == "synthetic-requests":
+                raise ProviderUnavailableError("timeout")
+            return original_read(data_source_id, page_id)
+        notion.read_record = flaky  # type: ignore[method-assign]
+        _spy_preflight(worker, lambda call: broken.__setitem__("on", True) if call == 2 else None)
+        worker.run_once()
+        assert len(_auto_resolved_pages(notion)) == 1
+        assert sum(1 for p in notion.data_sources["synthetic-requests"] if p["Request Status"] == "Draft") == 1
+        assert _auto_plans(state)[0]["status"] == "RECONCILE_REQUIRED"
+    finally:
+        system_cm.__exit__(None, None, None)

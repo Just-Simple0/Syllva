@@ -82,6 +82,7 @@ P2 백엔드 이후 추가로 구현한 범위(미커밋):
 - **P-B2a FINAL r14 = REVISE 4/1**(처분 `pb2a-r14-disposition.json`) → 반영: canonical Canvas binding 해시는 intake 행이 있어도 중복 증거, Session Date 범위(start≠end) 불인정, rollback 전후 Submitted/Cancelled 엄격 bool, 첫 종료 쓰기 직전 `_auto_enabled()` 재확인. 테스트 71개. 전체 3012 통과/1 기존 실패(keyring).
 - **P-B2a FINAL r15 = REVISE 2/0 + 방어 강화 1**(처분 `pb2a-r15-disposition.json`) → 반영: intake 행이 있는 Session binding은 생성 시각과 현재 관측 시각으로 판정(binding이 더 최신일 때만 행의 증명이 유효, 아니면 unproven), closure 경합 시 전체 복구 재귀 호출을 제거하고 해당 intent만 복구 + 진입 시 영속 상태 재확인, Notion Date end 전체 ISO 검증. 테스트 74개. 전체 3015 통과/1 기존 실패(keyring).
 - **P-B2a FINAL r16 = REVISE 1/0 + 방어 강화 1**(처분 `pb2a-r16-disposition.json`) → 반영: 첫 HUMAN 검증의 Draft/AutoResolved sibling 읽기 예외를 RECONCILE 판정으로 변환해 plan 보류(+job VOID), 중복 조회의 N+1 제거. 테스트 75개. 전체 3016 통과/1 기존 실패(keyring).
+- **P-B2a FINAL r17 = GO 0/0 + 방어 강화 1**(GPT-6 Extra High, 17차 리뷰, 필수 지적 누계 64건): 선택 1건(AutoResolved sibling 조회 예외 전용 회귀 테스트) 반영, 테스트 76개. 총괄 기술 수락, 사람 승인·운영 활성화는 아니다. 다음: PR·머지 → P-B2b 계획 리뷰(불변식 체크리스트 선행).
 - **독립 리뷰(경과)**: Native FINAL 두 패킷을 준비·송신했고 위 라운드 기록대로 종결했다. 최초 패킷은 `.insane-review/drive-oauth-20261005/native-final-p2-settings/`(18파일, 76,189토큰), `native-final-p2-runtime/`(17파일, 70,953토큰; `intake/worker.py`는 142KB라 git diff로 첨부). 회수·처분 결과는 같은 폴더의 응답과 아래 절에 이어 기록한다.
 - **남은 것**: (1) 사용자의 Google Cloud Desktop client(client_id/secret)를 `config.yaml` `google_oauth`에 넣고 `chmod 600`; (2) School의 기존 SA 연결을 OAuth로 교체(MCP·worker 모두, env/external 경로는 먼저 detach); (3) 실제 Google 통신 검증(토큰 교환·refresh·about.get·매 tick 재검증)과 필요 시 소폭 수정; (4) School 실제 전체 흐름(intake→Notion/Drive 저장→retrieval) 통과; (5) 리뷰 지적 반영, checker 핀 갱신(credential_service.py 외 변경 핀 없음), 커밋.
 
@@ -103,7 +104,7 @@ P2 백엔드 이후 추가로 구현한 범위(미커밋):
 | GUI-2/3 후속 수정 | 독립 Native/Gemini FINAL과 검사, 인간 승인된 기존 checker 적용 뒤 로컬 기술 수락 완료 | 기존 수락 근거 보존 |
 | P1 Drive 개인정보 보강 | 개발·필수 지적 수정·Native 두 FINAL 범위 통합 기술 수락 완료 | 완료 소스는 위 로컬 커밋에 보존 |
 | P2 개인용 Drive OAuth | 구현 완료, 2026-10-10 커밋·PR·머지. Native FINAL Settings r6 GO·Runtime r9 GO. 체커 핀 갱신 완료. 실제 Google 로그인·live 읽기·worker sync 틱(8파일 발견) 통과 | 운영 TODO(zshrc env 제거, schema_profile 설정) |
-| Intake 분류 v2 | P-A: FINAL GO(r18), PR #15 머지. P-B1: FINAL GO(r3), PR #16. **P-B2a(단계 A·AUTO_PENDING·Draft 자동 종료) 구현·테스트 완료, FINAL 리뷰 전** | P-B2a FINAL 리뷰 → PR → P-B2b(승격·실행·opaque) |
+| Intake 분류 v2 | P-A: FINAL GO(r18), PR #15 머지. P-B1: FINAL GO(r3), PR #16. **P-B2a(단계 A·AUTO_PENDING·Draft 자동 종료) FINAL GO(r17)** | P-B2a PR·머지 → P-B2b(승격·실행·opaque) 계획 리뷰 |
 | 단일 테스트 source 예외 | inactive 후보 PLAN/FINAL 기술 GO. 활성 적용은 하지 않음 | 정확 후보 SHA에 관한 별도 인간 적용 결정 |
 | P3 설정 화면 / GUI-4 | OAuth 후속·실제 흐름 수락 대기 | P2 승인·구현·FINAL 이후 진행 |
 | School 실제 전체 흐름 | 아직 통과하지 않음 | 필요한 계정·권한·데이터는 인간이 준비 |
