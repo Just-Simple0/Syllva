@@ -1599,13 +1599,7 @@ class IntakeWorker:
             return None, None, None, BLOCK_SESSION_UNKNOWN
         wanted = recorded.isoformat()
 
-        def day(row: Mapping[str, Any]) -> str | None:
-            value = row.get("Date")
-            if isinstance(value, Mapping):
-                end = value.get("end")
-                if end not in (None, "") and str(end).strip()[:10] != str(value.get("start") or "").strip()[:10]:
-                    return None  # a multi-day range proves no single date (r14 R2)
-                value = value.get("start")
+        def parse_day(value: Any) -> str | None:
             if not value:
                 return None
             text = str(value).strip()
@@ -1617,6 +1611,16 @@ class IntakeWorker:
             except ValueError:
                 return None
             return None  # anything outside the two ISO shapes proves nothing (r9 #4, r10 R3)
+
+        def day(row: Mapping[str, Any]) -> str | None:
+            value = row.get("Date")
+            if isinstance(value, Mapping):
+                start = parse_day(value.get("start"))
+                end = value.get("end")
+                if end not in (None, "") and parse_day(end) != start:
+                    return None  # an invalid end or a multi-day range proves no single date (r14 R2, r15 H1)
+                return start
+            return parse_day(value)
 
         if any(day(row) is None for row in rows):
             return None, None, None, BLOCK_SESSION_UNKNOWN  # a Session whose date cannot be read may be the target
@@ -2283,8 +2287,14 @@ class IntakeWorker:
             return False
         if self._snapshot_as_draft(readback, receipt, item.intake_id) != expected_snapshot:
             # The human raced the closure (USER field, Submitted or Cancelled): recovery
-            # (iii) rolls the status back and supersedes the plan.
-            self._recover_auto_resolve_intents()
+            # (iii) of THIS intent rolls the status back and supersedes the plan.  Other
+            # intents are never re-entered from here (r15 R2).
+            try:
+                self._recover_one_intent(intent)
+            except ReconnectRequiredError:
+                raise
+            except Exception:  # noqa: BLE001 - an unreadable page keeps the barrier
+                self._note_recovery_unknown(intent)
             return False
         terminal = self._auto_request_snapshot(readback, receipt, item.intake_id)
         self.state.transition_auto_resolve_intent(intent.intent_id, "DONE", terminal_snapshot_hash=terminal)
@@ -2347,6 +2357,10 @@ class IntakeWorker:
 
     def _recover_one_intent(self, intent: AutoResolveIntent) -> None:
         assert self.notion is not None
+        fresh = self.state.get_auto_resolve_intent(intent.request_key)
+        if fresh is None or fresh.intent_id != intent.intent_id or fresh.state not in {"PENDING", "RECONCILE"}:
+            return  # settled meanwhile (an outer loop may hold a stale object)
+        intent = fresh
         receipt = self.state.get_request_receipt(intent.request_key)
         record = self.state.get_classification_record(intent.record_id)
         if receipt is None or receipt.provider_page_id is None or record is None:

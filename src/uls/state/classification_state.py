@@ -635,7 +635,7 @@ class ClassificationStateMixin:
         unproven: list[str] = []
         with self._transaction() as connection:
             rows = connection.execute(
-                "SELECT i.intake_id, i.provider_file_id, i.source_hash, i.status, "
+                "SELECT i.intake_id, i.provider_file_id, i.source_hash, i.status, i.source_version, "
                 "(SELECT c.byte_sha256 FROM classification_records c WHERE c.intake_id = i.intake_id "
                 " AND c.byte_sha256 IS NOT NULL AND c.source_version = i.source_version "
                 " AND c.provider_file_id = i.provider_file_id ORDER BY c.rowid DESC LIMIT 1) AS proven_sha, "
@@ -667,9 +667,17 @@ class ClassificationStateMixin:
                 (provider_file_id,),
             ).fetchall()
             sessions = connection.execute(
-                "SELECT provider_file_id FROM session_source_bindings WHERE provider = ? AND provider_file_id != ?",
+                "SELECT provider_file_id, created_at FROM session_source_bindings "
+                "WHERE provider = ? AND provider_file_id != ?",
                 (provider, provider_file_id),
             ).fetchall()
+            observed = {
+                str(row["provider_file_id"]): connection.execute(
+                    "SELECT MAX(observed_at) AS at FROM intake_observations WHERE intake_id = ? AND source_version = ?",
+                    (row["intake_id"], row["source_version"]),
+                ).fetchone()["at"]
+                for row in rows
+            }
         for bound in canvas:
             other = str(bound["drive_file_id"])
             # Independent of the file's current intake row: the binding records the bytes the
@@ -678,7 +686,15 @@ class ClassificationStateMixin:
                 proven.append(other)
         for bound in sessions:
             other = str(bound["provider_file_id"])
-            if other not in known and other not in proven:
+            if other in proven:
+                continue
+            if other not in known:
+                unproven.append(other)  # no row at all: its content cannot be shown to differ
+                continue
+            seen_at = observed.get(other)
+            if seen_at is None or str(bound["created_at"]) <= str(seen_at):
+                # The binding predates the file's current observation, so it may describe
+                # older bytes that the row's current proof says nothing about (r15 R1).
                 unproven.append(other)
         return {"proven": sorted(set(proven)), "unproven": sorted(set(unproven))}
 

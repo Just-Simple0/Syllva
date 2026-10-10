@@ -2334,3 +2334,92 @@ def test_the_first_closure_write_requires_auto_to_be_usable_right_now(tmp_path: 
         assert _item(system).classification_state == "HUMAN"
     finally:
         system_cm.__exit__(None, None, None)
+
+
+# ---------------------------------------------------------------------------
+# P-B2a FINAL r15 findings
+# ---------------------------------------------------------------------------
+def test_a_session_binding_older_than_the_files_current_observation_is_unproven(tmp_path: Path) -> None:
+    # r15 R1: A was bound to a Session, then its content changed (new source version); the
+    # binding says nothing about the new bytes, and B now carries A's old bytes.
+    from dataclasses import replace
+
+    for label, changed, expected in (("changed", True, "HUMAN"), ("unchanged", False, "CLASSIFIED")):
+        with _system(tmp_path / label, name=MATCHED_NAME, raw=RAW) as system:
+            worker = _enable(system)
+            state, drive = system["state"], system["drive"]
+            _second_file(system, name="a.md", raw=b"first content of the other file", md5=True)
+            worker.run_once()  # no calendar yet: the transcript stays HUMAN, A is observed as version 1
+            state.record_session_source_binding(
+                binding_id=f"b-{label}", course_key=COURSE, session_id="TEST102-S05", provider="google_drive",
+                provider_file_id="synthetic-other", reservation_id=f"r-{label}", state="ACTIVE")
+            if changed:
+                new = b"the other file was rewritten afterwards"
+                drive.files["synthetic-other"] = replace(
+                    drive.files["synthetic-other"], size=len(new), md5_checksum=hashlib.md5(new).hexdigest())
+                drive.contents["synthetic-other"] = new
+                worker.run_once()  # A becomes version 2, observed after the binding
+            _complete_calendar(state)
+            worker.run_once()
+            item = _item(system)
+            assert item.classification_state == expected, label
+            if changed:
+                assert "AUTO_BLOCK_DUPLICATE_UNPROVEN" in state.get_intake_suggestion(item.intake_id)["suggestion_note"]
+                assert _auto_plans(state) == []
+
+
+def test_recovery_never_recurses_and_ignores_a_stale_intent_object(tmp_path: Path) -> None:
+    # r15 R2: a race inside the closure recovers only its own intent; a stale PENDING object
+    # of an intent that is already DONE changes nothing.
+    system_cm, system = _pre_v2_draft(tmp_path)
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        notion, state = system["notion"], system["state"]
+        calls = {"n": 0}
+        original = worker._recover_auto_resolve_intents
+
+        def counted():
+            calls["n"] += 1
+            return original()
+        worker._recover_auto_resolve_intents = counted  # type: ignore[method-assign]
+
+        def edit(page_id: str) -> None:
+            for page in notion.data_sources["synthetic-requests"]:
+                if page["id"] == page_id:
+                    page["Course"] = ["synthetic-course-page-0"]
+        _landing_hook(notion, edit)
+        worker.run_once()
+        assert calls["n"] == 1  # the tick-start recovery only; the race did not re-enter the loop
+    finally:
+        system_cm.__exit__(None, None, None)
+    system_cm, system = _pre_v2_draft(tmp_path / "stale")
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        notion, state = system["notion"], system["state"]
+        _drop_first_auto_resolved_write(notion)
+        worker.run_once()
+        stale = state.list_auto_resolve_intents()[0]
+        worker.run_once()  # retried to DONE
+        receipt = next(r for r in state.list_request_receipts())
+        assert state.get_auto_resolve_intent(receipt.request_key).state == "DONE"
+        worker._recover_one_intent(stale)
+        item = _item(system)
+        assert item.last_error_code is None and state.get_request_receipt(receipt.request_key).state == "AutoResolved"
+    finally:
+        system_cm.__exit__(None, None, None)
+
+
+def test_session_date_end_must_be_a_full_iso_value(tmp_path: Path) -> None:
+    # r15 H1
+    cases = {"invalid-end": ({"start": "2026-09-11", "end": "2026-09-11invalid"}, "HUMAN"),
+             "datetime-end": ({"start": "2026-09-11", "end": "2026-09-11T10:00:00+09:00"}, "CLASSIFIED")}
+    for label, (value, expected) in cases.items():
+        with _system(tmp_path / label, name=MATCHED_NAME, raw=RAW) as system:
+            worker = _enable(system)
+            _complete_calendar(system["state"])
+            _seed_session(system["notion"], "TEST102-S01")
+            system["notion"].data_sources["synthetic-sessions"][0]["Date"] = value
+            worker.run_once()
+            assert _item(system).classification_state == expected, label
