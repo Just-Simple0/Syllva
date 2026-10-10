@@ -988,7 +988,10 @@ def test_a_closed_sibling_the_human_edited_stops_further_closures(tmp_path: Path
         _spy_preflight(worker, edit_closed)
         worker.run_once()
         assert len(_auto_resolved_pages(notion)) == 1
-        assert sum(1 for p in notion.data_sources["synthetic-requests"] if p["Request Status"] == "Draft") == 1
+        # The second Draft stays open (never closed), and since P-B3c the human edit of the
+        # closed first one yields exactly one new HUMAN generation next to it.
+        drafts = [p for p in notion.data_sources["synthetic-requests"] if p["Request Status"] == "Draft"]
+        assert sorted(p["Request Type"] for p in drafts) == ["ASSIGN_COURSE", "FILE_DETAILS"]
         assert _auto_plans(state)[0]["status"] == "SUPERSEDED"
     finally:
         system_cm.__exit__(None, None, None)

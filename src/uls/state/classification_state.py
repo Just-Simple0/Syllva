@@ -271,6 +271,11 @@ CREATE TABLE IF NOT EXISTS terminal_change_ledger (
     created_at TEXT NOT NULL,
     PRIMARY KEY (original_receipt_id, changed_user_snapshot_hash)
 );
+CREATE TABLE IF NOT EXISTS classification_cursors (
+    name TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS handover_records (
     from_plan_revision TEXT NOT NULL,
     to_plan_revision TEXT NOT NULL,
@@ -1502,6 +1507,34 @@ class ClassificationStateMixin:
             )
             return generation
 
+    def get_generation_superseding(
+        self, intake_id: str, request_type: str, request_key: str
+    ) -> dict[str, Any] | None:
+        """The generation that superseded ``request_key`` for this intake (None if none)."""
+
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM intake_request_generations WHERE intake_id = ? AND request_type = ? "
+                "AND superseded_request_key = ?",
+                (intake_id, request_type, request_key),
+            ).fetchone()
+            return None if row is None else dict(row)
+
+    def get_classification_cursor(self, name: str) -> str | None:
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT value FROM classification_cursors WHERE name = ?", (name,)
+            ).fetchone()
+            return None if row is None else str(row["value"])
+
+    def set_classification_cursor(self, name: str, value: str) -> None:
+        with self._transaction(immediate=True) as connection:
+            connection.execute(
+                "INSERT INTO classification_cursors(name, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                (name, value, _now()),
+            )
+
     def get_request_generation(self, request_key: str, intake_id: str | None = None) -> dict[str, Any] | None:
         """One HUMAN request may cover several intakes (ASSIGN_COURSE); pass ``intake_id`` to pick one."""
 
@@ -2010,6 +2043,50 @@ class ClassificationStateMixin:
                 (from_plan_revision, to_plan_revision),
             ).fetchone()
             return dict(row)
+
+    def terminal_change_counts(self) -> dict[str, int]:
+        with self._transaction() as connection:
+            return {str(r["state"]): int(r["n"]) for r in connection.execute(
+                "SELECT state, COUNT(*) AS n FROM terminal_change_ledger GROUP BY state").fetchall()}
+
+    def get_handover(self, from_plan_revision: str, to_plan_revision: str) -> dict[str, Any] | None:
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM handover_records WHERE from_plan_revision = ? AND to_plan_revision = ?",
+                (from_plan_revision, to_plan_revision),
+            ).fetchone()
+            return None if row is None else dict(row)
+
+    def handovers_to_plan(self, to_plan_revision: str) -> list[dict[str, Any]]:
+        with self._transaction() as connection:
+            return [dict(r) for r in connection.execute(
+                "SELECT * FROM handover_records WHERE to_plan_revision = ? ORDER BY created_at",
+                (to_plan_revision,),
+            ).fetchall()]
+
+    def adopt_entity_reservation(
+        self, reservation_id: str, *, from_plan_revision: str, to_plan_revision: str
+    ) -> None:
+        """Hand a live reservation to the next plan keeping its identity (plan §3.4 r8 R3).
+
+        Only the owning plan changes; reservation id, entity id, marker and parent stay, so
+        every key derived from them is the one the earlier plan already used.  Idempotent."""
+
+        with self._transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT plan_revision, state FROM entity_reservations WHERE reservation_id = ?",
+                (reservation_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(reservation_id)
+            if row["plan_revision"] == to_plan_revision:
+                return
+            if row["plan_revision"] != from_plan_revision or row["state"] not in ("PENDING", "APPLIED"):
+                raise ValueError("the reservation is not adoptable from this plan")
+            connection.execute(
+                "UPDATE entity_reservations SET plan_revision = ?, updated_at = ? WHERE reservation_id = ?",
+                (to_plan_revision, _now(), reservation_id),
+            )
 
     # --- chunk tags ----------------------------------------------------------------
 

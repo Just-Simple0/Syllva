@@ -141,6 +141,19 @@ _ISO_DATETIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})
 
 
 @dataclass(frozen=True)
+class _Handover:
+    """A verified AUTO -> HUMAN hand-over (plan §3.4 r8 R3, r10 R2).
+
+    mode: ASSIGN_MATCH (course confirmed, nothing re-run), COMPLETE (every AUTO effect is
+    verified and equals the human request: nothing is left to execute) or CONTINUE (verified
+    effects are adopted and the human plan carries on)."""
+
+    mode: str
+    from_plan_revision: str
+    adopted: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class ClassificationExecutionContext:
     """Immutable inputs of an AUTO_CLASSIFICATION execution (plan §3.4).
 
@@ -480,6 +493,242 @@ class IntakeWorker:
         finally:
             entry.__exit__(None, None, None)
 
+    # --- AUTO -> HUMAN hand-over (plan §3.4, P-B3c) --------------------------------
+
+    def _auto_effects(self, item: IntakeItem) -> tuple[list[dict[str, Any]], list[EntityReservation]]:
+        plans = self.state.list_intake_plans(plan_authority="AUTO_CLASSIFICATION", intake_id=item.intake_id)
+        revisions = {plan["plan_revision"] for plan in plans}
+        reservations = [
+            held for kind in ("SESSION", "MATERIAL")
+            if (held := self.state.get_entity_reservation(intake_id=item.intake_id, entity_kind=kind)) is not None
+            and held.plan_revision in revisions
+        ]
+        return plans, reservations
+
+    def _handover_gate(
+        self, item: IntakeItem, request: RequestInput, workspace: ResolvedSemesterWorkspace
+    ) -> _Handover | None:
+        """Decide before any write whether the human request may continue the automatic result.
+
+        No AUTO effect -> None (the ordinary HUMAN path).  Otherwise every effect is read back
+        and compared with the request; anything that is not proven identical is
+        RECONCILE_REQUIRED and nothing is created, moved or re-run."""
+
+        plans, reservations = self._auto_effects(item)
+        advanced = item.status in (IntakeStatus.ORGANIZED.value, IntakeStatus.REGISTERED.value, IntakeStatus.MOVING.value)
+        if not plans or not (reservations or advanced):
+            return None
+        latest = plans[-1]
+        target = json.loads(latest["target_snapshot_json"])
+        if request.course_key != target.get("course_key"):
+            raise IntakeReconcileRequired("the human course differs from the automatic result; resolve it manually")
+        if request.request_type == RequestType.ASSIGN_COURSE.value:
+            return _Handover("ASSIGN_MATCH", latest["plan_revision"], {})
+        if request.kind != target.get("kind"):
+            raise IntakeReconcileRequired("the human Kind differs from the automatic result; resolve it manually")
+        is_transcript = request.kind == FileKind.TRANSCRIPT.value
+        if is_transcript:
+            if request.actual_date != target.get("actual_date"):
+                raise IntakeReconcileRequired("the human date differs from the automatic result")
+            if target.get("session_mode") == SessionMode.EXISTING.value and (
+                request.session_mode != SessionMode.EXISTING.value or request.session_id != target.get("session_id")
+            ):
+                raise IntakeReconcileRequired("the human Session differs from the automatic result")
+        elif target.get("material_type_initial") and request.material_role not in (None, target.get("material_type_initial")):
+            raise IntakeReconcileRequired("the human Material Role differs from the automatic result")
+        course_id = self._course_page_map(workspace).get(request.course_key or "")
+        if not course_id:
+            raise IntakeReconcileRequired("the automatic result's Course page is unavailable")
+        adopted: dict[str, Any] = {}
+        for held in reservations:
+            logical = "sessions" if held.entity_kind == "SESSION" else "materials"
+            rows = [row for row in self.notion.list_records(logical) if row.get("ID") == held.entity_app_id] if self.notion else []
+            if len(rows) != 1 or _relation_ids(rows[0].get("Course")) != [course_id]:
+                raise IntakeReconcileRequired(f"the automatic {held.entity_kind} is missing or in another Course")
+            if held.entity_kind == "SESSION":
+                if not is_transcript or rows[0].get("Date") != request.actual_date:
+                    raise IntakeReconcileRequired("the automatic Session does not match the human request")
+                binding = self.state.session_source_binding_for(request.course_key or "", held.entity_app_id)
+                if binding is not None and (
+                    binding.get("reservation_id") != held.reservation_id
+                    or binding.get("provider_file_id") != item.provider_file_id
+                ):
+                    raise IntakeReconcileRequired("the Session's canonical source binding is not this file's")
+            elif is_transcript:
+                raise IntakeReconcileRequired("the automatic Material does not match a transcript request")
+            adopted[held.entity_kind] = {
+                "reservation_id": held.reservation_id, "entity_app_id": held.entity_app_id,
+                "page_id": _page_id(rows[0]),
+            }
+        if is_transcript and "SESSION" not in adopted and advanced:
+            raise IntakeReconcileRequired("the automatic Session effect cannot be proven")
+        complete = item.status == IntakeStatus.ORGANIZED.value
+        return _Handover("COMPLETE" if complete else "CONTINUE", latest["plan_revision"], adopted)
+
+    def _adopted_reservation(self, item: IntakeItem, plan: IntakePlan, entity_kind: str) -> EntityReservation | None:
+        """The earlier plan's live reservation when a recorded hand-over names it (identity kept)."""
+
+        held = self.state.get_entity_reservation(intake_id=item.intake_id, entity_kind=entity_kind)
+        if held is None or held.plan_revision == plan.plan_revision:
+            return None
+        for record in self.state.handovers_to_plan(plan.plan_revision):
+            if record["from_plan_revision"] != held.plan_revision:
+                continue
+            effect = json.loads(record["adopted_effects_json"]).get(entity_kind)
+            if effect and effect.get("reservation_id") == held.reservation_id:
+                self.state.adopt_entity_reservation(
+                    held.reservation_id, from_plan_revision=held.plan_revision, to_plan_revision=plan.plan_revision)
+                adopted: EntityReservation | None = self.state.get_entity_reservation(held.reservation_id)
+                return adopted
+        return None
+
+    def _next_file_details_request(self, item: IntakeItem, workspace: ResolvedSemesterWorkspace,
+                                   layout_context: _LayoutValidationContext) -> RequestReceipt:
+        """The FILE_DETAILS request after an ASSIGN_COURSE: a later generation when this intake
+        already had one (its key stays terminal), the ordinary request otherwise."""
+
+        earlier = [
+            r for r, _shape in self._human_receipts_for_intake(item.intake_id)
+            if r.request_type == RequestType.FILE_DETAILS.value
+        ]
+        return self._create_input_request_with_context(
+            item, workspace, request_type=RequestType.FILE_DETAILS.value, target_snapshot=None,
+            layout_context=layout_context,
+            superseded_request_key=earlier[-1].request_key if earlier and earlier[-1].state in self._TERMINAL_RECEIPT_STATES else None,
+        )
+
+    # --- AutoResolved terminal scan (plan §3.4, P-B3c) -----------------------------
+
+    _TERMINAL_RECEIPT_STATES = frozenset({"Applied", "Cancelled", "AutoResolved"})
+
+    def _scan_terminal_requests(self, layout_context: _LayoutValidationContext | None) -> None:
+        """Bounded, circular reconciliation scan of AutoResolved receipts.
+
+        A cycle fixes its high-water mark, so a growing set cannot starve the old receipts;
+        the cursor advances after each item (a retry is idempotent).  It also runs with AUTO
+        switched off: it only reacts to a human change of a request the system closed."""
+
+        if self.notion is None or layout_context is None:
+            return
+        done = sorted(self.state.list_auto_resolve_intents(states=("DONE",)), key=lambda i: i.request_key)
+        if not done:
+            return
+        limit = max(1, int(getattr(getattr(self.config.intake, "classification", None), "max_terminal_scan", 50)))
+        cursor = self.state.get_classification_cursor("auto_resolved_scan_cursor") or ""
+        high = self.state.get_classification_cursor("auto_resolved_scan_high_water") or ""
+        if not high or cursor >= high:
+            cursor, high = "", done[-1].request_key
+            self.state.set_classification_cursor("auto_resolved_scan_high_water", high)
+            self.state.set_classification_cursor("auto_resolved_scan_cursor", cursor)
+        batch = [i for i in done if cursor < i.request_key <= high][:limit]
+        if not batch:
+            self.state.set_classification_cursor("auto_resolved_scan_cursor", high)
+            return
+        for intent in batch:
+            try:
+                self._scan_one_terminal(intent, layout_context)
+            except ReconnectRequiredError:
+                raise
+            except Exception:  # noqa: BLE001 - one request never blocks the scan; the next cycle retries
+                self.state.record_intake_stage_event("terminal_scan_error", operation_key=intent.request_key)
+            self.state.set_classification_cursor("auto_resolved_scan_cursor", intent.request_key)
+
+    def _terminal_integrity_ok(self, page: Mapping[str, Any], receipt: RequestReceipt, intake_id: str) -> bool:
+        """Key, type, revision and intake binding of a closed request must be the receipt's own;
+        otherwise the page is not ours to read a human change from (RECONCILE, no generation)."""
+
+        return bool(
+            page.get("Request Key") == receipt.request_key
+            and page.get("Request Type") == receipt.request_type
+            and page.get("Request Revision Hash") == receipt.request_revision_hash
+            and page.get("Request Status") == "Auto Resolved"
+            and type(page.get("Submitted")) is bool and type(page.get("Cancelled")) is bool
+            and len(_relation_ids(page.get("Intake Items"))) == 1
+            and self.state.get_intake_item(intake_id) is not None
+        )
+
+    def _terminal_user_change(
+        self, page: Mapping[str, Any], workspace: ResolvedSemesterWorkspace, receipt: RequestReceipt, intake_id: str
+    ) -> str | None:
+        """The hash of a human change of a system-closed (blank) request, or None.
+
+        The closed request was blank with both checkboxes false, so any USER value or a true
+        checkbox is the human change; SYSTEM-field drift alone is not."""
+
+        request = self._request_from_page(page, workspace)
+        if (
+            page.get("Submitted") is False and page.get("Cancelled") is False
+            and normalized_user_hash(request) == self._blank_user_hash(request)
+        ):
+            return None
+        return sha256_hex([
+            "intake.terminal-user-change.v1", receipt.request_key, intake_id,
+            [page.get(field) for field in ("Course", "Kind", "Actual Date", "Session", "Session Mode", "Session No", "Material Role")],
+            page.get("Submitted"), page.get("Cancelled"),
+        ])
+
+    def _scan_one_terminal(self, intent: AutoResolveIntent, layout_context: _LayoutValidationContext) -> None:
+        receipt = self.state.get_request_receipt(intent.request_key)
+        if receipt is None or receipt.state != "AutoResolved" or not receipt.provider_page_id or not intent.terminal_snapshot_hash:
+            return
+        try:
+            bound = json.loads(receipt.intake_ids_json or "null")
+        except ValueError:
+            return
+        if not isinstance(bound, list) or len(bound) != 1 or not receipt.request_type:
+            return
+        item = self.state.get_intake_item(str(bound[0]))
+        if item is None:
+            return
+        workspace = self._workspace_for_item(item)
+        assert self.notion is not None
+        page = self.notion.read_record("input_request", receipt.provider_page_id)
+        if page is None:
+            raise SourceUnavailableError("AutoResolved request page is unavailable")
+        if self._auto_request_snapshot(page, receipt, item.intake_id) == intent.terminal_snapshot_hash:
+            return
+        if not self._terminal_integrity_ok(page, receipt, item.intake_id):
+            self.state.record_intake_stage_event("terminal_reconcile_required", intake_id=item.intake_id,
+                                                 operation_key=receipt.request_key)
+            return
+        changed = self._terminal_user_change(page, workspace, receipt, item.intake_id)
+        if changed is None:
+            return
+        if self.state.get_terminal_change(receipt.receipt_id, changed) is not None:
+            return  # this exact human change was already handled (idempotent re-observation)
+        later = self.state.get_generation_superseding(item.intake_id, receipt.request_type, receipt.request_key)
+        open_requests = [
+            other for other, _shape in self._human_receipts_for_intake(item.intake_id)
+            if other.request_key != receipt.request_key and other.state not in self._TERMINAL_RECEIPT_STATES
+            and other.request_type == receipt.request_type
+        ]
+        if later is not None or open_requests:
+            for other in open_requests:
+                if other.provider_page_id and (self.notion.read_record("input_request", other.provider_page_id) or {}).get("Error") != "TERMINAL_CHANGED_AGAIN":
+                    self.notion.update_system_record("input_request", other.provider_page_id, {"Error": "TERMINAL_CHANGED_AGAIN"})
+            self.state.record_terminal_change(
+                receipt.receipt_id, changed, created_generation=None, created_request_key=None, state="CHANGED_AGAIN")
+            return
+        self._supersede_live_auto_plans(item, "terminal request changed by a human")
+        created = self._create_input_request_with_context(
+            item, workspace, request_type=receipt.request_type, target_snapshot=None,
+            layout_context=layout_context, superseded_request_key=receipt.request_key,
+        )
+        generation = self.state.get_request_generation(created.request_key, item.intake_id)
+        if generation is None:
+            raise IntakeReconcileRequired("the new request generation is not recorded")
+        self.state.record_terminal_change(
+            receipt.receipt_id, changed, created_generation=int(generation["generation"]),
+            created_request_key=created.request_key, state="CREATED")
+
+    def _supersede_live_auto_plans(self, item: IntakeItem, reason: str) -> None:
+        for status in ("AUTO_PENDING", "PLANNED"):
+            for plan_row in self.state.list_intake_plans(
+                plan_authority="AUTO_CLASSIFICATION", status=status, intake_id=item.intake_id
+            ):
+                self.state.supersede_intake_plan(plan_row["plan_revision"], reason)
+        self.state.record_intake_stage_event("auto_plan_superseded", intake_id=item.intake_id, operation_key=reason)
+
     def _observe_canvas(self) -> None:
         """Bounded Canvas metadata observation before discovery (plan §4, §6.3).
 
@@ -534,6 +783,7 @@ class IntakeWorker:
                         "needs_input": 0,
                         "request_extensions": {},
                     }
+                self._scan_terminal_requests(run_layout_context)
                 for request_key in self._submitted_request_keys()[:max_jobs]:
                     try:
                         self._claim_request_unlocked(
@@ -1172,6 +1422,13 @@ class IntakeWorker:
         user_hash = normalized_user_hash(request)
         if request.input_hash and request.input_hash != user_hash:
             raise IntakeReconcileRequired("Input Hash does not match USER fields")
+        handovers: dict[str, _Handover] = {}
+        for intake_id in request.intake_ids:
+            gate = self._handover_gate(self._require_item(intake_id), request, workspace)
+            if gate is not None:
+                handovers[intake_id] = gate
+        if handovers and len(request.intake_ids) != 1:
+            raise IntakeReconcileRequired("a multi-intake request cannot continue an automatic result")
         target_snapshot = self._request_target_snapshot(request, workspace)
         plan_revision = make_plan_revision(
             request_key=request.request_key,
@@ -1215,14 +1472,17 @@ class IntakeWorker:
         plans: list[dict[str, Any]] = []
         for intake_id in request.intake_ids:
             item = self._require_item(intake_id)
+            handover = handovers.get(intake_id)
             if request.request_type == RequestType.ASSIGN_COURSE.value:
-                self.state.update_intake_item(item.intake_id, selected_course_key=request.course_key, status=IntakeStatus.NEEDS_INPUT.value)
-                self._project_file_intake(
-                    self._require_item(item.intake_id),
-                    workspace,
-                    self._semester_workspace_fingerprint(workspace.semester),
-                    receipt=receipt,
-                )
+                if handover is None:
+                    self.state.update_intake_item(item.intake_id, selected_course_key=request.course_key, status=IntakeStatus.NEEDS_INPUT.value)
+                    self._project_file_intake(
+                        self._require_item(item.intake_id),
+                        workspace,
+                        self._semester_workspace_fingerprint(workspace.semester),
+                        receipt=receipt,
+                    )
+                # else: the automatic result already fixed this Course; the item is not moved back.
                 self._guarded_notion_update(
                     receipt,
                     request,
@@ -1244,15 +1504,26 @@ class IntakeWorker:
                     attempt_operation=INTAKE_REQUEST_SYNC_OPERATION,
                 )
                 self.state.update_request_receipt(request_key, state="Applied")
-                next_receipt = self._create_input_request_with_context(
-                    self._require_item(item.intake_id),
-                    workspace,
-                    request_type=RequestType.FILE_DETAILS.value,
-                    target_snapshot=None,
-                    layout_context=layout_context,
-                )
+                next_receipt = self._next_file_details_request(
+                    self._require_item(item.intake_id), workspace, layout_context)
                 plans.append({"intake_id": item.intake_id, "next_request_key": next_receipt.request_key})
                 continue
+            if handover is not None:
+                self.state.record_handover(handover.from_plan_revision, plan_revision, handover.adopted)
+                if handover.mode == "COMPLETE":
+                    reference = ",".join(
+                        str(effect["entity_app_id"]) for effect in handover.adopted.values()) or (request.course_key or "")
+                    self._guarded_notion_update(
+                        receipt, request, workspace, "input_request", receipt.provider_page_id,
+                        {"Request Status": "Applied", "Result Status": "Ready", "Result Reference": reference},
+                        operation_key=self._operation_key(
+                            INTAKE_REQUEST_SYNC_OPERATION, self.provider, receipt.request_key,
+                            receipt.request_revision_hash, "handover"),
+                        attempt_operation=INTAKE_REQUEST_SYNC_OPERATION,
+                    )
+                    self.state.update_request_receipt(request_key, state="Applied")
+                    plans.append({"intake_id": intake_id, "handover": "COMPLETE"})
+                    continue
             target = dict(target_snapshot)
             target["intake_id"] = intake_id
             plan_hash = sha256_hex(["intake.plan-record.v1", plan_revision, intake_id, target])
@@ -1361,6 +1632,7 @@ class IntakeWorker:
         """Plan §4 O2 readiness block; P-C adds the model counters."""
 
         counts = self.state.classification_counts() if hasattr(self.state, "classification_counts") else {}
+        classification_cfg = getattr(getattr(self.config, "intake", None), "classification", None)
         if not self._classification_enabled():
             status, reason = "DISABLED", "intake.classification.enabled is false"
         elif not self._classification_profile_active():
@@ -1382,6 +1654,11 @@ class IntakeWorker:
             "auto_enabled": self._auto_enabled(),
             "auto_pending_plans": auto_pending,
             "pending_auto_resolve_intents": pending_intents,
+            "terminal_scan_cursor": self.state.get_classification_cursor("auto_resolved_scan_cursor") or "",
+            "terminal_changes": self.state.terminal_change_counts(),
+            "canvas_observation": (
+                "ENABLED" if getattr(classification_cfg, "canvas_observation_enabled", False) and self.canvas_observer is not None
+                else "DISABLED"),
             "rule_table_version": RULE_TABLE_VERSION,
             "tag_rule_version": TAG_RULE_VERSION,
             "calls_remaining": 0,
@@ -3521,6 +3798,10 @@ class IntakeWorker:
     ) -> tuple[EntityReservation, dict[str, Any] | None]:
         rows = self._inventory("sessions", workspace, course_id)
         target_page: dict[str, Any] | None = None
+        adopted = self._adopted_reservation(item, plan, "SESSION")
+        if adopted is not None:
+            page = next((row for row in rows if row.get("ID") == adopted.entity_app_id), None)
+            return adopted, (page if request.session_mode == SessionMode.EXISTING.value else None)
         if request.session_mode == SessionMode.EXISTING.value:
             if not request.session_id:
                 raise RequestValidationError(("EXISTING transcript requires one Session",))
@@ -3570,6 +3851,9 @@ class IntakeWorker:
         course_id: str,
     ) -> EntityReservation:
         rows = self._inventory("materials", workspace, course_id)
+        adopted = self._adopted_reservation(item, plan, "MATERIAL")
+        if adopted is not None:
+            return adopted
         held = self.state.get_entity_reservation(intake_id=item.intake_id, entity_kind="MATERIAL")
         entity_id = held.entity_app_id if held is not None and held.plan_revision == plan.plan_revision else \
             self._next_entity_id(rows, request.course_key or item.selected_course_key or "", "M")
