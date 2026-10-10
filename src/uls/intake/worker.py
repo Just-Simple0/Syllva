@@ -248,6 +248,9 @@ class IntakeWorker:
         # Intake classification v2: a configured Notion profile that does not
         # match the configured data sources is recorded, never applied.
         self._classification_profile_mismatch: str | None = None
+        # Metadata-only Canvas observer (plan §6.3); None keeps the worker Canvas-free.
+        self.canvas_observer: Any | None = None
+        self._canvas_cursor = 0
         # OAuth compositions hold this for a whole public entry so no other
         # entry can refresh the shared credential while provider work runs.
         self._entry_lock = threading.Lock()
@@ -477,6 +480,30 @@ class IntakeWorker:
         finally:
             entry.__exit__(None, None, None)
 
+    def _observe_canvas(self) -> None:
+        """Bounded Canvas metadata observation before discovery (plan §4, §6.3).
+
+        Disabled by default.  A failing course never blocks Drive intake or another
+        course; its calendar stays closed because the observer closes it first."""
+
+        classification = getattr(self.config.intake, "classification", None)
+        observer = self.canvas_observer
+        if observer is None or not getattr(classification, "canvas_observation_enabled", False):
+            return
+        mapping = getattr(classification, "canvas_course_map", {}) or {}
+        course_ids = sorted(int(course_id) for course_id in mapping)
+        if not course_ids:
+            return
+        limit = max(1, int(getattr(classification, "max_canvas_courses_per_tick", 5)))
+        start = self._canvas_cursor % len(course_ids)
+        chosen = [course_ids[(start + offset) % len(course_ids)] for offset in range(min(limit, len(course_ids)))]
+        self._canvas_cursor = (start + len(chosen)) % len(course_ids)
+        for course_id in chosen:
+            try:
+                observer.observe_course(course_id)
+            except Exception:  # noqa: BLE001, S112 - one course never blocks the tick; the calendar is already closed
+                continue
+
     def _run_once_attested(self, *, sync: bool, process: bool, max_jobs: int) -> dict[str, Any]:
         if not self.state.acquire_local_worker_lock():
             return {"status": "already_running", "discovered": 0, "processed": 0}
@@ -486,6 +513,7 @@ class IntakeWorker:
                 # closure never races a human claim in the same tick; it runs even when
                 # AUTO is switched off so an intent that already started is settled (r1 R9).
                 self._recover_auto_resolve_intents()
+            self._observe_canvas()
             discovered = self._sync_unlocked() if sync else 0
             processed = failed = needs_input = 0
             run_layout_context: _LayoutValidationContext | None = None
@@ -1373,7 +1401,26 @@ class IntakeWorker:
                 return SemesterRange(date.fromisoformat(start), date.fromisoformat(end), "config")
         return None
 
+    def _calendar_eligible(self, course_key: str) -> bool:
+        """A recorded calendar is used only while its Canvas course is still the verified,
+        unique mapping of this course key and the active Canvas profile still matches
+        the registry origin (plan §2.3; P-B3 A4/A5).  Rows stay; matching stops."""
+
+        course = self.state.recording_calendar_course(course_key)
+        if course is None:
+            return True
+        classification = getattr(self.config.intake, "classification", None)
+        mapping = getattr(classification, "canvas_course_map", {}) or {}
+        if mapping.get(int(course["canvas_course_id"])) != course_key:
+            return False
+        if sum(1 for key in mapping.values() if key == course_key) != 1:
+            return False
+        observer = getattr(self, "canvas_observer", None)
+        return observer is None or bool(observer.profile_matches())
+
     def _course_calendar(self, course_key: str, semester: SemesterRange | None) -> CourseCalendar | None:
+        if not self._calendar_eligible(course_key):
+            return build_calendar(course_key, [], semester=semester, collection_complete=False)
         rows = self.state.list_recording_calendar_current(course_key)
         complete = self.state.recording_calendar_complete(course_key)
         if not rows:

@@ -317,6 +317,9 @@ def _recording_observation(item_type: Any, title: Any, resource_kind: Any = RECO
     return True
 
 
+is_recording_observation = _recording_observation
+
+
 def _unit_interval(value: Any) -> bool:
     return not isinstance(value, bool) and isinstance(value, (int, float)) and 0 <= value <= 1
 
@@ -989,6 +992,85 @@ class ClassificationStateMixin:
         query += " ORDER BY resource_kind, resource_id, observation_revision"
         with self._transaction() as connection:
             return [dict(row) for row in connection.execute(query, params).fetchall()]
+
+    def close_recording_calendar(self, course_key: str, canvas_course_id: int) -> None:
+        """Fail-closed barrier written *before* a Canvas collection starts (plan §2.3, P-B3 A4).
+
+        One transaction binds the course key to its Canvas course (first binding wins,
+        a different pairing is refused) and withdraws any completeness proof.  Only a
+        later verified complete projection reopens the calendar.
+        """
+
+        with self._transaction(immediate=True) as connection:
+            bound = connection.execute(
+                "SELECT course_key, canvas_course_id FROM recording_calendar_courses "
+                "WHERE course_key = ? OR canvas_course_id = ?",
+                (course_key, int(canvas_course_id)),
+            ).fetchall()
+            if any(
+                (b["course_key"], int(b["canvas_course_id"])) != (course_key, int(canvas_course_id))
+                for b in bound
+            ):
+                raise ValueError("course_key / canvas_course_id binding differs from the recorded one")
+            connection.execute(
+                "INSERT INTO recording_calendar_courses(course_key, canvas_course_id, "
+                "collection_complete, projection_revision_hash, updated_at) VALUES (?, ?, 0, NULL, ?) "
+                "ON CONFLICT(course_key) DO UPDATE SET collection_complete = 0, "
+                "projection_revision_hash = NULL, updated_at = excluded.updated_at",
+                (course_key, int(canvas_course_id), _now()),
+            )
+
+    def latest_canvas_observation(
+        self, origin: str, canvas_course_id: int, resource_kind: str, resource_id: str
+    ) -> dict[str, Any] | None:
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM canvas_observations WHERE origin = ? AND canvas_course_id = ? "
+                "AND resource_kind = ? AND resource_id = ? ORDER BY observation_revision DESC LIMIT 1",
+                (origin, int(canvas_course_id), resource_kind, str(resource_id)),
+            ).fetchone()
+            return None if row is None else dict(row)
+
+    def record_canvas_classification(self, **values: Any) -> dict[str, Any]:
+        """Persist the metadata-only S1 verdict of one observation revision (immutable)."""
+
+        for name in ("observation_fingerprint", "origin", "canvas_course_id", "resource_kind",
+                     "resource_id", "observation_revision", "decision_json", "rule_table_version"):
+            if values.get(name) in (None, ""):
+                raise ValueError(f"canvas classification requires {name}")
+        params = (
+            values["observation_fingerprint"], values["origin"], int(values["canvas_course_id"]),
+            values["resource_kind"], str(values["resource_id"]), int(values["observation_revision"]),
+            values.get("kind"), values["decision_json"], values["rule_table_version"],
+        )
+        with self._transaction(immediate=True) as connection:
+            existing = connection.execute(
+                "SELECT * FROM canvas_classifications WHERE observation_fingerprint = ?",
+                (params[0],),
+            ).fetchone()
+            if existing is not None:
+                if (existing["kind"], existing["decision_json"], existing["rule_table_version"]) != (
+                    params[6], params[7], params[8]
+                ):
+                    raise ValueError("canvas classification of an observation revision is immutable")
+                return dict(existing)
+            connection.execute(
+                "INSERT INTO canvas_classifications(observation_fingerprint, origin, canvas_course_id, "
+                "resource_kind, resource_id, observation_revision, kind, decision_json, "
+                "rule_table_version, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (*params, _now()),
+            )
+            return dict(connection.execute(
+                "SELECT * FROM canvas_classifications WHERE observation_fingerprint = ?", (params[0],)
+            ).fetchone())
+
+    def list_canvas_classifications(self, canvas_course_id: int) -> list[dict[str, Any]]:
+        with self._transaction() as connection:
+            return [dict(r) for r in connection.execute(
+                "SELECT * FROM canvas_classifications WHERE canvas_course_id = ? "
+                "ORDER BY resource_kind, resource_id, observation_revision",
+                (int(canvas_course_id),),
+            ).fetchall()]
 
     def replace_recording_calendar_current(
         self,

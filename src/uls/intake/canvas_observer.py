@@ -1,0 +1,365 @@
+"""Read-only Canvas metadata observation (plan §2.3, §6.3; P-B3a).
+
+The observer reads the assignment, announcement and module listings of one verified
+Canvas course through the pinned, bounded transport of the Settings Canvas connection
+and records *metadata only*: observations, their S1 verdicts and the recording calendar.
+It never creates plans, jobs, File Intake rows, Materials or Input Requests.
+
+Fail-closed order for one course: gate → close the calendar (one transaction) → read
+everything → record → reconcile → classify → project the calendar.  A crash or error at
+any point leaves the calendar closed, because only the final verified projection
+reopens it.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import time
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import AbstractContextManager, contextmanager
+from dataclasses import dataclass
+from datetime import date
+from typing import Any, Protocol
+from urllib.parse import urljoin
+
+from ..settings.canvas_checks import (
+    CanvasCheckError,
+    CanvasConnection,
+    open_canvas_connection,
+    validate_canvas_origin,
+)
+from ..state.classification_state import is_recording_observation
+from .classification.calendar import RecordingEntry, SemesterRange, build_calendar
+from .classification.rules import (
+    CANVAS_ANNOUNCEMENT,
+    CANVAS_ASSIGNMENT,
+    CANVAS_MODULE_ITEM,
+    ItemSignals,
+    classify_by_rules,
+)
+from .classification.taxonomy import Origin
+
+PER_PAGE = 50
+MAX_PAGES = 10
+MAX_ITEMS = 500
+MAX_RUN_SECONDS = 45.0
+_WEEK_MODULE = re.compile(r"^(\d+)주차$")
+_CANVAS_METADATA_ONLY = "CANVAS_METADATA_ONLY"
+
+
+class _Incomplete(Exception):
+    """The collection is not provably complete; the calendar must stay closed."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class CanvasReader(Protocol):
+    def get_page(self, url: str, deadline: float) -> tuple[list[Any], str | None]:
+        """One GET of an allowlisted listing: (items, next_url or None)."""
+
+
+@dataclass(frozen=True)
+class ObservationResult:
+    status: str  # COMPLETE | INCOMPLETE | INELIGIBLE | DISABLED
+    reason: str = ""
+    course_key: str = ""
+    canvas_course_id: int = 0
+    observed: int = 0
+    classified: int = 0
+
+
+class ConnectionReader:
+    """Production reader over one pinned CanvasConnection (never exposes the token)."""
+
+    def __init__(self, connection: CanvasConnection, token: str) -> None:
+        self._connection = connection
+        self._token = token
+
+    def get_page(self, url: str, deadline: float) -> tuple[list[Any], str | None]:
+        response = self._connection.observe(url, self._token, deadline=deadline)
+        try:
+            body = json.loads(response.body)
+        except (UnicodeDecodeError, ValueError, RecursionError):
+            raise _Incomplete("MALFORMED_RESPONSE") from None
+        if not isinstance(body, list):
+            raise _Incomplete("MALFORMED_RESPONSE")
+        link = ""
+        for key, value in response.headers.items():
+            if key.lower() == "link":
+                link = value
+        return body, _next_url(link, url)
+
+
+def _next_url(link: str, current: str) -> str | None:
+    if not link:
+        return None
+    entries = re.findall(r'<([^<>]+)>\s*((?:;[^,]*)*)', link)
+    found: list[str] = []
+    for target, attributes in entries:
+        relation = re.search(r';\s*rel\s*=\s*(?:"([^"]*)"|([^;\s,]+))', attributes)
+        if relation and "next" in (relation.group(1) or relation.group(2)).split():
+            found.append(urljoin(current, target))
+    if len(found) > 1 or (not entries and "next" in link):
+        raise _Incomplete("MALFORMED_LINK")
+    return found[0] if found else None
+
+
+def connection_reader_factory(
+    origin: str, token_provider: Callable[[], str | None],
+) -> Callable[[], AbstractContextManager[CanvasReader | None]]:
+    """A factory yielding a pinned reader, or None when no Canvas credential is available."""
+
+    @contextmanager
+    def factory() -> Iterator[CanvasReader | None]:
+        token = token_provider()
+        if not token:
+            yield None
+            return
+        with open_canvas_connection(origin) as connection:
+            yield ConnectionReader(connection, token)
+
+    return factory
+
+
+def _text(value: Any) -> str | None:
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _identifier(value: Any) -> str:
+    if isinstance(value, bool) or not isinstance(value, int | str) or not str(value).strip():
+        raise _Incomplete("MALFORMED_ID")
+    return str(value).strip()
+
+
+class CanvasObserver:
+    def __init__(
+        self,
+        state: Any,
+        *,
+        origin: str,
+        verified_origin: str,
+        course_map: Mapping[int, str],
+        reader_factory: Callable[[], AbstractContextManager[CanvasReader | None]],
+        semester_for: Callable[[str], SemesterRange | None],
+        monotonic: Callable[[], float] = time.monotonic,
+        max_run_seconds: float = MAX_RUN_SECONDS,
+    ) -> None:
+        self._state = state
+        self._origin = origin
+        self._verified_origin = verified_origin
+        self._course_map = {int(k): v for k, v in course_map.items()}
+        self._factory = reader_factory
+        self._semester_for = semester_for
+        self._monotonic = monotonic
+        self._max_run_seconds = max_run_seconds
+
+    def profile_matches(self) -> bool:
+        try:
+            return validate_canvas_origin(self._origin) == validate_canvas_origin(self._verified_origin)
+        except CanvasCheckError:
+            return False
+
+    # --- gates -------------------------------------------------------------------
+
+    def _gate(self, canvas_course_id: int) -> ObservationResult | None:
+        course_key = self._course_map.get(int(canvas_course_id))
+        if course_key is None:
+            return ObservationResult("INELIGIBLE", "COURSE_NOT_MAPPED", "", int(canvas_course_id))
+        if not self.profile_matches():
+            self._close(course_key)
+            return ObservationResult("INELIGIBLE", "PROFILE_MISMATCH", course_key, int(canvas_course_id))
+        if sum(1 for key in self._course_map.values() if key == course_key) != 1:
+            self._close(course_key)
+            return ObservationResult("INELIGIBLE", "MANY_TO_ONE_MAPPING", course_key, int(canvas_course_id))
+        return None
+
+    def _close(self, course_key: str) -> None:
+        row = self._state.recording_calendar_course(course_key)
+        if row is not None:
+            self._state.close_recording_calendar(course_key, int(row["canvas_course_id"]))
+
+    # --- one course --------------------------------------------------------------
+
+    def observe_course(self, canvas_course_id: int) -> ObservationResult:
+        canvas_course_id = int(canvas_course_id)
+        blocked = self._gate(canvas_course_id)
+        if blocked is not None:
+            return blocked
+        course_key = self._course_map[canvas_course_id]
+        try:
+            with self._factory() as reader:
+                if reader is None:
+                    self._close(course_key)
+                    return ObservationResult("DISABLED", "NO_CREDENTIAL", course_key, canvas_course_id)
+                # Barrier first: a crash anywhere below keeps the calendar closed.
+                self._state.close_recording_calendar(course_key, canvas_course_id)
+                collected = self._collect(reader, canvas_course_id)
+        except _Incomplete as error:
+            return self._incomplete(course_key, canvas_course_id, error.reason)
+        except CanvasCheckError as error:
+            return self._incomplete(course_key, canvas_course_id, error.code)
+        return self._record(course_key, canvas_course_id, collected)
+
+    def _incomplete(self, course_key: str, canvas_course_id: int, reason: str) -> ObservationResult:
+        self._state.reconcile_canvas_collection(
+            origin=self._origin, canvas_course_id=canvas_course_id,
+            resource_kind=CANVAS_MODULE_ITEM, seen_resource_ids=(), collection_complete=False,
+        )
+        return ObservationResult("INCOMPLETE", reason, course_key, canvas_course_id)
+
+    # --- reading -----------------------------------------------------------------
+
+    def _pages(self, reader: CanvasReader, first: str, deadline: float) -> list[Any]:
+        items: list[Any] = []
+        url: str | None = first
+        for _ in range(MAX_PAGES):
+            if url is None:
+                return items
+            if self._monotonic() >= deadline:
+                raise _Incomplete("TIME_LIMIT")
+            page, url = reader.get_page(url, deadline)
+            items.extend(page)
+            if len(items) > MAX_ITEMS:
+                raise _Incomplete("ITEM_LIMIT")
+        if url is not None:
+            raise _Incomplete("PAGE_LIMIT")
+        return items
+
+    def _collect(self, reader: CanvasReader, course_id: int) -> dict[str, list[dict[str, Any]]]:
+        deadline = self._monotonic() + self._max_run_seconds
+        base = f"/api/v1/courses/{course_id}"
+        assignments = self._pages(reader, f"{base}/assignments?order_by=name&per_page={PER_PAGE}", deadline)
+        announcements = self._pages(
+            reader, f"/api/v1/announcements?context_codes[]=course_{course_id}&per_page={PER_PAGE}", deadline)
+        modules = self._pages(reader, f"{base}/modules?include[]=items&per_page={PER_PAGE}", deadline)
+        out: dict[str, list[dict[str, Any]]] = {
+            CANVAS_ASSIGNMENT: [], CANVAS_ANNOUNCEMENT: [], CANVAS_MODULE_ITEM: [],
+        }
+        for row in assignments:
+            out[CANVAS_ASSIGNMENT].append(self._plain(row, "name", None, None))
+        for row in announcements:
+            out[CANVAS_ANNOUNCEMENT].append(self._plain(row, "title", None, None))
+        total = 0
+        for module in modules:
+            if not isinstance(module, dict):
+                raise _Incomplete("MALFORMED_MODULE")
+            module_id = _identifier(module.get("id"))
+            name = _text(module.get("name"))
+            items = module.get("items")
+            count = module.get("items_count")
+            if name is None or not isinstance(items, list) or isinstance(count, bool) or not isinstance(count, int):
+                raise _Incomplete("MALFORMED_MODULE")
+            if len(items) != count:
+                items = self._pages(
+                    reader, f"{base}/modules/{module_id}/items?per_page={PER_PAGE}", deadline)
+                if len(items) != count:
+                    raise _Incomplete("MODULE_ITEMS_INCOMPLETE")
+            week_match = _WEEK_MODULE.match(name)
+            week = int(week_match.group(1)) if week_match and int(week_match.group(1)) > 0 else None
+            for item in items:
+                total += 1
+                if total > MAX_ITEMS:
+                    raise _Incomplete("ITEM_LIMIT")
+                out[CANVAS_MODULE_ITEM].append(self._plain(item, "title", name, week))
+        for kind, rows in out.items():
+            if len({r["resource_id"] for r in rows}) != len(rows):
+                raise _Incomplete(f"DUPLICATE_{kind.upper()}")
+        return out
+
+    @staticmethod
+    def _plain(row: Any, title_key: str, module_name: str | None, week: int | None) -> dict[str, Any]:
+        if not isinstance(row, dict):
+            raise _Incomplete("MALFORMED_ITEM")
+        title = _text(row.get(title_key))
+        if title is None:
+            raise _Incomplete("MALFORMED_TITLE")
+        item_type = row.get("type") if module_name is not None else None
+        updated = _text(row.get("updated_at")) or _text(row.get("posted_at"))
+        return {
+            "resource_id": _identifier(row.get("id")), "title": title, "module_name": module_name,
+            "module_week": week, "item_type": _text(item_type), "updated_at": updated,
+        }
+
+    # --- recording ---------------------------------------------------------------
+
+    def _revision(self, kind: str, row: dict[str, Any], course_id: int) -> int:
+        latest = self._state.latest_canvas_observation(self._origin, course_id, kind, row["resource_id"])
+        if latest is None:
+            return 1
+        stored = (latest["title"], latest["module_name"], latest["module_week"],
+                  latest["item_type"], latest["updated_at"])
+        payload = (row["title"], row["module_name"], row["module_week"], row["item_type"], row["updated_at"])
+        # The whole stored payload is compared, not only updated_at (P-B3 A3).
+        return int(latest["observation_revision"]) + (0 if stored == payload else 1)
+
+    def _record(self, course_key: str, course_id: int, collected: dict[str, list[dict[str, Any]]]) -> ObservationResult:
+        observed = classified = 0
+        for kind, rows in collected.items():
+            for row in rows:
+                revision = self._revision(kind, row, course_id)
+                self._state.record_canvas_observation(
+                    origin=self._origin, canvas_course_id=course_id, resource_kind=kind,
+                    resource_id=row["resource_id"], observation_revision=revision, title=row["title"],
+                    module_name=row["module_name"], module_week=row["module_week"],
+                    item_type=row["item_type"], updated_at=row["updated_at"], collection_complete=True,
+                )
+                observed += 1
+                classified += self._classify(course_id, kind, row, revision)
+            self._state.reconcile_canvas_collection(
+                origin=self._origin, canvas_course_id=course_id, resource_kind=kind,
+                seen_resource_ids=[r["resource_id"] for r in rows], collection_complete=True,
+            )
+        reason = self._project_calendar(course_key, course_id)
+        status = "COMPLETE" if reason == "" else "INCOMPLETE"
+        return ObservationResult(status, reason, course_key, course_id, observed, classified)
+
+    def _classify(self, course_id: int, kind: str, row: dict[str, Any], revision: int) -> int:
+        decision = classify_by_rules(ItemSignals(
+            title=row["title"], origin=Origin.UNKNOWN, canvas_resource_kind=kind,
+            canvas_item_type=row["item_type"],
+        ))
+        payload = {
+            "handling_mode": _CANVAS_METADATA_ONLY,
+            "decision": decision.decision_type.value,
+            "rule_id": decision.rule_id,
+            "priority": decision.priority,
+            "candidates": [k.value for k in decision.candidates],
+            "origin_candidate": Origin.PROFESSOR_SOURCE.value if decision.decided else None,
+            "week": row["module_week"],
+            "reason": "" if decision.decided else "S3_DEFERRED",
+            "unsupported": decision.terminal_unsupported,
+        }
+        fingerprint = hashlib.sha256(json.dumps(
+            [self._origin, course_id, kind, row["resource_id"], revision, row["title"], row["module_name"],
+             row["module_week"], row["item_type"], row["updated_at"]],
+            ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+        self._state.record_canvas_classification(
+            observation_fingerprint=fingerprint, origin=self._origin, canvas_course_id=course_id,
+            resource_kind=kind, resource_id=row["resource_id"], observation_revision=revision,
+            kind=decision.kind.value if decision.kind is not None else None,
+            decision_json=json.dumps(payload, ensure_ascii=False, sort_keys=True),
+            rule_table_version=decision.rule_table_version,
+        )
+        return 1
+
+    def _project_calendar(self, course_key: str, course_id: int) -> str:
+        entries: list[RecordingEntry] = []
+        for obs in self._state.list_active_canvas_observations(course_id, CANVAS_MODULE_ITEM):
+            if not is_recording_observation(obs["item_type"], obs["title"], obs["resource_kind"]):
+                continue
+            week = obs["module_week"]
+            if isinstance(week, bool) or not isinstance(week, int) or week < 1:
+                return "RECORDING_WITHOUT_WEEK"  # cannot be placed: the calendar stays closed
+            entries.append(RecordingEntry(
+                course_id, str(obs["resource_id"]), int(obs["observation_revision"]), week,
+                date.fromisoformat(str(obs["title"]).strip()),
+            ))
+        calendar = build_calendar(
+            course_key, entries, semester=self._semester_for(course_key), collection_complete=True)
+        self._state.replace_recording_calendar_current(
+            course_key, course_id, calendar, collection_complete=True)
+        return ""

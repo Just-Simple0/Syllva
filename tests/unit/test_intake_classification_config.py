@@ -84,3 +84,28 @@ google_drive:
 def test_malformed_sections_fail_closed(tmp_path, body: str) -> None:
     with pytest.raises(ValueError):
         _load(tmp_path, body)
+
+
+def test_canvas_observation_defaults_off_and_validates(tmp_path) -> None:
+    cls = _load(tmp_path, "system:\n  timezone: Asia/Seoul\n").intake.classification
+    assert (cls.canvas_observation_enabled, cls.canvas_origin, cls.max_canvas_courses_per_tick) == (False, "", 5)
+    ok = _load(tmp_path, """
+intake:
+  classification:
+    canvas_observation_enabled: true
+    canvas_origin: "https://LMS.example.edu/"
+    max_canvas_courses_per_tick: 3
+""").intake.classification
+    assert ok.canvas_origin == "https://lms.example.edu" and ok.max_canvas_courses_per_tick == 3
+
+
+@pytest.mark.parametrize("body", [
+    "canvas_observation_enabled: true",                       # enabled needs an origin
+    "canvas_origin: 'http://lms.example.edu'",                 # https only
+    "canvas_origin: 'https://127.0.0.1'",                      # no IP literal
+    "canvas_observation_enabled: 'yes'",
+    "max_canvas_courses_per_tick: 0",
+])
+def test_canvas_observation_rejects_unsafe_values(tmp_path, body) -> None:
+    with pytest.raises(ValueError):
+        _load(tmp_path, f"intake:\n  classification:\n    {body}\n")

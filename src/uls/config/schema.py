@@ -228,6 +228,12 @@ class ClassificationCfg:
     # Verified Canvas course ID -> canonical course_key (plan §2.3). Only
     # registry rows with verification_state=api_code_verified belong here.
     canvas_course_map: dict[int, str] = field(default_factory=dict)
+    # Metadata-only Canvas observation (plan §6.3, P-B3a): off by default.  canvas_origin is the
+    # HTTPS origin the course map was verified against; the active Settings Canvas profile must
+    # match it before anything is read or a recorded calendar is used.
+    canvas_observation_enabled: bool = False
+    canvas_origin: str = ""
+    max_canvas_courses_per_tick: int = 5
 
 
 @dataclass

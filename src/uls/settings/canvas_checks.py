@@ -20,6 +20,7 @@ from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
 
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_REQUESTS = 25
+OBSERVATION_MAX_REQUESTS = 60
 MAX_DISCOVERY_PAGES = 4
 MAX_DISCOVERY_COURSES = 200
 MAX_SELECTED_COURSES = 20
@@ -293,6 +294,45 @@ def _request_target(origin: CanvasOrigin, url: str) -> str:
     return urlunsplit(("", "", path, parsed.query, ""))
 
 
+_OBSERVATION_PATHS = (
+    re.compile(r"/api/v1/courses/([0-9]{1,64})/assignments"),
+    re.compile(r"/api/v1/courses/([0-9]{1,64})/modules"),
+    re.compile(r"/api/v1/courses/([0-9]{1,64})/modules/[0-9]{1,64}/items"),
+    re.compile(r"/api/v1/announcements"),
+)
+_OBSERVATION_KEYS = frozenset({"order_by", "per_page", "page", "include[]", "context_codes[]",
+                               "start_date", "end_date"})
+
+
+def _observation_target(origin: CanvasOrigin, url: str) -> str:
+    """Allowlist for the metadata-only observation reads (plan §6.3): GET paths only."""
+    if (len(url) > 8192 or "\\" in url or "#" in url
+            or any(ord(char) <= 32 or ord(char) == 127 for char in url)):
+        raise CanvasCheckError("DESTINATION_NOT_ALLOWED")
+    try:
+        parsed = urlsplit(urljoin(origin.origin + "/", url))
+        destination = validate_canvas_origin(f"{parsed.scheme}://{parsed.netloc}")
+    except (ValueError, CanvasCheckError):
+        destination = None
+    if destination != origin:
+        raise CanvasCheckError("DESTINATION_NOT_ALLOWED")
+    if not any(pattern.fullmatch(parsed.path) for pattern in _OBSERVATION_PATHS):
+        raise CanvasCheckError("CHECK_NOT_READ_ONLY")
+    try:
+        fields = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=bool(parsed.query),
+                           max_num_fields=8)
+    except ValueError:
+        raise CanvasCheckError("CHECK_NOT_READ_ONLY") from None
+    for key, value in fields:
+        bounded = (key in {"per_page", "page"} and len(value) <= 5 and value.isascii()
+                   and value.isdecimal() and 0 < int(value) <= (50 if key == "per_page" else 10000))
+        plain = (key in _OBSERVATION_KEYS - {"per_page", "page"} and len(value) <= 64
+                 and value.isascii() and value.isprintable())
+        if not (bounded or plain):
+            raise CanvasCheckError("CHECK_NOT_READ_ONLY")
+    return urlunsplit(("", "", parsed.path, parsed.query, ""))
+
+
 @dataclass
 class CanvasConnection:
     """One origin-bound connection; all requests are GETs carrying one header-only token."""
@@ -302,13 +342,29 @@ class CanvasConnection:
     _request_count: int = 0
     _closed: bool = False
     _first_request_deadline: float | None = None
+    _request_limit: int = MAX_REQUESTS
+
+    def observe(self, url: str, token: str, *, deadline: float | None = None) -> CanvasResponse:
+        """One read-only GET of an allowlisted course-metadata resource (plan §6.3).
+
+        Only the assignment, module, module-item and course-announcement listings
+        reach the transport; every other path stays CHECK_NOT_READ_ONLY.
+        """
+        self._request_limit = OBSERVATION_MAX_REQUESTS
+        self._admit()
+        return self._send(_observation_target(self.target, url), token, deadline)
 
     def request(self, method: str, url: str, token: str, *, deadline: float | None = None) -> CanvasResponse:
         if method != "GET":
             raise CanvasCheckError("CHECK_NOT_READ_ONLY")
-        if self._closed or self._request_count >= MAX_REQUESTS:
+        self._admit()
+        return self._send(_request_target(self.target, url), token, deadline)
+
+    def _admit(self) -> None:
+        if self._closed or self._request_count >= self._request_limit:
             raise CanvasCheckError("PROVIDER_UNAVAILABLE")
-        path = _request_target(self.target, url)
+
+    def _send(self, path: str, token: str, deadline: float | None) -> CanvasResponse:
         if (not isinstance(token, str) or not token or len(token) > 4096
                 or any(ord(char) < 33 or ord(char) > 126 for char in token)):
             raise CanvasCheckError("INVALID_CREDENTIAL")

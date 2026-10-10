@@ -26,6 +26,9 @@ def _enable(system, *, profile: str | None = "legacy5-cls"):
     system["config"].intake.classification.enabled = True
     registry = system["config"].google_drive.semester_registries[0]
     registry.start_date, registry.end_date = "2026-09-01", "2026-12-20"
+    # A recorded calendar is only used for a verified Canvas mapping (P-B3 A5).
+    system["config"].intake.classification.canvas_course_map = (
+        system["config"].intake.classification.canvas_course_map or {67535: COURSE_KEYS[1]})
     return _rewire(system, profile) if profile else system["worker"]
 
 
