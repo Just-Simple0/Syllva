@@ -14,7 +14,7 @@ import hashlib
 import json
 import re
 import sqlite3
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -987,10 +987,13 @@ class ClassificationStateMixin:
         return deactivated
 
     def list_active_canvas_observations(
-        self, canvas_course_id: int, resource_kind: str | None = None
+        self, canvas_course_id: int, resource_kind: str | None = None, origin: str | None = None
     ) -> list[dict[str, Any]]:
         query = "SELECT * FROM canvas_observations WHERE canvas_course_id = ? AND active = 1"
         params: list[Any] = [int(canvas_course_id)]
+        if origin is not None:
+            query += " AND origin = ?"
+            params.append(origin)
         if resource_kind is not None:
             query += " AND resource_kind = ?"
             params.append(resource_kind)
@@ -1024,6 +1027,21 @@ class ClassificationStateMixin:
                 "projection_revision_hash = NULL, updated_at = excluded.updated_at",
                 (course_key, int(canvas_course_id), _now()),
             )
+
+    def deactivate_foreign_origin_observations(self, canvas_course_id: int, origin: str) -> int:
+        """Observations of this numeric Canvas course under another origin are history, not
+        evidence for the origin the mapping is verified against now (plan §2.3).  Rows stay."""
+
+        with self._transaction(immediate=True) as connection:
+            cursor = connection.execute(
+                "UPDATE canvas_observations SET active = 0 WHERE canvas_course_id = ? AND origin <> ? AND active = 1",
+                (int(canvas_course_id), origin),
+            )
+            if cursor.rowcount:
+                connection.execute(
+                    "UPDATE recording_calendar_courses SET collection_complete = 0, projection_revision_hash = NULL, "
+                    "updated_at = ? WHERE canvas_course_id = ?", (_now(), int(canvas_course_id)))
+            return int(cursor.rowcount)
 
     def latest_canvas_observation(
         self, origin: str, canvas_course_id: int, resource_kind: str, resource_id: str
@@ -1380,88 +1398,98 @@ class ClassificationStateMixin:
         """Persist the next generation number before any provider create (r8 R1)."""
 
         with self._transaction(immediate=True) as connection:
-            # One supersession basis owns exactly one generation: a retry after the
-            # key was bound (lost provider response) and a retry before it both come
-            # back to the same number (R9, P-A r2 #5).
-            same_basis = connection.execute(
-                "SELECT generation FROM intake_request_generations "
-                "WHERE intake_id = ? AND request_type = ? AND superseded_request_key IS ? ",
-                (intake_id, request_type, superseded_request_key),
-            ).fetchone()
-            if same_basis is not None:
-                return int(same_basis["generation"])
-            pending = connection.execute(
-                "SELECT generation, superseded_request_key FROM intake_request_generations "
-                "WHERE intake_id = ? AND request_type = ? AND request_key IS NULL "
-                "ORDER BY generation DESC LIMIT 1",
+            return int(self._reserve_generation_tx(connection, intake_id, request_type, superseded_request_key))
+
+    def _reserve_generation_tx(
+        self, connection: sqlite3.Connection, intake_id: str, request_type: str, superseded_request_key: str | None,
+    ) -> int:
+        # One supersession basis owns exactly one generation: a retry after the
+        # key was bound (lost provider response) and a retry before it both come
+        # back to the same number (R9, P-A r2 #5).
+        same_basis = connection.execute(
+            "SELECT generation FROM intake_request_generations "
+            "WHERE intake_id = ? AND request_type = ? AND superseded_request_key IS ? ",
+            (intake_id, request_type, superseded_request_key),
+        ).fetchone()
+        if same_basis is not None:
+            return int(same_basis["generation"])
+        pending = connection.execute(
+            "SELECT generation, superseded_request_key FROM intake_request_generations "
+            "WHERE intake_id = ? AND request_type = ? AND request_key IS NULL "
+            "ORDER BY generation DESC LIMIT 1",
+            (intake_id, request_type),
+        ).fetchone()
+        if pending is not None:
+            # A reservation whose create never completed blocks a new basis: the
+            # caller must bind or reconcile it first, never skip a number.
+            raise ValueError("pending request generation has a different supersession basis")
+        if superseded_request_key is not None:
+            latest = connection.execute(
+                "SELECT generation, request_key FROM intake_request_generations "
+                "WHERE intake_id = ? AND request_type = ? ORDER BY generation DESC LIMIT 1",
                 (intake_id, request_type),
             ).fetchone()
-            if pending is not None:
-                # A reservation whose create never completed blocks a new basis: the
-                # caller must bind or reconcile it first, never skip a number.
-                raise ValueError("pending request generation has a different supersession basis")
-            if superseded_request_key is not None:
-                latest = connection.execute(
-                    "SELECT generation, request_key FROM intake_request_generations "
-                    "WHERE intake_id = ? AND request_type = ? ORDER BY generation DESC LIMIT 1",
-                    (intake_id, request_type),
-                ).fetchone()
-                if latest is None or latest["request_key"] != superseded_request_key:
-                    raise ValueError("a new generation may only supersede the latest bound request key")
-            row = connection.execute(
-                "SELECT COALESCE(MAX(generation), 0) AS g FROM intake_request_generations "
-                "WHERE intake_id = ? AND request_type = ?",
-                (intake_id, request_type),
-            ).fetchone()
-            generation = int(row["g"]) + 1
-            if superseded_request_key is None and generation > 1:
-                raise ValueError("a superseding generation must name the superseded request key")
-            connection.execute(
-                "INSERT INTO intake_request_generations(intake_id, request_type, generation, "
-                "request_key, superseded_request_key, derivation_version, created_at) "
-                "VALUES (?, ?, ?, NULL, ?, 'V2', ?)",
-                (intake_id, request_type, generation, superseded_request_key, _now()),
-            )
-            return generation
+            if latest is None or latest["request_key"] != superseded_request_key:
+                raise ValueError("a new generation may only supersede the latest bound request key")
+        row = connection.execute(
+            "SELECT COALESCE(MAX(generation), 0) AS g FROM intake_request_generations "
+            "WHERE intake_id = ? AND request_type = ?",
+            (intake_id, request_type),
+        ).fetchone()
+        generation = int(row["g"]) + 1
+        if superseded_request_key is None and generation > 1:
+            raise ValueError("a superseding generation must name the superseded request key")
+        connection.execute(
+            "INSERT INTO intake_request_generations(intake_id, request_type, generation, "
+            "request_key, superseded_request_key, derivation_version, created_at) "
+            "VALUES (?, ?, ?, NULL, ?, 'V2', ?)",
+            (intake_id, request_type, generation, superseded_request_key, _now()),
+        )
+        return generation
 
     def bind_request_generation_key(
         self, intake_id: str, request_type: str, generation: int, request_key: str
     ) -> None:
         with self._transaction(immediate=True) as connection:
-            current = connection.execute(
-                "SELECT request_key, superseded_request_key FROM intake_request_generations "
-                "WHERE intake_id = ? AND request_type = ? AND generation = ?",
-                (intake_id, request_type, int(generation)),
-            ).fetchone()
-            if current is None:
-                raise KeyError((intake_id, request_type, generation))
-            if current["request_key"] not in (None, request_key):
-                raise ValueError("request generation is already bound to another key")
-            if current["request_key"] == request_key:
-                return  # idempotent re-bind
-            # Every generation carries a new key: never the superseded one nor any key
-            # of another generation of this (intake, type).  FILE_DETAILS keys are
-            # single-intake; ASSIGN_COURSE keys may legitimately span intakes (r3 #4).
-            others = connection.execute(
-                "SELECT intake_id, request_type, generation FROM intake_request_generations "
-                "WHERE request_key = ? AND NOT (intake_id = ? AND request_type = ? AND generation = ?)",
-                (request_key, intake_id, request_type, int(generation)),
-            ).fetchall()
-            if any(
-                (o["intake_id"], o["request_type"]) == (intake_id, request_type) for o in others
-            ):
-                raise ValueError("request key is already bound to another generation of this intake")
-            if others and request_type != "ASSIGN_COURSE":
-                raise ValueError(f"{request_type} request keys are single-intake")
-            if any(o["request_type"] != request_type for o in others):
-                raise ValueError("request key is bound to another request type")
-            if current["superseded_request_key"] == request_key:
-                raise ValueError("a superseding generation needs a new request key")
-            connection.execute(
-                "UPDATE intake_request_generations SET request_key = ? "
-                "WHERE intake_id = ? AND request_type = ? AND generation = ?",
-                (request_key, intake_id, request_type, int(generation)),
-            )
+            self._bind_generation_tx(connection, intake_id, request_type, generation, request_key)
+
+    def _bind_generation_tx(
+        self, connection: sqlite3.Connection, intake_id: str, request_type: str, generation: int, request_key: str,
+    ) -> None:
+        current = connection.execute(
+            "SELECT request_key, superseded_request_key FROM intake_request_generations "
+            "WHERE intake_id = ? AND request_type = ? AND generation = ?",
+            (intake_id, request_type, int(generation)),
+        ).fetchone()
+        if current is None:
+            raise KeyError((intake_id, request_type, generation))
+        if current["request_key"] not in (None, request_key):
+            raise ValueError("request generation is already bound to another key")
+        if current["request_key"] == request_key:
+            return  # idempotent re-bind
+        # Every generation carries a new key: never the superseded one nor any key
+        # of another generation of this (intake, type).  FILE_DETAILS keys are
+        # single-intake; ASSIGN_COURSE keys may legitimately span intakes (r3 #4).
+        others = connection.execute(
+            "SELECT intake_id, request_type, generation FROM intake_request_generations "
+            "WHERE request_key = ? AND NOT (intake_id = ? AND request_type = ? AND generation = ?)",
+            (request_key, intake_id, request_type, int(generation)),
+        ).fetchall()
+        if any(
+            (o["intake_id"], o["request_type"]) == (intake_id, request_type) for o in others
+        ):
+            raise ValueError("request key is already bound to another generation of this intake")
+        if others and request_type != "ASSIGN_COURSE":
+            raise ValueError(f"{request_type} request keys are single-intake")
+        if any(o["request_type"] != request_type for o in others):
+            raise ValueError("request key is bound to another request type")
+        if current["superseded_request_key"] == request_key:
+            raise ValueError("a superseding generation needs a new request key")
+        connection.execute(
+            "UPDATE intake_request_generations SET request_key = ? "
+            "WHERE intake_id = ? AND request_type = ? AND generation = ?",
+            (request_key, intake_id, request_type, int(generation)),
+        )
 
     def ensure_legacy_request_generation(self, intake_id: str, request_type: str, request_key: str) -> int:
         """Record a request created before/outside v2 as a LEGACY generation (idempotent).
@@ -2048,6 +2076,41 @@ class ClassificationStateMixin:
         with self._transaction() as connection:
             return {str(r["state"]): int(r["n"]) for r in connection.execute(
                 "SELECT state, COUNT(*) AS n FROM terminal_change_ledger GROUP BY state").fetchall()}
+
+    def begin_terminal_generation(
+        self, original_receipt_id: str, changed_hash: str, intake_id: str, request_type: str,
+        superseded_request_key: str, derive_request_key: Callable[[int], str],
+    ) -> tuple[int, str]:
+        """(receipt, changed hash) -> generation -> request key in ONE transaction (plan §3.4,
+        G2/T2): reserve-or-resume the generation, bind its key and write the PENDING ledger
+        entry together, so no crash can separate a generation from the change that owns it.
+        An unsettled earlier change of the same receipt blocks a different one."""
+
+        with self._transaction(immediate=True) as connection:
+            other = connection.execute(
+                "SELECT changed_user_snapshot_hash FROM terminal_change_ledger WHERE original_receipt_id = ? "
+                "AND state = 'PENDING' AND changed_user_snapshot_hash <> ?",
+                (original_receipt_id, changed_hash),
+            ).fetchone()
+            if other is not None:
+                raise ValueError("an unsettled earlier change owns the pending generation")
+            number = self._reserve_generation_tx(connection, intake_id, request_type, superseded_request_key)
+            key = derive_request_key(number)
+            self._bind_generation_tx(connection, intake_id, request_type, number, key)
+            existing = connection.execute(
+                "SELECT created_generation, created_request_key FROM terminal_change_ledger "
+                "WHERE original_receipt_id = ? AND changed_user_snapshot_hash = ?",
+                (original_receipt_id, changed_hash),
+            ).fetchone()
+            if existing is None:
+                connection.execute(
+                    "INSERT INTO terminal_change_ledger(original_receipt_id, changed_user_snapshot_hash, "
+                    "created_generation, created_request_key, state, created_at) VALUES (?, ?, ?, ?, 'PENDING', ?)",
+                    (original_receipt_id, changed_hash, number, key, _now()),
+                )
+            elif (existing["created_generation"], existing["created_request_key"]) != (number, key):
+                raise ValueError("terminal change ledger entry is immutable")
+            return number, key
 
     def latest_request_generation(self, intake_id: str, request_type: str) -> dict[str, Any] | None:
         with self._transaction() as connection:

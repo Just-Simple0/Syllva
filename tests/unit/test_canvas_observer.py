@@ -235,7 +235,7 @@ def test_two_canvas_courses_for_one_course_key_are_ineligible(tmp_path) -> None:
     h = Harness(tmp_path)
     try:
         assert h.run().status == "COMPLETE"
-        h.observer._course_map[99999] = KEY
+        h.observer._map_source[99999] = KEY
         result = h.run()
         assert (result.status, result.reason) == ("INELIGIBLE", "MANY_TO_ONE_MAPPING")
         assert not h.state.recording_calendar_complete(KEY)
@@ -370,7 +370,8 @@ def test_a_moved_mapping_drops_the_old_projection_and_reopens_only_after_a_compl
     h = Harness(tmp_path)
     try:
         assert h.run().status == "COMPLETE"
-        h.observer._course_map = {99999: KEY}
+        h.observer._map_source.clear()
+        h.observer._map_source[99999] = KEY
         result = h.observer.observe_course(99999)
         assert result.status == "COMPLETE"
         assert h.state.recording_calendar_course(KEY)["canvas_course_id"] == 99999
@@ -388,5 +389,40 @@ def test_the_live_profile_provider_is_read_on_every_check(tmp_path) -> None:
         assert not h.observer.profile_matches()
         current["origin"] = None
         assert not h.observer.profile_matches()
+    finally:
+        h.close()
+
+
+def test_projection_never_mixes_observations_of_another_origin(tmp_path) -> None:
+    h = Harness(tmp_path)
+    try:
+        other = "https://other.example.edu"
+        h.state.record_canvas_observation(
+            origin=other, canvas_course_id=COURSE_ID, resource_kind="module_item", resource_id="9999",
+            observation_revision=1, title="2026-10-01", module_name="9주차", module_week=9,
+            item_type="ExternalTool", collection_complete=True)
+        assert h.run().status == "COMPLETE"
+        weeks = [r.week for r in h.state.list_recording_calendar_current(KEY)]
+        assert weeks == [1, 2, 3, 4]
+    finally:
+        h.close()
+
+
+def test_the_proof_follows_origin_principal_and_mapping(tmp_path) -> None:
+    h = Harness(tmp_path)
+    try:
+        principal = {"value": "user-1"}
+        h.observer._principal_provider = lambda: principal["value"]
+        first = h.observer.current_proof(KEY)
+        assert first and h.run().status == "COMPLETE"
+        assert h.state.get_classification_cursor(f"calendar_proof:{KEY}") == first
+        principal["value"] = "user-2"
+        assert h.observer.current_proof(KEY) not in (None, first)
+        principal["value"] = None
+        assert h.observer.current_proof(KEY) is None
+        h.observer._principal_provider = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+        assert h.observer.current_proof(KEY) is None
+        h.observer._map_source[99999] = KEY                   # the live map is re-read: now ambiguous
+        assert h.observer.current_proof(KEY) is None
     finally:
         h.close()

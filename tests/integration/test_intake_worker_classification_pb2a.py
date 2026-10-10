@@ -46,6 +46,7 @@ def _complete_calendar(state) -> None:
     state.replace_recording_calendar_current(
         COURSE, 67535, build_calendar(COURSE, entries, semester=SEMESTER, collection_complete=True),
         collection_complete=True)
+    state.set_classification_cursor(f"calendar_proof:{COURSE}", "test-proof")
 
 
 def _auto_plans(state):

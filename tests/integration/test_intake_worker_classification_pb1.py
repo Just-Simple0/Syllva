@@ -22,6 +22,19 @@ SUGGESTED = ("Suggested Course", "Suggested Kind", "Suggested Date", "Suggested 
 USER_FIELDS = ("Course", "Kind", "Actual Date", "Session", "Session Mode", "Session No", "Material Role")
 
 
+class _TrustedCanvas:
+    """Stands in for the Canvas observer: the active connection matches the verified registry."""
+
+    def profile_matches(self) -> bool:
+        return True
+
+    def current_proof(self, _course_key: str) -> str:
+        return "test-proof"
+
+    def observe_course(self, _course_id: int) -> None:
+        return None
+
+
 def _enable(system, *, profile: str | None = "legacy5-cls"):
     system["config"].intake.classification.enabled = True
     registry = system["config"].google_drive.semester_registries[0]
@@ -29,7 +42,9 @@ def _enable(system, *, profile: str | None = "legacy5-cls"):
     # A recorded calendar is only used for a verified Canvas mapping (P-B3 A5).
     system["config"].intake.classification.canvas_course_map = (
         system["config"].intake.classification.canvas_course_map or {67535: COURSE_KEYS[1]})
-    return _rewire(system, profile) if profile else system["worker"]
+    worker = _rewire(system, profile) if profile else system["worker"]
+    worker.canvas_observer = _TrustedCanvas()    # live proof of the verified Canvas profile (P-B3 A5)
+    return worker
 
 
 def test_transcript_upload_is_classified_locally_and_suggested_on_the_draft(tmp_path: Path) -> None:

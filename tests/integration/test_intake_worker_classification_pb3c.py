@@ -445,3 +445,83 @@ def test_an_assign_course_does_not_skip_the_effect_verification(tmp_path: Path) 
         with pytest.raises(IntakeReconcileRequired):
             worker.claim_request(new["Request Key"])
         assert _details_pages(system) == []
+
+
+# --- review round 2 -----------------------------------------------------------------------
+
+def test_a_relation_only_change_is_caught_before_the_snapshot_shortcut(tmp_path: Path) -> None:
+    with _closed_request(tmp_path) as (system, worker):
+        events = []
+        original = system["state"].record_intake_stage_event
+        system["state"].record_intake_stage_event = lambda *a, **k: (events.append(k.get("operation_key") or a), original(*a, **k))[1]
+        _closed_page(system)["Intake Items"] = ["some-other-intake-page"]      # nothing else changed
+        worker.run_once()
+        assert len(_pages(system)) == 1 and system["state"].terminal_change_counts() == {}
+        assert any(e == _closed_page(system)["Request Key"] for e in events)    # recorded as RECONCILE
+
+
+def test_generation_key_and_ledger_commit_together_or_not_at_all(tmp_path: Path) -> None:
+    with _closed_request(tmp_path) as (system, _worker):
+        state, item = system["state"], _item(system)
+        receipt = next(r for r in state.list_request_receipts() if r.state == "AutoResolved")
+        state.ensure_legacy_request_generation(item.intake_id, "ASSIGN_COURSE", receipt.request_key)
+        with pytest.raises(RuntimeError):
+            state.begin_terminal_generation(
+                receipt.receipt_id, "h1", item.intake_id, "ASSIGN_COURSE", receipt.request_key,
+                lambda _n: (_ for _ in ()).throw(RuntimeError("crash after the reservation")))
+        assert state.latest_request_generation(item.intake_id, "ASSIGN_COURSE")["request_key"] == receipt.request_key
+        assert state.terminal_change_counts() == {}
+        number, key = state.begin_terminal_generation(
+            receipt.receipt_id, "h1", item.intake_id, "ASSIGN_COURSE", receipt.request_key, lambda n: f"key-{n}")
+        assert state.begin_terminal_generation(
+            receipt.receipt_id, "h1", item.intake_id, "ASSIGN_COURSE", receipt.request_key, lambda n: f"key-{n}") == (number, key)
+        with pytest.raises(ValueError):                      # another change while h1 is unsettled
+            state.begin_terminal_generation(
+                receipt.receipt_id, "h2", item.intake_id, "ASSIGN_COURSE", receipt.request_key, lambda n: f"key-{n}")
+
+
+def test_a_move_in_flight_or_a_moved_unfinished_source_is_not_adopted(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    from uls.intake.requests import RequestInput
+    from uls.intake.worker import IntakeReconcileRequired
+
+    with _closed_request(tmp_path) as (system, worker):
+        item = _item(system)
+        workspace = worker._workspace_for_item(item)
+        request = RequestInput("k", "FILE_DETAILS", intake_ids=(item.intake_id,), course_key=item.inferred_course_key,
+                               kind="TRANSCRIPT", actual_date="2026-09-10", session_mode="NEW")
+        system["state"].update_intake_item(item.intake_id, status="MOVING")
+        with pytest.raises(IntakeReconcileRequired):
+            worker._handover_gate(_item(system), request, workspace)
+        system["state"].update_intake_item(item.intake_id, status="REGISTERED")
+        drive, source_id = system["drive"], system["source_id"]
+        # a REGISTERED item's source must still sit in its original parent; here it was moved
+        with pytest.raises(IntakeReconcileRequired):
+            worker._handover_gate(_item(system), request, workspace)
+        assert drive.files[source_id] is not None and replace
+
+
+def test_an_adopted_effect_that_changed_after_the_claim_is_not_taken_over(tmp_path: Path) -> None:
+    from tests.integration.test_intake_worker_classification_pb2a import MATCHED_NAME, RAW
+    from tests.integration.test_intake_worker_preview import _system
+
+    with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        _interrupted_auto_run(system, worker)
+        notion, state = system["notion"], system["state"]
+        assign = _assign_request(notion)
+        assign.update({"Course": [AUTO_COURSE_PAGE], "Submitted": True})
+        worker.claim_request(assign["Request Key"])
+        details = _details_pages(system)[0]
+        details.update({"Course": [AUTO_COURSE_PAGE], "Kind": "TRANSCRIPT", "Actual Date": {"start": "2026-09-10", "end": None},
+                        "Session Mode": "NEW", "Submitted": True})
+        worker.claim_request(details["Request Key"])
+        receipt = state.get_request_receipt(details["Request Key"])
+        (session,) = notion.data_sources["synthetic-sessions"]
+        session["Date"] = "2026-09-17"                          # changed between the claim and the job
+        worker.run_once()
+        held = state.get_entity_reservation(intake_id=_item(system).intake_id, entity_kind="SESSION")
+        assert held.plan_revision != receipt.plan_revision      # ownership was not changed
+        assert len(notion.data_sources["synthetic-sessions"]) == 1 and session["Date"] == "2026-09-17"

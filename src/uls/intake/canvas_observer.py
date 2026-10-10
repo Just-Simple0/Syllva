@@ -154,22 +154,50 @@ class CanvasObserver:
         *,
         origin: str,
         verified_origin: str,
-        course_map: Mapping[int, str],
+        course_map: Mapping[int, str] | Callable[[], Mapping[int, str]],
         reader_factory: Callable[[], AbstractContextManager[CanvasReader | None]],
         semester_for: Callable[[str], SemesterRange | None],
         monotonic: Callable[[], float] = time.monotonic,
         max_run_seconds: float = MAX_RUN_SECONDS,
         profile_provider: Callable[[], str | None] | None = None,
+        principal_provider: Callable[[], str | None] | None = None,
     ) -> None:
         self._state = state
         self._profile_provider = profile_provider
+        self._principal_provider = principal_provider
         self._origin = origin
         self._verified_origin = verified_origin
-        self._course_map = {int(k): v for k, v in course_map.items()}
+        self._map_source = course_map
         self._factory = reader_factory
         self._semester_for = semester_for
         self._monotonic = monotonic
         self._max_run_seconds = max_run_seconds
+
+    @property
+    def _course_map(self) -> dict[int, str]:
+        """The *current* verified mapping (re-read on every use, never a copy)."""
+
+        source = self._map_source() if callable(self._map_source) else self._map_source
+        return {int(k): v for k, v in source.items()}
+
+    def current_proof(self, course_key: str) -> str | None:
+        """Evidence that the active Canvas connection (origin and, when available, principal)
+        is the one the course map was verified against for this course key (plan §2.3).  None
+        means no proof: a calendar is then not used."""
+
+        mapping = self._course_map
+        ids = sorted(cid for cid, key in mapping.items() if key == course_key)
+        if len(ids) != 1 or not self.profile_matches():
+            return None
+        try:
+            principal = self._principal_provider() if self._principal_provider is not None else ""
+        except Exception:  # noqa: BLE001 - an unreadable principal is no proof
+            return None
+        if principal is None:
+            return None
+        return hashlib.sha256(json.dumps(
+            ["canvas-calendar-proof.v1", self._origin, principal, ids[0], course_key],
+            ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
     def profile_matches(self) -> bool:
         """The *current* active Canvas connection origin (read on every call when a provider
@@ -180,19 +208,20 @@ class CanvasObserver:
             if not current:
                 return False
             return validate_canvas_origin(current) == validate_canvas_origin(self._verified_origin)
-        except CanvasCheckError:
+        except Exception:  # noqa: BLE001 - an unreadable profile is no evidence (fail closed)
             return False
 
     # --- gates -------------------------------------------------------------------
 
     def _gate(self, canvas_course_id: int) -> ObservationResult | None:
-        course_key = self._course_map.get(int(canvas_course_id))
+        mapping = self._course_map
+        course_key = mapping.get(int(canvas_course_id))
         if course_key is None:
             return ObservationResult("INELIGIBLE", "COURSE_NOT_MAPPED", "", int(canvas_course_id))
         if not self.profile_matches():
             self._close(course_key)
             return ObservationResult("INELIGIBLE", "PROFILE_MISMATCH", course_key, int(canvas_course_id))
-        if sum(1 for key in self._course_map.values() if key == course_key) != 1:
+        if sum(1 for key in mapping.values() if key == course_key) != 1:
             self._close(course_key)
             return ObservationResult("INELIGIBLE", "MANY_TO_ONE_MAPPING", course_key, int(canvas_course_id))
         return None
@@ -215,7 +244,10 @@ class CanvasObserver:
 
     def observe_course(self, canvas_course_id: int) -> ObservationResult:
         canvas_course_id = int(canvas_course_id)
-        blocked = self._gate(canvas_course_id)
+        try:
+            blocked = self._gate(canvas_course_id)
+        except Exception:  # noqa: BLE001 - fixed failure; nothing was read
+            return ObservationResult("INELIGIBLE", "GATE_FAILED", "", canvas_course_id)
         if blocked is not None:
             return blocked
         course_key = self._course_map[canvas_course_id]
@@ -331,6 +363,7 @@ class CanvasObserver:
 
     def _record(self, course_key: str, course_id: int, collected: dict[str, list[dict[str, Any]]]) -> ObservationResult:
         observed = classified = 0
+        self._state.deactivate_foreign_origin_observations(course_id, self._origin)
         for kind, rows in collected.items():
             for row in rows:
                 revision = self._revision(kind, row, course_id)
@@ -381,7 +414,7 @@ class CanvasObserver:
 
     def _project_calendar(self, course_key: str, course_id: int) -> str:
         entries: list[RecordingEntry] = []
-        for obs in self._state.list_active_canvas_observations(course_id, CANVAS_MODULE_ITEM):
+        for obs in self._state.list_active_canvas_observations(course_id, CANVAS_MODULE_ITEM, self._origin):
             if not is_recording_observation(obs["item_type"], obs["title"], obs["resource_kind"]):
                 continue
             week = obs["module_week"]
@@ -391,8 +424,13 @@ class CanvasObserver:
                 course_id, str(obs["resource_id"]), int(obs["observation_revision"]), week,
                 date.fromisoformat(str(obs["title"]).strip()),
             ))
+        # The eligibility is proven again immediately before the projection is made.
+        proof = self.current_proof(course_key)
+        if proof is None or self._gate(course_id) is not None:
+            return "ELIGIBILITY_LOST"
         calendar = build_calendar(
             course_key, entries, semester=self._semester_for(course_key), collection_complete=True)
         self._state.replace_recording_calendar_current(
             course_key, course_id, calendar, collection_complete=True)
+        self._state.set_classification_cursor(f"calendar_proof:{course_key}", proof)
         return ""

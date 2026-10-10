@@ -505,16 +505,18 @@ class IntakeWorker:
         ]
         return plans, reservations
 
-    def _verify_organized_source(self, item: IntakeItem) -> None:
-        """The moved source is still exactly where the automatic run left it, private and unchanged."""
+    def _verify_organized_source(self, item: IntakeItem, *, moved: bool = True) -> None:
+        """The source is still exactly where the automatic run left it (moved: its canonical
+        destination; otherwise its original parent), private and unchanged."""
 
         try:
             metadata = self.drive.read_metadata(item.provider_file_id)
             canonical = json.loads(item.canonical_source_json or "{}")
             if (
                 metadata.file_id != item.provider_file_id or metadata.owned_by_me is not True
-                or canonical.get("file_id") != item.provider_file_id
-                or canonical.get("parent_id") != metadata.parent_id
+                or (moved and (canonical.get("file_id") != item.provider_file_id
+                               or canonical.get("parent_id") != metadata.parent_id))
+                or (not moved and metadata.parent_id != item.observed_parent_id)
                 or _metadata_source_hash(metadata) != item.source_hash
             ):
                 raise IntakeReconcileRequired("the organized source no longer matches the automatic result")
@@ -541,6 +543,8 @@ class IntakeWorker:
         advanced = item.status in (IntakeStatus.ORGANIZED.value, IntakeStatus.REGISTERED.value, IntakeStatus.MOVING.value)
         if not plans or not (reservations or advanced):
             return None
+        if item.status == IntakeStatus.MOVING.value:
+            raise IntakeReconcileRequired("an automatic move is in flight; it cannot be adopted")
         latest = plans[-1]
         target = json.loads(latest["target_snapshot_json"])
         if request.course_key != target.get("course_key"):
@@ -600,11 +604,38 @@ class IntakeWorker:
             raise IntakeReconcileRequired("the automatic Session effect cannot be proven")
         if complete:
             self._verify_organized_source(item)
+        elif reservations:
+            self._verify_organized_source(item, moved=False)
         if is_assign:
             return _Handover("ASSIGN_MATCH", latest["plan_revision"], adopted)
         return _Handover("COMPLETE" if complete else "CONTINUE", latest["plan_revision"], adopted)
 
-    def _adopted_reservation(self, item: IntakeItem, plan: IntakePlan, entity_kind: str) -> EntityReservation | None:
+    def _reverify_adopted(
+        self, item: IntakeItem, plan: IntakePlan, held: EntityReservation, effect: Mapping[str, Any], course_id: str
+    ) -> None:
+        """The adopted effect is read back again immediately before the ownership changes: the
+        claim-time verification may be stale by the time the human job runs."""
+
+        if self.notion is None:
+            raise SourceUnavailableError("Notion worker port is not configured")
+        logical = "sessions" if held.entity_kind == "SESSION" else "materials"
+        rows = [row for row in self.notion.list_records(logical) if row.get("ID") == held.entity_app_id]
+        target = json.loads(plan.target_snapshot_json) if isinstance(plan.target_snapshot_json, str) else dict(plan.target_snapshot_json)
+        if len(rows) != 1 or _page_id(rows[0]) != effect.get("page_id") or _relation_ids(rows[0].get("Course")) != [course_id]:
+            raise IntakeReconcileRequired(f"the adopted {held.entity_kind} changed after the hand-over was verified")
+        if held.entity_kind == "SESSION":
+            binding = self.state.session_source_binding_for(target.get("course_key") or "", held.entity_app_id)
+            if rows[0].get("Date") != target.get("actual_date") or (binding is not None and (
+                binding.get("reservation_id") != held.reservation_id
+                or binding.get("provider_file_id") != item.provider_file_id
+            )):
+                raise IntakeReconcileRequired("the adopted Session changed after the hand-over was verified")
+        elif target.get("material_type_initial") and rows[0].get("Type") not in (None, target.get("material_type_initial")):
+            raise IntakeReconcileRequired("the adopted Material changed after the hand-over was verified")
+
+    def _adopted_reservation(
+        self, item: IntakeItem, plan: IntakePlan, entity_kind: str, course_id: str,
+    ) -> EntityReservation | None:
         """The earlier plan's live reservation when a recorded hand-over names it (identity kept)."""
 
         held = self.state.get_entity_reservation(intake_id=item.intake_id, entity_kind=entity_kind)
@@ -615,6 +646,7 @@ class IntakeWorker:
                 continue
             effect = json.loads(record["adopted_effects_json"]).get(entity_kind)
             if effect and effect.get("reservation_id") == held.reservation_id:
+                self._reverify_adopted(item, plan, held, effect, course_id)
                 self.state.adopt_entity_reservation(
                     held.reservation_id, from_plan_revision=held.plan_revision, to_plan_revision=plan.plan_revision)
                 adopted: EntityReservation | None = self.state.get_entity_reservation(held.reservation_id)
@@ -736,11 +768,11 @@ class IntakeWorker:
         page = self.notion.read_record("input_request", receipt.provider_page_id)
         if page is None:
             raise SourceUnavailableError("AutoResolved request page is unavailable")
-        if self._auto_request_snapshot(page, receipt, item.intake_id) == intent.terminal_snapshot_hash:
-            return
         if not self._terminal_integrity_ok(page, receipt, item.intake_id):
             self.state.record_intake_stage_event("terminal_reconcile_required", intake_id=item.intake_id,
                                                  operation_key=receipt.request_key)
+            return
+        if self._auto_request_snapshot(page, receipt, item.intake_id) == intent.terminal_snapshot_hash:
             return
         changed = self._terminal_user_change(page, workspace, receipt, item.intake_id)
         if changed is None:
@@ -772,12 +804,23 @@ class IntakeWorker:
                 receipt.receipt_id, changed, created_generation=None, created_request_key=None, state="CHANGED_AGAIN")
             return
         self._supersede_live_auto_plans(item, "terminal request changed by a human")
-        number, generation = self._prepare_superseding_generation(
-            item, workspace, receipt.request_type, superseded_key, None)
-        # (receipt, changed hash) -> generation -> key is durable before the provider create.
-        self.state.record_terminal_change(
-            receipt.receipt_id, changed, created_generation=number,
-            created_request_key=generation.request_key, state="PENDING")
+        config_fingerprint = self._semester_config_fingerprint(workspace.semester)
+
+        def derive(number: int) -> str:
+            return str(make_request_generation(
+                item=item, request_type=receipt.request_type or "", provider=self.provider,
+                provider_account_binding_id=self.provider_account_binding_id,
+                config_fingerprint=config_fingerprint, target_snapshot=None,
+                superseded_request_key=superseded_key, request_generation=number,
+            ).request_key)
+
+        try:
+            # (receipt, changed hash) -> generation -> key is ONE transaction, before any create.
+            self.state.ensure_legacy_request_generation(item.intake_id, receipt.request_type or "", superseded_key)
+            self.state.begin_terminal_generation(
+                receipt.receipt_id, changed, item.intake_id, receipt.request_type or "", superseded_key, derive)
+        except ValueError as exc:
+            raise IntakeReconcileRequired(f"the terminal change cannot be bound to a generation: {exc}") from exc
         self._settle_terminal_change(item, workspace, receipt, changed, superseded_key, layout_context)
 
     def _settle_terminal_change(
@@ -1790,10 +1833,11 @@ class IntakeWorker:
         return None
 
     def _calendar_eligible(self, course_key: str) -> bool:
-        """A recorded calendar is used only while its Canvas course is still the verified,
-        unique mapping of this course key and the *current* Canvas profile still matches the
-        registry origin (plan §2.3; P-B3 A4/A5).  A calendar found ineligible is closed in
-        the state as well, so a restored mapping needs a fresh complete observation."""
+        """A recorded calendar is used only with a *current* proof (plan §2.3; P-B3 A4/A5): its
+        Canvas course is still the verified, unique mapping of this course key and the
+        active Canvas connection is the one the projection was made under.  With no proof
+        provider the calendar is not used.  An ineligible calendar is closed in the state as
+        well, so a restored mapping or profile needs a fresh complete observation."""
 
         course = self.state.recording_calendar_course(course_key)
         if course is None:
@@ -1801,13 +1845,14 @@ class IntakeWorker:
         classification = getattr(self.config.intake, "classification", None)
         mapping = getattr(classification, "canvas_course_map", {}) or {}
         observer = getattr(self, "canvas_observer", None)
-        eligible = (
-            mapping.get(int(course["canvas_course_id"])) == course_key
+        eligible = False
+        if (
+            observer is not None
+            and mapping.get(int(course["canvas_course_id"])) == course_key
             and sum(1 for key in mapping.values() if key == course_key) == 1
-            # Observation switched on without an observer: no live profile evidence -> closed.
-            and not (observer is None and getattr(classification, "canvas_observation_enabled", False))
-            and (observer is None or bool(observer.profile_matches()))
-        )
+        ):
+            proof = observer.current_proof(course_key)
+            eligible = bool(proof) and proof == self.state.get_classification_cursor(f"calendar_proof:{course_key}")
         if not eligible and course["collection_complete"]:
             self.state.close_recording_calendar(course_key, int(course["canvas_course_id"]))
         return eligible
@@ -3885,7 +3930,7 @@ class IntakeWorker:
     ) -> tuple[EntityReservation, dict[str, Any] | None]:
         rows = self._inventory("sessions", workspace, course_id)
         target_page: dict[str, Any] | None = None
-        adopted = self._adopted_reservation(item, plan, "SESSION")
+        adopted = self._adopted_reservation(item, plan, "SESSION", course_id)
         if adopted is not None:
             page = next((row for row in rows if row.get("ID") == adopted.entity_app_id), None)
             return adopted, (page if request.session_mode == SessionMode.EXISTING.value else None)
@@ -3938,7 +3983,7 @@ class IntakeWorker:
         course_id: str,
     ) -> EntityReservation:
         rows = self._inventory("materials", workspace, course_id)
-        adopted = self._adopted_reservation(item, plan, "MATERIAL")
+        adopted = self._adopted_reservation(item, plan, "MATERIAL", course_id)
         if adopted is not None:
             return adopted
         held = self.state.get_entity_reservation(intake_id=item.intake_id, entity_kind="MATERIAL")

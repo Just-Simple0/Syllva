@@ -39,6 +39,9 @@ class _Observer:
     def profile_matches(self) -> bool:
         return self.matches
 
+    def current_proof(self, _course_key: str) -> str | None:
+        return "test-proof" if self.matches else None
+
 
 def test_observation_is_off_by_default_even_with_an_observer(tmp_path: Path) -> None:
     with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
@@ -163,10 +166,11 @@ def test_an_ineligible_calendar_is_closed_in_the_state_so_a_restored_mapping_nee
         assert not system["state"].recording_calendar_complete(COURSE)         # no stale proof is revived
 
 
-def test_observation_enabled_without_an_observer_has_no_live_profile_evidence(tmp_path: Path) -> None:
+def test_a_recorded_calendar_without_any_live_proof_provider_is_not_used(tmp_path: Path) -> None:
     with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
         worker = _enable(system)
         _complete_calendar(system["state"])
-        system["config"].intake.classification.canvas_observation_enabled = True
+        worker.canvas_observer = None
         worker.run_once()
         assert _item(system).calendar_match == "AMBIGUOUS" and _auto_plans(system["state"]) == []
+        assert not system["state"].recording_calendar_complete(COURSE)
