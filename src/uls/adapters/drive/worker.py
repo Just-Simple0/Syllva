@@ -148,6 +148,21 @@ class DriveWorkerPort(Protocol):
     def move_file(self, file_id: str, original_parent_id: str, target_parent_id: str) -> DriveMetadata: ...
 
 
+class _BoundedSink(io.BytesIO):
+    """A download buffer that refuses the write taking it past ``limit``, so an
+    oversized single response never lands in memory beyond the bound (P-B1 r3 O1)."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__()
+        self._limit = int(limit)
+
+    def write(self, data: Any, /) -> int:
+        view = memoryview(data)
+        if self.tell() + len(view) > self._limit:
+            raise SourcePartialError("Drive source exceeds byte limit")
+        return super().write(view)
+
+
 class GoogleDriveWorkerAdapter:
     """Authenticated provider-specific worker adapter.
 
@@ -259,7 +274,7 @@ class GoogleDriveWorkerAdapter:
         try:
             from googleapiclient.http import MediaIoBaseDownload  # type: ignore[import-untyped]
 
-            output = io.BytesIO()
+            output = _BoundedSink(limit)
             downloader = MediaIoBaseDownload(
                 output,
                 self._files.get_media(fileId=file_id, supportsAllDrives=True),
