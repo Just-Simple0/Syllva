@@ -179,6 +179,28 @@ ExecRequest = RequestInput | ClassificationExecutionContext
 ExecReceipt = RequestReceipt | ClassificationExecutionContext
 
 
+def _parse_session_day(value: Any) -> str | None:
+    """A single ISO day from a Notion Date value; None when it is missing, malformed or a range."""
+
+    if isinstance(value, Mapping):
+        start = _parse_session_day(value.get("start"))
+        end = value.get("end")
+        if end not in (None, "") and _parse_session_day(end) != start:
+            return None  # an invalid end or a multi-day range proves no single date
+        return start
+    if not value:
+        return None
+    text = str(value).strip()
+    try:
+        if _ISO_DATE_ONLY.fullmatch(text):
+            return date.fromisoformat(text).isoformat()
+        if _ISO_DATETIME.fullmatch(text):
+            return datetime.fromisoformat(text).date().isoformat()
+    except ValueError:
+        return None
+    return None  # anything outside the two ISO shapes proves nothing
+
+
 class _PreflightStop(Exception):  # internal control flow, never leaves the preflight
     """Unwinds the source checks when an item-level blocker already decided the preflight."""
 
@@ -1292,11 +1314,11 @@ class IntakeWorker:
         pending_intents = len(self.state.list_auto_resolve_intents()) if hasattr(self.state, "list_auto_resolve_intents") else 0
         planned = len(self.state.list_intake_plans(plan_authority="AUTO_CLASSIFICATION", status="PLANNED")) \
             if hasattr(self.state, "list_intake_plans") else 0
-        auto_jobs = [job for job in self.state.list_jobs(limit=1000) if job.plan_authority == "AUTO_CLASSIFICATION"]
+        job_counts = self.state.auto_job_counts()
         return {
             "planned_auto_plans": planned,
-            "auto_jobs_pending": sum(1 for job in auto_jobs if str(job.status) == "PENDING" and job.voided_at is None),
-            "auto_jobs_failed": sum(1 for job in auto_jobs if str(job.status) in {"FAILED", "NEEDS_REVIEW", "PARTIAL"}),
+            "auto_jobs_pending": job_counts["pending"],
+            "auto_jobs_failed": job_counts["failed"],
             "status": status,
             "reason": reason,
             "auto_enabled": self._auto_enabled(),
@@ -1629,7 +1651,8 @@ class IntakeWorker:
         return mapped is None or mapped != record.course_key
 
     def _session_binding(
-        self, item: IntakeItem, course_key: str | None, recorded: date | None, workspace: ResolvedSemesterWorkspace
+        self, item: IntakeItem, course_key: str | None, recorded: date | None, workspace: ResolvedSemesterWorkspace,
+        *, ignore_ids: frozenset[str] = frozenset(),
     ) -> tuple[str | None, str | None, str | None, str | None]:
         """Plan §2.3/§3.4: bind a matched transcript to the Notion Sessions inventory of its
         course and date.  No Session → NEW; exactly one *proven free* Session → EXISTING with
@@ -1655,33 +1678,14 @@ class IntakeWorker:
             return None, None, None, BLOCK_SESSION_UNKNOWN
         wanted = recorded.isoformat()
 
-        def parse_day(value: Any) -> str | None:
-            if not value:
-                return None
-            text = str(value).strip()
-            try:
-                if _ISO_DATE_ONLY.fullmatch(text):
-                    return date.fromisoformat(text).isoformat()
-                if _ISO_DATETIME.fullmatch(text):
-                    return datetime.fromisoformat(text).date().isoformat()
-            except ValueError:
-                return None
-            return None  # anything outside the two ISO shapes proves nothing (r9 #4, r10 R3)
-
         def day(row: Mapping[str, Any]) -> str | None:
-            value = row.get("Date")
-            if isinstance(value, Mapping):
-                start = parse_day(value.get("start"))
-                end = value.get("end")
-                if end not in (None, "") and parse_day(end) != start:
-                    return None  # an invalid end or a multi-day range proves no single date (r14 R2, r15 H1)
-                return start
-            return parse_day(value)
+            return _parse_session_day(row.get("Date"))
 
         if any(day(row) is None for row in rows):
             return None, None, None, BLOCK_SESSION_UNKNOWN  # a Session whose date cannot be read may be the target
 
-        same = sorted((row for row in rows if day(row) == wanted), key=lambda row: str(row.get("ID")))
+        same = sorted((row for row in rows if day(row) == wanted and row.get("ID") not in ignore_ids),
+                      key=lambda row: str(row.get("ID")))
         evidence = []
         for row in same:
             entity_id = row.get("ID")
@@ -1963,10 +1967,6 @@ class IntakeWorker:
             if executing else (IntakeStatus.NEEDS_INPUT.value, IntakeStatus.RECONCILE_REQUIRED.value)
         ):
             reason = "ITEM_STATUS"
-        # Once the move has started the parent legitimately changes (own effect, plan §3.4
-        # cross-authority rules); the move code validates that transition itself.
-        past_move = executing and current.status in (
-            IntakeStatus.REGISTERED.value, IntakeStatus.MOVING.value, IntakeStatus.ORGANIZED.value)
         try:
             if reason is not None:
                 raise _PreflightStop
@@ -1981,10 +1981,12 @@ class IntakeWorker:
                     decision = {}
                 if record.provider_file_id != item.provider_file_id or current.provider_file_id != record.provider_file_id:
                     reason = "SOURCE_IDENTITY"
-                elif not past_move and (
+                elif (
                     metadata.parent_id != current.observed_parent_id
                     or metadata.parent_id != decision.get("source_parent")
-                ):
+                ) and not (executing and self._own_move_proven(current, plan, metadata)):
+                    # A different parent is only acceptable as the plan's own, read-back move
+                    # (same plan revision, file ID and hash, expected destination) — never by status alone.
                     reason = "SOURCE_PARENT"
                 elif metadata.name != decision.get("source_name") or metadata.mime_type != decision.get("source_mime"):
                     reason = "SOURCE_METADATA"
@@ -2054,6 +2056,15 @@ class IntakeWorker:
             byte_md5=record.byte_md5, size=self._declared_size(item),
         )
         return "DUPLICATE_CONTENT" if found["proven"] or found["unproven"] else None
+
+    def _own_move_proven(self, item: IntakeItem, plan: IntakePlan, metadata: DriveMetadata) -> bool:
+        target = metadata.parent_id
+        if target is None:
+            return False
+        prior = self.state.get_provider_write_attempt(self._operation_key(
+            INTAKE_MOVE_OPERATION, self.provider, item.provider_file_id, item.original_parent_id, target,
+            item.source_hash, plan.plan_revision))
+        return prior is not None and prior.response_state == "READBACK_OK" and prior.target_id == item.provider_file_id
 
     def _eligibility_mismatch(
         self, item: IntakeItem, record: ClassificationRecord, workspace: ResolvedSemesterWorkspace,
@@ -2226,44 +2237,82 @@ class IntakeWorker:
 
     def _session_point_of_use(self, context: ClassificationExecutionContext, workspace: ResolvedSemesterWorkspace) -> None:
         """E9: the Sessions inventory is re-read immediately before a Session is reserved,
-        created or given a transcript pointer.  Our own created Session is an own effect."""
+        created or given a transcript pointer.  Only OUR Session — reserved by this plan, created
+        by a READBACK_OK write, with the recorded ID/Course/Date — is an own effect; the rest of
+        the day's inventory must still equal the record (r1 R3)."""
 
         item = self._require_item(context.intake_id)
-        record = self.state.get_classification_record(context.record_id)
-        reservation = self.state.get_entity_reservation(intake_id=item.intake_id, entity_kind="SESSION")
-        if record is None:
-            raise IntakeReconcileRequired("AUTO record is missing")
-        recorded = None if context.actual_date is None else date.fromisoformat(context.actual_date)
-        mode, session_id, digest, block = self._session_binding(item, context.course_key, recorded, workspace)
-        if reservation is not None and context.session_mode == SessionMode.NEW.value:
-            # Resuming our own creation: the reserved Session may already exist.
-            if block is None and (mode, session_id, digest) == (record.session_mode, record.session_id, record.sessions_inventory_hash):
-                return
-            if self._own_session_row_exists(reservation.entity_app_id, context, workspace):
-                return
-        elif block is None and (mode, session_id, digest) == (record.session_mode, record.session_id, record.sessions_inventory_hash):
-            return
         plan = self.state.get_intake_plan(context.plan_revision)
-        if plan is not None:
-            self.state.reconcile_intake_plan(plan.plan_revision, "SESSION_INVENTORY")
+        record = self.state.get_classification_record(context.record_id)
+        if record is None or plan is None:
+            raise IntakeReconcileRequired("AUTO record is missing")
+        reservation = self.state.get_entity_reservation(intake_id=item.intake_id, entity_kind="SESSION")
+        recorded = None if context.actual_date is None else date.fromisoformat(context.actual_date)
+        expected = (record.session_mode, record.session_id, record.sessions_inventory_hash)
+        ok = False
+        if reservation is not None and context.session_mode == SessionMode.NEW.value:
+            if reservation.plan_revision == context.plan_revision:
+                mode, session_id, digest, block = self._session_binding(
+                    item, context.course_key, recorded, workspace, ignore_ids=frozenset({reservation.entity_app_id}))
+                ok = block is None and (mode, session_id, digest) == expected and self._own_session_effect_ok(
+                    item, plan, context, reservation.entity_app_id, workspace)
+        else:
+            mode, session_id, digest, block = self._session_binding(item, context.course_key, recorded, workspace)
+            ok = block is None and (mode, session_id, digest) == expected
+        if ok:
+            return
+        self.state.reconcile_intake_plan(plan.plan_revision, "SESSION_INVENTORY")
         raise IntakeReconcileRequired("the Sessions inventory changed after the decision")
+
+    def _own_session_effect_ok(
+        self, item: IntakeItem, plan: IntakePlan, context: ClassificationExecutionContext, entity_id: str,
+        workspace: ResolvedSemesterWorkspace,
+    ) -> bool:
+        """The reserved Session either does not exist yet, or is exactly the page this plan created."""
+
+        if self.notion is None:
+            return False
+        rows = [row for row in self.notion.list_records("sessions") if row.get("ID") == entity_id]
+        if not rows:
+            return True
+        if len(rows) != 1:
+            return False
+        course_id = self._course_page_map(workspace).get(context.course_key)
+        if _parse_session_day(rows[0].get("Date")) != context.actual_date or course_id is None \
+                or _relation_ids(rows[0].get("Course")) != [course_id]:
+            return False
+        op_key = self._plan_operation_key(INTAKE_SESSION_OPERATION, item, plan, workspace, context, target_id=None)
+        attempt = self.state.get_provider_write_attempt(op_key)
+        return attempt is not None and attempt.response_state == "READBACK_OK"
 
     def _session_pointer_gate(
         self, context: ClassificationExecutionContext, session_page: Mapping[str, Any], derivative_file_id: str
     ) -> None:
-        """E9: an EXISTING Session's transcript pointer is only written while no other file has
-        taken the Session — a foreign pointer or source binding appeared after the decision."""
+        """E9: before the transcript pointer is written the Session must still be exactly the
+        decided one — ID, Course and Date — and, for an EXISTING Session, still untaken
+        (no foreign pointer or source binding)."""
 
-        if context.session_mode != SessionMode.EXISTING.value or self.notion is None:
+        if self.notion is None:
             return
+        reservation = self.state.get_entity_reservation(intake_id=context.intake_id, entity_kind="SESSION")
+        expected_id = context.session_id if context.session_mode == SessionMode.EXISTING.value else (
+            None if reservation is None else reservation.entity_app_id)
         row = self.notion.read_record("sessions", _page_id(session_page) or "")
-        pointer = None if row is None else row.get("Normalized Transcript")
-        binding = self.state.session_source_binding_for(context.course_key, context.session_id or "")
-        foreign_pointer = bool(pointer) and pointer != _drive_link(derivative_file_id)
-        foreign_binding = binding is not None and binding.get("provider_file_id") != context.source_file_id
-        if row is None or foreign_pointer or foreign_binding:
-            self.state.reconcile_intake_plan(context.plan_revision, "SESSION_TAKEN")
-            raise IntakeReconcileRequired("the existing Session was taken by another transcript")
+        workspace = self._workspace_for_item(self._require_item(context.intake_id))
+        course_id = self._course_page_map(workspace).get(context.course_key)
+        bad = (
+            row is None or expected_id is None or row.get("ID") != expected_id
+            or _parse_session_day(row.get("Date")) != context.actual_date
+            or course_id is None or _relation_ids(row.get("Course")) != [course_id]
+        )
+        if not bad and context.session_mode == SessionMode.EXISTING.value and row is not None:
+            pointer = row.get("Normalized Transcript")
+            binding = self.state.session_source_binding_for(context.course_key, context.session_id or "")
+            bad = (bool(pointer) and pointer != _drive_link(derivative_file_id)) or (
+                binding is not None and binding.get("provider_file_id") != context.source_file_id)
+        if bad:
+            self.state.reconcile_intake_plan(context.plan_revision, "SESSION_CHANGED")
+            raise IntakeReconcileRequired("the Session no longer matches the decision")
 
     def _own_session_row_exists(self, entity_id: str, context: ClassificationExecutionContext,
                                 workspace: ResolvedSemesterWorkspace) -> bool:
@@ -2300,6 +2349,9 @@ class IntakeWorker:
         elif not self._layout_context_allows(layout_context, workspace):
             raise IntakeReconcileRequired("item processing layout context is stale or missing")
         context = self._auto_context(item, plan, record, job_id=job.id)
+        if not (job.course_key == record.course_key == workspace.course_key):
+            self.state.reconcile_intake_plan(plan.plan_revision, "COURSE_MISMATCH")
+            raise IntakeReconcileRequired("job, record and workspace disagree on the AUTO course")
         self._assert_job_identity(job, context)
         self._auto_write_gate(context, workspace, entry=True)
         if context.kind == Kind.TRANSCRIPT.value:

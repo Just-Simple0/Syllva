@@ -594,7 +594,7 @@ def test_supersession_voids_jobs_atomically_and_idempotently(tmp_path: Path) -> 
         assert state.get_job(job_key="sha256:" + "1" * 64).voided_at is not None
         state.create_job(job_key="sha256:" + "2" * 64, operation="intake.test", stage="intake",
                          target_entity_id=plan["intake_id"], plan_revision=plan["plan_revision"],
-                         plan_authority="AUTO_CLASSIFICATION")
+                         plan_authority="HUMAN_REQUEST")  # an AUTO plan has one job (unique index)
         assert state.supersede_intake_plan(plan["plan_revision"], "TEST") == 0  # already closed
         assert state.get_job(job_key="sha256:" + "2" * 64).voided_at is not None     # ... but still voided
 

@@ -604,6 +604,10 @@ class SQLiteStateStore(UsageRangeStateMixin, ClassificationStateMixin):
                        "bound_authority", "bound_revision_hash"):
             if column not in job_columns:
                 self._connection.execute(f"ALTER TABLE jobs ADD COLUMN {column} TEXT")
+        self._connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_auto_plan ON jobs(plan_revision) "
+            "WHERE plan_authority = 'AUTO_CLASSIFICATION' AND plan_revision IS NOT NULL"
+        )
         # An earlier P-A draft declared UNIQUE(request_key) on the generations table,
         # which silently dropped multi-intake receipts (P-A review R8); rebuild it.
         unique_on_key = any(
@@ -1562,15 +1566,28 @@ class SQLiteStateStore(UsageRangeStateMixin, ClassificationStateMixin):
             )
 
     def _enqueue_auto_job(
-        self, connection: sqlite3.Connection, intake_id: str, plan_revision: str, spec: Mapping[str, Any]
-    ) -> None:
+        self, connection: sqlite3.Connection, intake_id: str, plan_revision: str, spec: Mapping[str, Any],
+        *, promoting: bool = True,
+    ) -> bool:
+        """Create the plan's single job.  Returns True when a job row was inserted.
+
+        Promotion claims the item for the plan.  A repair never touches an item that moved
+        on (REGISTERED/MOVING/ORGANIZED) and never creates a second job for a plan whose job
+        exists under another key (plan-level uniqueness, r1 R1/R2)."""
+
         job_key, operation = spec["job_key"], _canonical_operation(spec["operation"])
         _validate_job_key(job_key)
         now = _utc_now()
-        connection.execute(
-            "UPDATE intake_items SET plan_revision = ?, status = 'PLANNED', last_seen_at = ? WHERE intake_id = ?",
-            (plan_revision, now, intake_id),
-        )
+        if promoting:
+            connection.execute(
+                "UPDATE intake_items SET plan_revision = ?, status = 'PLANNED', last_seen_at = ? WHERE intake_id = ?",
+                (plan_revision, now, intake_id),
+            )
+        if connection.execute(
+            "SELECT 1 FROM jobs WHERE plan_revision = ? AND plan_authority = 'AUTO_CLASSIFICATION'",
+            (plan_revision,),
+        ).fetchone() is not None:
+            return False
         if connection.execute("SELECT 1 FROM jobs WHERE job_key = ?", (job_key,)).fetchone() is None:
             connection.execute(
                 """
@@ -1583,6 +1600,20 @@ class SQLiteStateStore(UsageRangeStateMixin, ClassificationStateMixin):
                 (_new_id("job_"), job_key, operation, spec.get("stage", "intake"), JobStatus.PENDING.value,
                  spec.get("course_key"), intake_id, now, now, plan_revision),
             )
+            return True
+        return False
+
+    def auto_job_counts(self) -> dict[str, int]:
+        """Filtered COUNTs of AUTO jobs (readiness): pending (not voided) and failed/needs-review."""
+
+        with self._lock:
+            pending = self._connection.execute(
+                "SELECT COUNT(*) FROM jobs WHERE plan_authority = 'AUTO_CLASSIFICATION' AND status = ? "
+                "AND voided_at IS NULL", (JobStatus.PENDING.value,)).fetchone()[0]
+            failed = self._connection.execute(
+                "SELECT COUNT(*) FROM jobs WHERE plan_authority = 'AUTO_CLASSIFICATION' AND status IN (?, ?, ?)",
+                (JobStatus.FAILED.value, "NEEDS_REVIEW", JobStatus.PARTIAL.value)).fetchone()[0]
+        return {"pending": int(pending), "failed": int(failed)}
 
     def ensure_auto_plan_job(self, plan_revision: str, spec: Mapping[str, Any]) -> bool:
         """Repair: a PLANNED AUTO plan without its job gets exactly one (idempotent)."""
@@ -1595,9 +1626,16 @@ class SQLiteStateStore(UsageRangeStateMixin, ClassificationStateMixin):
             ).fetchone()
             if plan is None or plan["plan_authority"] != "AUTO_CLASSIFICATION" or plan["status"] != "PLANNED":
                 return False
-            had = connection.execute("SELECT 1 FROM jobs WHERE job_key = ?", (spec["job_key"],)).fetchone()
-            self._enqueue_auto_job(connection, plan["intake_id"], plan_revision, spec)
-            return had is None
+            created = self._enqueue_auto_job(connection, plan["intake_id"], plan_revision, spec, promoting=False)
+            if created:
+                # Only a still-unstarted item is re-pointed at its plan; a progressed item keeps its state.
+                connection.execute(
+                    "UPDATE intake_items SET plan_revision = ?, status = 'PLANNED' "
+                    "WHERE intake_id = ? AND status IN ('NEEDS_INPUT', 'PLANNED') "
+                    "AND (plan_revision IS NULL OR plan_revision = ?)",
+                    (plan_revision, plan["intake_id"], plan_revision),
+                )
+            return created
 
     def get_intake_plan(self, plan_revision: str) -> IntakePlan | None:
         with self._lock:

@@ -1286,7 +1286,19 @@ class RetrievalEngine:
                 "Notion Material logical ID is missing or mismatched",
                 details={"material_id": expected_id},
             )
+        if result is not None and self._v2_material_hidden(expected_id):
+            return None  # one choke point: context, new capabilities and capability revalidation (plan §9 P-B)
         return result
+
+    def _v2_material_hidden(self, material_id: str) -> bool:
+        """A Material created by an AUTO run stays unexposed until the v2 gate is switched on."""
+
+        if self._config_mapping("v2_exposure_gate", {}) is True:
+            return False
+        marker = getattr(self.state_store, "is_v2_auto_material", None)
+        if marker is None:
+            return False
+        return bool(marker(material_id))
 
     def _user_references(self, session_id: str) -> tuple[Mapping[str, Any], ...]:
         method = getattr(self.notion_reader, "get_session_user_annotations", None)

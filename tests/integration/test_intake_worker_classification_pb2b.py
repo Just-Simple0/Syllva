@@ -1,10 +1,8 @@
 """P-B2b: stage B promotion, AUTO jobs and execution (plan §3.4, §3.7, §6.1)."""
 from __future__ import annotations
 
-import contextlib
 import hashlib
 from dataclasses import replace
-from datetime import date
 from pathlib import Path
 
 import pytest
@@ -21,6 +19,7 @@ from tests.integration.test_intake_worker_classification_pb2a import (
 )
 from tests.integration.test_intake_worker_classification_profile import _rewire
 from tests.integration.test_intake_worker_preview import (
+    COURSE_KEYS,
     _assign_request,
     _pdf_bytes,
     _privacy,
@@ -104,6 +103,8 @@ def test_a_matched_transcript_runs_end_to_end_without_any_request(tmp_path: Path
         system["worker"].run_once()
         worker.run_once()
         assert len(_jobs(system)) == 1 and len(_sessions(system)) == 1 and len(_auto_plans(state)) == 1
+        # r1 R1: repeated ticks never move a finished item back to PLANNED
+        assert _item(system).status == "ORGANIZED" and _jobs(system)[0].completed_at
 
 
 def test_an_opaque_tabular_material_runs_without_extraction_or_provenance(tmp_path: Path) -> None:
@@ -139,6 +140,12 @@ def test_a_lecture_pdf_is_normalized_with_the_initial_type(tmp_path: Path) -> No
         assert material["Type"] == "Lecture Slides" and material["AI Kind"] == "LECTURE_SLIDES"
         assert material["Text Status"] == "Ready" and material.get("Normalized Source")
         assert item.exposure_block_reason is None
+        # the read-only state used by retrieval marks it as an AUTO product (exposure gate, plan §9 P-B)
+        from uls.state.reader import ReadOnlyState
+
+        reader = ReadOnlyState(system["state"].db_path)
+        assert reader.is_v2_auto_material(material["ID"]) is True
+        assert reader.is_v2_auto_material("COMP319-M99") is False
 
 
 def test_a_blank_draft_is_closed_and_the_plan_runs_in_the_same_tick(tmp_path: Path) -> None:
@@ -293,54 +300,107 @@ def test_disabling_auto_after_promotion_runs_nothing(tmp_path: Path) -> None:
         assert str(_jobs(system)[0].status) in {"NEEDS_REVIEW", "JobStatus.NEEDS_REVIEW"} or _jobs(system)[0].voided_at
 
 
-def test_an_own_session_is_recognised_as_an_own_effect(tmp_path: Path) -> None:
-    # E9/H1: after a completed run the point-of-use check accepts our own Session.
+def test_only_our_own_session_is_an_own_effect(tmp_path: Path) -> None:
+    # E9/H1 + r1 R3: our proven Session passes; an extra same-day Session or a Session we cannot prove
+    # we created is refused and parks the plan.
+    for label in ("own", "extra-session", "unproven"):
+        with _system(tmp_path / label, name=MATCHED_NAME, raw=RAW) as system:
+            worker = _enable(system)
+            _complete_calendar(system["state"])
+            worker.run_once()
+            item = _item(system)
+            plan = system["state"].get_intake_plan(item.plan_revision)
+            context = worker._auto_context(item, plan, worker._auto_record_for_item(item), job_id=None)
+            workspace = worker._workspace_for_item(item)
+            if label == "extra-session":
+                _seed_session(system["notion"], "TEST102-S77")
+            if label == "unproven":
+                from uls.intake.worker import INTAKE_SESSION_OPERATION
+
+                op_key = worker._plan_operation_key(INTAKE_SESSION_OPERATION, item, plan, workspace, context, target_id=None)
+                system["state"].update_provider_write_attempt(op_key, response_state="UNKNOWN")
+            if label == "own":
+                worker._session_point_of_use(context, workspace)  # must not raise
+            else:
+                with pytest.raises(IntakeReconcileRequired):
+                    worker._session_point_of_use(context, workspace)
+                assert _auto_plans(system["state"])[0]["status"] == "RECONCILE_REQUIRED"
+
+
+def test_a_session_that_changed_date_or_course_before_the_pointer_write_is_refused(tmp_path: Path) -> None:
+    # r1 R4
+    for label, change in (("date", ("Date", "2026-09-11")), ("course", ("Course", ["synthetic-course-page-0"]))):
+        with _system(tmp_path / label, name=MATCHED_NAME, raw=RAW) as system:
+            worker = _enable(system)
+            _complete_calendar(system["state"])
+            _seed_session(system["notion"], "TEST102-S01")
+            original = worker._session_pointer_gate
+
+            def gate(context, page, derivative_file_id, _o=original, _c=change, _sy=system):
+                _sy["notion"].data_sources["synthetic-sessions"][0][_c[0]] = _c[1]
+                return _o(context, page, derivative_file_id)
+            worker._session_pointer_gate = gate  # type: ignore[method-assign]
+            worker.run_once()
+            assert not system["notion"].data_sources["synthetic-sessions"][0].get("Normalized Transcript"), label
+            assert _auto_plans(system["state"])[0]["status"] == "RECONCILE_REQUIRED", label
+
+
+def test_a_finished_job_is_never_duplicated_or_regressed_by_repair(tmp_path: Path) -> None:
+    # r1 R1/R2: the repair loop sees a PLANNED plan whose job exists under another key.
     with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
         worker = _enable(system)
         _complete_calendar(system["state"])
         worker.run_once()
-        item = _item(system)
-        plan = system["state"].get_intake_plan(item.plan_revision)
-        record = worker._auto_record_for_item(item)
-        context = worker._auto_context(item, plan, record, job_id=None)
-        worker._session_point_of_use(context, worker._workspace_for_item(item))  # must not raise
-        # a Session of someone else for the same day is not ours
-        _seed_session(system["notion"], "TEST102-S77")
-        with contextlib.suppress(IntakeReconcileRequired):
-            worker._session_point_of_use(context, worker._workspace_for_item(item))
-    assert date.fromisoformat("2026-09-10")  # keeps the fixture date explicit
+        state = system["state"]
+        (job,) = _jobs(system)
+        with state._transaction(immediate=True) as connection:
+            connection.execute("UPDATE jobs SET job_key = ? WHERE id = ?", ("sha256:" + "a" * 64, job.id))
+        worker._promote_ready_plans()
+        worker._promote_ready_plans()
+        assert len(_jobs(system)) == 1 and _item(system).status == "ORGANIZED"
+        # the database itself refuses a second AUTO job for one plan
+        import sqlite3
+
+        with pytest.raises(sqlite3.IntegrityError), state._transaction(immediate=True) as connection:
+            connection.execute(
+                "INSERT INTO jobs(id, job_key, operation, stage, status, created_at, updated_at, plan_revision, plan_authority) "
+                "VALUES ('dup', ?, 'intake_session', 'intake', 'PENDING', 'x', 'x', ?, 'AUTO_CLASSIFICATION')",
+                ("sha256:" + "b" * 64, job.plan_revision))
 
 
-def test_an_existing_free_session_is_used_and_a_foreign_pointer_stops_the_write(tmp_path: Path) -> None:
-    # E9: EXISTING execution, and a pointer taken by another transcript between decision and write.
-    with _system(tmp_path / "ok", name=MATCHED_NAME, raw=RAW) as system:
+def test_a_source_moved_between_binding_and_the_move_is_not_an_own_effect(tmp_path: Path) -> None:
+    # r1 R5: status REGISTERED alone never opens the parent exception.
+    with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
         worker = _enable(system)
         _complete_calendar(system["state"])
-        _seed_session(system["notion"], "TEST102-S01")
-        worker.run_once()
-        (session,) = _sessions(system)
-        assert session["ID"] == "TEST102-S01" and session.get("Normalized Transcript")
-        assert _item(system).status == "ORGANIZED" and len(_sessions(system)) == 1
-    with _system(tmp_path / "foreign", name=MATCHED_NAME, raw=RAW) as system:
-        worker = _enable(system)
-        _complete_calendar(system["state"])
-        _seed_session(system["notion"], "TEST102-S01")
-        original = worker._session_pointer_gate
+        original = worker._auto_write_gate
+        moved = {"done": False}
 
-        def gate(context, page, derivative_file_id):
-            system["notion"].data_sources["synthetic-sessions"][0]["Normalized Transcript"] = "https://drive.google.com/file/d/other/view"
-            return original(context, page, derivative_file_id)
-        worker._session_pointer_gate = gate  # type: ignore[method-assign]
+        def gate(context, workspace, *, entry=False):
+            if _item(system).status == "REGISTERED" and not moved["done"]:
+                moved["done"] = True
+                drive = system["drive"]
+                drive.files[system["source_id"]] = replace(drive.files[system["source_id"]], parents=("synthetic-course-0",))
+            return original(context, workspace, entry=entry)
+        worker._auto_write_gate = gate  # type: ignore[method-assign]
         worker.run_once()
-        assert system["notion"].data_sources["synthetic-sessions"][0]["Normalized Transcript"].endswith("/other/view")
-        assert _auto_plans(system["state"])[0]["status"] == "RECONCILE_REQUIRED"
+        assert moved["done"]
         assert _item(system).status != "ORGANIZED"
+        assert _auto_plans(system["state"])[0]["status"] == "RECONCILE_REQUIRED"
+        assert system["drive"].files[system["source_id"]].parents == ("synthetic-course-0",)  # never moved by us
 
 
-def test_readiness_reports_the_auto_execution_counters(tmp_path: Path) -> None:
+def test_job_record_and_workspace_must_agree_on_the_course(tmp_path: Path) -> None:
+    # r1 H1
     with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
         worker = _enable(system)
         _complete_calendar(system["state"])
-        result = worker.run_once()
-        block = result["readiness"]["classification"]
-        assert block["planned_auto_plans"] == 1 and block["auto_jobs_pending"] == 0 and block["auto_jobs_failed"] == 0
+        original = worker._promote_ready_plans
+
+        def promote_then_corrupt():
+            original()
+            with system["state"]._transaction(immediate=True) as connection:
+                connection.execute("UPDATE jobs SET course_key = ?", (COURSE_KEYS[0],))
+        worker._promote_ready_plans = promote_then_corrupt  # type: ignore[method-assign]
+        worker.run_once()
+        assert _sessions(system) == [] and _auto_plans(system["state"])[0]["status"] == "RECONCILE_REQUIRED"
