@@ -66,6 +66,9 @@ from uls.intake.classification.pipeline import (
     BLOCK_PLAN_CONFLICT,
     BLOCK_PLAN_RECONCILE,
     BLOCK_PLAN_SUPERSEDED,
+    BLOCK_SESSION_AMBIGUOUS,
+    BLOCK_SESSION_OCCUPIED,
+    BLOCK_SESSION_UNKNOWN,
     NOTE_AUTO_UNAVAILABLE,
     NOTE_FORMAT_KIND_MISMATCH,
     ClassificationOutcome,
@@ -1382,6 +1385,13 @@ class IntakeWorker:
             outcome = classify(probe)
         record_id: str | None = None
         byte_proven = probe is not None and probe.complete and probe.byte_sha256 is not None
+        session_mode, session_id, session_hash, session_block = outcome.session_mode, None, None, None
+        if outcome.session_mode is not None and self._auto_enabled():
+            session_mode, session_id, session_hash, session_block = self._session_binding(outcome, workspace)
+        verified_basis = None
+        if binding is not None and probe is not None and probe.byte_sha256 is not None \
+                and binding.get("byte_sha256") == probe.byte_sha256:
+            verified_basis = self._canvas_basis(binding)
         if outcome.decided and outcome.kind is not None and byte_proven and probe is not None:
             record = self.state.create_classification_record(
                 intake_id=item.intake_id,
@@ -1400,7 +1410,14 @@ class IntakeWorker:
                 course_key=outcome.course_key,
                 week=outcome.week,
                 decided_date=None if outcome.recorded_date is None else outcome.recorded_date.isoformat(),
-                course_basis={"type": outcome.course_basis or "none"},
+                course_basis={
+                    "type": outcome.course_basis or "none",
+                    "alias_inventory_hash": self._alias_inventory_hash(workspace.semester),
+                    "canvas_binding": verified_basis if outcome.origin is Origin.PROFESSOR_SOURCE else None,
+                },
+                session_mode=session_mode,
+                session_id=session_id,
+                sessions_inventory_hash=session_hash,
                 calendar_projection_revision_hash=None if calendar is None else calendar.revision_hash(),
                 semester_range_basis=None if semester is None else semester.basis(),
             )
@@ -1410,6 +1427,8 @@ class IntakeWorker:
         decided = outcome.decided and record_id is not None
         record = self.state.get_classification_record(record_id) if record_id else None
         blockers = self._stage_a_blockers(item, outcome, record)
+        if session_block is not None and outcome.decided and record is not None:
+            blockers = (*blockers, session_block)
         auto_plan: IntakePlan | None = None
         if decided and record is not None and not blockers and self._auto_enabled():
             auto_plan, plan_block = self._ensure_auto_plan(item, outcome, record, workspace_fingerprint)
@@ -1481,6 +1500,50 @@ class IntakeWorker:
             blockers.append(BLOCK_DUPLICATE_UNPROVEN)
         return tuple(dict.fromkeys(blockers))
 
+    def _session_binding(
+        self, outcome: ClassificationOutcome, workspace: ResolvedSemesterWorkspace
+    ) -> tuple[str | None, str | None, str | None, str | None]:
+        """Plan §2.3/§3.4: bind a matched transcript to the Notion Sessions inventory of its
+        course and date.  No Session → NEW; exactly one unoccupied → EXISTING with its ID;
+        several, occupied or unreadable → blocked (HUMAN), never guessed."""
+
+        course_key = outcome.course_key
+        if outcome.recorded_date is None or not course_key or self.notion is None:
+            return None, None, None, BLOCK_SESSION_UNKNOWN
+        course_workspace = next(
+            (w for w in self.workspaces if w.semester == workspace.semester and w.course_key == course_key), None
+        )
+        if course_workspace is None:
+            return None, None, None, BLOCK_SESSION_UNKNOWN
+        try:
+            course_id = self._course_page_map(course_workspace).get(course_key)
+            if course_id is None:
+                return None, None, None, BLOCK_SESSION_UNKNOWN
+            rows = self._inventory("sessions", course_workspace, course_id)
+        except ReconnectRequiredError:
+            raise
+        except (IntakeReconcileRequired, SourceUnavailableError, ProviderUnavailableError, PolicyDeniedError, ValueError):
+            return None, None, None, BLOCK_SESSION_UNKNOWN
+        wanted = outcome.recorded_date.isoformat()
+
+        def day(row: Mapping[str, Any]) -> str | None:
+            value = row.get("Date")
+            if isinstance(value, Mapping):
+                value = value.get("start")
+            return str(value)[:10] if value else None
+
+        same = sorted((row for row in rows if day(row) == wanted), key=lambda row: str(row.get("ID")))
+        digest = sha256_hex(["intake.sessions-inventory.v1", course_key, wanted,
+                             [[row.get("ID"), day(row), row.get("Recording Status")] for row in same]])
+        if not same:
+            return SessionMode.NEW.value, None, digest, None
+        if len(same) > 1:
+            return None, None, digest, BLOCK_SESSION_AMBIGUOUS
+        row = same[0]
+        if row.get("Recording Status") not in (None, "", "Pending"):
+            return None, None, digest, BLOCK_SESSION_OCCUPIED
+        return SessionMode.EXISTING.value, str(row.get("ID")), digest, None
+
     def _declared_size(self, item: IntakeItem) -> int | None:
         for observation in reversed(self.state.list_intake_observations(item.intake_id)):
             if observation.source_version != item.source_version:
@@ -1520,7 +1583,8 @@ class IntakeWorker:
             "kind": outcome.kind.value if outcome.kind else None,
             "actual_date": None if outcome.recorded_date is None else outcome.recorded_date.isoformat(),
             "week": outcome.week,
-            "session_mode": outcome.session_mode,
+            "session_mode": record.session_mode,
+            "session_id": record.session_id,
             "material_type_initial": outcome.material_type_initial,
             "handling": None if outcome.handling is None else outcome.handling.value,
             "classification_revision_hash": record.classification_revision_hash,
@@ -1554,6 +1618,7 @@ class IntakeWorker:
             page.get("Cancelled") if type(page.get("Cancelled")) is bool else "INVALID",
             page.get("Request Status"),
             page.get("Request Key"),
+            sorted(str(v) for v in _relation_ids(page.get("Intake Items"))),
             page.get("Request Revision Hash"),
             page.get("Input Hash") or None,
             page.get("Plan Revision") or None,
@@ -1576,6 +1641,19 @@ class IntakeWorker:
             and page.get("Request Revision Hash") == receipt.request_revision_hash
             and not page.get("Input Hash") and not page.get("Plan Revision")
         )
+
+    def _closure_bound(self, page: Mapping[str, Any], receipt: RequestReceipt, workspace: ResolvedSemesterWorkspace) -> bool:
+        """Identity plus the exact Intake Items binding of the persisted receipt (r3 #3)."""
+
+        if not self._closure_identity_ok(page, receipt):
+            return False
+        try:
+            bound = json.loads(receipt.intake_ids_json or "null")
+        except ValueError:
+            return False
+        if not isinstance(bound, list):
+            return False
+        return sorted(self._request_from_page(page, workspace).intake_ids) == sorted(str(v) for v in bound)
 
     def _human_receipts_for_intake(self, intake_id: str) -> list[tuple[RequestReceipt, str]]:
         """Every receipt bound to this intake with its binding shape: 'single', 'multi' or
@@ -1614,6 +1692,17 @@ class IntakeWorker:
         drafts: list[tuple[RequestReceipt, Mapping[str, Any]]] = []
         for receipt, binding in self._human_receipts_for_intake(item.intake_id):
             if receipt.state == "AutoResolved":
+                done = self.state.get_auto_resolve_intent(receipt.request_key)
+                if (
+                    binding != "single" or not receipt.provider_page_id or done is None
+                    or done.state != "DONE" or not done.terminal_snapshot_hash
+                ):
+                    return "RECONCILE", f"closed request {receipt.request_key} has no verifiable terminal snapshot", []
+                closed = self.notion.read_record("input_request", receipt.provider_page_id)
+                if closed is None:
+                    return "RECONCILE", f"closed request page {receipt.request_key} is unavailable", []
+                if self._auto_request_snapshot(closed, receipt, item.intake_id) != done.terminal_snapshot_hash:
+                    return "HUMAN", "HUMAN_TERMINAL_CHANGED", []
                 continue
             if binding != "single" or not receipt.provider_page_id:
                 return "RECONCILE", f"request {receipt.request_key} binding or creation is unresolved", []
@@ -1657,7 +1746,7 @@ class IntakeWorker:
             page.get("Request Status") != "Draft"
             or page.get("Submitted") is not False
             or page.get("Cancelled") is not False
-            or not self._closure_identity_ok(page, receipt)
+            or not self._closure_bound(page, receipt, workspace)
             or normalized_user_hash(request) != self._blank_user_hash(request)
         )
 
@@ -1696,6 +1785,8 @@ class IntakeWorker:
         except (SourceUnavailableError, SourcePartialError, PolicyDeniedError, ProviderUnavailableError):
             reason = "SOURCE_UNAVAILABLE"
         if reason is None:
+            reason = self._provenance_mismatch(item, record, workspace)
+        if reason is None:
             if (
                 self._semester_workspace_fingerprint(workspace.semester) != record.workspace_fingerprint
                 or self._semester_config_fingerprint(workspace.semester) != record.config_fingerprint
@@ -1721,6 +1812,41 @@ class IntakeWorker:
         )
         self.state.record_intake_stage_event("auto_preflight_failed", intake_id=item.intake_id, operation_key=reason)
         return False
+
+    def _alias_inventory_hash(self, semester: str) -> str:
+        index = self._course_alias_index(semester)
+        return sha256_hex(["intake.alias-inventory.v1", sorted(index.resolved.items()), sorted(index.disabled)])
+
+    @staticmethod
+    def _canvas_basis(binding: Mapping[str, Any]) -> dict[str, Any]:
+        keys = ("drive_file_id", "canvas_course_id", "resource_kind", "resource_id", "observation_revision",
+                "attachment_id", "byte_sha256")
+        return {key: binding.get(key) for key in keys}
+
+    def _provenance_mismatch(
+        self, item: IntakeItem, record: ClassificationRecord, workspace: ResolvedSemesterWorkspace
+    ) -> str | None:
+        """Plan §3.4 (d): the course and origin evidence the record was built on is still
+        current — the alias inventory, and for a PROFESSOR_SOURCE the exact persisted Canvas
+        binding (file id, resource/revision, attachment, byte hash).  Nothing is re-derived."""
+
+        try:
+            basis = json.loads(record.course_basis_json or "{}")
+        except ValueError:
+            return "COURSE_BASIS"
+        if not isinstance(basis, dict):
+            return "COURSE_BASIS"
+        if basis.get("alias_inventory_hash") != self._alias_inventory_hash(workspace.semester):
+            return "ALIAS_BASIS"
+        if record.origin == Origin.PROFESSOR_SOURCE.value:
+            binding = self.state.get_canvas_drive_binding(item.provider_file_id)
+            if binding is None or basis.get("canvas_binding") != self._canvas_basis(binding):
+                return "CANVAS_BINDING"
+            if binding.get("byte_sha256") != record.byte_sha256:
+                return "CANVAS_BINDING"
+        elif basis.get("canvas_binding") is not None:
+            return "CANVAS_BINDING"
+        return None
 
     def _apply_human_verdict(
         self, item: IntakeItem, record: ClassificationRecord, workspace: ResolvedSemesterWorkspace,
@@ -1754,16 +1880,9 @@ class IntakeWorker:
             return
         if not drafts:
             return
-        if not self._auto_preflight(item, plan, record, workspace):
-            return
         for receipt, _draft_page in drafts:
-            verdict, reason, fresh_drafts = self._judge_human_requests(item, workspace)
-            if verdict != "UNTOUCHED":
-                self._apply_human_verdict(item, record, workspace, verdict, reason)
-                return
-            fresh = next((page for other, page in fresh_drafts if other.request_key == receipt.request_key), None)
+            fresh = self._closure_gate(item, plan, record, workspace, receipt)
             if fresh is None:
-                self._supersede_auto_plans_for_record(item, record, "HUMAN_DRAFT_CHANGED")
                 return
             snapshot = self._auto_request_snapshot(fresh, receipt, item.intake_id)
             intent = self.state.create_auto_resolve_intent(
@@ -1772,6 +1891,26 @@ class IntakeWorker:
             )
             if not self._write_auto_resolved(item, receipt, record, intent, workspace, snapshot):
                 return  # the barrier stands; recovery settles it before any further closure
+
+    def _closure_gate(
+        self, item: IntakeItem, plan: IntakePlan, record: ClassificationRecord,
+        workspace: ResolvedSemesterWorkspace, receipt: RequestReceipt, *, retrying: str | None = None,
+    ) -> Mapping[str, Any] | None:
+        """Everything that must hold immediately before one closure write (r3 #1): the
+        source/provenance preflight, then — as the very last step — a fresh judgement of
+        every HUMAN request of the intake.  Returns the target's fresh Draft page, or None
+        after the matching supersede/reconcile transition (zero writes)."""
+
+        if not self._auto_preflight(item, plan, record, workspace):
+            return None
+        verdict, reason, drafts = self._judge_human_requests(item, workspace, retrying=retrying)
+        if verdict != "UNTOUCHED":
+            self._apply_human_verdict(item, record, workspace, verdict, reason)
+            return None
+        fresh = next((page for other, page in drafts if other.request_key == receipt.request_key), None)
+        if fresh is None:
+            self._supersede_auto_plans_for_record(item, record, "HUMAN_DRAFT_CHANGED")
+        return fresh
 
     def _write_auto_resolved(
         self, item: IntakeItem, receipt: RequestReceipt, record: ClassificationRecord,
@@ -1809,7 +1948,7 @@ class IntakeWorker:
             self._mark_auto_close_reconcile(item, "Auto Resolved readback is missing or mismatched")
             return False
         self.state.update_provider_write_attempt(op_key, response_state="READBACK_OK", readback_json=readback)
-        if not self._closure_identity_ok(readback, receipt):
+        if not self._closure_bound(readback, receipt, workspace):
             # The page is no longer (only) this request: never DONE, never rolled back
             # blindly; the barrier stays until a human reconciles.
             self._mark_reconcile(item, "closure page identity changed after the write")
@@ -1877,13 +2016,13 @@ class IntakeWorker:
             if page is None:
                 self._mark_auto_close_reconcile(item, "Auto Resolved readback is unavailable")
                 continue  # (iv) stays PENDING
+            if not self._closure_bound(page, receipt, workspace):
+                self._mark_reconcile(item, "closure page identity or Intake Items binding changed")
+                continue  # never DONE, never overwritten: barrier until a human reconciles
             rollback = self.state.get_auto_resolve_rollback(intent.intent_id)
             if rollback is not None:
                 self._settle_rollback(item, record, receipt, intent, rollback, page)
                 continue
-            if not self._closure_identity_ok(page, receipt):
-                self._mark_reconcile(item, "closure page identity changed")
-                continue  # never DONE, never overwritten: barrier until a human reconciles
             status = page.get("Request Status")
             pre_close = intent.pre_close_snapshot_hash
             untouched = pre_close is not None and self._snapshot_as_draft(page, receipt, item.intake_id) == pre_close
@@ -1914,13 +2053,11 @@ class IntakeWorker:
                 # only when AUTO may still write and every HUMAN request of the intake is
                 # still untouched; otherwise release the human path (r1 R5, r2 R3).
                 plan = self._live_auto_plan_for_record(record)
-                verdict, _reason, drafts = self._judge_human_requests(item, workspace, retrying=receipt.request_key)
-                fresh = next((pg for other, pg in drafts if other.request_key == receipt.request_key), None)
-                if (
-                    self._auto_enabled() and plan is not None and verdict == "UNTOUCHED" and fresh is not None
-                    and self._auto_request_snapshot(fresh, receipt, item.intake_id) == pre_close
-                    and self._auto_preflight(item, plan, record, workspace)
-                ):
+                fresh = (
+                    self._closure_gate(item, plan, record, workspace, receipt, retrying=receipt.request_key)
+                    if self._auto_enabled() and plan is not None else None
+                )
+                if fresh is not None and self._auto_request_snapshot(fresh, receipt, item.intake_id) == pre_close:
                     self._write_auto_resolved(item, receipt, record, intent, workspace, pre_close or "")
                     continue
                 self.state.transition_auto_resolve_intent(intent.intent_id, "ABORTED")
@@ -1953,7 +2090,9 @@ class IntakeWorker:
         """
 
         assert self.notion is not None
-        target = str(rollback["target_status"])
+        # The target follows the live Submitted checkbox, not the possibly stale persisted
+        # target, so a request the human submitted meanwhile is never turned back (r3 #2).
+        target = "Submitted" if page.get("Submitted") is True else "Draft"
         self._supersede_auto_plans_for_record(item, record, "HUMAN_DRAFT_CHANGED")
         if rollback["state"] == "DONE":
             self._clear_auto_close_reconcile(item)
@@ -1962,6 +2101,10 @@ class IntakeWorker:
         status, reference = page.get("Request Status"), page.get("Result Reference")
         confirm: Mapping[str, Any] | None = page
         if status == AUTO_RESOLVED_STATUS:
+            if reference != record.record_id:
+                # Without proof that the reference is ours nothing is written (r3 #2).
+                self._mark_reconcile(item, f"Auto Resolved page carries a foreign reference {reference!r}")
+                return
             self.notion.update_system_record("input_request", page_id, {"Request Status": target, "Result Reference": None})
             confirm = self.notion.read_record("input_request", page_id)
         elif reference == record.record_id and status in ("Draft", "Submitted"):

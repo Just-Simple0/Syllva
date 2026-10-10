@@ -801,3 +801,279 @@ def test_closure_reconcile_state_is_cleared_once_the_intent_settles(tmp_path: Pa
         assert item.status != "RECONCILE_REQUIRED" and item.last_error_code is None
     finally:
         system_cm.__exit__(None, None, None)
+
+
+# ---------------------------------------------------------------------------
+# P-B2a FINAL r3 findings
+# ---------------------------------------------------------------------------
+def _spy_preflight(worker, on_call) -> None:
+    original = worker._auto_preflight
+    calls = {"n": 0}
+
+    def preflight(*args, **kwargs):
+        calls["n"] += 1
+        on_call(calls["n"])
+        return original(*args, **kwargs)
+    worker._auto_preflight = preflight  # type: ignore[method-assign]
+
+
+def _auto_resolved_pages(notion) -> list:
+    return [p for p in notion.data_sources["synthetic-requests"] if p["Request Status"] == "Auto Resolved"]
+
+
+def test_every_closure_repeats_the_source_preflight(tmp_path: Path) -> None:
+    # r3 #1: the source moves after the first closure; the second Draft must not be closed.
+    system_cm, system = _pre_v2_draft(tmp_path)
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        _add_details_draft(worker, system)
+        drive, notion, state = system["drive"], system["notion"], system["state"]
+        from dataclasses import replace
+
+        def move(call: int) -> None:
+            if call == 2:
+                drive.files[system["source_id"]] = replace(drive.files[system["source_id"]], parents=("synthetic-course-0",))
+        _spy_preflight(worker, move)
+        worker.run_once()
+        assert len(_auto_resolved_pages(notion)) == 1
+        assert sum(1 for p in notion.data_sources["synthetic-requests"] if p["Request Status"] == "Draft") == 1
+        assert _auto_plans(state)[0]["status"] == "RECONCILE_REQUIRED"
+    finally:
+        system_cm.__exit__(None, None, None)
+
+
+def test_pending_retry_judges_humans_after_its_preflight(tmp_path: Path) -> None:
+    # r3 #1: the sibling Draft changes *during the retry's preflight download*.
+    system_cm, system = _pre_v2_draft(tmp_path)
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        _add_details_draft(worker, system)
+        notion, state = system["notion"], system["state"]
+        _drop_first_auto_resolved_write(notion)
+        worker.run_once()
+        pending = [r for r in state.list_request_receipts()
+                   if (i := state.get_auto_resolve_intent(r.request_key)) is not None and i.state == "PENDING"]
+        assert len(pending) == 1
+        from tests.integration.test_intake_worker_preview import _details_request
+        other = _details_request(notion) if pending[0].request_type == "ASSIGN_COURSE" else _assign_request(notion)
+        _spy_preflight(worker, lambda call: other.__setitem__("Course", ["synthetic-course-page-0"]))
+        since = len(notion.events)
+        worker.run_once()
+        assert _request_writes(notion, since) == []
+        assert state.get_auto_resolve_intent(pending[0].request_key).state == "ABORTED"
+        assert _auto_plans(state)[0]["status"] == "SUPERSEDED"
+    finally:
+        system_cm.__exit__(None, None, None)
+
+
+def _rollback_pending(tmp_path: Path):
+    """Crash after the rollback write: rollback PENDING, page already back to Draft."""
+
+    system_cm, system = _pre_v2_draft(tmp_path)
+    worker = _enable(system)
+    _complete_calendar(system["state"])
+    notion, state = system["notion"], system["state"]
+
+    def edit(page_id: str) -> None:
+        for page in notion.data_sources["synthetic-requests"]:
+            if page["id"] == page_id:
+                page["Course"] = ["synthetic-course-page-0"]
+    _landing_hook(notion, edit)
+    original_complete = state.complete_auto_resolve_rollback
+    crashes = {"left": 1}
+
+    def complete(intent_id: str):
+        if crashes["left"]:
+            crashes["left"] -= 1
+            raise RuntimeError("crash before the rollback commit")
+        return original_complete(intent_id)
+    state.complete_auto_resolve_rollback = complete  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        worker.run_once()
+    return system_cm, system, worker
+
+
+def test_rollback_reentry_checks_identity_and_ownership(tmp_path: Path) -> None:
+    # r3 #2: identity drift, a foreign reference and a Submitted flip on re-entry.
+    system_cm, system, worker = _rollback_pending(tmp_path / "identity")
+    try:
+        notion, state = system["notion"], system["state"]
+        _assign_request(notion)["Request Revision Hash"] = "drifted"
+        since = len(notion.events)
+        worker.run_once()
+        assert _request_writes(notion, since) == []
+        receipt = next(r for r in state.list_request_receipts())
+        assert state.get_auto_resolve_intent(receipt.request_key).state == "PENDING"
+    finally:
+        system_cm.__exit__(None, None, None)
+    system_cm, system, worker = _rollback_pending(tmp_path / "foreign")
+    try:
+        notion, state = system["notion"], system["state"]
+        _assign_request(notion).update({"Request Status": "Auto Resolved", "Result Reference": "someone-else"})
+        since = len(notion.events)
+        worker.run_once()
+        assert _request_writes(notion, since) == []
+        assert _assign_request(notion)["Result Reference"] == "someone-else"
+    finally:
+        system_cm.__exit__(None, None, None)
+    system_cm, system, worker = _rollback_pending(tmp_path / "submitted")
+    try:
+        notion, state = system["notion"], system["state"]
+        record_id = _item(system).classification_record_id
+        _assign_request(notion).update({"Request Status": "Auto Resolved", "Result Reference": record_id, "Submitted": True})
+        worker.run_once()
+        # The persisted target was Draft, but the live checkbox wins: never turned back to Draft.
+        assert _assign_request(notion)["Request Status"] != "Draft"
+        assert _assign_request(notion).get("Result Reference") != record_id  # our reference is gone
+    finally:
+        system_cm.__exit__(None, None, None)
+
+
+def test_changed_intake_binding_is_not_untouched(tmp_path: Path) -> None:
+    # r3 #3: the human re-pointed the Draft to another intake; also drift after the write.
+    system_cm, system = _pre_v2_draft(tmp_path / "before")
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        _assign_request(system["notion"])["Intake Items"] = ["some-other-intake-page"]
+        since = len(system["notion"].events)
+        worker.run_once()
+        assert _request_writes(system["notion"], since) == []
+        assert _auto_plans(system["state"])[0]["status"] == "SUPERSEDED"
+    finally:
+        system_cm.__exit__(None, None, None)
+    system_cm, system = _pre_v2_draft(tmp_path / "after")
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        notion, state = system["notion"], system["state"]
+
+        def repoint(page_id: str) -> None:
+            for page in notion.data_sources["synthetic-requests"]:
+                if page["id"] == page_id:
+                    page["Intake Items"] = ["some-other-intake-page"]
+        _landing_hook(notion, repoint)
+        worker.run_once()
+        receipt = next(r for r in state.list_request_receipts())
+        assert state.get_auto_resolve_intent(receipt.request_key).state == "PENDING"
+        assert state.get_request_receipt(receipt.request_key).state == "Draft"
+    finally:
+        system_cm.__exit__(None, None, None)
+
+
+def test_a_closed_sibling_the_human_edited_stops_further_closures(tmp_path: Path) -> None:
+    # r3 #4: the first Draft is closed, then the human edits it; the second must stay open.
+    system_cm, system = _pre_v2_draft(tmp_path)
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        _add_details_draft(worker, system)
+        notion, state = system["notion"], system["state"]
+
+        def edit_closed(call: int) -> None:
+            if call == 2:
+                for page in _auto_resolved_pages(notion):
+                    page["Course"] = ["synthetic-course-page-0"]
+        _spy_preflight(worker, edit_closed)
+        worker.run_once()
+        assert len(_auto_resolved_pages(notion)) == 1
+        assert sum(1 for p in notion.data_sources["synthetic-requests"] if p["Request Status"] == "Draft") == 1
+        assert _auto_plans(state)[0]["status"] == "SUPERSEDED"
+    finally:
+        system_cm.__exit__(None, None, None)
+
+
+def _seed_session(notion, entity_id: str, *, recording_status: str | None = "Pending") -> None:
+    row = {"id": f"page-{entity_id}", "ID": entity_id, "Course": ["synthetic-course-page-1"], "Date": "2026-09-10"}
+    if recording_status is not None:
+        row["Recording Status"] = recording_status
+    notion.data_sources["synthetic-sessions"].append(row)
+
+
+def test_stage_a_binds_the_transcript_to_the_session_inventory(tmp_path: Path) -> None:
+    # r3 #5: NEW only when no Session exists; one free Session → EXISTING; otherwise blocked.
+    cases = {
+        "free": (["TEST102-S01"], None, "EXISTING"),
+        "occupied": (["TEST102-S01"], "Ready", None),
+        "ambiguous": (["TEST102-S01", "TEST102-S02"], None, None),
+    }
+    for name, (ids, occupied, expected_mode) in cases.items():
+        with _system(tmp_path / name, name=MATCHED_NAME, raw=RAW) as system:
+            worker = _enable(system)
+            _complete_calendar(system["state"])
+            for entity_id in ids:
+                _seed_session(system["notion"], entity_id, recording_status=occupied or "Pending")
+            worker.run_once()
+            item, plans = _item(system), _auto_plans(system["state"])
+            record = system["state"].get_classification_record(item.classification_record_id)
+            if expected_mode is None:
+                assert item.classification_state == "HUMAN" and plans == []
+                note = system["state"].get_intake_suggestion(item.intake_id)["suggestion_note"]
+                assert ("AUTO_BLOCK_SESSION_OCCUPIED" if occupied else "AUTO_BLOCK_SESSION_AMBIGUOUS") in note
+            else:
+                assert item.classification_state == "CLASSIFIED" and len(plans) == 1
+                assert (record.session_mode, record.session_id) == ("EXISTING", "TEST102-S01")
+                assert record.sessions_inventory_hash
+    with _system(tmp_path / "new", name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        worker.run_once()
+        record = system["state"].get_classification_record(_item(system).classification_record_id)
+        assert (record.session_mode, record.session_id) == ("NEW", None) and record.sessions_inventory_hash
+
+
+def test_preflight_rechecks_alias_and_canvas_provenance(tmp_path: Path) -> None:
+    # r3 #6 (alias): an alias edit after classification parks the plan, zero writes.
+    system_cm, system = _pre_v2_draft(tmp_path / "alias")
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        _spy_preflight(worker, lambda call: system["config"].courses[1].__setattr__("aliases", ["새별칭"]))
+        notion, state = system["notion"], system["state"]
+        since = len(notion.events)
+        worker.run_once()
+        assert _request_writes(notion, since) == []
+        assert _auto_plans(state)[0]["status"] == "RECONCILE_REQUIRED"
+    finally:
+        system_cm.__exit__(None, None, None)
+    # r3 #6 (Canvas): a PROFESSOR_SOURCE record whose binding was replaced is refused.
+    csv = b"name,score\nA,1\n"
+    with _system(tmp_path / "canvas", name="mbti.csv", mime_type="text/csv", raw=csv) as system:
+        from dataclasses import replace
+        _enable(system, profile=None)
+        drive, state = system["drive"], system["state"]
+        drive.files[system["source_id"]] = replace(drive.files[system["source_id"]], parents=("synthetic-course-upload-1",))
+        from tests.integration.test_intake_worker_preview import _privacy
+
+        from uls.adapters.drive.worker import DRIVE_FOLDER_MIME, DriveMetadata
+        drive.files["synthetic-course-upload-1"] = DriveMetadata(
+            file_id="synthetic-course-upload-1", name="upload", mime_type=DRIVE_FOLDER_MIME,
+            parents=("synthetic-course-1",), modified_time="2026-09-13T10:00:00Z", size=0, md5_checksum=None, **_privacy())
+        system["config"].google_drive.semester_registries[0].optional_course_upload_folder_ids[COURSE] = "synthetic-course-upload-1"
+        from uls.config.credentials import ResolvedCredentials
+        from uls.intake.identity import provider_binding_id
+        from uls.runtime import build_intake_worker
+        system["worker"] = build_intake_worker(
+            system["config"], ResolvedCredentials({}), state=state, drive=drive, notion=system["notion"],
+            provider_account_binding_id=provider_binding_id("google_drive", "synthetic-owner", "synthetic-oauth"),
+            semester="2026-2")
+        worker = _rewire(system, "legacy5-cls")
+        state.record_canvas_drive_binding(
+            drive_file_id=system["source_id"], canvas_course_id=67535, resource_kind="assignment", resource_id="as-1",
+            observation_revision=1, attachment_id="att-9", attachment_filename="mbti.csv", attachment_size=len(csv),
+            byte_sha256=hashlib.sha256(csv).hexdigest())
+        worker.run_once()
+        item = _item(system)
+        record = state.get_classification_record(item.classification_record_id)
+        assert record.origin == "PROFESSOR_SOURCE" and _auto_plans(state)[0]["status"] == "AUTO_PENDING"
+        workspace = worker._workspace_for_item(item)
+        assert worker._provenance_mismatch(item, record, workspace) is None
+        original = state.get_canvas_drive_binding
+        # A later revision replaced the binding (P-B3 will own the lifecycle): the record's
+        # exact basis no longer matches and the preflight must refuse.
+        state.get_canvas_drive_binding = lambda file_id: {**original(file_id), "resource_id": "as-2"}  # type: ignore[method-assign]
+        assert worker._provenance_mismatch(item, record, workspace) == "CANVAS_BINDING"
+        state.get_canvas_drive_binding = lambda file_id: None  # type: ignore[method-assign]
+        assert worker._provenance_mismatch(item, record, workspace) == "CANVAS_BINDING"
