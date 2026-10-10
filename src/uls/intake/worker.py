@@ -61,6 +61,7 @@ from uls.intake.classification import (
 from uls.intake.classification.calendar import CourseCalendar
 from uls.intake.classification.pipeline import (
     BLOCK_BYTES_UNPROVEN,
+    BLOCK_CANVAS_COURSE,
     BLOCK_DUPLICATE_CONTENT,
     BLOCK_DUPLICATE_UNPROVEN,
     BLOCK_PLAN_CONFLICT,
@@ -1387,7 +1388,9 @@ class IntakeWorker:
         byte_proven = probe is not None and probe.complete and probe.byte_sha256 is not None
         session_mode, session_id, session_hash, session_block = outcome.session_mode, None, None, None
         if outcome.session_mode is not None and self._auto_enabled():
-            session_mode, session_id, session_hash, session_block = self._session_binding(outcome, workspace)
+            session_mode, session_id, session_hash, session_block = self._session_binding(
+                item, outcome.course_key, outcome.recorded_date, workspace
+            )
         verified_basis = None
         if binding is not None and probe is not None and probe.byte_sha256 is not None \
                 and binding.get("byte_sha256") == probe.byte_sha256:
@@ -1404,7 +1407,8 @@ class IntakeWorker:
                 config_fingerprint=config_fingerprint,
                 rule_table_version=outcome.rule_table_version,
                 decision={"type": "rule", "rule_id": outcome.rule_id,
-                          "candidates": [kind.value for kind in outcome.candidates]},
+                          "candidates": [kind.value for kind in outcome.candidates],
+                          "source_name": item.original_name, "source_mime": item.mime_type},
                 kind=outcome.kind.value,
                 origin=outcome.origin.value,
                 course_key=outcome.course_key,
@@ -1498,17 +1502,29 @@ class IntakeWorker:
             blockers.append(BLOCK_DUPLICATE_CONTENT)
         if candidates["unproven"]:
             blockers.append(BLOCK_DUPLICATE_UNPROVEN)
+        if record.origin == Origin.PROFESSOR_SOURCE.value and self._canvas_course_mismatch(item, record):
+            blockers.append(BLOCK_CANVAS_COURSE)
         return tuple(dict.fromkeys(blockers))
 
+    def _canvas_course_mismatch(self, item: IntakeItem, record: ClassificationRecord) -> bool:
+        """A PROFESSOR_SOURCE is only usable for the course its Canvas course is mapped to
+        in the verified ``canvas_course_map``; unmapped or different → HUMAN (r4 #3)."""
+
+        binding = self.state.get_canvas_drive_binding(item.provider_file_id)
+        mapping = getattr(getattr(self.config.intake, "classification", None), "canvas_course_map", {}) or {}
+        mapped = None if binding is None else mapping.get(binding.get("canvas_course_id"))
+        return mapped is None or mapped != record.course_key
+
     def _session_binding(
-        self, outcome: ClassificationOutcome, workspace: ResolvedSemesterWorkspace
+        self, item: IntakeItem, course_key: str | None, recorded: date | None, workspace: ResolvedSemesterWorkspace
     ) -> tuple[str | None, str | None, str | None, str | None]:
         """Plan §2.3/§3.4: bind a matched transcript to the Notion Sessions inventory of its
-        course and date.  No Session → NEW; exactly one unoccupied → EXISTING with its ID;
-        several, occupied or unreadable → blocked (HUMAN), never guessed."""
+        course and date.  No Session → NEW; exactly one *proven free* Session → EXISTING with
+        its ID; several, occupied (a Normalized Transcript pointer or another file's canonical
+        source binding), an unreadable ID or an unreadable inventory → blocked, never guessed.
+        The occupancy evidence is part of the inventory hash."""
 
-        course_key = outcome.course_key
-        if outcome.recorded_date is None or not course_key or self.notion is None:
+        if recorded is None or not course_key or self.notion is None:
             return None, None, None, BLOCK_SESSION_UNKNOWN
         course_workspace = next(
             (w for w in self.workspaces if w.semester == workspace.semester and w.course_key == course_key), None
@@ -1524,7 +1540,7 @@ class IntakeWorker:
             raise
         except (IntakeReconcileRequired, SourceUnavailableError, ProviderUnavailableError, PolicyDeniedError, ValueError):
             return None, None, None, BLOCK_SESSION_UNKNOWN
-        wanted = outcome.recorded_date.isoformat()
+        wanted = recorded.isoformat()
 
         def day(row: Mapping[str, Any]) -> str | None:
             value = row.get("Date")
@@ -1533,16 +1549,29 @@ class IntakeWorker:
             return str(value)[:10] if value else None
 
         same = sorted((row for row in rows if day(row) == wanted), key=lambda row: str(row.get("ID")))
-        digest = sha256_hex(["intake.sessions-inventory.v1", course_key, wanted,
-                             [[row.get("ID"), day(row), row.get("Recording Status")] for row in same]])
+        evidence = []
+        for row in same:
+            entity_id = row.get("ID")
+            binding = self.state.session_source_binding_for(course_key, entity_id) if isinstance(entity_id, str) else None
+            evidence.append([entity_id, day(row), row.get("Recording Status"), bool(row.get("Normalized Transcript")),
+                             None if binding is None else binding.get("provider_file_id")])
+        digest = sha256_hex(["intake.sessions-inventory.v2", course_key, wanted, evidence])
         if not same:
             return SessionMode.NEW.value, None, digest, None
         if len(same) > 1:
             return None, None, digest, BLOCK_SESSION_AMBIGUOUS
         row = same[0]
-        if row.get("Recording Status") not in (None, "", "Pending"):
+        entity_id, binding_file = evidence[0][0], evidence[0][4]
+        if not isinstance(entity_id, str) or not entity_id:
+            return None, None, digest, BLOCK_SESSION_UNKNOWN
+        own_binding = binding_file == item.provider_file_id
+        if (
+            row.get("Recording Status") not in (None, "", "Pending")
+            or (evidence[0][3] and not own_binding)
+            or (binding_file is not None and not own_binding)
+        ):
             return None, None, digest, BLOCK_SESSION_OCCUPIED
-        return SessionMode.EXISTING.value, str(row.get("ID")), digest, None
+        return SessionMode.EXISTING.value, entity_id, digest, None
 
     def _declared_size(self, item: IntakeItem) -> int | None:
         for observation in reversed(self.state.list_intake_observations(item.intake_id)):
@@ -1723,6 +1752,9 @@ class IntakeWorker:
                 return "RECONCILE", f"Draft page {receipt.request_key} is unavailable", []
             if self._human_touched(page, receipt, workspace):
                 return "HUMAN", "HUMAN_DRAFT_CHANGED", []
+            if page.get("Result Reference"):
+                # Not ours (ours is handled by recovery before this point): reconcile, never overwrite.
+                return "RECONCILE", f"Draft {receipt.request_key} carries a foreign Result Reference", []
             drafts.append((receipt, page))
         return "UNTOUCHED", "", drafts
 
@@ -1770,8 +1802,14 @@ class IntakeWorker:
                 reason = "SOURCE_IDENTITY"
             else:
                 _check_private_drive_metadata(metadata)
+                try:
+                    decision = json.loads(record.decision_json or "{}")
+                except ValueError:
+                    decision = {}
                 if metadata.parent_id != current.observed_parent_id:
                     reason = "SOURCE_PARENT"
+                elif metadata.name != decision.get("source_name") or metadata.mime_type != decision.get("source_mime"):
+                    reason = "SOURCE_METADATA"
                 elif _metadata_source_hash(metadata) != current.source_hash or current.source_version != record.source_version:
                     reason = "SOURCE_VERSION"
                 elif metadata.md5_checksum and record.byte_md5 and metadata.md5_checksum != record.byte_md5:
@@ -1785,7 +1823,7 @@ class IntakeWorker:
         except (SourceUnavailableError, SourcePartialError, PolicyDeniedError, ProviderUnavailableError):
             reason = "SOURCE_UNAVAILABLE"
         if reason is None:
-            reason = self._provenance_mismatch(item, record, workspace)
+            reason = self._provenance_mismatch(item, record, workspace) or self._eligibility_mismatch(item, record, workspace)
         if reason is None:
             if (
                 self._semester_workspace_fingerprint(workspace.semester) != record.workspace_fingerprint
@@ -1812,6 +1850,30 @@ class IntakeWorker:
         )
         self.state.record_intake_stage_event("auto_preflight_failed", intake_id=item.intake_id, operation_key=reason)
         return False
+
+    def _eligibility_mismatch(
+        self, item: IntakeItem, record: ClassificationRecord, workspace: ResolvedSemesterWorkspace
+    ) -> str | None:
+        """Plan §2.3: the calendar projection, the effective semester range and the Sessions
+        inventory the record was decided on are still the current ones (r4 #2)."""
+
+        semester = self._semester_range(workspace.semester)
+        if record.course_key:
+            calendar = self._course_calendar(record.course_key, semester)
+            if (None if calendar is None else calendar.revision_hash()) != record.calendar_projection_revision_hash:
+                return "CALENDAR"
+        current_basis = None if semester is None else semester.basis()
+        stored = None if record.semester_range_basis_json is None else json.loads(record.semester_range_basis_json)
+        if json.dumps(current_basis, sort_keys=True, default=str) != json.dumps(stored, sort_keys=True, default=str):
+            return "SEMESTER_RANGE"
+        if record.session_mode is not None:
+            recorded = None if record.decided_date is None else date.fromisoformat(record.decided_date)
+            mode, session_id, digest, block = self._session_binding(item, record.course_key, recorded, workspace)
+            if block is not None or (mode, session_id, digest) != (
+                record.session_mode, record.session_id, record.sessions_inventory_hash
+            ):
+                return "SESSION_INVENTORY"
+        return None
 
     def _alias_inventory_hash(self, semester: str) -> str:
         index = self._course_alias_index(semester)
@@ -1844,6 +1906,8 @@ class IntakeWorker:
                 return "CANVAS_BINDING"
             if binding.get("byte_sha256") != record.byte_sha256:
                 return "CANVAS_BINDING"
+            if self._canvas_course_mismatch(item, record):
+                return "CANVAS_COURSE"
         elif basis.get("canvas_binding") is not None:
             return "CANVAS_BINDING"
         return None
@@ -2098,6 +2162,7 @@ class IntakeWorker:
             self._clear_auto_close_reconcile(item)
             return
         page_id = receipt.provider_page_id or ""
+        workspace = self._workspace_for_item(item)
         status, reference = page.get("Request Status"), page.get("Result Reference")
         confirm: Mapping[str, Any] | None = page
         if status == AUTO_RESOLVED_STATUS:
@@ -2113,11 +2178,22 @@ class IntakeWorker:
         elif reference or status not in ("Draft", "Submitted"):
             self._mark_reconcile(item, f"Auto Resolved rollback found status {status!r} with reference {reference!r}")
             return
-        if (
-            confirm is None or confirm.get("Request Status") == AUTO_RESOLVED_STATUS
-            or confirm.get("Request Status") not in ("Draft", "Submitted") or confirm.get("Result Reference")
-        ):
-            self._mark_reconcile(item, "Auto Resolved rollback readback failed")
+        for _ in range(2):
+            if confirm is None or not self._closure_bound(confirm, receipt, workspace) or confirm.get("Result Reference"):
+                self._mark_reconcile(item, "Auto Resolved rollback readback failed")
+                return
+            expected = "Submitted" if confirm.get("Submitted") is True else "Draft"
+            if confirm.get("Request Status") == expected:
+                break
+            if confirm.get("Request Status") not in ("Draft", "Submitted"):
+                self._mark_reconcile(item, "Auto Resolved rollback readback shows an unexpected status")
+                return
+            # The human flipped Submitted while the rollback was in flight: align only the
+            # system-owned status projection with the live checkbox (never a USER field).
+            self.notion.update_system_record("input_request", page_id, {"Request Status": expected})
+            confirm = self.notion.read_record("input_request", page_id)
+        else:
+            self._mark_reconcile(item, "Auto Resolved rollback did not settle")
             return
         self.state.complete_auto_resolve_rollback(intent.intent_id)
         self._clear_auto_close_reconcile(item)

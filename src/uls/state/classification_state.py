@@ -623,7 +623,8 @@ class ClassificationStateMixin:
                 "(SELECT c.byte_sha256 FROM classification_records c WHERE c.intake_id = i.intake_id "
                 " AND c.byte_sha256 IS NOT NULL AND c.source_version = i.source_version "
                 " AND c.provider_file_id = i.provider_file_id ORDER BY c.rowid DESC LIMIT 1) AS proven_sha, "
-                "(SELECT json_extract(o.metadata_json, '$.size') FROM intake_observations o "
+                "(SELECT CASE WHEN json_type(o.metadata_json, '$.size') = 'integer' "
+                " THEN json_extract(o.metadata_json, '$.size') END FROM intake_observations o "
                 " WHERE o.intake_id = i.intake_id AND o.source_version = i.source_version "
                 " ORDER BY o.observed_at DESC LIMIT 1) AS size "
                 "FROM intake_items i WHERE i.provider = ? AND i.intake_id != ?",
@@ -638,7 +639,7 @@ class ClassificationStateMixin:
             if row["proven_sha"] is not None or source_hash.startswith("md5:"):
                 continue  # bytes known for the current version and different
             other_size = row["size"]
-            if size is None or other_size is None or type(other_size) is not int or other_size == size:
+            if size is None or other_size is None or type(other_size) is not int or other_size < 0 or other_size == size:
                 unproven.append(file_id)  # size unknown or equal, bytes unknown: cannot rule out
         return {"proven": sorted(proven), "unproven": sorted(unproven)}
 
@@ -1181,6 +1182,16 @@ class ClassificationStateMixin:
                 (values["drive_file_id"],),
             ).fetchone()
             return dict(row)
+
+    def session_source_binding_for(self, course_key: str, session_id: str) -> dict[str, Any] | None:
+        """The canonical source binding of a Session, when one exists (occupancy proof)."""
+
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM session_source_bindings WHERE course_key = ? AND session_id = ?",
+                (course_key, session_id),
+            ).fetchone()
+            return None if row is None else dict(row)
 
     def get_canvas_drive_binding(self, drive_file_id: str) -> dict[str, Any] | None:
         with self._transaction() as connection:

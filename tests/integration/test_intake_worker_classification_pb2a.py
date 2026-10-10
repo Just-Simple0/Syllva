@@ -108,6 +108,7 @@ def test_material_from_a_proven_binding_in_a_course_folder_is_auto_eligible(tmp_
             **_privacy())
         registry = system["config"].google_drive.semester_registries[0]
         registry.optional_course_upload_folder_ids[COURSE] = "synthetic-course-upload-1"
+        system["config"].intake.classification.canvas_course_map = {67535: COURSE}
         # The worker resolves its workspaces at construction: rebuild it on the new layout.
         from uls.config.credentials import ResolvedCredentials
         from uls.intake.identity import provider_binding_id
@@ -1052,6 +1053,7 @@ def test_preflight_rechecks_alias_and_canvas_provenance(tmp_path: Path) -> None:
             file_id="synthetic-course-upload-1", name="upload", mime_type=DRIVE_FOLDER_MIME,
             parents=("synthetic-course-1",), modified_time="2026-09-13T10:00:00Z", size=0, md5_checksum=None, **_privacy())
         system["config"].google_drive.semester_registries[0].optional_course_upload_folder_ids[COURSE] = "synthetic-course-upload-1"
+        system["config"].intake.classification.canvas_course_map = {67535: COURSE}
         from uls.config.credentials import ResolvedCredentials
         from uls.intake.identity import provider_binding_id
         from uls.runtime import build_intake_worker
@@ -1077,3 +1079,201 @@ def test_preflight_rechecks_alias_and_canvas_provenance(tmp_path: Path) -> None:
         assert worker._provenance_mismatch(item, record, workspace) == "CANVAS_BINDING"
         state.get_canvas_drive_binding = lambda file_id: None  # type: ignore[method-assign]
         assert worker._provenance_mismatch(item, record, workspace) == "CANVAS_BINDING"
+
+
+# ---------------------------------------------------------------------------
+# P-B2a FINAL r4 findings
+# ---------------------------------------------------------------------------
+def test_session_occupancy_needs_pointer_and_binding_proof(tmp_path: Path) -> None:
+    # r4 #1: a Pending Session with a Normalized Transcript pointer, or bound to another
+    # file, is occupied; a Session bound to this very file is an idempotent re-entry.
+    for name in ("pointer", "foreign-binding", "own-binding"):
+        with _system(tmp_path / name, name=MATCHED_NAME, raw=RAW) as system:
+            worker = _enable(system)
+            _complete_calendar(system["state"])
+            _seed_session(system["notion"], "TEST102-S01")
+            row = system["notion"].data_sources["synthetic-sessions"][0]
+            if name == "pointer":
+                row["Normalized Transcript"] = "https://drive.google.com/file/d/elsewhere/view"
+            else:
+                system["state"].record_session_source_binding(
+                    binding_id=f"b-{name}", course_key=COURSE, session_id="TEST102-S01", provider="google_drive",
+                    provider_file_id="elsewhere" if name == "foreign-binding" else system["source_id"],
+                    reservation_id="r-1", state="ACTIVE")
+            worker.run_once()
+            item = _item(system)
+            if name == "own-binding":
+                assert item.classification_state == "CLASSIFIED"
+            else:
+                assert item.classification_state == "HUMAN" and _auto_plans(system["state"]) == []
+                assert "AUTO_BLOCK_SESSION_OCCUPIED" in system["state"].get_intake_suggestion(item.intake_id)["suggestion_note"]
+
+
+def test_preflight_rechecks_session_semester_and_metadata(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    def run(label: str, mutate) -> tuple:
+        system_cm, system = _pre_v2_draft(tmp_path / label)
+        try:
+            worker = _enable(system)
+            _complete_calendar(system["state"])
+            _spy_preflight(worker, lambda call: mutate(system) if call == 1 else None)
+            notion, state = system["notion"], system["state"]
+            since = len(notion.events)
+            worker.run_once()
+            return _request_writes(notion, since), _auto_plans(state)[0]["status"], _assign_request(notion)["Request Status"]
+        finally:
+            system_cm.__exit__(None, None, None)
+
+    # r4 #2: a Session appeared for the date after the plan said NEW.
+    writes, status, request_status = run("session", lambda system: _seed_session(system["notion"], "TEST102-S01"))
+    assert writes == [] and status == "RECONCILE_REQUIRED" and request_status == "Draft"
+    # r4 #2: the effective semester range changed.
+    def widen(system) -> None:
+        system["config"].google_drive.semester_registries[0].end_date = "2026-12-31"
+    writes, status, _ = run("semester", widen)
+    assert writes == [] and status == "RECONCILE_REQUIRED"
+    # r4 #2: the calendar projection changed (week 2 moved by a day).
+    def shift(system) -> None:
+        state = system["state"]
+        state.record_canvas_observation(origin="canvas.knu", canvas_course_id=67535, resource_kind="module_item",
+                                        resource_id="r4", observation_revision=1, title="2026-09-24",
+                                        module_name="4주차", module_week=4, item_type="ExternalTool",
+                                        collection_complete=True)
+        entries = [RecordingEntry(67535, f"r{w}", 1, w, date(2026, 9, 3) + timedelta(days=7 * (w - 1))) for w in (1, 2, 3, 4)]
+        state.replace_recording_calendar_current(
+            COURSE, 67535, build_calendar(COURSE, entries, semester=SEMESTER, collection_complete=True),
+            collection_complete=True)
+    writes, status, _ = run("calendar", shift)
+    assert writes == [] and status == "RECONCILE_REQUIRED"
+    # r4 #4: renamed after S1 decided, bytes and md5 unchanged.
+    def rename(system) -> None:
+        drive = system["drive"]
+        drive.files[system["source_id"]] = replace(drive.files[system["source_id"]], name="notes.md")
+    writes, status, _ = run("rename", rename)
+    assert writes == [] and status == "RECONCILE_REQUIRED"
+    def retype(system) -> None:
+        drive = system["drive"]
+        drive.files[system["source_id"]] = replace(drive.files[system["source_id"]], mime_type="text/plain")
+    writes, status, _ = run("mime", retype)
+    assert writes == [] and status == "RECONCILE_REQUIRED"
+
+
+def test_canvas_course_must_match_the_classified_course(tmp_path: Path) -> None:
+    # r4 #3: a verified binding of another (or an unmapped) Canvas course never reaches AUTO.
+    csv = b"name,score\nA,1\n"
+    for label, mapping in (("other-course", {67535: COURSE_KEYS[2]}), ("unmapped", {})):
+        with _system(tmp_path / label, name="mbti.csv", mime_type="text/csv", raw=csv) as system:
+            from dataclasses import replace
+            _enable(system, profile=None)
+            drive, state = system["drive"], system["state"]
+            drive.files[system["source_id"]] = replace(drive.files[system["source_id"]], parents=("synthetic-course-upload-1",))
+            from tests.integration.test_intake_worker_preview import _privacy
+
+            from uls.adapters.drive.worker import DRIVE_FOLDER_MIME, DriveMetadata
+            drive.files["synthetic-course-upload-1"] = DriveMetadata(
+                file_id="synthetic-course-upload-1", name="upload", mime_type=DRIVE_FOLDER_MIME,
+                parents=("synthetic-course-1",), modified_time="2026-09-13T10:00:00Z", size=0, md5_checksum=None, **_privacy())
+            system["config"].google_drive.semester_registries[0].optional_course_upload_folder_ids[COURSE] = "synthetic-course-upload-1"
+            system["config"].intake.classification.canvas_course_map = mapping
+            from uls.config.credentials import ResolvedCredentials
+            from uls.intake.identity import provider_binding_id
+            from uls.runtime import build_intake_worker
+            system["worker"] = build_intake_worker(
+                system["config"], ResolvedCredentials({}), state=state, drive=drive, notion=system["notion"],
+                provider_account_binding_id=provider_binding_id("google_drive", "synthetic-owner", "synthetic-oauth"),
+                semester="2026-2")
+            worker = _rewire(system, "legacy5-cls")
+            state.record_canvas_drive_binding(
+                drive_file_id=system["source_id"], canvas_course_id=67535, resource_kind="assignment", resource_id="as-1",
+                observation_revision=1, attachment_id="att-9", attachment_filename="mbti.csv", attachment_size=len(csv),
+                byte_sha256=hashlib.sha256(csv).hexdigest())
+            worker.run_once()
+            item = _item(system)
+            assert item.classification_state == "HUMAN" and _auto_plans(state) == []
+            assert "AUTO_BLOCK_CANVAS_COURSE" in state.get_intake_suggestion(item.intake_id)["suggestion_note"]
+
+
+def test_a_foreign_result_reference_is_never_overwritten(tmp_path: Path) -> None:
+    # r4 #5: first closure.
+    system_cm, system = _pre_v2_draft(tmp_path / "first")
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        _assign_request(system["notion"])["Result Reference"] = "someone-elses-record"
+        since = len(system["notion"].events)
+        worker.run_once()
+        assert _request_writes(system["notion"], since) == []
+        assert _assign_request(system["notion"])["Result Reference"] == "someone-elses-record"
+        assert _assign_request(system["notion"])["Request Status"] == "Draft"
+    finally:
+        system_cm.__exit__(None, None, None)
+    # r4 #5: lost-write retry.
+    system_cm, system = _pre_v2_draft(tmp_path / "retry")
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        notion, state = system["notion"], system["state"]
+        _drop_first_auto_resolved_write(notion)
+        worker.run_once()
+        _assign_request(notion)["Result Reference"] = "someone-elses-record"
+        since = len(notion.events)
+        worker.run_once()
+        assert _request_writes(notion, since) == []
+        assert _assign_request(notion)["Result Reference"] == "someone-elses-record"
+        receipt = next(r for r in state.list_request_receipts())
+        assert state.get_auto_resolve_intent(receipt.request_key).state == "ABORTED"
+    finally:
+        system_cm.__exit__(None, None, None)
+
+
+def test_rollback_aligns_status_when_submitted_flips_mid_rollback(tmp_path: Path) -> None:
+    # r4 #6: the human submits while the rollback write is in flight.
+    system_cm, system = _pre_v2_draft(tmp_path)
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        notion, state = system["notion"], system["state"]
+
+        def edit(page_id: str) -> None:
+            for page in notion.data_sources["synthetic-requests"]:
+                if page["id"] == page_id:
+                    page["Course"] = ["synthetic-course-page-0"]
+        _landing_hook(notion, edit)
+        original_update = notion.update_record
+
+        def update_record(data_source_id: str, page_id: str, properties):
+            row = original_update(data_source_id, page_id, properties)
+            status = ((properties.get("Request Status") or {}).get("status") or {}).get("name")
+            if data_source_id == "synthetic-requests" and status == "Draft" and "Result Reference" in properties:
+                for page in notion.data_sources["synthetic-requests"]:
+                    if page["id"] == page_id:
+                        page["Submitted"] = True
+            return row
+        notion.update_record = update_record  # type: ignore[method-assign]
+        since = len(notion.events)
+        worker.run_once()
+        status_only = [e for e in _request_writes(notion, since) if set(e[3]) == {"Request Status"}
+                       and e[3]["Request Status"]["status"]["name"] == "Submitted"]
+        assert status_only, "the status projection must follow the live Submitted checkbox"
+        receipt = next(r for r in state.list_request_receipts() if r.request_type == "ASSIGN_COURSE")
+        intent = state.get_auto_resolve_intent(receipt.request_key)
+        assert intent.state == "ABORTED" and state.get_auto_resolve_rollback(intent.intent_id)["state"] == "DONE"
+    finally:
+        system_cm.__exit__(None, None, None)
+
+
+def test_json_boolean_size_is_not_a_proven_size(tmp_path: Path) -> None:
+    # r4 #7: {"size": true} must not clear the duplicate ambiguity.
+    from dataclasses import replace
+
+    with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        _second_file(system, name="notes.md", raw=b"z" * 9, md5=False)
+        drive = system["drive"]
+        drive.files["synthetic-other"] = replace(drive.files["synthetic-other"], size=True)  # type: ignore[arg-type]
+        worker.run_once()
+        item = _item(system)
+        assert item.classification_state == "HUMAN" and _auto_plans(system["state"]) == []
+        assert "AUTO_BLOCK_DUPLICATE_UNPROVEN" in system["state"].get_intake_suggestion(item.intake_id)["suggestion_note"]
