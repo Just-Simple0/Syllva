@@ -1458,6 +1458,50 @@ class ClassificationStateMixin:
                 (request_key, intake_id, request_type, int(generation)),
             )
 
+    def ensure_legacy_request_generation(self, intake_id: str, request_type: str, request_key: str) -> int:
+        """Record a request created before/outside v2 as a LEGACY generation (idempotent).
+
+        The migration backfill only runs when the store opens; a request created by this
+        process must be recognisable as the latest bound generation before it can be
+        superseded.  The receipt must prove the key, type and intake binding.
+        """
+
+        with self._transaction(immediate=True) as connection:
+            bound = connection.execute(
+                "SELECT generation FROM intake_request_generations WHERE intake_id = ? "
+                "AND request_type = ? AND request_key = ?",
+                (intake_id, request_type, request_key),
+            ).fetchone()
+            if bound is not None:
+                return int(bound["generation"])
+            receipt = connection.execute(
+                "SELECT request_type, intake_ids_json FROM request_receipts WHERE request_key = ?",
+                (request_key,),
+            ).fetchone()
+            try:
+                intake_ids = json.loads(receipt["intake_ids_json"]) if receipt is not None else None
+            except (TypeError, ValueError):
+                intake_ids = None
+            if (receipt is None or receipt["request_type"] != request_type
+                    or not isinstance(intake_ids, list) or intake_id not in intake_ids):
+                raise ValueError("the receipt does not prove this request key for the intake")
+            latest = connection.execute(
+                "SELECT generation, request_key FROM intake_request_generations "
+                "WHERE intake_id = ? AND request_type = ? ORDER BY generation DESC LIMIT 1",
+                (intake_id, request_type),
+            ).fetchone()
+            if latest is not None and latest["request_key"] is None:
+                raise ValueError("a pending request generation blocks recording a legacy one")
+            generation = 1 if latest is None else int(latest["generation"]) + 1
+            connection.execute(
+                "INSERT INTO intake_request_generations(intake_id, request_type, generation, "
+                "request_key, superseded_request_key, derivation_version, created_at) "
+                "VALUES (?, ?, ?, ?, ?, 'LEGACY', ?)",
+                (intake_id, request_type, generation, request_key,
+                 None if latest is None else latest["request_key"], _now()),
+            )
+            return generation
+
     def get_request_generation(self, request_key: str, intake_id: str | None = None) -> dict[str, Any] | None:
         """One HUMAN request may cover several intakes (ASSIGN_COURSE); pass ``intake_id`` to pick one."""
 

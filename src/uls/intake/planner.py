@@ -143,6 +143,8 @@ def make_request_generation(
     provider_account_binding_id: str,
     config_fingerprint: str,
     target_snapshot: Mapping[str, Any] | None = None,
+    superseded_request_key: str | None = None,
+    request_generation: int | None = None,
 ) -> RequestGeneration:
     """Build the pre-receipt key from durable observation metadata only."""
 
@@ -163,6 +165,8 @@ def make_request_generation(
             "session": None,
         },
         intake_ids=[item.intake_id],
+        superseded_request_key=superseded_request_key,
+        request_generation=request_generation,
     )
 
 

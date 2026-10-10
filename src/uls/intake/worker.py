@@ -888,8 +888,13 @@ class IntakeWorker:
         *,
         request_type: str = RequestType.FILE_DETAILS.value,
         target_snapshot: Mapping[str, Any] | None = None,
+        superseded_request_key: str | None = None,
     ) -> RequestReceipt:
-        """Create or recover one initial SYSTEM request projection."""
+        """Create or recover one SYSTEM request projection.
+
+        ``superseded_request_key`` creates the next HUMAN generation of a terminal request
+        (plan §3.4): the V2 derivation, a durable generation reserved *and bound to its key*
+        before any provider create."""
 
         item = self._require_item(intake_id)
         workspace = self._workspace_for_item(item)
@@ -904,6 +909,7 @@ class IntakeWorker:
                 request_type=request_type,
                 target_snapshot=target_snapshot,
                 layout_context=layout_context,
+                superseded_request_key=superseded_request_key,
             )
 
     def _create_input_request_with_context(
@@ -914,6 +920,7 @@ class IntakeWorker:
         request_type: str,
         target_snapshot: Mapping[str, Any] | None,
         layout_context: _LayoutValidationContext,
+        superseded_request_key: str | None = None,
     ) -> RequestReceipt:
         if not self._layout_context_allows(layout_context, workspace):
             raise IntakeReconcileRequired("Input Request layout context is stale or missing")
@@ -938,6 +945,18 @@ class IntakeWorker:
                     # only happens on a later call for a different
                     # request_type once this one is resolved.
                     return recovered_receipt
+        generation_number: int | None = None
+        if superseded_request_key is not None:
+            try:
+                # The superseded key must be the latest bound generation: record it first when
+                # it was created in this process (the open-time backfill has not seen it).
+                self.state.ensure_legacy_request_generation(item.intake_id, request_type, superseded_request_key)
+                # Reserve-or-resume: the same basis always returns the same number, and a
+                # pending reservation of another basis refuses a new one (plan §3.4, G2).
+                generation_number = self.state.reserve_request_generation(
+                    item.intake_id, request_type, superseded_request_key=superseded_request_key)
+            except ValueError as exc:
+                raise IntakeReconcileRequired(f"request generation cannot be reserved: {exc}") from exc
         generation = make_request_generation(
             item=item,
             request_type=request_type,
@@ -945,7 +964,16 @@ class IntakeWorker:
             provider_account_binding_id=self.provider_account_binding_id,
             config_fingerprint=config_fingerprint,
             target_snapshot=target_snapshot,
+            superseded_request_key=superseded_request_key,
+            request_generation=generation_number,
         )
+        if generation_number is not None:
+            try:
+                # The generation -> key binding is durable before any provider create.
+                self.state.bind_request_generation_key(
+                    item.intake_id, request_type, generation_number, generation.request_key)
+            except (ValueError, KeyError) as exc:
+                raise IntakeReconcileRequired(f"request generation cannot be bound: {exc}") from exc
         # This is intentionally committed before the first create attempt.
         # Durable intent uses the item's stable identity: once persisted,
         # this key does not change even if item.source_hash/version drift
@@ -1007,6 +1035,8 @@ class IntakeWorker:
             }
             suggestion_props = self._suggestion_properties(item)
             properties.update(suggestion_props)
+            if superseded_request_key is not None:
+                properties["Result Reference"] = f"AUTO_SUPERSEDED:{superseded_request_key}"
             self.state.record_provider_write_attempt(
                 operation=INTAKE_REQUEST_SYNC_OPERATION,
                 operation_key=attempt_key,
@@ -4539,6 +4569,27 @@ class IntakeWorker:
             for item in items
         ]
         config_fingerprint = self._semester_config_fingerprint(workspace.semester)
+        # The persisted generation record picks the derivation (plan §3.4 r9 R4): V2 when a
+        # supersession generation was reserved for this key, otherwise the LEGACY derivation
+        # (also for requests that predate v2).  A V2 record that cannot be used is never
+        # guessed around.
+        supersession: dict[str, Any] = {}
+        records = [
+            self.state.get_request_generation(receipt.request_key, item.intake_id)
+            if hasattr(self.state, "get_request_generation") else None
+            for item in items
+        ]
+        v2_records = [r for r in records if r is not None and r.get("derivation_version") == "V2"]
+        if v2_records:
+            record = v2_records[0]
+            if (len(items) != 1 or len(v2_records) != 1
+                    or not record.get("superseded_request_key")
+                    or record.get("request_type") != request.request_type):
+                raise IntakeReconcileRequired("request generation record is inconsistent with the request")
+            supersession = {
+                "superseded_request_key": record["superseded_request_key"],
+                "request_generation": int(record["generation"]),
+            }
         revision = derive_request_revision(
             provider=self.provider,
             provider_account_binding_id=self.provider_account_binding_id,
@@ -4547,6 +4598,7 @@ class IntakeWorker:
             observation_refs=observation_refs,
             config_fingerprint=config_fingerprint,
             target_snapshot_hash=receipt.target_snapshot_hash,
+            **supersession,
         )
         key = derive_request_key(
             provider=self.provider,
@@ -4556,6 +4608,7 @@ class IntakeWorker:
             request_revision_hash=revision,
             intake_ids=[item.intake_id for item in items],
             target_snapshot_hash=receipt.target_snapshot_hash,
+            **supersession,
         )
         if revision != receipt.request_revision_hash or key != receipt.request_key:
             raise IntakeReconcileRequired(
