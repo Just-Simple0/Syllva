@@ -2226,3 +2226,111 @@ def test_disabling_leaves_a_p_b1_classified_item_without_auto_plan_untouched(tmp
         released = [e for e in state.list_intake_stage_events(item.intake_id) if e.get("stage") == "auto_authority_released"] \
             if hasattr(state, "list_intake_stage_events") else []
         assert released == []
+
+
+def test_closing_a_plan_hands_the_item_back_in_the_same_transaction(tmp_path: Path) -> None:
+    # Self-audit sweep: plan close and the item's classification_state are one commit.
+    with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        worker.run_once()
+        state = system["state"]
+        assert _item(system).classification_state == "CLASSIFIED"
+        plan = _auto_plans(state)[0]
+        state.reconcile_intake_plan(plan["plan_revision"], "TEST")
+        assert _item(system).classification_state == "HUMAN"
+        assert _auto_plans(state)[0]["status"] == "RECONCILE_REQUIRED"
+
+
+# ---------------------------------------------------------------------------
+# P-B2a FINAL r14 findings
+# ---------------------------------------------------------------------------
+def test_a_canvas_binding_with_an_intake_row_is_still_duplicate_evidence(tmp_path: Path) -> None:
+    # r14 R1: file A has an intake row of *different* current bytes, but its canonical Canvas
+    # binding still records the transcript's bytes.
+    with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        _second_file(system, name="a.md", raw=b"completely different content here", md5=True)
+        system["state"].record_canvas_drive_binding(
+            drive_file_id="synthetic-other", canvas_course_id=1, resource_kind="assignment", resource_id="as-1",
+            observation_revision=1, attachment_id="att-1", attachment_filename="a.md", attachment_size=len(RAW),
+            byte_sha256=hashlib.sha256(RAW).hexdigest())
+        worker.run_once()
+        item = _item(system)
+        assert item.classification_state == "HUMAN" and _auto_plans(system["state"]) == []
+        assert "DUPLICATE_CONTENT" in system["state"].get_intake_suggestion(item.intake_id)["suggestion_note"]
+
+
+def test_a_session_date_range_is_not_a_single_day(tmp_path: Path) -> None:
+    # r14 R2
+    cases = {"range": ({"start": "2026-09-10", "end": "2026-09-12"}, "HUMAN"),
+             "same-day": ({"start": "2026-09-11", "end": "2026-09-11"}, "CLASSIFIED"),
+             "open-end": ({"start": "2026-09-11", "end": None}, "CLASSIFIED"),
+             "no-start": ({"end": "2026-09-10"}, "HUMAN")}
+    for label, (value, expected) in cases.items():
+        with _system(tmp_path / label, name=MATCHED_NAME, raw=RAW) as system:
+            worker = _enable(system)
+            _complete_calendar(system["state"])
+            _seed_session(system["notion"], "TEST102-S01")
+            system["notion"].data_sources["synthetic-sessions"][0]["Date"] = value
+            worker.run_once()
+            assert _item(system).classification_state == expected, label
+
+
+def test_rollback_never_acts_on_a_non_boolean_checkbox(tmp_path: Path) -> None:
+    # r14 R3: Submitted is None, a string or missing when the rollback is about to write.
+    for label, value in (("none", None), ("string", "true"), ("missing", "MISSING")):
+        system_cm, system = _pre_v2_draft(tmp_path / label)
+        try:
+            worker = _enable(system)
+            _complete_calendar(system["state"])
+            notion, state = system["notion"], system["state"]
+
+            def corrupt(page_id: str, v=value, n=notion) -> None:
+                for page in n.data_sources["synthetic-requests"]:
+                    if page["id"] == page_id:
+                        page["Course"] = ["synthetic-course-page-0"]
+                        if v == "MISSING":
+                            page.pop("Submitted", None)
+                        else:
+                            page["Submitted"] = v
+            _landing_hook(notion, corrupt)
+            since = len(notion.events)
+            worker.run_once()
+            receipt = next(r for r in state.list_request_receipts())
+            intent = state.get_auto_resolve_intent(receipt.request_key)
+            assert intent.state == "PENDING", label
+            assert _assign_request(notion)["Request Status"] == "Auto Resolved", label
+            assert len(_request_writes(notion, since)) == 1, label  # only the original closure write
+            assert state.get_auto_resolve_rollback(intent.intent_id) is None or \
+                state.get_auto_resolve_rollback(intent.intent_id)["state"] == "PENDING", label
+        finally:
+            system_cm.__exit__(None, None, None)
+
+
+def test_the_first_closure_write_requires_auto_to_be_usable_right_now(tmp_path: Path) -> None:
+    # r14 R4: the feature is switched off between stage A and the first write.
+    system_cm, system = _pre_v2_draft(tmp_path)
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        notion, state = system["notion"], system["state"]
+        original = worker._judge_human_requests
+        flipped = {"done": False}
+
+        def judge(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if not flipped["done"]:
+                flipped["done"] = True
+                system["config"].intake.classification.enabled = False
+            return result
+        worker._judge_human_requests = judge  # type: ignore[method-assign]
+        since = len(notion.events)
+        worker.run_once()
+        assert _request_writes(notion, since) == []
+        assert _auto_plans(state)[0]["status"] == "RECONCILE_REQUIRED"
+        assert _assign_request(notion)["Request Status"] == "Draft"
+        assert _item(system).classification_state == "HUMAN"
+    finally:
+        system_cm.__exit__(None, None, None)

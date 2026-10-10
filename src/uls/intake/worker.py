@@ -1602,6 +1602,9 @@ class IntakeWorker:
         def day(row: Mapping[str, Any]) -> str | None:
             value = row.get("Date")
             if isinstance(value, Mapping):
+                end = value.get("end")
+                if end not in (None, "") and str(end).strip()[:10] != str(value.get("start") or "").strip()[:10]:
+                    return None  # a multi-day range proves no single date (r14 R2)
                 value = value.get("start")
             if not value:
                 return None
@@ -2215,6 +2218,11 @@ class IntakeWorker:
         every HUMAN request of the intake.  Returns the target's fresh Draft page, or None
         after the matching supersede/reconcile transition (zero writes)."""
 
+        if retrying is None and not self._auto_enabled():
+            # A first mutation needs AUTO to be usable right now; a started closure keeps its
+            # readback recovery regardless (r14 R4).
+            self.state.reconcile_intake_plan(plan.plan_revision, "AUTO_UNAVAILABLE")
+            return None
         if not self._auto_preflight(item, plan, record, workspace):
             return None
         verdict, reason, drafts = self._judge_human_requests(item, workspace, retrying=retrying)
@@ -2439,6 +2447,10 @@ class IntakeWorker:
         """
 
         assert self.notion is not None
+        if type(page.get("Submitted")) is not bool or type(page.get("Cancelled")) is not bool:
+            # An unclear checkbox is an unknown provider state: no mutation, barrier stays (r14 R3).
+            self._mark_auto_close_reconcile(item, "rollback readback has a non-boolean Submitted or Cancelled")
+            return
         # The target follows the live Submitted checkbox, not the possibly stale persisted
         # target, so a request the human submitted meanwhile is never turned back (r3 #2).
         target = "Submitted" if page.get("Submitted") is True else "Draft"
@@ -2464,7 +2476,10 @@ class IntakeWorker:
             self._mark_auto_close_reconcile(item, f"Auto Resolved rollback found status {status!r} with reference {reference!r}")
             return
         for _ in range(2):
-            if confirm is None or not self._closure_bound(confirm, receipt, workspace) or confirm.get("Result Reference"):
+            if (
+                confirm is None or not self._closure_bound(confirm, receipt, workspace) or confirm.get("Result Reference")
+                or type(confirm.get("Submitted")) is not bool or type(confirm.get("Cancelled")) is not bool
+            ):
                 self._mark_auto_close_reconcile(item, "Auto Resolved rollback readback failed")
                 return
             expected = "Submitted" if confirm.get("Submitted") is True else "Draft"

@@ -50,3 +50,7 @@ P-B2는 리뷰 단위로 다시 둘로 나눈다.
 3. ASSIGN_COURSE 재실행 보호·교차 권한 인계 재검증.
 
 수용: §9 P-B 행의 잔여 항목 + §6.3 테스트.
+
+## 구현 메모
+
+- `classification_records.course_basis.type`은 구현에서 `upload_folder|config_alias|notion_alias`를 쓴다. Canvas course map은 근거 유형이 아니라 단계 A와 첫 mutation preflight의 교차 검증이며 `canvas_map` 유형은 P-B3에 남긴다(P-B2a r14 O1).

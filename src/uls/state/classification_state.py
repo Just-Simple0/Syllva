@@ -598,6 +598,15 @@ class ClassificationStateMixin:
             ).fetchone()
             if row is not None and row["status"] in ("SUPERSEDED", "RECONCILE_REQUIRED"):
                 self._void_plan_jobs(connection, plan_revision, reason)
+                # The item hands the authority back in the SAME transaction, so no crash can
+                # leave a closed plan next to an item that still claims CLASSIFIED.
+                connection.execute(
+                    "UPDATE intake_items SET classification_state = 'HUMAN' WHERE intake_id = ("
+                    "SELECT intake_id FROM intake_plans WHERE plan_revision = ? "
+                    "AND plan_authority = 'AUTO_CLASSIFICATION' ORDER BY created_at DESC LIMIT 1) "
+                    "AND classification_state = 'CLASSIFIED'",
+                    (plan_revision,),
+                )
         return int(changed)
 
     def get_auto_resolve_rollback(self, intent_id: str) -> dict[str, Any] | None:
@@ -663,8 +672,8 @@ class ClassificationStateMixin:
             ).fetchall()
         for bound in canvas:
             other = str(bound["drive_file_id"])
-            if other in known:
-                continue  # judged above with its intake row
+            # Independent of the file's current intake row: the binding records the bytes the
+            # canonical material was built from (r14 R1).
             if bound["byte_sha256"] == byte_sha256:
                 proven.append(other)
         for bound in sessions:
