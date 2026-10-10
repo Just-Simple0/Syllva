@@ -1633,3 +1633,119 @@ def test_a_duplicate_found_after_stage_a_stops_the_first_write(tmp_path: Path) -
         assert _assign_request(notion)["Request Status"] == "Draft"
     finally:
         system_cm.__exit__(None, None, None)
+
+
+# ---------------------------------------------------------------------------
+# P-B2a FINAL r8 findings
+# ---------------------------------------------------------------------------
+def test_abort_is_atomic_with_plan_supersession_and_job_void(tmp_path: Path) -> None:
+    # r8 R1: a crash right after the ABORTED commit must not leave a live AUTO plan.
+    system_cm, system = _pre_v2_draft(tmp_path)
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        notion, state = system["notion"], system["state"]
+        _drop_first_auto_resolved_write(notion)
+        worker.run_once()
+        plan = _auto_plans(state)[0]
+        state.create_job(job_key="sha256:" + "5" * 64, operation="intake.test", stage="intake",
+                         target_entity_id=plan["intake_id"], plan_revision=plan["plan_revision"],
+                         plan_authority="AUTO_CLASSIFICATION")
+        _assign_request(notion)["Course"] = ["synthetic-course-page-0"]
+        original_event = state.record_intake_stage_event
+
+        def crash_after_commit(event: str, **kwargs):
+            if event == "auto_plan_superseded":
+                raise RuntimeError("crash right after the abort commit")
+            return original_event(event, **kwargs)
+        state.record_intake_stage_event = crash_after_commit  # type: ignore[method-assign]
+        worker._recover_auto_resolve_intents()
+        receipt = next(r for r in state.list_request_receipts())
+        assert state.get_auto_resolve_intent(receipt.request_key).state == "ABORTED"
+        assert _auto_plans(state)[0]["status"] == "SUPERSEDED"
+        assert state.get_job(job_key="sha256:" + "5" * 64).voided_at is not None
+        assert _item(system).classification_state == "HUMAN"
+    finally:
+        system_cm.__exit__(None, None, None)
+
+
+def test_every_closure_error_path_respects_reconcile_ownership(tmp_path: Path) -> None:
+    for label, independent in (("independent", True), ("own-only", False)):
+        system_cm, system = _pre_v2_draft(tmp_path / label)
+        try:
+            worker = _enable(system)
+            _complete_calendar(system["state"])
+            notion, state = system["notion"], system["state"]
+            _drop_first_auto_resolved_write(notion)
+            worker.run_once()
+            if independent:
+                state.update_intake_item(_item(system).intake_id, status="RECONCILE_REQUIRED",
+                                         last_error_code="SOURCE_CHANGED_ELSEWHERE", last_error="independent cause")
+            page = _assign_request(notion)
+            page["Request Type"] = "FILE_DETAILS"   # identity broken
+            worker.run_once()
+            expected = "SOURCE_CHANGED_ELSEWHERE" if independent else "AUTO_RESOLVE_RECONCILE"
+            assert _item(system).last_error_code == expected
+            page["Request Type"] = "ASSIGN_COURSE"  # identity restored
+            worker.run_once()
+            receipt = next(r for r in state.list_request_receipts())
+            assert state.get_auto_resolve_intent(receipt.request_key).state == "DONE"
+            item = _item(system)
+            if independent:
+                assert item.status == "RECONCILE_REQUIRED" and item.last_error_code == "SOURCE_CHANGED_ELSEWHERE"
+            else:
+                assert item.status != "RECONCILE_REQUIRED" and item.last_error_code is None
+        finally:
+            system_cm.__exit__(None, None, None)
+
+
+def test_the_closure_mark_is_cleared_in_the_terminal_commit(tmp_path: Path) -> None:
+    # r8 R3: a crash right after DONE cannot leave the closure's reconcile mark behind.
+    system_cm, system = _pre_v2_draft(tmp_path)
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        notion, state = system["notion"], system["state"]
+        original_read = notion.read_record
+        vanished = {"on": False}
+
+        def read_record(data_source_id: str, page_id: str):
+            if vanished["on"] and data_source_id == "synthetic-requests":
+                return None
+            return original_read(data_source_id, page_id)
+        notion.read_record = read_record  # type: ignore[method-assign]
+        _landing_hook(notion, lambda page_id: vanished.__setitem__("on", True))
+        worker.run_once()
+        assert _item(system).last_error_code == "AUTO_RESOLVE_RECONCILE"
+        vanished["on"] = False
+
+        def crash(item) -> None:
+            raise RuntimeError("crash between the terminal commit and the cleanup")
+        worker._clear_auto_close_reconcile = crash  # type: ignore[method-assign]
+        worker.run_once()
+        receipt = next(r for r in state.list_request_receipts())
+        assert state.get_auto_resolve_intent(receipt.request_key).state == "DONE"
+        item = _item(system)
+        assert item.last_error_code is None and item.status != "RECONCILE_REQUIRED"
+    finally:
+        system_cm.__exit__(None, None, None)
+
+
+def test_a_session_with_an_unreadable_date_is_unknown(tmp_path: Path) -> None:
+    # r8 O1: no Date, or an unparsable one, may be the target; a clearly different date is fine.
+    for label, date_value, expected in (("missing", None, "HUMAN"), ("garbage", "tomorrow", "HUMAN"),
+                                        ("other-day", "2026-09-11", "CLASSIFIED")):
+        with _system(tmp_path / label, name=MATCHED_NAME, raw=RAW) as system:
+            worker = _enable(system)
+            _complete_calendar(system["state"])
+            _seed_session(system["notion"], "TEST102-S01")
+            row = system["notion"].data_sources["synthetic-sessions"][0]
+            if date_value is None:
+                row.pop("Date")
+            else:
+                row["Date"] = date_value
+            worker.run_once()
+            item = _item(system)
+            assert item.classification_state == expected
+            if expected == "HUMAN":
+                assert "AUTO_BLOCK_SESSION_UNKNOWN" in system["state"].get_intake_suggestion(item.intake_id)["suggestion_note"]

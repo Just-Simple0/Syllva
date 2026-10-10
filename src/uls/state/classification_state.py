@@ -280,6 +280,8 @@ CHUNK_TAG_SOURCES = frozenset({"rule", "model"})
 REQUIRED_TAG_QUESTION = "assignment"
 MATERIAL_BACKFILL_MARKER = "material_ai_kind_backfill_snapshot"
 AUTO_RESOLVABLE_REQUEST_TYPES = frozenset({"ASSIGN_COURSE", "FILE_DETAILS"})
+# The File Intake error code owned by an unresolved automatic closure (cleared with its terminal commit).
+AUTO_CLOSE_RECONCILE_CODE = "AUTO_RESOLVE_RECONCILE"
 # Approved S2/S4 thresholds (user decision 2026-10-10; ClassificationCfg defaults).  A
 # model yes/no below them is never a resolved decision (plan §3.2 / §3.6).
 MODEL_MIN_CONFIDENCE = 0.80
@@ -1364,6 +1366,71 @@ class ClassificationStateMixin:
         if record["intake_id"] != intake_ids[0]:
             raise ValueError("classification record belongs to another intake than the request")
 
+    @staticmethod
+    def _clear_closure_mark(connection: sqlite3.Connection, record_id: str) -> None:
+        """Inside the terminal transaction: drop the closure-owned reconcile mark of the
+        record's intake unless another live intent of that intake still needs it.  An
+        independent reconcile cause (any other error code) is never touched."""
+
+        record = connection.execute(
+            "SELECT intake_id FROM classification_records WHERE record_id = ?", (record_id,)
+        ).fetchone()
+        if record is None:
+            return
+        live = connection.execute(
+            "SELECT 1 FROM auto_resolve_intents i JOIN classification_records c ON c.record_id = i.record_id "
+            "WHERE c.intake_id = ? AND i.state IN ('PENDING', 'RECONCILE')",
+            (record["intake_id"],),
+        ).fetchone()
+        if live is None:
+            connection.execute(
+                "UPDATE intake_items SET status = 'NEEDS_INPUT', last_error_code = NULL, last_error = NULL "
+                "WHERE intake_id = ? AND status = 'RECONCILE_REQUIRED' AND last_error_code = ?",
+                (record["intake_id"], AUTO_CLOSE_RECONCILE_CODE),
+            )
+
+    def abort_auto_resolve_intent_superseding(self, intent_id: str, reason: str) -> AutoResolveIntent:
+        """§3.5 (ii): plan SUPERSEDED + its jobs VOID + item HUMAN + intent ABORTED + the
+        closure's reconcile mark, all in ONE transaction, so no crash can leave a closed
+        intent next to a live AUTO plan (r8 R1).  Idempotent for an already ABORTED intent."""
+
+        with self._transaction(immediate=True) as connection:
+            row = connection.execute("SELECT * FROM auto_resolve_intents WHERE intent_id = ?", (intent_id,)).fetchone()
+            if row is None:
+                raise KeyError(intent_id)
+            if row["state"] not in ("PENDING", "RECONCILE", "ABORTED"):
+                raise ValueError(f"auto resolve intent cannot be aborted from {row['state']}")
+            record = connection.execute(
+                "SELECT intake_id, classification_revision_hash FROM classification_records WHERE record_id = ?",
+                (row["record_id"],),
+            ).fetchone()
+            if record is not None:
+                plans = connection.execute(
+                    "SELECT plan_revision FROM intake_plans WHERE plan_authority = 'AUTO_CLASSIFICATION' "
+                    "AND classification_revision_hash = ? AND status IN ('AUTO_PENDING', 'PLANNED')",
+                    (record["classification_revision_hash"],),
+                ).fetchall()
+                for plan in plans:
+                    connection.execute(
+                        "UPDATE intake_plans SET status = 'SUPERSEDED' WHERE plan_revision = ?",
+                        (plan["plan_revision"],),
+                    )
+                    self._void_plan_jobs(connection, plan["plan_revision"], reason)
+                connection.execute(
+                    "UPDATE intake_items SET classification_state = 'HUMAN' WHERE intake_id = ?",
+                    (record["intake_id"],),
+                )
+            if row["state"] != "ABORTED":
+                connection.execute(
+                    "UPDATE auto_resolve_intents SET state = 'ABORTED', updated_at = ? WHERE intent_id = ?",
+                    (_now(), intent_id),
+                )
+            self._clear_closure_mark(connection, row["record_id"])
+            refreshed = connection.execute(
+                "SELECT * FROM auto_resolve_intents WHERE intent_id = ?", (intent_id,)
+            ).fetchone()
+            return AutoResolveIntent(**dict(refreshed))
+
     def create_auto_resolve_intent(
         self, *, record_id: str, request_key: str, expected_user_snapshot_hash: str,
         pre_close_snapshot_hash: str | None = None,
@@ -1506,6 +1573,8 @@ class ClassificationStateMixin:
                 "UPDATE auto_resolve_intents SET state = ?, updated_at = ? WHERE intent_id = ?",
                 (state, _now(), intent_id),
             )
+            if state in ("DONE", "ABORTED"):
+                self._clear_closure_mark(connection, row["record_id"])
             refreshed = connection.execute(
                 "SELECT * FROM auto_resolve_intents WHERE intent_id = ?", (intent_id,)
             ).fetchone()
@@ -1555,6 +1624,11 @@ class ClassificationStateMixin:
                 "WHERE intent_id = ? AND state IN ('PENDING', 'RECONCILE')",
                 (_now(), intent_id),
             )
+            intent_row = connection.execute(
+                "SELECT record_id FROM auto_resolve_intents WHERE intent_id = ?", (intent_id,)
+            ).fetchone()
+            if intent_row is not None:
+                self._clear_closure_mark(connection, intent_row["record_id"])
             row = connection.execute(
                 "SELECT * FROM auto_resolve_rollbacks WHERE intent_id = ?", (intent_id,)
             ).fetchone()
