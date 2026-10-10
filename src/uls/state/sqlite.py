@@ -12,7 +12,7 @@ import re
 import sqlite3
 import threading
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
@@ -573,6 +573,7 @@ class SQLiteStateStore(UsageRangeStateMixin, ClassificationStateMixin):
             ("classification_source", "TEXT"), ("classification_record_id", "TEXT"),
             ("inferred_course_key", "TEXT"), ("inferred_week", "INTEGER"), ("inferred_date", "TEXT"),
             ("calendar_match", "TEXT"), ("classification_state", "TEXT NOT NULL DEFAULT 'NONE'"),
+            ("exposure_block_reason", "TEXT"),
         ):
             if column not in intake_columns:
                 self._connection.execute(f"ALTER TABLE intake_items ADD COLUMN {column} {declaration}")
@@ -599,9 +600,14 @@ class SQLiteStateStore(UsageRangeStateMixin, ClassificationStateMixin):
                     f"ALTER TABLE document_tag_manifests ADD COLUMN {column} TEXT NOT NULL DEFAULT '[]'"
                 )
         job_columns = {row[1] for row in self._connection.execute("PRAGMA table_info(jobs)")}
-        for column in ("plan_revision", "plan_authority", "voided_at", "void_reason"):
+        for column in ("plan_revision", "plan_authority", "voided_at", "void_reason",
+                       "bound_authority", "bound_revision_hash", "bound_kind"):
             if column not in job_columns:
                 self._connection.execute(f"ALTER TABLE jobs ADD COLUMN {column} TEXT")
+        self._connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_auto_plan ON jobs(plan_revision) "
+            "WHERE plan_authority = 'AUTO_CLASSIFICATION' AND plan_revision IS NOT NULL"
+        )
         # An earlier P-A draft declared UNIQUE(request_key) on the generations table,
         # which silently dropped multi-intake receipts (P-A review R8); rebuild it.
         unique_on_key = any(
@@ -1172,7 +1178,7 @@ class SQLiteStateStore(UsageRangeStateMixin, ClassificationStateMixin):
             "last_successful_stage", "last_seen_at",
             "origin", "classified_kind", "classification_source", "classification_record_id",
             "inferred_course_key", "inferred_week", "inferred_date", "calendar_match",
-            "classification_state",
+            "classification_state", "exposure_block_reason",
         }
         unknown = set(patch) - allowed
         if unknown:
@@ -1452,7 +1458,7 @@ class SQLiteStateStore(UsageRangeStateMixin, ClassificationStateMixin):
                 connection.execute("SELECT * FROM intake_plans WHERE plan_id=?", (values["plan_id"],)).fetchone()
             )
 
-    def promote_auto_plan(self, plan_revision: str) -> IntakePlan:
+    def promote_auto_plan(self, plan_revision: str, *, enqueue: Mapping[str, Any] | None = None) -> IntakePlan:
         """Stage B (plan §3.4): AUTO_PENDING → PLANNED only when no live HUMAN request remains.
 
         Every receipt that names this intake must be terminal (Applied, Cancelled or
@@ -1550,9 +1556,86 @@ class SQLiteStateStore(UsageRangeStateMixin, ClassificationStateMixin):
             connection.execute(
                 "UPDATE intake_plans SET status = 'PLANNED' WHERE plan_id = ?", (plan["plan_id"],)
             )
+            if enqueue is not None:
+                # Promotion, the item's claim of the plan and its single job commit together
+                # (P-B2b E3): no crash can leave a PLANNED plan without its job or an item
+                # pointing at a plan that was never promoted.
+                self._enqueue_auto_job(connection, plan["intake_id"], plan_revision, enqueue)
             return _intake_plan_from_row(
                 connection.execute("SELECT * FROM intake_plans WHERE plan_id = ?", (plan["plan_id"],)).fetchone()
             )
+
+    def _enqueue_auto_job(
+        self, connection: sqlite3.Connection, intake_id: str, plan_revision: str, spec: Mapping[str, Any],
+        *, promoting: bool = True,
+    ) -> bool:
+        """Create the plan's single job.  Returns True when a job row was inserted.
+
+        Promotion claims the item for the plan.  A repair never touches an item that moved
+        on (REGISTERED/MOVING/ORGANIZED) and never creates a second job for a plan whose job
+        exists under another key (plan-level uniqueness, r1 R1/R2)."""
+
+        job_key, operation = spec["job_key"], _canonical_operation(spec["operation"])
+        _validate_job_key(job_key)
+        now = _utc_now()
+        if promoting:
+            connection.execute(
+                "UPDATE intake_items SET plan_revision = ?, status = 'PLANNED', last_seen_at = ? WHERE intake_id = ?",
+                (plan_revision, now, intake_id),
+            )
+        if connection.execute(
+            "SELECT 1 FROM jobs WHERE plan_revision = ? AND plan_authority = 'AUTO_CLASSIFICATION'",
+            (plan_revision,),
+        ).fetchone() is not None:
+            return False
+        if connection.execute("SELECT 1 FROM jobs WHERE job_key = ?", (job_key,)).fetchone() is None:
+            connection.execute(
+                """
+                INSERT INTO jobs(
+                    id, job_key, operation, stage, status, course_key, source_file_id, source_hash,
+                    target_entity_id, attempt_count, error_class, last_error, created_at, updated_at,
+                    completed_at, plan_revision, plan_authority
+                ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, 0, NULL, NULL, ?, ?, NULL, ?, 'AUTO_CLASSIFICATION')
+                """,
+                (_new_id("job_"), job_key, operation, spec.get("stage", "intake"), JobStatus.PENDING.value,
+                 spec.get("course_key"), intake_id, now, now, plan_revision),
+            )
+            return True
+        return False
+
+    def auto_job_counts(self) -> dict[str, int]:
+        """Filtered COUNTs of AUTO jobs (readiness): pending (not voided) and failed/needs-review."""
+
+        with self._lock:
+            pending = self._connection.execute(
+                "SELECT COUNT(*) FROM jobs WHERE plan_authority = 'AUTO_CLASSIFICATION' AND status = ? "
+                "AND voided_at IS NULL", (JobStatus.PENDING.value,)).fetchone()[0]
+            failed = self._connection.execute(
+                "SELECT COUNT(*) FROM jobs WHERE plan_authority = 'AUTO_CLASSIFICATION' AND status IN (?, ?, ?)",
+                (JobStatus.FAILED.value, "NEEDS_REVIEW", JobStatus.PARTIAL.value)).fetchone()[0]
+        return {"pending": int(pending), "failed": int(failed)}
+
+    def ensure_auto_plan_job(self, plan_revision: str, spec: Mapping[str, Any]) -> bool:
+        """Repair: a PLANNED AUTO plan without its job gets exactly one (idempotent)."""
+
+        with self._transaction(immediate=True) as connection:
+            plan = connection.execute(
+                "SELECT intake_id, status, plan_authority FROM intake_plans WHERE plan_revision = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (plan_revision,),
+            ).fetchone()
+            if plan is None or plan["plan_authority"] != "AUTO_CLASSIFICATION" or plan["status"] != "PLANNED":
+                return False
+            created = self._enqueue_auto_job(connection, plan["intake_id"], plan_revision, spec, promoting=False)
+            if created:
+                # Only a still-unstarted item is re-pointed at its plan; a progressed item keeps its state.
+                connection.execute(
+                    "UPDATE intake_items SET plan_revision = ?, status = 'PLANNED' "
+                    "WHERE intake_id = ? AND status IN ('NEEDS_INPUT', 'PLANNED') "
+                    "AND (plan_revision IS NULL OR plan_revision = ?)",
+                    (plan_revision, plan["intake_id"], plan_revision),
+                )
+            return created
 
     def get_intake_plan(self, plan_revision: str) -> IntakePlan | None:
         with self._lock:
@@ -3931,6 +4014,9 @@ class SQLiteStateStore(UsageRangeStateMixin, ClassificationStateMixin):
         source_file_id: str,
         source_hash: str,
         course_key: str | None = None,
+        authority: str | None = None,
+        classification_revision_hash: str | None = None,
+        kind: str | None = None,
     ) -> Job:
         """Bind a plan job to the verified source generation before provenance.
 
@@ -3961,14 +4047,24 @@ class SQLiteStateStore(UsageRangeStateMixin, ClassificationStateMixin):
                 raise ValueError("job source file identity cannot be rebound")
             if row["source_hash"] not in (None, source_hash):
                 raise ValueError("job source hash cannot be rebound")
+            if authority is not None and row["bound_authority"] not in (None, authority):
+                raise ValueError("job authority cannot be rebound")
+            if classification_revision_hash is not None and row["bound_revision_hash"] not in (
+                None, classification_revision_hash
+            ):
+                raise ValueError("job classification revision cannot be rebound")
             connection.execute(
                 """
                 UPDATE jobs
                 SET source_file_id = ?, source_hash = ?,
-                    course_key = COALESCE(course_key, ?), updated_at = ?
+                    course_key = COALESCE(course_key, ?), updated_at = ?,
+                    bound_authority = COALESCE(bound_authority, ?),
+                    bound_revision_hash = COALESCE(bound_revision_hash, ?),
+                    bound_kind = COALESCE(bound_kind, ?)
                 WHERE id = ?
                 """,
-                (source_file_id, source_hash, course_key, _utc_now(), row["id"]),
+                (source_file_id, source_hash, course_key, _utc_now(), authority,
+                 classification_revision_hash, kind, row["id"]),
             )
             return _job_from_row(
                 connection.execute("SELECT * FROM jobs WHERE id = ?", (row["id"],)).fetchone()

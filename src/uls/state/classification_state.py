@@ -30,6 +30,13 @@ from uls.intake.classification.calendar import (
 )
 
 CLASSIFICATION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS v2_material_markers (
+    entity_app_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    intake_id TEXT NOT NULL,
+    plan_revision TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS classification_records (
     record_id TEXT PRIMARY KEY,
     intake_id TEXT NOT NULL,
@@ -712,6 +719,14 @@ class ClassificationStateMixin:
             ).fetchall()
         return [AutoResolveIntent(**dict(r)) for r in rows]
 
+    def get_classification_record_by_revision(self, revision_hash: str, intake_id: str) -> ClassificationRecord | None:
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM classification_records WHERE classification_revision_hash = ? AND intake_id = ?",
+                (revision_hash, intake_id),
+            ).fetchone()
+            return None if row is None else ClassificationRecord(**dict(row))
+
     def latest_classification_record(self, intake_id: str) -> ClassificationRecord | None:
         with self._transaction() as connection:
             row = connection.execute(
@@ -1241,6 +1256,17 @@ class ClassificationStateMixin:
                 (values["drive_file_id"],),
             ).fetchone()
             return dict(row)
+
+    def mark_v2_material(self, entity_app_id: str, kind: str, intake_id: str, plan_revision: str) -> None:
+        """Persist, BEFORE the Material page exists, that this canonical Material is a v2 product
+        (AUTO run or HUMAN v2 Kind).  Idempotent; the retrieval exposure gate reads it."""
+
+        with self._transaction(immediate=True) as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO v2_material_markers(entity_app_id, kind, intake_id, plan_revision, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (entity_app_id, kind, intake_id, plan_revision, _now()),
+            )
 
     def session_source_binding_for(self, course_key: str, session_id: str) -> dict[str, Any] | None:
         """The canonical source binding of a Session, when one exists (occupancy proof)."""

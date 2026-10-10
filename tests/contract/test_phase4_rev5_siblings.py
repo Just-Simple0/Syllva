@@ -18,6 +18,7 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures"))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
+from no_v2_state import NoV2State
 from phase4 import phase4_applier_kwargs, phase4_proposal, ready_phase4
 
 from uls.adapters.notion.base import HumanApprovalApplier, QueueState, upsert_proposal
@@ -133,7 +134,7 @@ def _engine(reader: Any, drive: Any, resolver: Any) -> RetrievalEngine:
     return RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         UlsConfig(),
         source_binding_resolver=resolver,

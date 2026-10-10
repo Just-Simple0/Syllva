@@ -10,6 +10,7 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures"))
 
+from no_v2_state import NoV2State
 from phase4 import phase4_applier_kwargs, phase4_proposal, ready_phase4
 
 from uls.adapters.drive.binding import (
@@ -51,7 +52,7 @@ class _ReadTrap:
 @pytest.mark.parametrize("invalid", ["false", "true", 0, 1, None, [], {}])
 def test_include_provisional_type_is_rejected_before_provider_reads(invalid) -> None:
     notion, drive = _ReadTrap(), _ReadTrap()
-    engine = RetrievalEngine(notion, drive, None, MemoryEphemeralStore(), UlsConfig())
+    engine = RetrievalEngine(notion, drive, NoV2State(), MemoryEphemeralStore(), UlsConfig())
     with pytest.raises(UlsError):
         engine.get_session_context("COMP319-S05", include_provisional=invalid)
     assert notion.calls == []
@@ -63,7 +64,7 @@ def test_runtime_provisional_config_type_is_rejected_before_provider_reads(inval
     notion, drive = _ReadTrap(), _ReadTrap()
     config = UlsConfig()
     config.retrieval.allow_provisional_material_usage = invalid
-    engine = RetrievalEngine(notion, drive, None, MemoryEphemeralStore(), config)
+    engine = RetrievalEngine(notion, drive, NoV2State(), MemoryEphemeralStore(), config)
     with pytest.raises(UlsError):
         engine.get_session_context("COMP319-S05", include_provisional=True)
     assert notion.calls == []
@@ -439,7 +440,7 @@ def test_post_issue_provisional_config_revocation_denies_followup() -> None:
     engine = RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         config,
         source_binding_resolver=resolver,

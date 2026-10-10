@@ -16,6 +16,7 @@ from phase4 import (
     activity_record,
     exam_record,
 )
+from tests.fixtures.no_v2_state import NoV2State
 
 from uls.adapters.drive.binding import ValidatedSourceBindingResolver
 from uls.adapters.notion.base import HumanApprovalApplier, QueueState, upsert_proposal
@@ -42,7 +43,7 @@ def test_activity_derivative_provenance_and_exam_approval_flow_use_provider_neut
     engine = RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         UlsConfig(),
         source_binding_resolver=resolver,

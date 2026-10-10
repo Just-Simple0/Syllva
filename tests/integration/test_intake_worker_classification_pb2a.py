@@ -17,6 +17,15 @@ from uls.intake.worker import IntakeReconcileRequired
 
 pytestmark = pytest.mark.integration
 
+
+@pytest.fixture(autouse=True)
+def _no_promotion(monkeypatch):
+    """P-B2a behaviour is tested in isolation from the P-B2b promotion (own test module)."""
+
+    from uls.intake.worker import IntakeWorker
+
+    monkeypatch.setattr(IntakeWorker, "_promote_ready_plans", lambda self: None)
+
 COURSE = COURSE_KEYS[1]  # "Synthetic Course 1"
 SEMESTER = SemesterRange(date(2026, 9, 1), date(2026, 12, 20), "config")
 MATCHED_NAME = "2026.09.10_Synthetic Course 1_2주차.md"
@@ -585,7 +594,7 @@ def test_supersession_voids_jobs_atomically_and_idempotently(tmp_path: Path) -> 
         assert state.get_job(job_key="sha256:" + "1" * 64).voided_at is not None
         state.create_job(job_key="sha256:" + "2" * 64, operation="intake.test", stage="intake",
                          target_entity_id=plan["intake_id"], plan_revision=plan["plan_revision"],
-                         plan_authority="AUTO_CLASSIFICATION")
+                         plan_authority="HUMAN_REQUEST")  # an AUTO plan has one job (unique index)
         assert state.supersede_intake_plan(plan["plan_revision"], "TEST") == 0  # already closed
         assert state.get_job(job_key="sha256:" + "2" * 64).voided_at is not None     # ... but still voided
 

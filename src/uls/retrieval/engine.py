@@ -1286,7 +1286,23 @@ class RetrievalEngine:
                 "Notion Material logical ID is missing or mismatched",
                 details={"material_id": expected_id},
             )
+        if result is not None and self._v2_material_hidden(expected_id):
+            return None  # one choke point: context, new capabilities and capability revalidation (plan §9 P-B)
         return result
+
+    def _v2_material_hidden(self, material_id: str) -> bool:
+        """A v2 Material (AUTO run or HUMAN v2 Kind) stays unexposed until the v2 gate is switched on."""
+
+        if self._config_mapping("v2_exposure_gate", {}) is True:
+            return False
+        if self.state_store is None:
+            # Without durable state nothing proves that no v2 Material exists — the current feature
+            # flag says nothing about Materials created earlier (r4 R3).
+            raise SourceUnavailableError("no durable state can classify Materials while the v2 gate is off")
+        marker = getattr(self.state_store, "is_v2_material", None)
+        if marker is None:
+            raise SourceUnavailableError("the v2 exposure marker is unavailable")  # fail closed
+        return bool(marker(material_id))
 
     def _user_references(self, session_id: str) -> tuple[Mapping[str, Any], ...]:
         method = getattr(self.notion_reader, "get_session_user_annotations", None)
