@@ -39,7 +39,8 @@ def test_transcript_upload_is_classified_locally_and_suggested_on_the_draft(tmp_
         assert (item.classified_kind, item.classification_source) == ("TRANSCRIPT", "rule:P3:transcript_filename")
         assert (item.origin, item.inferred_course_key, item.inferred_week, item.inferred_date) == (
             "USER_AUTHORED_TRANSCRIPT", COURSE_KEYS[1], 2, "2026-09-10")
-        assert item.calendar_match == "NO_CALENDAR" and item.classification_state == "CLASSIFIED"
+        # Decided and byte-proven, but stage A blocks on the calendar: an S3 (HUMAN) decision.
+        assert item.calendar_match == "NO_CALENDAR" and item.classification_state == "HUMAN"
         record = state.get_classification_record(item.classification_record_id)
         assert record is not None and record.kind == "TRANSCRIPT" and record.byte_sha256 and record.byte_md5
         assert record.course_key == COURSE_KEYS[1] and record.semester_range_basis_json is not None
@@ -49,7 +50,7 @@ def test_transcript_upload_is_classified_locally_and_suggested_on_the_draft(tmp_
         assert assign["Suggested Course"] == COURSE_KEYS[1] and assign["Suggested Kind"] == "TRANSCRIPT"
         assert assign["Suggested Date"] == "2026-09-10" and assign["Suggested Week"] == 2
         assert assign["Suggestion Source"] == "rule:P3:transcript_filename"
-        assert "NO_CALENDAR" in assign["Suggestion Note"] and "AUTO_NOT_ENABLED" in assign["Suggestion Note"]
+        assert "NO_CALENDAR" in assign["Suggestion Note"] and "AUTO_BLOCK_CALENDAR" in assign["Suggestion Note"]
         assert all(not assign.get(field) for field in USER_FIELDS)
         assert assign["Submitted"] is False and assign["Cancelled"] is False
         # File Intake carries the classification projection.
@@ -79,7 +80,7 @@ def test_undecided_upload_gets_only_the_fixed_note(tmp_path: Path) -> None:
         assert item.classified_kind is None and item.classification_state == "HUMAN"
         assert item.classification_record_id is None and item.origin == "UNKNOWN"
         assign = _assign_request(system["notion"])
-        assert assign["Suggestion Note"] == "NO_SINGLE_RULE;CLASSIFIER_DISABLED;AUTO_NOT_ENABLED"
+        assert assign["Suggestion Note"] == "NO_SINGLE_RULE;CLASSIFIER_DISABLED;AUTO_BLOCK_NOT_DECIDED"
         assert all(assign.get(field) is None for field in SUGGESTED if field != "Suggestion Note")
 
 
@@ -204,7 +205,8 @@ def test_code_upload_is_classified_before_any_request_and_p0_is_terminal(tmp_pat
     with _system(tmp_path, name="tcp_server.c", mime_type="text/x-csrc", raw=b"#include <stdio.h>\n") as system:
         _enable(system)
         item = _tick_item(system)
-        assert item.classified_kind == "PROVIDED_CODE" and item.classification_state == "CLASSIFIED"
+        assert item.classified_kind == "PROVIDED_CODE" and item.classification_state == "HUMAN"
+        assert "AUTO_BLOCK_ORIGIN_UNKNOWN" in system["state"].get_intake_suggestion(item.intake_id)["suggestion_note"]
         assert len(system["notion"].data_sources["synthetic-requests"]) == 1
         assert _assign_request(system["notion"])["Suggested Kind"] == "PROVIDED_CODE"
     # A P0 title is terminal: UNSUPPORTED status, fixed code, no download, no draft, no Material (R5).
@@ -340,7 +342,7 @@ def test_download_is_bounded_and_must_match_the_declared_size(tmp_path: Path) ->
         _enable(system)
         system["config"].intake.classification.max_source_bytes = len(body)
         item = _tick_item(system)
-        assert item.classification_record_id is not None and item.classification_state == "CLASSIFIED"
+        assert item.classification_record_id is not None and item.classified_kind == "TRANSCRIPT"
 
 
 def test_verified_binding_settles_origin_and_p4_even_when_s1_is_undecided(tmp_path: Path) -> None:

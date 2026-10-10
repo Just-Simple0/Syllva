@@ -540,6 +540,52 @@ class ClassificationStateMixin:
             ).fetchone()
             return None if row is None else ClassificationRecord(**dict(row))
 
+    def list_classification_records_by_bytes(self, byte_sha256: str) -> list[ClassificationRecord]:
+        """Every record holding these exact bytes (duplicate-content gate, plan §3.4 r6 R2)."""
+
+        with self._transaction() as connection:
+            rows = connection.execute(
+                "SELECT * FROM classification_records WHERE byte_sha256 = ? ORDER BY rowid",
+                (byte_sha256,),
+            ).fetchall()
+        return [ClassificationRecord(**dict(row)) for row in rows]
+
+    def list_intake_plans(self, *, plan_authority: str | None = None, status: str | None = None) -> list[dict[str, Any]]:
+        query, params = "SELECT * FROM intake_plans", []
+        clauses = []
+        if plan_authority is not None:
+            clauses.append("plan_authority = ?"); params.append(plan_authority)
+        if status is not None:
+            clauses.append("status = ?"); params.append(status)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        with self._transaction() as connection:
+            return [dict(r) for r in connection.execute(query + " ORDER BY created_at, plan_id", params).fetchall()]
+
+    def supersede_intake_plan(self, plan_revision: str, reason: str) -> int:
+        """Close an AUTO plan a human overtook: status SUPERSEDED and its jobs VOID (plan §3.4)."""
+
+        with self._transaction(immediate=True) as connection:
+            cursor = connection.execute(
+                "UPDATE intake_plans SET status = 'SUPERSEDED' WHERE plan_revision = ? "
+                "AND plan_authority = 'AUTO_CLASSIFICATION' AND status IN ('AUTO_PENDING', 'PLANNED')",
+                (plan_revision,),
+            )
+            changed = cursor.rowcount
+        if changed:
+            self.void_jobs_for_plan(plan_revision, reason)
+        return int(changed)
+
+    def list_auto_resolve_intents(self, *, states: Iterable[str] = ("PENDING", "RECONCILE")) -> list[AutoResolveIntent]:
+        wanted = tuple(states)
+        with self._transaction() as connection:
+            rows = connection.execute(
+                "SELECT * FROM auto_resolve_intents WHERE state IN (" + ",".join("?" for _ in wanted) + ") "
+                "ORDER BY rowid",
+                wanted,
+            ).fetchall()
+        return [AutoResolveIntent(**dict(r)) for r in rows]
+
     def latest_classification_record(self, intake_id: str) -> ClassificationRecord | None:
         with self._transaction() as connection:
             row = connection.execute(

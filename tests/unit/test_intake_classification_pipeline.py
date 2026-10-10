@@ -18,7 +18,12 @@ from uls.intake.classification import (
     build_calendar,
 )
 from uls.intake.classification.pipeline import (
-    NOTE_AUTO_UNAVAILABLE,
+    BLOCK_CALENDAR,
+    BLOCK_COURSE_UNRESOLVED,
+    BLOCK_HANDLING,
+    BLOCK_NOT_DECIDED,
+    BLOCK_ORIGIN_UNKNOWN,
+    BLOCK_UNSUPPORTED,
     NOTE_CALENDAR_MISMATCH,
     NOTE_CLASSIFIER_DISABLED,
     NOTE_COURSE_UNRESOLVED,
@@ -64,8 +69,10 @@ def test_every_observed_transcript_is_decided_but_falls_back_on_the_calendar(ite
     assert outcome.recorded_date == date.fromisoformat(str(item["filename_date"]))
     assert outcome.calendar is not None and outcome.calendar.status is MatchStatus(str(item["expected_calendar_match"]))
     assert outcome.handling is HandlingMode.NORMALIZE
-    assert item["expected_fallback_reason"] in outcome.notes and NOTE_AUTO_UNAVAILABLE in outcome.notes
-    assert outcome.needs_human and outcome.suggestion_source == "rule:P3:transcript_filename"
+    assert item["expected_fallback_reason"] in outcome.notes
+    # Stage A (plan §3.4): a mismatched calendar is the only blocker, so the item stays HUMAN.
+    assert outcome.stage_a_blockers() == (BLOCK_CALENDAR,) and outcome.needs_human
+    assert outcome.session_mode is None and outcome.suggestion_source == "rule:P3:transcript_filename"
     fields = outcome.suggestion_fields()
     assert fields["suggested_kind"] == "TRANSCRIPT" and fields["suggested_week"] == item["expected_week"]
     assert fields["suggested_course_key"] == item["expected_course_key"]
@@ -76,7 +83,8 @@ def test_every_observed_transcript_is_decided_but_falls_back_on_the_calendar(ite
 def test_undecided_items_go_to_s3_with_the_classifier_disabled_note() -> None:
     outcome = _classify("lecture.md")
     assert outcome.kind is None and outcome.decision_type is None and outcome.handling is None
-    assert outcome.notes == (NOTE_NO_SINGLE_RULE, NOTE_CLASSIFIER_DISABLED, NOTE_AUTO_UNAVAILABLE)
+    assert outcome.notes == (NOTE_NO_SINGLE_RULE, NOTE_CLASSIFIER_DISABLED)
+    assert outcome.stage_a_blockers() == (BLOCK_NOT_DECIDED,)
     assert outcome.suggestion_source is None and outcome.origin is Origin.UNKNOWN
     assert outcome.suggestion_fields()["suggested_kind"] is None
     # With S2 available the disabled note disappears but the item is still undecided here.
@@ -95,12 +103,16 @@ def test_explicit_upload_folder_course_wins_and_calendar_states_map_to_notes() -
     matched = _classify(name, calendar=calendar)
     assert matched.calendar is not None and matched.calendar.status is MatchStatus.MATCHED and matched.week == 2
     assert NOTE_CALENDAR_MISMATCH not in matched.notes and NOTE_NO_CALENDAR not in matched.notes
+    # A matched, course-resolved, normalizable transcript has no stage-A blocker: NEW session.
+    assert matched.stage_a_blockers() == () and not matched.needs_human and matched.session_mode == "NEW"
+    assert _classify(name, calendar=calendar, probe=None).stage_a_blockers() == (BLOCK_HANDLING,)
     wrong_week = _classify("2026.09.10_알고리즘2_3주차.md", calendar=calendar)
     assert wrong_week.calendar is not None and wrong_week.calendar.reason == "WEEK_MISMATCH"
     assert NOTE_CALENDAR_MISMATCH in wrong_week.notes
     unknown_course = _classify("2026.09.10_미지과목_2주차.md")
     assert unknown_course.kind is Kind.TRANSCRIPT and unknown_course.course_key is None
     assert NOTE_COURSE_UNRESOLVED in unknown_course.notes and unknown_course.calendar is None
+    assert unknown_course.stage_a_blockers() == (BLOCK_COURSE_UNRESOLVED, BLOCK_CALENDAR)
 
 
 def test_probe_outcomes_drive_the_handling_mode() -> None:
@@ -124,6 +136,12 @@ def test_verified_canvas_attachment_signal_reaches_p4() -> None:
                       canvas_attachment_of="assignment")
     assert bound.kind is Kind.ASSIGNMENT_RESOURCE and bound.rule_id == "P4:tabular_assignment_attachment"
     assert bound.origin is Origin.PROFESSOR_SOURCE and bound.handling is HandlingMode.REGISTER_OPAQUE_NO_RETRIEVAL
+    # A Material needs a resolved course and a PROFESSOR_SOURCE origin before AUTO (§9).
+    assert bound.stage_a_blockers() == (BLOCK_COURSE_UNRESOLVED,)
+    assert _classify("mbti.csv", mime_type="text/csv", probe=csv, canvas_attachment_of="assignment",
+                     explicit_course_key="2026-2_LMS67535-001").stage_a_blockers() == (BLOCK_ORIGIN_UNKNOWN,)
+    assert _classify("mbti.csv", mime_type="text/csv", probe=csv, origin=Origin.PROFESSOR_SOURCE,
+                     canvas_attachment_of="assignment", explicit_course_key="2026-2_LMS67535-001").stage_a_blockers() == ()
     # An announcement attachment is not an assignment signal.
     announced = _classify("mbti.csv", mime_type="text/csv", probe=csv, origin=Origin.PROFESSOR_SOURCE,
                           canvas_attachment_of="announcement")
@@ -134,4 +152,5 @@ def test_forbidden_formats_are_terminal_without_a_probe() -> None:
     outcome = _classify("VMware_installer.exe", mime_type="application/x-msdownload", probe=None)
     assert outcome.kind is Kind.UNSUPPORTED and NOTE_UNSUPPORTED in outcome.notes
     assert outcome.handling is HandlingMode.S3 and outcome.course_key is None
+    assert outcome.stage_a_blockers() == (BLOCK_UNSUPPORTED,)
     assert NOTE_COURSE_UNRESOLVED not in outcome.notes
