@@ -1813,7 +1813,12 @@ class IntakeWorker:
                     or done.state != "DONE" or not done.terminal_snapshot_hash
                 ):
                     return "RECONCILE", f"closed request {receipt.request_key} has no verifiable terminal snapshot", []
-                closed = self.notion.read_record("input_request", receipt.provider_page_id)
+                try:
+                    closed = self.notion.read_record("input_request", receipt.provider_page_id)
+                except ReconnectRequiredError:
+                    raise
+                except Exception:  # noqa: BLE001 - an unreadable sibling is an unknown HUMAN state (r16 R1)
+                    return "RECONCILE", f"closed request page {receipt.request_key} could not be read", []
                 if closed is None:
                     return "RECONCILE", f"closed request page {receipt.request_key} is unavailable", []
                 if self._auto_request_snapshot(closed, receipt, item.intake_id) != done.terminal_snapshot_hash:
@@ -1835,7 +1840,12 @@ class IntakeWorker:
                     return "BARRIER", receipt.request_key, []
                 if intent.state == "DONE":
                     continue
-            page = self.notion.read_record("input_request", receipt.provider_page_id)
+            try:
+                page = self.notion.read_record("input_request", receipt.provider_page_id)
+            except ReconnectRequiredError:
+                raise
+            except Exception:  # noqa: BLE001 - HUMAN state unverifiable: park the plan, write nothing (r16 R1)
+                return "RECONCILE", f"Draft page {receipt.request_key} could not be read", []
             if page is None:
                 return "RECONCILE", f"Draft page {receipt.request_key} is unavailable", []
             if self._human_touched(page, receipt, workspace):

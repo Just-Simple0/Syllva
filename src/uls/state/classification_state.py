@@ -671,11 +671,15 @@ class ClassificationStateMixin:
                 "WHERE provider = ? AND provider_file_id != ?",
                 (provider, provider_file_id),
             ).fetchall()
+            latest = {
+                (str(o["intake_id"]), int(o["source_version"])): o["at"]
+                for o in connection.execute(
+                    "SELECT intake_id, source_version, MAX(observed_at) AS at FROM intake_observations "
+                    "GROUP BY intake_id, source_version"
+                ).fetchall()
+            }
             observed = {
-                str(row["provider_file_id"]): connection.execute(
-                    "SELECT MAX(observed_at) AS at FROM intake_observations WHERE intake_id = ? AND source_version = ?",
-                    (row["intake_id"], row["source_version"]),
-                ).fetchone()["at"]
+                str(row["provider_file_id"]): latest.get((str(row["intake_id"]), int(row["source_version"])))
                 for row in rows
             }
         for bound in canvas:

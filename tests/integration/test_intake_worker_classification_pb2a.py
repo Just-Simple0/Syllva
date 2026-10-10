@@ -2423,3 +2423,32 @@ def test_session_date_end_must_be_a_full_iso_value(tmp_path: Path) -> None:
             system["notion"].data_sources["synthetic-sessions"][0]["Date"] = value
             worker.run_once()
             assert _item(system).classification_state == expected, label
+
+
+def test_an_unreadable_first_human_check_parks_the_plan(tmp_path: Path) -> None:
+    # r16 R1: the very first Draft readback raises; the unverified AUTO plan must not survive.
+    from uls.adapters.notion.intake import ProviderUnavailableError
+
+    system_cm, system = _pre_v2_draft(tmp_path)
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        notion, state = system["notion"], system["state"]
+        draft = _assign_request(notion)
+        draft["Course"] = ["synthetic-course-page-0"]  # a human edit that the failed read cannot see
+        original_read = notion.read_record
+
+        def flaky(data_source_id: str, page_id: str):
+            if data_source_id == "synthetic-requests":
+                raise ProviderUnavailableError("timeout")
+            return original_read(data_source_id, page_id)
+        notion.read_record = flaky  # type: ignore[method-assign]
+        since = len(notion.events)
+        worker.run_once()
+        assert _request_writes(notion, since) == []
+        plan = _auto_plans(state)[0]
+        assert plan["status"] == "RECONCILE_REQUIRED" and _item(system).classification_state == "HUMAN"
+        assert state.list_auto_resolve_intents() == []
+        assert draft["Course"] == ["synthetic-course-page-0"] and draft["Request Status"] == "Draft"
+    finally:
+        system_cm.__exit__(None, None, None)
