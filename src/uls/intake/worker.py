@@ -61,6 +61,7 @@ from uls.intake.classification import (
 )
 from uls.intake.classification.calendar import CourseCalendar
 from uls.intake.classification.pipeline import (
+    BLOCK_ALIAS_EVIDENCE,
     BLOCK_BYTES_UNPROVEN,
     BLOCK_CANVAS_COURSE,
     BLOCK_DUPLICATE_CONTENT,
@@ -136,6 +137,10 @@ class IntakeReconcileRequired(UlsError):
 
 _ISO_DATE_ONLY = re.compile(r"\d{4}-\d{2}-\d{2}")
 _ISO_DATETIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})?")
+
+
+class _PreflightStop(Exception):  # internal control flow, never leaves the preflight
+    """Unwinds the source checks when an item-level blocker already decided the preflight."""
 
 
 class RequestTerminalError(UlsError):
@@ -1359,7 +1364,6 @@ class IntakeWorker:
             return None
         alias_entries = self._course_alias_entries(workspace.semester)
         alias_index = CourseAliasIndex.build(alias_entries)
-        alias_hash = self._alias_inventory_hash(alias_entries)
         semester = self._semester_range(workspace.semester)
         explicit = self._explicit_course_candidate(item)
         axes = transcript_signals(item.original_name, alias_index)
@@ -1408,6 +1412,21 @@ class IntakeWorker:
             outcome = classify(probe)
         record_id: str | None = None
         byte_proven = probe is not None and probe.complete and probe.byte_sha256 is not None
+        # AUTO course evidence for an alias-based course: config + USER Notion Aliases, with
+        # duplicate aliases disabled; unreadable Notion aliases fail closed (r11 R1).
+        alias_dependent = outcome.course_basis == "config_alias"
+        notion_aliases: list[tuple[str, tuple[str, ...]]] | None = None
+        alias_block: str | None = None
+        if alias_dependent and outcome.decided and self._auto_enabled():
+            notion_aliases = self._notion_alias_entries(workspace.semester)
+            if notion_aliases is None:
+                alias_block = BLOCK_ALIAS_EVIDENCE
+            else:
+                combined = CourseAliasIndex.build(self._merge_alias_entries(alias_entries, notion_aliases))
+                resolved = transcript_signals(item.original_name, combined).get("course_key")
+                if resolved != outcome.course_key:
+                    alias_block = BLOCK_ALIAS_EVIDENCE
+        alias_hash = self._alias_inventory_hash(alias_entries, notion_aliases if alias_dependent else None)
         session_mode, session_id, session_hash, session_block = outcome.session_mode, None, None, None
         if outcome.session_mode is not None and self._auto_enabled():
             session_mode, session_id, session_hash, session_block = self._session_binding(
@@ -1440,6 +1459,7 @@ class IntakeWorker:
                 course_basis={
                     "type": outcome.course_basis or "none",
                     "alias_inventory_hash": alias_hash,
+                    "alias_dependent": alias_dependent,
                     "canvas_binding_seen": None if binding is None else self._canvas_basis(binding),
                     "canvas_binding": verified_basis if outcome.origin is Origin.PROFESSOR_SOURCE else None,
                 },
@@ -1457,6 +1477,8 @@ class IntakeWorker:
         blockers = self._stage_a_blockers(item, outcome, record)
         if session_block is not None and outcome.decided and record is not None:
             blockers = (*blockers, session_block)
+        if alias_block is not None and outcome.decided and record is not None:
+            blockers = (*blockers, alias_block)
         auto_plan: IntakePlan | None = None
         if decided and record is not None and not blockers and self._auto_enabled():
             auto_plan, plan_block = self._ensure_auto_plan(item, outcome, record, workspace_fingerprint)
@@ -1520,7 +1542,8 @@ class IntakeWorker:
         if item.last_error_code == "DUPLICATE_CANDIDATE":
             blockers.append(BLOCK_DUPLICATE_CONTENT)
         candidates = self.state.duplicate_content_candidates(
-            intake_id=item.intake_id, provider=self.provider, byte_sha256=record.byte_sha256,
+            intake_id=item.intake_id, provider=self.provider, provider_file_id=item.provider_file_id,
+            byte_sha256=record.byte_sha256,
             byte_md5=record.byte_md5, size=self._declared_size(item),
         )
         if candidates["proven"]:
@@ -1635,7 +1658,7 @@ class IntakeWorker:
         existing: IntakePlan | None = self.state.get_intake_plan(plan_revision)
         if existing is None and any(
             row["intake_id"] == item.intake_id and row["status"] == "SUPERSEDED"
-            for row in self.state.list_intake_plans(plan_authority="AUTO_CLASSIFICATION", status="SUPERSEDED")
+            for row in self.state.list_intake_plans(plan_authority="AUTO_CLASSIFICATION", status="SUPERSEDED", intake_id=item.intake_id)
         ):
             # A human (or the barrier) already took the authority from an AUTO plan of this
             # intake; a newer classification revision never restores it (r10 R1).
@@ -1845,7 +1868,15 @@ class IntakeWorker:
 
         reason: str | None = None
         current = self._require_item(item.intake_id)
+        if current.last_error_code == "DUPLICATE_CANDIDATE":
+            reason = "DUPLICATE_CANDIDATE"
+        elif current.status == IntakeStatus.RECONCILE_REQUIRED.value and current.last_error_code != AUTO_CLOSE_RECONCILE_CODE:
+            reason = "ITEM_RECONCILE"  # an independent cause; only the closure's own mark may retry
+        elif current.status not in (IntakeStatus.NEEDS_INPUT.value, IntakeStatus.RECONCILE_REQUIRED.value):
+            reason = "ITEM_STATUS"
         try:
+            if reason is not None:
+                raise _PreflightStop
             metadata = self.drive.read_metadata(item.provider_file_id)
             if metadata.file_id != item.provider_file_id or metadata.owned_by_me is not True:
                 reason = "SOURCE_IDENTITY"
@@ -1872,6 +1903,8 @@ class IntakeWorker:
                 probe = self._source_probe(current)
                 if not probe.complete or probe.byte_sha256 != record.byte_sha256:
                     reason = "SOURCE_BYTES"
+        except _PreflightStop:
+            pass
         except ReconnectRequiredError:
             raise
         except (SourceUnavailableError, SourcePartialError, PolicyDeniedError, ProviderUnavailableError):
@@ -1902,10 +1935,15 @@ class IntakeWorker:
         if reason is None:
             return True
         self.state.reconcile_intake_plan(plan.plan_revision, f"PREFLIGHT_{reason}")
-        self.state.update_intake_item(
-            item.intake_id, status=IntakeStatus.RECONCILE_REQUIRED.value, classification_state="HUMAN",
-            last_error_code="RECONCILE_REQUIRED", last_error=f"AUTO preflight failed: {reason}",
-        )
+        if reason in {"DUPLICATE_CANDIDATE", "ITEM_RECONCILE", "ITEM_STATUS"}:
+            # The item already carries its own blocking state; the plan is parked and the
+            # independent cause is left exactly as it is (r11 R3).
+            self.state.update_intake_item(item.intake_id, classification_state="HUMAN")
+        else:
+            self.state.update_intake_item(
+                item.intake_id, status=IntakeStatus.RECONCILE_REQUIRED.value, classification_state="HUMAN",
+                last_error_code="RECONCILE_REQUIRED", last_error=f"AUTO preflight failed: {reason}",
+            )
         self.state.record_intake_stage_event("auto_preflight_failed", intake_id=item.intake_id, operation_key=reason)
         return False
 
@@ -1915,7 +1953,8 @@ class IntakeWorker:
         if not record.byte_sha256:
             return "BYTES_UNPROVEN"
         found = self.state.duplicate_content_candidates(
-            intake_id=item.intake_id, provider=self.provider, byte_sha256=record.byte_sha256,
+            intake_id=item.intake_id, provider=self.provider, provider_file_id=item.provider_file_id,
+            byte_sha256=record.byte_sha256,
             byte_md5=record.byte_md5, size=self._declared_size(item),
         )
         return "DUPLICATE_CONTENT" if found["proven"] or found["unproven"] else None
@@ -1950,7 +1989,7 @@ class IntakeWorker:
         RECONCILE_REQUIRED with its jobs VOID in the same transaction (r5 R3)."""
 
         for status in ("AUTO_PENDING", "PLANNED"):
-            for row in self.state.list_intake_plans(plan_authority="AUTO_CLASSIFICATION", status=status):
+            for row in self.state.list_intake_plans(plan_authority="AUTO_CLASSIFICATION", status=status, intake_id=item.intake_id):
                 if row["intake_id"] == item.intake_id and (keep is None or row["plan_revision"] != keep.plan_revision):
                     self.state.reconcile_intake_plan(row["plan_revision"], "AUTO_PLAN_RECLASSIFIED")
                     self.state.record_intake_stage_event(
@@ -1966,7 +2005,7 @@ class IntakeWorker:
             if record is not None and record.intake_id == item.intake_id:
                 return
         for status in ("AUTO_PENDING", "PLANNED"):
-            for row in self.state.list_intake_plans(plan_authority="AUTO_CLASSIFICATION", status=status):
+            for row in self.state.list_intake_plans(plan_authority="AUTO_CLASSIFICATION", status=status, intake_id=item.intake_id):
                 if row["intake_id"] == item.intake_id:
                     self.state.reconcile_intake_plan(row["plan_revision"], "AUTO_UNAVAILABLE")
         self.state.update_intake_item(item.intake_id, classification_state="HUMAN")
@@ -1977,7 +2016,7 @@ class IntakeWorker:
 
         superseded = False
         for status in ("AUTO_PENDING", "PLANNED"):
-            for row in self.state.list_intake_plans(plan_authority="AUTO_CLASSIFICATION", status=status):
+            for row in self.state.list_intake_plans(plan_authority="AUTO_CLASSIFICATION", status=status, intake_id=item.intake_id):
                 if row["intake_id"] == item.intake_id:
                     self.state.supersede_intake_plan(row["plan_revision"], reason)
                     superseded = True
@@ -1985,13 +2024,61 @@ class IntakeWorker:
             self.state.update_intake_item(item.intake_id, classification_state="HUMAN")
             self.state.record_intake_stage_event("auto_plan_superseded", intake_id=item.intake_id, operation_key=reason)
 
-    @staticmethod
-    def _alias_inventory_hash(entries: Sequence[tuple[str, Sequence[str]]]) -> str:
-        """Canonical hash of the raw alias inventory plus what it resolves to."""
+    def _notion_alias_entries(self, semester: str) -> list[tuple[str, tuple[str, ...]]] | None:
+        """The USER-owned Notion Academic Courses ``Aliases`` of the semester (comma separated,
+        plan §2.3).  ``None`` when they cannot be read or parsed: alias-based AUTO then fails
+        closed (r11 R1)."""
 
-        canonical = sorted((key, sorted(aliases)) for key, aliases in entries)
-        index = CourseAliasIndex.build(entries)
-        return sha256_hex(["intake.alias-inventory.v2", canonical, sorted(index.resolved.items()), sorted(index.disabled)])
+        if self.notion is None:
+            return None
+        try:
+            rows = self.notion.list_records("academic_courses")
+        except ReconnectRequiredError:
+            raise
+        except Exception:  # noqa: BLE001 - an unreadable USER alias source is unusable evidence
+            return None
+        entries: list[tuple[str, tuple[str, ...]]] = []
+        for row in rows:
+            key = row.get("Course Key")
+            if not isinstance(key, str) or not key.startswith(semester + "_"):
+                continue
+            raw = row.get("Aliases")
+            if raw is None or raw == "":
+                aliases: tuple[str, ...] = ()
+            elif isinstance(raw, str):
+                aliases = tuple(part.strip() for part in raw.split(",") if part.strip())
+            elif isinstance(raw, (list, tuple)) and all(isinstance(part, str) for part in raw):
+                aliases = tuple(part.strip() for part in raw if part.strip())
+            else:
+                return None
+            entries.append((key, aliases))
+        return entries
+
+    @staticmethod
+    def _merge_alias_entries(
+        config_entries: Sequence[tuple[str, Sequence[str]]], notion_entries: Sequence[tuple[str, Sequence[str]]]
+    ) -> list[tuple[str, tuple[str, ...]]]:
+        merged: dict[str, list[str]] = {}
+        for key, aliases in (*config_entries, *notion_entries):
+            merged.setdefault(key, []).extend(aliases)
+        return [(key, tuple(values)) for key, values in merged.items()]
+
+    def _alias_inventory_hash(
+        self, config_entries: Sequence[tuple[str, Sequence[str]]],
+        notion_entries: Sequence[tuple[str, Sequence[str]]] | None = None,
+    ) -> str:
+        """Canonical hash of the raw config alias inventory, the Notion USER Aliases readback
+        (``None`` when not part of the evidence) and what the combination resolves to."""
+
+        def canon(entries: Sequence[tuple[str, Sequence[str]]]) -> list[Any]:
+            return sorted([key, sorted(aliases)] for key, aliases in entries)
+
+        index = CourseAliasIndex.build(self._merge_alias_entries(config_entries, notion_entries or ()))
+        return sha256_hex([
+            "intake.alias-inventory.v3", canon(config_entries),
+            None if notion_entries is None else canon(notion_entries),
+            sorted(index.resolved.items()), sorted(index.disabled),
+        ])
 
     @staticmethod
     def _canvas_basis(binding: Mapping[str, Any]) -> dict[str, Any]:
@@ -2012,7 +2099,13 @@ class IntakeWorker:
             return "COURSE_BASIS"
         if not isinstance(basis, dict):
             return "COURSE_BASIS"
-        if basis.get("alias_inventory_hash") != self._alias_inventory_hash(self._course_alias_entries(workspace.semester)):
+        dependent = bool(basis.get("alias_dependent"))
+        notion_aliases = self._notion_alias_entries(workspace.semester) if dependent else None
+        if dependent and notion_aliases is None:
+            return "ALIAS_BASIS"
+        if basis.get("alias_inventory_hash") != self._alias_inventory_hash(
+            self._course_alias_entries(workspace.semester), notion_aliases
+        ):
             return "ALIAS_BASIS"
         seen = self.state.get_canvas_drive_binding(item.provider_file_id)
         if (None if seen is None else self._canvas_basis(seen)) != basis.get("canvas_binding_seen"):

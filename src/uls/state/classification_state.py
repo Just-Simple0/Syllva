@@ -552,9 +552,13 @@ class ClassificationStateMixin:
             ).fetchall()
         return [ClassificationRecord(**dict(row)) for row in rows]
 
-    def list_intake_plans(self, *, plan_authority: str | None = None, status: str | None = None) -> list[dict[str, Any]]:
+    def list_intake_plans(
+        self, *, plan_authority: str | None = None, status: str | None = None, intake_id: str | None = None
+    ) -> list[dict[str, Any]]:
         query, params = "SELECT * FROM intake_plans", []
         clauses = []
+        if intake_id is not None:
+            clauses.append("intake_id = ?"); params.append(intake_id)
         if plan_authority is not None:
             clauses.append("plan_authority = ?"); params.append(plan_authority)
         if status is not None:
@@ -604,7 +608,8 @@ class ClassificationStateMixin:
             return None if row is None else dict(row)
 
     def duplicate_content_candidates(
-        self, *, intake_id: str, provider: str, byte_sha256: str, byte_md5: str | None, size: int | None
+        self, *, intake_id: str, provider: str, provider_file_id: str, byte_sha256: str,
+        byte_md5: str | None, size: int | None,
     ) -> dict[str, list[str]]:
         """Plan §3.4 duplicate-content gate, complete over the whole store (P-B2a r1 R1, r2 R1).
 
@@ -643,7 +648,30 @@ class ClassificationStateMixin:
             other_size = row["size"]
             if size is None or other_size is None or type(other_size) is not int or other_size < 0 or other_size == size:
                 unproven.append(file_id)  # size unknown or equal, bytes unknown: cannot rule out
-        return {"proven": sorted(proven), "unproven": sorted(unproven)}
+        # Canonical bindings that no longer have an intake row (r11 R2): a Canvas binding
+        # carries the byte hash (equal → proven duplicate); a Session source binding carries
+        # none, so its content cannot be shown to differ → unproven (fail closed).
+        known = {str(row["provider_file_id"]) for row in rows}
+        with self._transaction() as connection:
+            canvas = connection.execute(
+                "SELECT drive_file_id, byte_sha256 FROM canvas_drive_bindings WHERE drive_file_id != ?",
+                (provider_file_id,),
+            ).fetchall()
+            sessions = connection.execute(
+                "SELECT provider_file_id FROM session_source_bindings WHERE provider = ? AND provider_file_id != ?",
+                (provider, provider_file_id),
+            ).fetchall()
+        for bound in canvas:
+            other = str(bound["drive_file_id"])
+            if other in known:
+                continue  # judged above with its intake row
+            if bound["byte_sha256"] == byte_sha256:
+                proven.append(other)
+        for bound in sessions:
+            other = str(bound["provider_file_id"])
+            if other not in known and other not in proven:
+                unproven.append(other)
+        return {"proven": sorted(set(proven)), "unproven": sorted(set(unproven))}
 
     def list_auto_resolve_intents(self, *, states: Iterable[str] = ("PENDING", "RECONCILE")) -> list[AutoResolveIntent]:
         wanted = tuple(states)

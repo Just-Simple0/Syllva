@@ -1689,11 +1689,15 @@ def test_every_closure_error_path_respects_reconcile_ownership(tmp_path: Path) -
             page["Request Type"] = "ASSIGN_COURSE"  # identity restored
             worker.run_once()
             receipt = next(r for r in state.list_request_receipts())
-            assert state.get_auto_resolve_intent(receipt.request_key).state == "DONE"
             item = _item(system)
             if independent:
+                # r11 R3: an independent reconcile cause blocks the retry write; the closure
+                # ends without a write and the independent cause is untouched.
+                assert state.get_auto_resolve_intent(receipt.request_key).state == "ABORTED"
+                assert _assign_request(notion)["Request Status"] == "Draft"
                 assert item.status == "RECONCILE_REQUIRED" and item.last_error_code == "SOURCE_CHANGED_ELSEWHERE"
             else:
+                assert state.get_auto_resolve_intent(receipt.request_key).state == "DONE"
                 assert item.status != "RECONCILE_REQUIRED" and item.last_error_code is None
         finally:
             system_cm.__exit__(None, None, None)
@@ -1954,3 +1958,104 @@ def test_a_confirmed_write_that_was_reverted_is_not_retried(tmp_path: Path) -> N
         assert page["Request Status"] == "Draft"
     finally:
         system_cm.__exit__(None, None, None)
+
+
+# ---------------------------------------------------------------------------
+# P-B2a FINAL r11 findings
+# ---------------------------------------------------------------------------
+def _course_rows(notion) -> dict:
+    return {row["Course Key"]: row for row in notion.data_sources["synthetic-courses"]}
+
+
+def test_notion_user_aliases_join_the_auto_course_evidence(tmp_path: Path) -> None:
+    # r11 R1 (conflict): a Notion alias equal to this course's name on another course disables it.
+    with _system(tmp_path / "conflict", name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        _course_rows(system["notion"])[COURSE_KEYS[2]]["Aliases"] = "Synthetic Course 1, 다른이름"
+        worker.run_once()
+        item = _item(system)
+        assert item.classification_state == "HUMAN" and _auto_plans(system["state"]) == []
+        assert "AUTO_BLOCK_ALIAS_EVIDENCE" in system["state"].get_intake_suggestion(item.intake_id)["suggestion_note"]
+        assert item.inferred_course_key == COURSE  # the HUMAN suggestion itself is unchanged (P-B1)
+    # r11 R1 (unreadable): alias-based AUTO fails closed.
+    with _system(tmp_path / "unreadable", name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        _course_rows(system["notion"])[COURSE]["Aliases"] = {"unexpected": "shape"}
+        worker.run_once()
+        assert _item(system).classification_state == "HUMAN" and _auto_plans(system["state"]) == []
+    # r11 R1 (changed after the decision): the first-write preflight sees the new Notion Aliases.
+    system_cm, system = _pre_v2_draft(tmp_path / "changed")
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        notion, state = system["notion"], system["state"]
+        _spy_preflight(worker, lambda call: _course_rows(notion)[COURSE_KEYS[0]].__setitem__("Aliases", "새별칭"))
+        since = len(notion.events)
+        worker.run_once()
+        assert _request_writes(notion, since) == []
+        assert _auto_plans(state)[0]["status"] == "RECONCILE_REQUIRED"
+    finally:
+        system_cm.__exit__(None, None, None)
+    # control: a harmless Notion alias for an unrelated course does not block AUTO.
+    with _system(tmp_path / "control", name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        _course_rows(system["notion"])[COURSE_KEYS[3]]["Aliases"] = "무관한별칭"
+        worker.run_once()
+        assert _item(system).classification_state == "CLASSIFIED"
+
+
+def test_canonical_bindings_without_an_intake_row_count_as_duplicates(tmp_path: Path) -> None:
+    # r11 R2: a Canvas binding with the same bytes (proven), a Session binding of an unknown
+    # file (unprovable) and a Canvas binding with different bytes (harmless).
+    cases = {
+        "canvas-same": ("canvas", hashlib.sha256(RAW).hexdigest(), "DUPLICATE_CONTENT"),
+        "session-binding": ("session", None, "AUTO_BLOCK_DUPLICATE_UNPROVEN"),
+        "canvas-different": ("canvas", hashlib.sha256(b"other").hexdigest(), None),
+    }
+    for label, (kind, sha, expected) in cases.items():
+        with _system(tmp_path / label, name=MATCHED_NAME, raw=RAW) as system:
+            worker = _enable(system)
+            _complete_calendar(system["state"])
+            state = system["state"]
+            if kind == "canvas":
+                state.record_canvas_drive_binding(
+                    drive_file_id="legacy-only-file", canvas_course_id=1, resource_kind="assignment",
+                    resource_id="as-1", observation_revision=1, attachment_id="att-1", attachment_filename="x.md",
+                    attachment_size=len(RAW), byte_sha256=sha)
+            else:
+                state.record_session_source_binding(
+                    binding_id="b-legacy", course_key=COURSE, session_id="TEST102-S09", provider="google_drive",
+                    provider_file_id="legacy-only-file", reservation_id="r-9", state="ACTIVE")
+            worker.run_once()
+            item = _item(system)
+            if expected is None:
+                assert item.classification_state == "CLASSIFIED", label
+            else:
+                assert item.classification_state == "HUMAN" and _auto_plans(state) == [], label
+                assert expected in state.get_intake_suggestion(item.intake_id)["suggestion_note"], label
+
+
+def test_preflight_blocks_on_the_items_own_state(tmp_path: Path) -> None:
+    # r11 R3: DUPLICATE_CANDIDATE and an independent reconcile cause set after stage A.
+    for label, fields in (("duplicate", {"last_error_code": "DUPLICATE_CANDIDATE", "last_error": "late"}),
+                          ("reconcile", {"status": "RECONCILE_REQUIRED", "last_error_code": "SOURCE_CHANGED_ELSEWHERE",
+                                         "last_error": "independent"})):
+        system_cm, system = _pre_v2_draft(tmp_path / label)
+        try:
+            worker = _enable(system)
+            _complete_calendar(system["state"])
+            notion, state = system["notion"], system["state"]
+            def mark(call: int, f=fields, st=state, sy=system) -> None:
+                if call == 1:
+                    st.update_intake_item(_item(sy).intake_id, **f)
+            _spy_preflight(worker, mark)
+            since = len(notion.events)
+            worker.run_once()
+            assert _request_writes(notion, since) == [], label
+            assert _auto_plans(state)[0]["status"] == "RECONCILE_REQUIRED", label
+            assert _item(system).last_error_code == fields["last_error_code"], label  # cause untouched
+        finally:
+            system_cm.__exit__(None, None, None)
