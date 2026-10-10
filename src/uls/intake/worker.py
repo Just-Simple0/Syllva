@@ -1646,12 +1646,13 @@ class IntakeWorker:
 
         generation = self.state.get_request_generation(receipt.request_key, intake_id) if hasattr(self.state, "get_request_generation") else None
         return sha256_hex([
-            "intake.auto-snapshot.v2",
+            "intake.auto-snapshot.v3",
             [page.get(field) for field in ("Course", "Kind", "Actual Date", "Session", "Session Mode", "Session No", "Material Role")],
             page.get("Submitted") if type(page.get("Submitted")) is bool else "INVALID",
             page.get("Cancelled") if type(page.get("Cancelled")) is bool else "INVALID",
             page.get("Request Status"),
             page.get("Request Key"),
+            page.get("Request Type"),
             sorted(str(v) for v in _relation_ids(page.get("Intake Items"))),
             page.get("Request Revision Hash"),
             page.get("Input Hash") or None,
@@ -1672,6 +1673,8 @@ class IntakeWorker:
 
         return (
             page.get("Request Key") == receipt.request_key
+            and receipt.request_type is not None
+            and page.get("Request Type") == receipt.request_type
             and page.get("Request Revision Hash") == receipt.request_revision_hash
             and not page.get("Input Hash") and not page.get("Plan Revision")
         )
@@ -1835,7 +1838,11 @@ class IntakeWorker:
         except (SourceUnavailableError, SourcePartialError, PolicyDeniedError, ProviderUnavailableError):
             reason = "SOURCE_UNAVAILABLE"
         if reason is None:
-            reason = self._provenance_mismatch(item, record, workspace) or self._eligibility_mismatch(item, record, workspace)
+            reason = (
+                self._provenance_mismatch(item, record, workspace)
+                or self._eligibility_mismatch(item, record, workspace)
+                or self._duplicate_mismatch(item, record)
+            )
         if reason is None:
             if (
                 self._semester_workspace_fingerprint(workspace.semester) != record.workspace_fingerprint
@@ -1862,6 +1869,17 @@ class IntakeWorker:
         )
         self.state.record_intake_stage_event("auto_preflight_failed", intake_id=item.intake_id, operation_key=reason)
         return False
+
+    def _duplicate_mismatch(self, item: IntakeItem, record: ClassificationRecord) -> str | None:
+        """The stage-A duplicate gate, repeated against the current local evidence (r7 O1)."""
+
+        if not record.byte_sha256:
+            return "BYTES_UNPROVEN"
+        found = self.state.duplicate_content_candidates(
+            intake_id=item.intake_id, provider=self.provider, byte_sha256=record.byte_sha256,
+            byte_md5=record.byte_md5, size=self._declared_size(item),
+        )
+        return "DUPLICATE_CONTENT" if found["proven"] or found["unproven"] else None
 
     def _eligibility_mismatch(
         self, item: IntakeItem, record: ClassificationRecord, workspace: ResolvedSemesterWorkspace
@@ -2079,6 +2097,13 @@ class IntakeWorker:
         """A reconcile state owned by the closure itself (unknown readback): cleared again
         once the intent settles (r2 R6); never confused with a source/plan reconcile."""
 
+        current = self.state.get_intake_item(item.intake_id)
+        if (
+            current is not None
+            and current.status == IntakeStatus.RECONCILE_REQUIRED.value
+            and current.last_error_code not in (None, AUTO_CLOSE_RECONCILE_CODE)
+        ):
+            return  # an independent cause owns the item; the PENDING intent keeps tracking the closure
         self.state.update_intake_item(item.intake_id, status=IntakeStatus.RECONCILE_REQUIRED.value,
                                       last_error_code=AUTO_CLOSE_RECONCILE_CODE, last_error=message)
 

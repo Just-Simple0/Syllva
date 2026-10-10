@@ -1536,3 +1536,100 @@ def test_provider_exceptions_converge_to_the_unknown_outcome_contract(tmp_path: 
         assert _request_writes(notion, since) == []
     finally:
         system_cm.__exit__(None, None, None)
+
+
+# ---------------------------------------------------------------------------
+# P-B2a FINAL r7 findings
+# ---------------------------------------------------------------------------
+def test_a_changed_request_type_is_never_closed(tmp_path: Path) -> None:
+    # r7 #1 (before): the page's Request Type no longer matches the receipt.
+    system_cm, system = _pre_v2_draft(tmp_path / "before")
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        _assign_request(system["notion"])["Request Type"] = "FILE_DETAILS"
+        since = len(system["notion"].events)
+        worker.run_once()
+        assert _request_writes(system["notion"], since) == []
+        assert all(r.state == "Draft" for r in system["state"].list_request_receipts())
+    finally:
+        system_cm.__exit__(None, None, None)
+    # r7 #1 (after): the type changes right after the write landed → never DONE.
+    system_cm, system = _pre_v2_draft(tmp_path / "after")
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        notion, state = system["notion"], system["state"]
+
+        def retype(page_id: str) -> None:
+            for page in notion.data_sources["synthetic-requests"]:
+                if page["id"] == page_id:
+                    page["Request Type"] = "FILE_DETAILS"
+        _landing_hook(notion, retype)
+        worker.run_once()
+        receipt = next(r for r in state.list_request_receipts())
+        assert state.get_auto_resolve_intent(receipt.request_key).state == "PENDING"
+        assert state.get_request_receipt(receipt.request_key).state == "Draft"
+        with pytest.raises(IntakeReconcileRequired):
+            worker.claim_request(receipt.request_key)
+    finally:
+        system_cm.__exit__(None, None, None)
+
+
+def test_an_independent_reconcile_cause_survives_the_closure_marks(tmp_path: Path) -> None:
+    # r7 #2: another RECONCILE_REQUIRED cause must not be replaced or cleared by the closure.
+    system_cm, system = _pre_v2_draft(tmp_path)
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        notion, state = system["notion"], system["state"]
+        original_read = notion.read_record
+        vanished = {"on": False}
+
+        def read_record(data_source_id: str, page_id: str):
+            if vanished["on"] and data_source_id == "synthetic-requests":
+                return None
+            return original_read(data_source_id, page_id)
+        notion.read_record = read_record  # type: ignore[method-assign]
+        _landing_hook(notion, lambda page_id: vanished.__setitem__("on", True))
+        worker.run_once()
+        assert _item(system).last_error_code == "AUTO_RESOLVE_RECONCILE"
+        state.update_intake_item(_item(system).intake_id, status="RECONCILE_REQUIRED",
+                                 last_error_code="SOURCE_CHANGED_ELSEWHERE", last_error="independent cause")
+        worker.run_once()  # recovery still cannot read: the independent cause stays
+        assert _item(system).last_error_code == "SOURCE_CHANGED_ELSEWHERE"
+        vanished["on"] = False
+        worker.run_once()
+        receipt = next(r for r in state.list_request_receipts())
+        assert state.get_auto_resolve_intent(receipt.request_key).state == "DONE"
+        item = _item(system)
+        assert item.status == "RECONCILE_REQUIRED" and item.last_error_code == "SOURCE_CHANGED_ELSEWHERE"
+    finally:
+        system_cm.__exit__(None, None, None)
+
+
+def test_a_duplicate_found_after_stage_a_stops_the_first_write(tmp_path: Path) -> None:
+    # r7 O1: identical bytes become known locally between stage A and the first write.
+    system_cm, system = _pre_v2_draft(tmp_path)
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        notion, state = system["notion"], system["state"]
+
+        def duplicate_appears(call: int) -> None:
+            if call == 1:
+                item = _item(system)
+                state.upsert_intake_item(
+                    intake_id="intake-late-duplicate", provider=item.provider, provider_file_id="late-duplicate",
+                    semester=item.semester, original_parent_id=item.original_parent_id,
+                    observed_parent_id=item.observed_parent_id, original_name="late.md", mime_type="text/markdown",
+                    source_hash="md5:" + hashlib.md5(RAW).hexdigest(), source_version=1, observed_kind="UNKNOWN",
+                    course_candidates_json=[], status="NEEDS_INPUT", content_status="Pending")
+        _spy_preflight(worker, duplicate_appears)
+        since = len(notion.events)
+        worker.run_once()
+        assert _request_writes(notion, since) == []
+        assert _auto_plans(state)[0]["status"] == "RECONCILE_REQUIRED"
+        assert _assign_request(notion)["Request Status"] == "Draft"
+    finally:
+        system_cm.__exit__(None, None, None)
