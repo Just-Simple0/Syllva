@@ -1842,3 +1842,115 @@ def test_session_dates_must_be_complete_iso_values(tmp_path: Path) -> None:
             system["notion"].data_sources["synthetic-sessions"][0]["Date"] = value
             worker.run_once()
             assert _item(system).classification_state == expected, label
+
+
+# ---------------------------------------------------------------------------
+# P-B2a FINAL r10 findings
+# ---------------------------------------------------------------------------
+def test_a_human_supersession_survives_a_new_classification_revision(tmp_path: Path) -> None:
+    # r10 R1: human edit → SUPERSEDED → fields cleared → classification input changes.
+    system_cm, system = _pre_v2_draft(tmp_path)
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        notion, state = system["notion"], system["state"]
+        page = _assign_request(notion)
+        page["Course"] = ["synthetic-course-page-0"]
+        worker.run_once()
+        assert _auto_plans(state)[0]["status"] == "SUPERSEDED"
+        page["Course"] = []
+        system["config"].courses[1].aliases = ["다른별칭"]  # new alias snapshot → new classification revision
+        since = len(notion.events)
+        worker.run_once()
+        worker.run_once()
+        plans = _auto_plans(state)
+        assert len(plans) == 1 and plans[0]["status"] == "SUPERSEDED"
+        assert _request_writes(notion, since) == [] and page["Request Status"] == "Draft"
+        item = _item(system)
+        assert item.classification_state == "HUMAN"
+        assert "AUTO_PLAN_SUPERSEDED" in state.get_intake_suggestion(item.intake_id)["suggestion_note"]
+    finally:
+        system_cm.__exit__(None, None, None)
+
+
+def test_disabling_the_feature_returns_a_classified_item_to_the_human_path(tmp_path: Path) -> None:
+    # r10 R2: AUTO_PENDING, no draft → feature off → exactly one HUMAN draft, no AUTO write.
+    with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        worker.run_once()
+        state, notion = system["state"], system["notion"]
+        assert _item(system).classification_state == "CLASSIFIED" and notion.data_sources["synthetic-requests"] == []
+        plan = _auto_plans(state)[0]
+        state.create_job(job_key="sha256:" + "6" * 64, operation="intake.test", stage="intake",
+                         target_entity_id=plan["intake_id"], plan_revision=plan["plan_revision"],
+                         plan_authority="AUTO_CLASSIFICATION")
+        system["config"].intake.classification.enabled = False
+        since = len(notion.events)
+        worker.run_once()
+        worker.run_once()
+        assert len(notion.data_sources["synthetic-requests"]) == 1
+        assert notion.data_sources["synthetic-requests"][0]["Request Status"] == "Draft"
+        assert not any(((e[3].get("Request Status") or {}).get("status") or {}).get("name") == "Auto Resolved"
+                       for e in notion.events[since:] if e[0] == "update")
+        assert _auto_plans(state)[0]["status"] == "RECONCILE_REQUIRED"
+        assert state.get_job(job_key="sha256:" + "6" * 64).voided_at is not None
+        assert _item(system).classification_state == "HUMAN"
+
+
+def test_session_dates_reject_non_iso_separators(tmp_path: Path) -> None:
+    # r10 R3: Python's lenient parser would accept 'X', '_' and spaces as the date/time separator.
+    bad = {"x": "2026-09-10X09:00:00", "underscore": "2026-09-10_09:00:00", "space": "2026-09-10 09:00:00",
+           "unicode": "2026-09-10 09:00:00", "date-suffix": "2026-09-10Z"}
+    for label, value in bad.items():
+        with _system(tmp_path / label, name=MATCHED_NAME, raw=RAW) as system:
+            worker = _enable(system)
+            _complete_calendar(system["state"])
+            _seed_session(system["notion"], "TEST102-S01")
+            system["notion"].data_sources["synthetic-sessions"][0]["Date"] = value
+            worker.run_once()
+            assert _item(system).classification_state == "HUMAN", label
+    for label, value in {"date": "2026-09-11", "datetime": "2026-09-11T09:00:00", "offset": "2026-09-11T09:00:00+09:00",
+                         "zulu": "2026-09-11T00:00:00Z"}.items():
+        with _system(tmp_path / ("ok-" + label), name=MATCHED_NAME, raw=RAW) as system:
+            worker = _enable(system)
+            _complete_calendar(system["state"])
+            _seed_session(system["notion"], "TEST102-S01")
+            system["notion"].data_sources["synthetic-sessions"][0]["Date"] = value
+            worker.run_once()
+            assert _item(system).classification_state == "CLASSIFIED", label
+
+
+def test_a_confirmed_write_that_was_reverted_is_not_retried(tmp_path: Path) -> None:
+    # r10 R4: READBACK_OK, crash before DONE, the page is reverted to an untouched Draft.
+    system_cm, system = _pre_v2_draft(tmp_path)
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        notion, state = system["notion"], system["state"]
+        original_transition = state.transition_auto_resolve_intent
+        crashes = {"left": 1}
+
+        def transition(intent_id: str, new_state: str, **kwargs):
+            if new_state == "DONE" and crashes["left"]:
+                crashes["left"] -= 1
+                raise RuntimeError("crash before the atomic DONE commit")
+            return original_transition(intent_id, new_state, **kwargs)
+        state.transition_auto_resolve_intent = transition  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError):
+            worker.run_once()
+        receipt = next(r for r in state.list_request_receipts())
+        assert state.get_auto_resolve_intent(receipt.request_key).state == "PENDING"
+        page = _assign_request(notion)
+        page["Request Status"] = "Draft"
+        page["Result Reference"] = None
+        since = len(notion.events)
+        worker.run_once()
+        worker.run_once()
+        assert _request_writes(notion, since) == []
+        intent = state.get_auto_resolve_intent(receipt.request_key)
+        assert intent.state == "ABORTED" and state.get_request_receipt(receipt.request_key).state == "Draft"
+        assert _auto_plans(state)[0]["status"] == "SUPERSEDED" and _item(system).classification_state == "HUMAN"
+        assert page["Request Status"] == "Draft"
+    finally:
+        system_cm.__exit__(None, None, None)

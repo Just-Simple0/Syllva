@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import re
 import threading
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -131,6 +132,10 @@ class IntakeReconcileRequired(UlsError):
     code = "RECONCILE_REQUIRED"
 
 
+
+
+_ISO_DATE_ONLY = re.compile(r"\d{4}-\d{2}-\d{2}")
+_ISO_DATETIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})?")
 
 
 class RequestTerminalError(UlsError):
@@ -331,6 +336,10 @@ class IntakeWorker:
                 if item.status == IntakeStatus.NEEDS_INPUT.value and self._classification_enabled():
                     # Plan §4 boundary: observe → classify → S3 decision → request.
                     self._classify_discovered_item(item, workspace, config_fingerprint, workspace_fingerprint)
+                    item = self._require_item(item.intake_id)
+                if item.status == IntakeStatus.NEEDS_INPUT.value and item.classification_state == "CLASSIFIED" \
+                        and not self._auto_enabled():
+                    self._release_auto_authority(item)
                     item = self._require_item(item.intake_id)
                 if self.provider_account_binding_id:
                     self._project_file_intake_safe(item, workspace, workspace_fingerprint)
@@ -1566,11 +1575,13 @@ class IntakeWorker:
                 return None
             text = str(value).strip()
             try:
-                if len(text) == 10:
+                if _ISO_DATE_ONLY.fullmatch(text):
                     return date.fromisoformat(text).isoformat()
-                return datetime.fromisoformat(text).date().isoformat()
+                if _ISO_DATETIME.fullmatch(text):
+                    return datetime.fromisoformat(text).date().isoformat()
             except ValueError:
-                return None  # prefixes of invalid text prove nothing (r9 #4)
+                return None
+            return None  # anything outside the two ISO shapes proves nothing (r9 #4, r10 R3)
 
         if any(day(row) is None for row in rows):
             return None, None, None, BLOCK_SESSION_UNKNOWN  # a Session whose date cannot be read may be the target
@@ -1622,6 +1633,13 @@ class IntakeWorker:
 
         plan_revision = sha256_hex(["intake.auto-plan.v1", record.classification_revision_hash, workspace_fingerprint])
         existing: IntakePlan | None = self.state.get_intake_plan(plan_revision)
+        if existing is None and any(
+            row["intake_id"] == item.intake_id and row["status"] == "SUPERSEDED"
+            for row in self.state.list_intake_plans(plan_authority="AUTO_CLASSIFICATION", status="SUPERSEDED")
+        ):
+            # A human (or the barrier) already took the authority from an AUTO plan of this
+            # intake; a newer classification revision never restores it (r10 R1).
+            return None, BLOCK_PLAN_SUPERSEDED
         if existing is not None:
             if (
                 existing.plan_authority != "AUTO_CLASSIFICATION"
@@ -1938,6 +1956,22 @@ class IntakeWorker:
                     self.state.record_intake_stage_event(
                         "auto_plan_retired", intake_id=item.intake_id, operation_key="AUTO_PLAN_RECLASSIFIED")
 
+    def _release_auto_authority(self, item: IntakeItem) -> None:
+        """AUTO is no longer usable (feature off, profile or capability lost): close the live
+        AUTO plans (jobs VOID) and hand the item to the human path — unless a closure intent
+        of this intake is unresolved, which stays a barrier (r10 R2)."""
+
+        for intent in self.state.list_auto_resolve_intents():
+            record = self.state.get_classification_record(intent.record_id)
+            if record is not None and record.intake_id == item.intake_id:
+                return
+        for status in ("AUTO_PENDING", "PLANNED"):
+            for row in self.state.list_intake_plans(plan_authority="AUTO_CLASSIFICATION", status=status):
+                if row["intake_id"] == item.intake_id:
+                    self.state.reconcile_intake_plan(row["plan_revision"], "AUTO_UNAVAILABLE")
+        self.state.update_intake_item(item.intake_id, classification_state="HUMAN")
+        self.state.record_intake_stage_event("auto_authority_released", intake_id=item.intake_id, operation_key="AUTO_UNAVAILABLE")
+
     def _yield_auto_plans_to_human(self, item: IntakeItem, reason: str) -> None:
         """A submitted HUMAN request wins (plan §3.4 M2): persist SUPERSEDED + job VOID."""
 
@@ -2238,6 +2272,17 @@ class IntakeWorker:
             self._settle_rollback(item, record, receipt, intent, rollback, page)
             return
         if status == "Draft" and untouched:
+            prior_write = self.state.get_provider_write_attempt(
+                derive_operation_key("intake.auto-resolve.v1", self.provider, receipt.request_key, record.record_id)
+            )
+            if prior_write is not None and prior_write.response_state == "READBACK_OK":
+                # Our write was confirmed, yet the page is an untouched Draft again: someone
+                # reverted it.  Nothing is rewritten; the closure ends as a proven
+                # supersession and the human path keeps the Draft (r10 R4).
+                self.state.abort_auto_resolve_intent_superseding(intent.intent_id, "AUTO_WRITE_REVERTED")
+                self.state.record_intake_stage_event(
+                    "auto_plan_superseded", intake_id=item.intake_id, operation_key="AUTO_WRITE_REVERTED")
+                return
             # The write never landed.  Retry under the same intent and operation key
             # only when AUTO may still write and every HUMAN request of the intake is
             # still untouched; otherwise release the human path (r1 R5, r2 R3).
