@@ -135,3 +135,38 @@ def test_an_observed_calendar_drives_the_match_end_to_end(tmp_path: Path) -> Non
         worker.run_once()
         assert system["state"].recording_calendar_complete(COURSE)
         assert _item(system).calendar_match == "MATCHED" and len(_auto_plans(system["state"])) == 1
+
+
+def test_new_observation_stops_when_auto_is_switched_off(tmp_path: Path) -> None:
+    with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        cfg = system["config"].intake.classification
+        cfg.canvas_observation_enabled, cfg.canvas_course_map = True, {10: COURSE}
+        observer = _Observer()
+        worker.canvas_observer = observer
+        cfg.enabled = False
+        worker.run_once()
+        assert observer.calls == []
+
+
+def test_an_ineligible_calendar_is_closed_in_the_state_so_a_restored_mapping_needs_a_new_observation(tmp_path: Path) -> None:
+    with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        cfg = system["config"].intake.classification
+        assert system["state"].recording_calendar_complete(COURSE)
+        saved, cfg.canvas_course_map = cfg.canvas_course_map, {}
+        worker.run_once()
+        assert not system["state"].recording_calendar_complete(COURSE)         # closed, not only ignored
+        cfg.canvas_course_map = saved                                           # the mapping comes back
+        worker.run_once()
+        assert not system["state"].recording_calendar_complete(COURSE)         # no stale proof is revived
+
+
+def test_observation_enabled_without_an_observer_has_no_live_profile_evidence(tmp_path: Path) -> None:
+    with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        system["config"].intake.classification.canvas_observation_enabled = True
+        worker.run_once()
+        assert _item(system).calendar_match == "AMBIGUOUS" and _auto_plans(system["state"]) == []

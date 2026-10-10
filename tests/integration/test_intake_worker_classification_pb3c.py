@@ -358,3 +358,90 @@ def test_a_change_after_the_new_generation_was_submitted_only_marks_its_error(tm
         assert new["Error"] == "TERMINAL_CHANGED_AGAIN" and len(_pages(system)) == 2
         assert {k: new.get(k) for k in before} == before
         assert system["state"].terminal_change_counts() == {"CREATED": 1, "CHANGED_AGAIN": 1}
+
+
+# --- review round 1 -----------------------------------------------------------------------
+
+def test_a_request_whose_intake_relation_moved_to_another_intake_is_not_ours_to_read(tmp_path: Path) -> None:
+    with _closed_request(tmp_path) as (system, worker):
+        old = _closed_page(system)
+        old["Course"] = ["synthetic-course-page-0"]
+        old["Intake Items"] = ["some-other-intake-page"]
+        worker.run_once()
+        assert len(_pages(system)) == 1 and system["state"].terminal_change_counts() == {}
+
+
+def test_an_unsettled_generation_is_finished_under_its_own_change_before_a_later_one(tmp_path: Path) -> None:
+    with _closed_request(tmp_path) as (system, worker):
+        old = _closed_page(system)
+        old["Course"] = ["synthetic-course-page-0"]
+        system["notion"].drop_next_create_response = True
+        worker.run_once()                                    # change H1: generation bound, create response lost
+        assert system["state"].terminal_change_counts() == {"PENDING": 1}
+        old["Kind"] = "TRANSCRIPT"                           # change H2 before H1 settled
+        worker.run_once()
+        assert len(_pages(system)) == 2
+        assert system["state"].terminal_change_counts() == {"CREATED": 1}     # H1 settled, H2 not yet looked at
+        worker.run_once()
+        worker.run_once()
+        assert len(_pages(system)) == 2
+        assert system["state"].terminal_change_counts() == {"CREATED": 1, "CHANGED_AGAIN": 1}
+
+
+def test_a_cancelled_generation_lets_the_next_human_change_open_a_new_one(tmp_path: Path) -> None:
+    with _closed_request(tmp_path) as (system, worker):
+        old = _closed_page(system)
+        old["Course"] = ["synthetic-course-page-0"]
+        worker.run_once()
+        first = next(p for p in _pages(system) if p["Request Key"] != old["Request Key"])
+        first["Cancelled"] = True
+        system["state"].update_request_receipt(first["Request Key"], state="Cancelled")
+        old["Kind"] = "TRANSCRIPT"
+        worker.run_once()
+        pages = _pages(system)
+        assert len(pages) == 3
+        third = next(p for p in pages if p["Request Key"] not in {old["Request Key"], first["Request Key"]})
+        record = system["state"].get_request_generation(third["Request Key"], _item(system).intake_id)
+        assert record["generation"] == 3 and record["superseded_request_key"] == first["Request Key"]
+
+
+def test_an_automatic_result_whose_source_moved_is_not_adopted(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    from uls.intake.worker import IntakeReconcileRequired
+
+    with _closed_request(tmp_path) as (system, worker):
+        details = _fill_details(system, worker)
+        drive, source_id = system["drive"], system["source_id"]
+        drive.files[source_id] = replace(drive.files[source_id], parents=("somewhere-else",))
+        before = _state_snapshot(system)
+        with pytest.raises(IntakeReconcileRequired):
+            worker.claim_request(details["Request Key"])
+        assert _state_snapshot(system) == before
+
+
+def test_the_human_session_choice_must_be_the_automatic_session(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    from uls.intake.requests import RequestInput
+    from uls.intake.worker import IntakeReconcileRequired
+
+    with _closed_request(tmp_path) as (system, worker):
+        item = _item(system)
+        workspace = worker._workspace_for_item(item)
+        base = RequestInput("k", "FILE_DETAILS", intake_ids=(item.intake_id,), course_key=item.inferred_course_key,
+                            kind="TRANSCRIPT", actual_date="2026-09-10", session_mode="NEW")
+        assert worker._handover_gate(item, replace(base, session_mode="EXISTING", session_id="TEST102-S01"), workspace)
+        with pytest.raises(IntakeReconcileRequired):
+            worker._handover_gate(item, replace(base, session_mode="EXISTING", session_id="TEST102-S09"), workspace)
+
+
+def test_an_assign_course_does_not_skip_the_effect_verification(tmp_path: Path) -> None:
+    from uls.intake.worker import IntakeReconcileRequired
+
+    with _closed_request(tmp_path) as (system, worker):
+        new = _new_generation(system, worker, Course=[AUTO_COURSE_PAGE], Submitted=True)
+        system["notion"].data_sources["synthetic-sessions"].clear()
+        with pytest.raises(IntakeReconcileRequired):
+            worker.claim_request(new["Request Key"])
+        assert _details_pages(system) == []

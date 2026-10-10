@@ -40,6 +40,10 @@ def _modules(skip_week: int | None = None, bare_week: bool = False) -> list[dict
     return modules
 
 
+class _Killed(BaseException):
+    pass
+
+
 class FakeReader:
     def __init__(self, modules=None, assignments=None, announcements=None, *, fail_after: int | None = None,
                  extra_next: bool = False, module_items: dict[int, list] | None = None) -> None:
@@ -54,7 +58,7 @@ class FakeReader:
     def get_page(self, url: str, deadline: float):
         self.urls.append(url)
         if self.fail_after is not None and len(self.urls) > self.fail_after:
-            raise RuntimeError("process killed")
+            raise _Killed("process killed")
         if "/assignments" in url:
             rows = self.assignments
         elif "/announcements" in url:
@@ -192,9 +196,39 @@ def test_an_incomplete_collection_closes_a_previously_complete_calendar(harness)
 def test_a_process_death_mid_collection_leaves_the_calendar_closed(harness) -> None:
     assert harness.run().status == "COMPLETE"
     harness.reader.fail_after = 1
-    with pytest.raises(RuntimeError):
+    with pytest.raises(_Killed):
         harness.run()
     assert not harness.state.recording_calendar_complete(KEY)
+
+
+def test_a_connection_failure_before_any_read_still_closes_a_complete_calendar(tmp_path) -> None:
+    h = Harness(tmp_path)
+    try:
+        assert h.run().status == "COMPLETE" and h.state.recording_calendar_complete(KEY)
+
+        @contextmanager
+        def broken():
+            raise RuntimeError("token provider exploded")
+            yield  # pragma: no cover
+
+        h.observer._factory = broken
+        result = h.run()
+        assert (result.status, result.reason) == ("INCOMPLETE", "OBSERVATION_FAILED")
+        assert not h.state.recording_calendar_complete(KEY)
+    finally:
+        h.close()
+
+
+def test_a_next_link_to_another_course_of_the_same_origin_is_incomplete(harness) -> None:
+    from uls.intake.canvas_observer import _next_url
+
+    here = "/api/v1/courses/1/modules?include[]=items&per_page=50"
+    for foreign in ("/api/v1/courses/2/modules?include[]=items&per_page=50&page=2",
+                    "/api/v1/courses/1/assignments?include[]=items&per_page=50&page=2",
+                    "/api/v1/courses/1/modules?include[]=items&per_page=50&page=2&order_by=name"):
+        with pytest.raises(_Incomplete):
+            _next_url(f'<{foreign}>; rel="next"', here, ORIGIN)
+    assert _next_url('</api/v1/courses/1/modules?include[]=items&per_page=50&page=2>; rel="next"', here, ORIGIN)
 
 
 def test_two_canvas_courses_for_one_course_key_are_ineligible(tmp_path) -> None:
@@ -327,7 +361,32 @@ def test_a_next_link_to_another_origin_is_refused() -> None:
     with open_canvas_connection(ORIGIN, resolver=lambda _h, _p: ["93.184.216.34"],
                                 connector=lambda *_a: transport) as connection:
         reader = ConnectionReader(connection, "t0k")
-        _page, nxt = reader.get_page(first, 1e12)
-        with pytest.raises(CanvasCheckError):
-            reader.get_page(nxt, 1e12)
+        with pytest.raises(_Incomplete):
+            reader.get_page(first, 1e12)
     assert len(transport.requests) == 1
+
+
+def test_a_moved_mapping_drops_the_old_projection_and_reopens_only_after_a_complete_observation(tmp_path) -> None:
+    h = Harness(tmp_path)
+    try:
+        assert h.run().status == "COMPLETE"
+        h.observer._course_map = {99999: KEY}
+        result = h.observer.observe_course(99999)
+        assert result.status == "COMPLETE"
+        assert h.state.recording_calendar_course(KEY)["canvas_course_id"] == 99999
+    finally:
+        h.close()
+
+
+def test_the_live_profile_provider_is_read_on_every_check(tmp_path) -> None:
+    h = Harness(tmp_path)
+    try:
+        current = {"origin": ORIGIN}
+        h.observer._profile_provider = lambda: current["origin"]
+        assert h.observer.profile_matches()
+        current["origin"] = "https://other.example.edu"
+        assert not h.observer.profile_matches()
+        current["origin"] = None
+        assert not h.observer.profile_matches()
+    finally:
+        h.close()

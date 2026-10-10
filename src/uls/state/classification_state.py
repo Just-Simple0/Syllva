@@ -2049,6 +2049,39 @@ class ClassificationStateMixin:
             return {str(r["state"]): int(r["n"]) for r in connection.execute(
                 "SELECT state, COUNT(*) AS n FROM terminal_change_ledger GROUP BY state").fetchall()}
 
+    def latest_request_generation(self, intake_id: str, request_type: str) -> dict[str, Any] | None:
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM intake_request_generations WHERE intake_id = ? AND request_type = ? "
+                "ORDER BY generation DESC LIMIT 1",
+                (intake_id, request_type),
+            ).fetchone()
+            return None if row is None else dict(row)
+
+    def list_terminal_changes(self, original_receipt_id: str) -> list[dict[str, Any]]:
+        with self._transaction() as connection:
+            return [dict(r) for r in connection.execute(
+                "SELECT * FROM terminal_change_ledger WHERE original_receipt_id = ? ORDER BY created_at, "
+                "changed_user_snapshot_hash", (original_receipt_id,)).fetchall()]
+
+    def rebind_recording_calendar(self, course_key: str, canvas_course_id: int) -> None:
+        """The verified mapping moved a course key to another Canvas course: drop the old
+        projection and close the calendar until the new course is observed completely."""
+
+        with self._transaction(immediate=True) as connection:
+            other = connection.execute(
+                "SELECT course_key FROM recording_calendar_courses WHERE canvas_course_id = ? AND course_key <> ?",
+                (int(canvas_course_id), course_key),
+            ).fetchone()
+            if other is not None:
+                raise ValueError("the Canvas course is bound to another course key")
+            connection.execute("DELETE FROM recording_calendar_current WHERE course_key = ?", (course_key,))
+            connection.execute(
+                "UPDATE recording_calendar_courses SET canvas_course_id = ?, collection_complete = 0, "
+                "projection_revision_hash = NULL, updated_at = ? WHERE course_key = ?",
+                (int(canvas_course_id), _now(), course_key),
+            )
+
     def get_handover(self, from_plan_revision: str, to_plan_revision: str) -> dict[str, Any] | None:
         with self._transaction() as connection:
             row = connection.execute(

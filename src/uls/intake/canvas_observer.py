@@ -22,7 +22,7 @@ from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Protocol
-from urllib.parse import urljoin
+from urllib.parse import parse_qsl, urljoin, urlsplit
 
 from ..settings.canvas_checks import (
     CanvasCheckError,
@@ -91,21 +91,33 @@ class ConnectionReader:
         for key, value in response.headers.items():
             if key.lower() == "link":
                 link = value
-        return body, _next_url(link, url)
+        return body, _next_url(link, url, self._connection.target.origin)
 
 
-def _next_url(link: str, current: str) -> str | None:
+def _next_url(link: str, current: str, origin: str = "https://canvas.invalid") -> str | None:
     if not link:
         return None
     entries = re.findall(r'<([^<>]+)>\s*((?:;[^,]*)*)', link)
+    here = urljoin(origin + "/", current)
     found: list[str] = []
     for target, attributes in entries:
         relation = re.search(r';\s*rel\s*=\s*(?:"([^"]*)"|([^;\s,]+))', attributes)
         if relation and "next" in (relation.group(1) or relation.group(2)).split():
-            found.append(urljoin(current, target))
+            found.append(urljoin(here, target))
     if len(found) > 1 or (not entries and "next" in link):
         raise _Incomplete("MALFORMED_LINK")
-    return found[0] if found else None
+    if not found:
+        return None
+    # The next page keeps the first request's collection: same origin, same path and the
+    # same query apart from the page number (no other course or listing; plan §6.3).
+    a, b = urlsplit(here), urlsplit(found[0])
+    if (a.scheme, a.netloc, a.path) != (b.scheme, b.netloc, b.path):
+        raise _Incomplete("PAGINATION_SCOPE")
+    def keep(query: str) -> list[tuple[str, str]]:
+        return sorted(p for p in parse_qsl(query, keep_blank_values=True) if p[0] != "page")
+    if keep(a.query) != keep(b.query):
+        raise _Incomplete("PAGINATION_SCOPE")
+    return found[0]
 
 
 def connection_reader_factory(
@@ -147,8 +159,10 @@ class CanvasObserver:
         semester_for: Callable[[str], SemesterRange | None],
         monotonic: Callable[[], float] = time.monotonic,
         max_run_seconds: float = MAX_RUN_SECONDS,
+        profile_provider: Callable[[], str | None] | None = None,
     ) -> None:
         self._state = state
+        self._profile_provider = profile_provider
         self._origin = origin
         self._verified_origin = verified_origin
         self._course_map = {int(k): v for k, v in course_map.items()}
@@ -158,8 +172,14 @@ class CanvasObserver:
         self._max_run_seconds = max_run_seconds
 
     def profile_matches(self) -> bool:
+        """The *current* active Canvas connection origin (read on every call when a provider
+        is injected) must be the origin the course map was verified against."""
+
         try:
-            return validate_canvas_origin(self._origin) == validate_canvas_origin(self._verified_origin)
+            current = self._profile_provider() if self._profile_provider is not None else self._origin
+            if not current:
+                return False
+            return validate_canvas_origin(current) == validate_canvas_origin(self._verified_origin)
         except CanvasCheckError:
             return False
 
@@ -182,6 +202,15 @@ class CanvasObserver:
         if row is not None:
             self._state.close_recording_calendar(course_key, int(row["canvas_course_id"]))
 
+    def _barrier(self, course_key: str, canvas_course_id: int) -> None:
+        """Close the calendar before anything can fail (one transaction); a moved mapping
+        drops the old Canvas course's projection first."""
+
+        row = self._state.recording_calendar_course(course_key)
+        if row is not None and int(row["canvas_course_id"]) != canvas_course_id:
+            self._state.rebind_recording_calendar(course_key, canvas_course_id)
+        self._state.close_recording_calendar(course_key, canvas_course_id)
+
     # --- one course --------------------------------------------------------------
 
     def observe_course(self, canvas_course_id: int) -> ObservationResult:
@@ -190,18 +219,22 @@ class CanvasObserver:
         if blocked is not None:
             return blocked
         course_key = self._course_map[canvas_course_id]
+        # Barrier first (before the connection can fail): a crash or error anywhere below
+        # keeps the calendar closed.
+        self._barrier(course_key, canvas_course_id)
         try:
             with self._factory() as reader:
                 if reader is None:
-                    self._close(course_key)
                     return ObservationResult("DISABLED", "NO_CREDENTIAL", course_key, canvas_course_id)
-                # Barrier first: a crash anywhere below keeps the calendar closed.
-                self._state.close_recording_calendar(course_key, canvas_course_id)
                 collected = self._collect(reader, canvas_course_id)
         except _Incomplete as error:
             return self._incomplete(course_key, canvas_course_id, error.reason)
         except CanvasCheckError as error:
             return self._incomplete(course_key, canvas_course_id, error.code)
+        except Exception:  # noqa: BLE001 - fixed failure code only; the calendar is already closed
+            # Whatever the connection layer raised, the calendar is already closed; the
+            # caller sees a fixed failure, never provider text.
+            return self._incomplete(course_key, canvas_course_id, "OBSERVATION_FAILED")
         return self._record(course_key, canvas_course_id, collected)
 
     def _incomplete(self, course_key: str, canvas_course_id: int, reason: str) -> ObservationResult:

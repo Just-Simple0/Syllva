@@ -505,14 +505,37 @@ class IntakeWorker:
         ]
         return plans, reservations
 
+    def _verify_organized_source(self, item: IntakeItem) -> None:
+        """The moved source is still exactly where the automatic run left it, private and unchanged."""
+
+        try:
+            metadata = self.drive.read_metadata(item.provider_file_id)
+            canonical = json.loads(item.canonical_source_json or "{}")
+            if (
+                metadata.file_id != item.provider_file_id or metadata.owned_by_me is not True
+                or canonical.get("file_id") != item.provider_file_id
+                or canonical.get("parent_id") != metadata.parent_id
+                or _metadata_source_hash(metadata) != item.source_hash
+            ):
+                raise IntakeReconcileRequired("the organized source no longer matches the automatic result")
+            _check_private_drive_metadata(metadata)
+        except IntakeReconcileRequired:
+            raise
+        except ReconnectRequiredError:
+            raise
+        except (SourceUnavailableError, SourcePartialError, PolicyDeniedError, ProviderUnavailableError, ValueError) as exc:
+            raise IntakeReconcileRequired("the organized source cannot be verified") from exc
+
     def _handover_gate(
         self, item: IntakeItem, request: RequestInput, workspace: ResolvedSemesterWorkspace
     ) -> _Handover | None:
         """Decide before any write whether the human request may continue the automatic result.
 
-        No AUTO effect -> None (the ordinary HUMAN path).  Otherwise every effect is read back
-        and compared with the request; anything that is not proven identical is
-        RECONCILE_REQUIRED and nothing is created, moved or re-run."""
+        No AUTO effect -> None (the ordinary HUMAN path).  Otherwise every effect (Course,
+        Session/Material page, canonical source binding, Material Type, the moved source) is
+        read back and compared with the automatic target AND with the human request, for both
+        request types; anything not proven identical is RECONCILE_REQUIRED and nothing is
+        created, moved or re-run."""
 
         plans, reservations = self._auto_effects(item)
         advanced = item.status in (IntakeStatus.ORGANIZED.value, IntakeStatus.REGISTERED.value, IntakeStatus.MOVING.value)
@@ -522,47 +545,63 @@ class IntakeWorker:
         target = json.loads(latest["target_snapshot_json"])
         if request.course_key != target.get("course_key"):
             raise IntakeReconcileRequired("the human course differs from the automatic result; resolve it manually")
-        if request.request_type == RequestType.ASSIGN_COURSE.value:
-            return _Handover("ASSIGN_MATCH", latest["plan_revision"], {})
-        if request.kind != target.get("kind"):
-            raise IntakeReconcileRequired("the human Kind differs from the automatic result; resolve it manually")
-        is_transcript = request.kind == FileKind.TRANSCRIPT.value
-        if is_transcript:
-            if request.actual_date != target.get("actual_date"):
-                raise IntakeReconcileRequired("the human date differs from the automatic result")
-            if target.get("session_mode") == SessionMode.EXISTING.value and (
-                request.session_mode != SessionMode.EXISTING.value or request.session_id != target.get("session_id")
-            ):
-                raise IntakeReconcileRequired("the human Session differs from the automatic result")
-        elif target.get("material_type_initial") and request.material_role not in (None, target.get("material_type_initial")):
-            raise IntakeReconcileRequired("the human Material Role differs from the automatic result")
+        is_assign = request.request_type == RequestType.ASSIGN_COURSE.value
+        target_is_transcript = target.get("kind") == FileKind.TRANSCRIPT.value
+        if not is_assign:
+            if request.kind != target.get("kind"):
+                raise IntakeReconcileRequired("the human Kind differs from the automatic result; resolve it manually")
+            if target_is_transcript:
+                if request.actual_date != target.get("actual_date"):
+                    raise IntakeReconcileRequired("the human date differs from the automatic result")
+                if request.session_mode == SessionMode.NEW.value and target.get("session_mode") != SessionMode.NEW.value:
+                    raise IntakeReconcileRequired("the human asks for a new Session; the automatic run used an existing one")
+            elif target.get("material_type_initial") and request.material_role not in (None, target.get("material_type_initial")):
+                raise IntakeReconcileRequired("the human Material Role differs from the automatic result")
         course_id = self._course_page_map(workspace).get(request.course_key or "")
-        if not course_id:
+        if not course_id or self.notion is None:
             raise IntakeReconcileRequired("the automatic result's Course page is unavailable")
+        complete = item.status == IntakeStatus.ORGANIZED.value
         adopted: dict[str, Any] = {}
         for held in reservations:
             logical = "sessions" if held.entity_kind == "SESSION" else "materials"
-            rows = [row for row in self.notion.list_records(logical) if row.get("ID") == held.entity_app_id] if self.notion else []
+            rows = [row for row in self.notion.list_records(logical) if row.get("ID") == held.entity_app_id]
             if len(rows) != 1 or _relation_ids(rows[0].get("Course")) != [course_id]:
                 raise IntakeReconcileRequired(f"the automatic {held.entity_kind} is missing or in another Course")
+            row = rows[0]
             if held.entity_kind == "SESSION":
-                if not is_transcript or rows[0].get("Date") != request.actual_date:
-                    raise IntakeReconcileRequired("the automatic Session does not match the human request")
+                if not target_is_transcript or row.get("Date") != target.get("actual_date"):
+                    raise IntakeReconcileRequired("the automatic Session does not match its target")
+                if not is_assign and request.session_mode == SessionMode.EXISTING.value and request.session_id not in (
+                    held.entity_app_id, _page_id(row)
+                ):
+                    raise IntakeReconcileRequired("the human selected another Session than the automatic result")
                 binding = self.state.session_source_binding_for(request.course_key or "", held.entity_app_id)
-                if binding is not None and (
+                if (binding is None and (complete or advanced)) or (binding is not None and (
                     binding.get("reservation_id") != held.reservation_id
                     or binding.get("provider_file_id") != item.provider_file_id
-                ):
+                    or binding.get("session_id") != held.entity_app_id
+                )):
                     raise IntakeReconcileRequired("the Session's canonical source binding is not this file's")
-            elif is_transcript:
-                raise IntakeReconcileRequired("the automatic Material does not match a transcript request")
+                if complete and (row.get("Recording Status") not in {"Ready", "Partial"} or not row.get("Normalized Transcript")):
+                    raise IntakeReconcileRequired("the automatic Session is not in its finished state")
+            else:
+                if target_is_transcript:
+                    raise IntakeReconcileRequired("the automatic Material does not match a transcript target")
+                wanted = target.get("material_type_initial")
+                if wanted and row.get("Type") != wanted:
+                    raise IntakeReconcileRequired("the Material's Type changed after the automatic run")
+                if not is_assign and request.material_role not in (None, row.get("Type")):
+                    raise IntakeReconcileRequired("the human Material Role differs from the Material's Type")
             adopted[held.entity_kind] = {
                 "reservation_id": held.reservation_id, "entity_app_id": held.entity_app_id,
-                "page_id": _page_id(rows[0]),
+                "page_id": _page_id(row),
             }
-        if is_transcript and "SESSION" not in adopted and advanced:
+        if target_is_transcript and "SESSION" not in adopted and advanced:
             raise IntakeReconcileRequired("the automatic Session effect cannot be proven")
-        complete = item.status == IntakeStatus.ORGANIZED.value
+        if complete:
+            self._verify_organized_source(item)
+        if is_assign:
+            return _Handover("ASSIGN_MATCH", latest["plan_revision"], adopted)
         return _Handover("COMPLETE" if complete else "CONTINUE", latest["plan_revision"], adopted)
 
     def _adopted_reservation(self, item: IntakeItem, plan: IntakePlan, entity_kind: str) -> EntityReservation | None:
@@ -643,8 +682,9 @@ class IntakeWorker:
             and page.get("Request Revision Hash") == receipt.request_revision_hash
             and page.get("Request Status") == "Auto Resolved"
             and type(page.get("Submitted")) is bool and type(page.get("Cancelled")) is bool
-            and len(_relation_ids(page.get("Intake Items"))) == 1
-            and self.state.get_intake_item(intake_id) is not None
+            and (item := self.state.get_intake_item(intake_id)) is not None
+            and bool(item.file_intake_page_id)
+            and _relation_ids(page.get("Intake Items")) == [item.file_intake_page_id]
         )
 
     def _terminal_user_change(
@@ -682,6 +722,17 @@ class IntakeWorker:
             return
         workspace = self._workspace_for_item(item)
         assert self.notion is not None
+        for entry in self.state.list_terminal_changes(receipt.receipt_id):
+            if entry["state"] == "PENDING" and entry["created_request_key"]:
+                # An earlier change owns an unsettled generation: finish it under that change
+                # (never under a later one) before anything else is looked at.
+                record = self.state.get_request_generation(entry["created_request_key"], item.intake_id)
+                if record is None or not record.get("superseded_request_key"):
+                    raise IntakeReconcileRequired("a pending terminal change has no generation record")
+                self._settle_terminal_change(
+                    item, workspace, receipt, entry["changed_user_snapshot_hash"],
+                    record["superseded_request_key"], layout_context)
+                return
         page = self.notion.read_record("input_request", receipt.provider_page_id)
         if page is None:
             raise SourceUnavailableError("AutoResolved request page is unavailable")
@@ -696,38 +747,49 @@ class IntakeWorker:
             return
         if self.state.get_terminal_change(receipt.receipt_id, changed) is not None:
             return  # this exact human change was already handled (idempotent re-observation)
-        later = self.state.get_generation_superseding(item.intake_id, receipt.request_type, receipt.request_key)
-        # A generation that was reserved and bound but whose create never settled is resumed,
-        # not mistaken for a processed one (response loss; plan §3.4, G2/T2).
-        pending_key = None
-        if later is not None and later.get("request_key"):
-            later_receipt = self.state.get_request_receipt(later["request_key"])
-            if later_receipt is None or later_receipt.provider_page_id is None:
-                pending_key = later["request_key"]
+        latest = self.state.latest_request_generation(item.intake_id, receipt.request_type)
+        superseded_key = receipt.request_key
+        later_open = False
+        if latest is not None and latest["request_key"] != receipt.request_key:
+            later_receipt = self.state.get_request_receipt(latest["request_key"]) if latest["request_key"] else None
+            if later_receipt is not None and later_receipt.state == "Cancelled":
+                superseded_key = latest["request_key"]   # the human cancelled the last generation: the next one may open
+            elif later_receipt is not None and later_receipt.provider_page_id is not None:
+                later_open = True                          # still open or already processed
+            # a bound generation without a page is an unsettled create of an earlier attempt:
+            # it is resumed below under this change
         open_requests = [
             other for other, _shape in self._human_receipts_for_intake(item.intake_id)
-            if other.request_key not in (receipt.request_key, pending_key)
-            and other.state not in self._TERMINAL_RECEIPT_STATES
-            and other.request_type == receipt.request_type
+            if other.request_key != receipt.request_key and other.provider_page_id is not None
+            and other.state not in self._TERMINAL_RECEIPT_STATES and other.request_type == receipt.request_type
         ]
-        if (later is not None and pending_key is None) or open_requests:
+        if later_open or open_requests:
             for other in open_requests:
-                if other.provider_page_id and (self.notion.read_record("input_request", other.provider_page_id) or {}).get("Error") != "TERMINAL_CHANGED_AGAIN":
-                    self.notion.update_system_record("input_request", other.provider_page_id, {"Error": "TERMINAL_CHANGED_AGAIN"})
+                page_id = str(other.provider_page_id)
+                if (self.notion.read_record("input_request", page_id) or {}).get("Error") != "TERMINAL_CHANGED_AGAIN":
+                    self.notion.update_system_record("input_request", page_id, {"Error": "TERMINAL_CHANGED_AGAIN"})
             self.state.record_terminal_change(
                 receipt.receipt_id, changed, created_generation=None, created_request_key=None, state="CHANGED_AGAIN")
             return
         self._supersede_live_auto_plans(item, "terminal request changed by a human")
-        created = self._create_input_request_with_context(
-            item, workspace, request_type=receipt.request_type, target_snapshot=None,
-            layout_context=layout_context, superseded_request_key=receipt.request_key,
-        )
-        generation = self.state.get_request_generation(created.request_key, item.intake_id)
-        if generation is None:
-            raise IntakeReconcileRequired("the new request generation is not recorded")
+        number, generation = self._prepare_superseding_generation(
+            item, workspace, receipt.request_type, superseded_key, None)
+        # (receipt, changed hash) -> generation -> key is durable before the provider create.
         self.state.record_terminal_change(
-            receipt.receipt_id, changed, created_generation=int(generation["generation"]),
-            created_request_key=created.request_key, state="CREATED")
+            receipt.receipt_id, changed, created_generation=number,
+            created_request_key=generation.request_key, state="PENDING")
+        self._settle_terminal_change(item, workspace, receipt, changed, superseded_key, layout_context)
+
+    def _settle_terminal_change(
+        self, item: IntakeItem, workspace: ResolvedSemesterWorkspace, receipt: RequestReceipt,
+        changed: str, superseded_key: str, layout_context: _LayoutValidationContext,
+    ) -> None:
+        self._create_input_request_with_context(
+            item, workspace, request_type=receipt.request_type or "", target_snapshot=None,
+            layout_context=layout_context, superseded_request_key=superseded_key,
+        )
+        self.state.transition_terminal_change(
+            receipt.receipt_id, changed, expected_state="PENDING", state="CREATED")
 
     def _supersede_live_auto_plans(self, item: IntakeItem, reason: str) -> None:
         for status in ("AUTO_PENDING", "PLANNED"):
@@ -745,7 +807,7 @@ class IntakeWorker:
 
         classification = getattr(self.config.intake, "classification", None)
         observer = self.canvas_observer
-        if observer is None or not getattr(classification, "canvas_observation_enabled", False):
+        if observer is None or not getattr(classification, "canvas_observation_enabled", False) or not self._auto_enabled():
             return
         mapping = getattr(classification, "canvas_course_map", {}) or {}
         course_ids = sorted(int(course_id) for course_id in mapping)
@@ -1170,6 +1232,34 @@ class IntakeWorker:
                 superseded_request_key=superseded_request_key,
             )
 
+    def _prepare_superseding_generation(
+        self, item: IntakeItem, workspace: ResolvedSemesterWorkspace, request_type: str,
+        superseded_request_key: str, target_snapshot: Mapping[str, Any] | None,
+    ) -> tuple[int, Any]:
+        """Reserve-or-resume the next generation and bind it to its key, before any provider
+        create (plan §3.4 r8 R1; idempotent: the same basis returns the same generation)."""
+
+        try:
+            # The superseded key must be the latest bound generation: record it first when it
+            # was created in this process (the open-time backfill has not seen it).
+            self.state.ensure_legacy_request_generation(item.intake_id, request_type, superseded_request_key)
+            number = self.state.reserve_request_generation(
+                item.intake_id, request_type, superseded_request_key=superseded_request_key)
+        except ValueError as exc:
+            raise IntakeReconcileRequired(f"request generation cannot be reserved: {exc}") from exc
+        generation = make_request_generation(
+            item=item, request_type=request_type, provider=self.provider,
+            provider_account_binding_id=self.provider_account_binding_id,
+            config_fingerprint=self._semester_config_fingerprint(workspace.semester),
+            target_snapshot=target_snapshot, superseded_request_key=superseded_request_key,
+            request_generation=number,
+        )
+        try:
+            self.state.bind_request_generation_key(item.intake_id, request_type, number, generation.request_key)
+        except (ValueError, KeyError) as exc:
+            raise IntakeReconcileRequired(f"request generation cannot be bound: {exc}") from exc
+        return number, generation
+
     def _create_input_request_with_context(
         self,
         item: IntakeItem,
@@ -1203,35 +1293,18 @@ class IntakeWorker:
                     # only happens on a later call for a different
                     # request_type once this one is resolved.
                     return recovered_receipt
-        generation_number: int | None = None
         if superseded_request_key is not None:
-            try:
-                # The superseded key must be the latest bound generation: record it first when
-                # it was created in this process (the open-time backfill has not seen it).
-                self.state.ensure_legacy_request_generation(item.intake_id, request_type, superseded_request_key)
-                # Reserve-or-resume: the same basis always returns the same number, and a
-                # pending reservation of another basis refuses a new one (plan §3.4, G2).
-                generation_number = self.state.reserve_request_generation(
-                    item.intake_id, request_type, superseded_request_key=superseded_request_key)
-            except ValueError as exc:
-                raise IntakeReconcileRequired(f"request generation cannot be reserved: {exc}") from exc
-        generation = make_request_generation(
-            item=item,
-            request_type=request_type,
-            provider=self.provider,
-            provider_account_binding_id=self.provider_account_binding_id,
-            config_fingerprint=config_fingerprint,
-            target_snapshot=target_snapshot,
-            superseded_request_key=superseded_request_key,
-            request_generation=generation_number,
-        )
-        if generation_number is not None:
-            try:
-                # The generation -> key binding is durable before any provider create.
-                self.state.bind_request_generation_key(
-                    item.intake_id, request_type, generation_number, generation.request_key)
-            except (ValueError, KeyError) as exc:
-                raise IntakeReconcileRequired(f"request generation cannot be bound: {exc}") from exc
+            _number, generation = self._prepare_superseding_generation(
+                item, workspace, request_type, superseded_request_key, target_snapshot)
+        else:
+            generation = make_request_generation(
+                item=item,
+                request_type=request_type,
+                provider=self.provider,
+                provider_account_binding_id=self.provider_account_binding_id,
+                config_fingerprint=config_fingerprint,
+                target_snapshot=target_snapshot,
+            )
         # This is intentionally committed before the first create attempt.
         # Durable intent uses the item's stable identity: once persisted,
         # this key does not change even if item.source_hash/version drift
@@ -1718,20 +1791,26 @@ class IntakeWorker:
 
     def _calendar_eligible(self, course_key: str) -> bool:
         """A recorded calendar is used only while its Canvas course is still the verified,
-        unique mapping of this course key and the active Canvas profile still matches
-        the registry origin (plan §2.3; P-B3 A4/A5).  Rows stay; matching stops."""
+        unique mapping of this course key and the *current* Canvas profile still matches the
+        registry origin (plan §2.3; P-B3 A4/A5).  A calendar found ineligible is closed in
+        the state as well, so a restored mapping needs a fresh complete observation."""
 
         course = self.state.recording_calendar_course(course_key)
         if course is None:
             return True
         classification = getattr(self.config.intake, "classification", None)
         mapping = getattr(classification, "canvas_course_map", {}) or {}
-        if mapping.get(int(course["canvas_course_id"])) != course_key:
-            return False
-        if sum(1 for key in mapping.values() if key == course_key) != 1:
-            return False
         observer = getattr(self, "canvas_observer", None)
-        return observer is None or bool(observer.profile_matches())
+        eligible = (
+            mapping.get(int(course["canvas_course_id"])) == course_key
+            and sum(1 for key in mapping.values() if key == course_key) == 1
+            # Observation switched on without an observer: no live profile evidence -> closed.
+            and not (observer is None and getattr(classification, "canvas_observation_enabled", False))
+            and (observer is None or bool(observer.profile_matches()))
+        )
+        if not eligible and course["collection_complete"]:
+            self.state.close_recording_calendar(course_key, int(course["canvas_course_id"]))
+        return eligible
 
     def _course_calendar(self, course_key: str, semester: SemesterRange | None) -> CourseCalendar | None:
         if not self._calendar_eligible(course_key):
