@@ -604,27 +604,30 @@ class ClassificationStateMixin:
     def duplicate_content_candidates(
         self, *, intake_id: str, provider: str, byte_sha256: str, byte_md5: str | None, size: int | None
     ) -> dict[str, list[str]]:
-        """Plan §3.4 duplicate-content gate, complete over the whole store (P-B2a r1 R1).
+        """Plan §3.4 duplicate-content gate, complete over the whole store (P-B2a r1 R1, r2 R1).
 
         ``proven`` lists other provider file IDs whose bytes are known to equal these
-        (an md5 observation or a byte-proven classification record).  ``unproven`` lists
-        other live items whose bytes are *not* provable (a metadata-surrogate hash with
-        no byte-proven record) but whose declared size equals this payload: the gate
-        cannot rule them out, so the caller fails closed.
+        (an md5 observation, or a classification record proven for the item's *current*
+        source version).  ``unproven`` lists every other item whose bytes cannot be
+        proven different: no current-version byte proof and no md5, and a declared size
+        that is unknown or equal to this payload.  Terminal items (ORGANIZED with a
+        canonical binding, UNSUPPORTED) are judged like any other; the caller fails
+        closed on anything unproven.
         """
 
         proven: list[str] = []
         unproven: list[str] = []
-        this_item = {"intake_id": intake_id}
         with self._transaction() as connection:
             rows = connection.execute(
                 "SELECT i.intake_id, i.provider_file_id, i.source_hash, i.status, "
                 "(SELECT c.byte_sha256 FROM classification_records c WHERE c.intake_id = i.intake_id "
-                " AND c.byte_sha256 IS NOT NULL ORDER BY c.rowid DESC LIMIT 1) AS proven_sha, "
+                " AND c.byte_sha256 IS NOT NULL AND c.source_version = i.source_version "
+                " AND c.provider_file_id = i.provider_file_id ORDER BY c.rowid DESC LIMIT 1) AS proven_sha, "
                 "(SELECT json_extract(o.metadata_json, '$.size') FROM intake_observations o "
-                " WHERE o.intake_id = i.intake_id ORDER BY o.source_version DESC, o.observed_at DESC LIMIT 1) AS size "
+                " WHERE o.intake_id = i.intake_id AND o.source_version = i.source_version "
+                " ORDER BY o.observed_at DESC LIMIT 1) AS size "
                 "FROM intake_items i WHERE i.provider = ? AND i.intake_id != ?",
-                (provider, this_item["intake_id"]),
+                (provider, intake_id),
             ).fetchall()
         for row in rows:
             file_id = str(row["provider_file_id"])
@@ -633,11 +636,10 @@ class ClassificationStateMixin:
                 proven.append(file_id)
                 continue
             if row["proven_sha"] is not None or source_hash.startswith("md5:"):
-                continue  # bytes known and different
-            if row["status"] in ("UNSUPPORTED", "ORGANIZED"):
-                continue  # terminal items never enter the AUTO path again
-            if size is not None and row["size"] == size:
-                unproven.append(file_id)  # same declared size, bytes unknown: cannot rule out
+                continue  # bytes known for the current version and different
+            other_size = row["size"]
+            if size is None or other_size is None or type(other_size) is not int or other_size == size:
+                unproven.append(file_id)  # size unknown or equal, bytes unknown: cannot rule out
         return {"proven": sorted(proven), "unproven": sorted(unproven)}
 
     def list_auto_resolve_intents(self, *, states: Iterable[str] = ("PENDING", "RECONCILE")) -> list[AutoResolveIntent]:
@@ -1352,8 +1354,12 @@ class ClassificationStateMixin:
             raise ValueError("classification record belongs to another intake than the request")
 
     def create_auto_resolve_intent(
-        self, *, record_id: str, request_key: str, expected_user_snapshot_hash: str
+        self, *, record_id: str, request_key: str, expected_user_snapshot_hash: str,
+        pre_close_snapshot_hash: str | None = None,
     ) -> AutoResolveIntent:
+        """Durable PENDING intent; the pre-close snapshot (when given) is written in the
+        same transaction so no crash window separates the two (P-B2a r2 O1)."""
+
         with self._transaction(immediate=True) as connection:
             existing = connection.execute(
                 "SELECT * FROM auto_resolve_intents WHERE request_key = ? AND record_id = ?",
@@ -1362,6 +1368,8 @@ class ClassificationStateMixin:
             if existing is not None:
                 if existing["expected_user_snapshot_hash"] != expected_user_snapshot_hash:
                     raise ValueError("auto resolve intent inputs are immutable")
+                if pre_close_snapshot_hash is not None and existing["pre_close_snapshot_hash"] not in (None, pre_close_snapshot_hash):
+                    raise ValueError("pre_close_snapshot_hash is immutable once recorded")
                 if existing["state"] in ("PENDING", "RECONCILE"):
                     # A live intent is only re-read while its binding still holds: a
                     # receipt a human moved to Submitted/Claimed or a terminal state is
@@ -1386,9 +1394,9 @@ class ClassificationStateMixin:
             now = _now()
             connection.execute(
                 "INSERT INTO auto_resolve_intents(intent_id, record_id, request_key, "
-                "expected_user_snapshot_hash, state, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, 'PENDING', ?, ?)",
-                (intent_id, record_id, request_key, expected_user_snapshot_hash, now, now),
+                "expected_user_snapshot_hash, pre_close_snapshot_hash, state, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?)",
+                (intent_id, record_id, request_key, expected_user_snapshot_hash, pre_close_snapshot_hash, now, now),
             )
             row = connection.execute(
                 "SELECT * FROM auto_resolve_intents WHERE intent_id = ?", (intent_id,)

@@ -617,3 +617,187 @@ def test_recovery_runs_after_the_feature_is_switched_off(tmp_path: Path) -> None
         assert worker._submitted_request_keys() == []
     finally:
         system_cm.__exit__(None, None, None)
+
+
+# ---------------------------------------------------------------------------
+# P-B2a FINAL r2 findings
+# ---------------------------------------------------------------------------
+def test_duplicate_gate_treats_unknown_size_as_unprovable(tmp_path: Path) -> None:
+    # r2 R1: the other file has no md5 and no observed size → cannot be ruled out.
+    from dataclasses import replace
+
+    with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        _second_file(system, name="notes.md", raw=b"y" * 3, md5=False)
+        drive = system["drive"]
+        drive.files["synthetic-other"] = replace(drive.files["synthetic-other"], size=None)
+        worker.run_once()
+        item = _item(system)
+        assert item.classification_state == "HUMAN" and _auto_plans(system["state"]) == []
+        assert "AUTO_BLOCK_DUPLICATE_UNPROVEN" in system["state"].get_intake_suggestion(item.intake_id)["suggestion_note"]
+
+
+def test_applied_sibling_request_blocks_the_closure(tmp_path: Path) -> None:
+    # r2 R2: a human already applied ASSIGN_COURSE; the follow-up FILE_DETAILS Draft is
+    # untouched but must not be auto-closed.
+    system_cm, system = _pre_v2_draft(tmp_path)
+    try:
+        notion, state = system["notion"], system["state"]
+        _assign_request(notion).update({"Course": ["synthetic-course-page-1"], "Submitted": True})
+        system["worker"].run_once()
+        assert {r.request_type: r.state for r in state.list_request_receipts()} == {
+            "ASSIGN_COURSE": "Applied", "FILE_DETAILS": "Draft"}
+        worker = _enable(system)
+        _complete_calendar(state)
+        since = len(notion.events)
+        worker.run_once()
+        assert _request_writes(notion, since) == []
+        assert all(r.state != "AutoResolved" for r in state.list_request_receipts())
+        plans = _auto_plans(state)
+        assert all(p["status"] == "SUPERSEDED" for p in plans)
+    finally:
+        system_cm.__exit__(None, None, None)
+
+
+def test_human_change_during_the_preflight_download_stops_the_write(tmp_path: Path) -> None:
+    # r2 R3 (A): the human edits a Draft while the preflight re-downloads the source.
+    system_cm, system = _pre_v2_draft(tmp_path)
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        drive, notion, state = system["drive"], system["notion"], system["state"]
+        original_download = drive.download
+
+        def download(file_id: str, *, max_bytes=None):
+            data = original_download(file_id, max_bytes=max_bytes)
+            _assign_request(notion)["Course"] = ["synthetic-course-page-0"]
+            return data
+        drive.download = download  # type: ignore[method-assign]
+        since = len(notion.events)
+        worker.run_once()
+        assert _request_writes(notion, since) == []
+        assert _assign_request(notion)["Request Status"] == "Draft"
+        assert _auto_plans(state)[0]["status"] == "SUPERSEDED"
+        assert all(state.get_auto_resolve_intent(r.request_key) is None for r in state.list_request_receipts())
+    finally:
+        system_cm.__exit__(None, None, None)
+
+
+def test_pending_retry_rechecks_every_sibling_draft(tmp_path: Path) -> None:
+    # r2 R3 (B): the first closure write is lost; before the retry the human edits the
+    # *other* Draft of the same intake.  The retry must not close the first Draft.
+    from tests.integration.test_intake_worker_preview import _details_request
+
+    system_cm, system = _pre_v2_draft(tmp_path)
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        _add_details_draft(worker, system)
+        notion, state = system["notion"], system["state"]
+        _drop_first_auto_resolved_write(notion)
+        worker.run_once()
+        pending = [r for r in state.list_request_receipts()
+                   if (i := state.get_auto_resolve_intent(r.request_key)) is not None and i.state == "PENDING"]
+        assert len(pending) == 1
+        other = _details_request(notion) if pending[0].request_type == "ASSIGN_COURSE" else _assign_request(notion)
+        other["Course"] = ["synthetic-course-page-0"]
+        since = len(notion.events)
+        worker.run_once()
+        assert _request_writes(notion, since) == []
+        assert {p["Request Status"] for p in notion.data_sources["synthetic-requests"]} == {"Draft"}
+        assert state.get_auto_resolve_intent(pending[0].request_key).state == "ABORTED"
+        assert _auto_plans(state)[0]["status"] == "SUPERSEDED"
+    finally:
+        system_cm.__exit__(None, None, None)
+
+
+def test_changed_request_identity_in_the_readback_is_never_done(tmp_path: Path) -> None:
+    # r2 R4: the page's Request Revision Hash drifts right after the write landed.
+    system_cm, system = _pre_v2_draft(tmp_path)
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        notion, state = system["notion"], system["state"]
+
+        def drift(page_id: str) -> None:
+            for page in notion.data_sources["synthetic-requests"]:
+                if page["id"] == page_id:
+                    page["Request Revision Hash"] = "drifted"
+        _landing_hook(notion, drift)
+        worker.run_once()
+        receipt = next(r for r in state.list_request_receipts())
+        assert state.get_auto_resolve_intent(receipt.request_key).state == "PENDING"
+        assert state.get_request_receipt(receipt.request_key).state == "Draft"
+        assert _item(system).status == "RECONCILE_REQUIRED" and worker._submitted_request_keys() == []
+        worker.run_once()  # identity still wrong: the barrier stays, nothing is closed
+        assert state.get_auto_resolve_intent(receipt.request_key).state == "PENDING"
+    finally:
+        system_cm.__exit__(None, None, None)
+
+
+def test_rollback_never_overwrites_a_status_the_human_moved_on(tmp_path: Path) -> None:
+    # r2 R5: rollback pending, the human then set Submitted while our reference lingers.
+    system_cm, system = _pre_v2_draft(tmp_path)
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        notion, state = system["notion"], system["state"]
+
+        def edit(page_id: str) -> None:
+            for page in notion.data_sources["synthetic-requests"]:
+                if page["id"] == page_id:
+                    page["Course"] = ["synthetic-course-page-0"]
+        _landing_hook(notion, edit)
+        original_complete = state.complete_auto_resolve_rollback
+        crashes = {"left": 1}
+
+        def complete(intent_id: str):
+            if crashes["left"]:
+                crashes["left"] -= 1
+                raise RuntimeError("crash before the rollback commit")
+            return original_complete(intent_id)
+        state.complete_auto_resolve_rollback = complete  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError):
+            worker.run_once()
+        item = _item(system)
+        draft = _assign_request(notion)
+        draft.update({"Request Status": "Submitted", "Submitted": True, "Result Reference": item.classification_record_id})
+        since = len(notion.events)
+        worker.run_once()
+        writes = _request_writes(notion, since)
+        assert set(writes[0][3]) == {"Result Reference"}  # only our own reference is cleared first
+        assert not any(((w[3].get("Request Status") or {}).get("status") or {}).get("name") == "Draft" for w in writes)
+        assert not draft.get("Result Reference") or draft["Result Reference"] != item.classification_record_id
+        receipt = next(r for r in state.list_request_receipts() if r.request_type == "ASSIGN_COURSE")
+        assert state.get_auto_resolve_intent(receipt.request_key).state == "ABORTED"
+    finally:
+        system_cm.__exit__(None, None, None)
+
+
+def test_closure_reconcile_state_is_cleared_once_the_intent_settles(tmp_path: Path) -> None:
+    # r2 R6: an unknown readback marks the item; the later DONE removes only that mark.
+    system_cm, system = _pre_v2_draft(tmp_path)
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        notion, state = system["notion"], system["state"]
+        original_read = notion.read_record
+        vanished = {"on": False}
+
+        def read_record(data_source_id: str, page_id: str):
+            if vanished["on"] and data_source_id == "synthetic-requests":
+                return None
+            return original_read(data_source_id, page_id)
+        notion.read_record = read_record  # type: ignore[method-assign]
+        _landing_hook(notion, lambda page_id: vanished.__setitem__("on", True))
+        worker.run_once()
+        assert _item(system).status == "RECONCILE_REQUIRED"
+        vanished["on"] = False
+        worker.run_once()
+        receipt = next(r for r in state.list_request_receipts())
+        assert state.get_auto_resolve_intent(receipt.request_key).state == "DONE"
+        item = _item(system)
+        assert item.status != "RECONCILE_REQUIRED" and item.last_error_code is None
+    finally:
+        system_cm.__exit__(None, None, None)
