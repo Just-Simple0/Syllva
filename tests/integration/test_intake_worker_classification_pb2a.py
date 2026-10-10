@@ -2148,3 +2148,81 @@ def test_the_closure_mark_never_replaces_a_duplicate_candidate_code(tmp_path: Pa
         assert _item(system).last_error_code == "DUPLICATE_CANDIDATE"
     finally:
         system_cm.__exit__(None, None, None)
+
+
+# ---------------------------------------------------------------------------
+# P-B2a FINAL r13 findings
+# ---------------------------------------------------------------------------
+def test_an_unresolved_closure_freezes_reclassification_and_new_requests(tmp_path: Path) -> None:
+    # r13 R1: closure A is unresolved, the classification input changes (revision B).
+    system_cm, system = _pre_v2_draft(tmp_path)
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        notion, state = system["notion"], system["state"]
+        _drop_first_auto_resolved_write(notion)
+        worker.run_once()
+        receipt = next(r for r in state.list_request_receipts())
+        assert state.get_auto_resolve_intent(receipt.request_key).state == "PENDING"
+        records_before = len(state.list_classification_records_by_bytes(hashlib.sha256(RAW).hexdigest()))
+        requests_before = len(notion.data_sources["synthetic-requests"])
+        # revision B would be created now: the intake is frozen instead
+        original_recover = worker._recover_auto_resolve_intents
+        worker._recover_auto_resolve_intents = lambda: None  # type: ignore[method-assign]
+        system["config"].courses[1].aliases = ["다른별칭"]
+        item = _item(system)
+        state.update_intake_item(item.intake_id, status="NEEDS_INPUT", last_error_code=None, last_error=None)
+        worker.run_once()
+        assert len(_auto_plans(state)) == 1
+        assert len(state.list_classification_records_by_bytes(hashlib.sha256(RAW).hexdigest())) == records_before
+        assert len(notion.data_sources["synthetic-requests"]) == requests_before
+        assert worker._request_creation_allowed(_item(system)) is False
+        with pytest.raises(IntakeReconcileRequired):
+            worker.claim_request(receipt.request_key)
+        # the human changes the Draft; recovery then supersedes every live AUTO plan of the intake
+        worker._recover_auto_resolve_intents = original_recover  # type: ignore[method-assign]
+        _assign_request(notion)["Course"] = ["synthetic-course-page-0"]
+        since = len(notion.events)
+        worker.run_once()
+        assert state.get_auto_resolve_intent(receipt.request_key).state == "ABORTED"
+        assert all(p["status"] != "AUTO_PENDING" for p in _auto_plans(state))
+        assert _request_writes(notion, since) == []
+    finally:
+        system_cm.__exit__(None, None, None)
+
+
+def test_the_recorded_course_basis_names_the_alias_source(tmp_path: Path) -> None:
+    # r13 R2
+    name = "2026.09.10_별칭전용_2주차.md"
+    with _system(tmp_path / "notion", name=name, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        _course_rows(system["notion"])[COURSE]["Aliases"] = "별칭전용"
+        worker.run_once()
+        record = system["state"].get_classification_record(_item(system).classification_record_id)
+        basis = json.loads(record.course_basis_json)
+        assert basis["type"] == "notion_alias" and basis["alias_dependent"] is True
+    with _system(tmp_path / "config", name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        worker.run_once()
+        record = system["state"].get_classification_record(_item(system).classification_record_id)
+        assert json.loads(record.course_basis_json)["type"] == "config_alias"
+
+
+def test_disabling_leaves_a_p_b1_classified_item_without_auto_plan_untouched(tmp_path: Path) -> None:
+    # r13 R3: CLASSIFIED written by P-B1 (never an AUTO plan) is not modified when the feature is off.
+    with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system, profile=None)
+        _complete_calendar(system["state"])
+        worker.run_once()
+        state = system["state"]
+        item = _item(system)
+        state.update_intake_item(item.intake_id, classification_state="CLASSIFIED")
+        assert _auto_plans(state) == []
+        system["config"].intake.classification.enabled = False
+        worker.run_once()
+        assert _item(system).classification_state == "CLASSIFIED"
+        released = [e for e in state.list_intake_stage_events(item.intake_id) if e.get("stage") == "auto_authority_released"] \
+            if hasattr(state, "list_intake_stage_events") else []
+        assert released == []

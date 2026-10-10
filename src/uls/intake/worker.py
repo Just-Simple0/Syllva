@@ -1262,6 +1262,8 @@ class IntakeWorker:
         enabled a draft needs an explicit CLASSIFIED/HUMAN decision (or a human-labelled
         item); with it disabled the current behaviour is unchanged."""
 
+        if self._unresolved_closure(item.intake_id):
+            return False  # the persistent closure barrier also holds back new requests
         if not self._classification_enabled():
             return True
         if item.classification_source == "human":
@@ -1362,6 +1364,10 @@ class IntakeWorker:
 
         if item.classification_source == "human":
             return None
+        if self._unresolved_closure(item.intake_id):
+            # §3.5 (iv): while a closure of this intake is unresolved nothing is re-decided —
+            # no new record, no new AUTO plan, no HUMAN draft (r13 R1).
+            return None
         alias_entries = self._course_alias_entries(workspace.semester)
         notion_aliases: list[tuple[str, tuple[str, ...]]] | None = None
         if self._auto_enabled():
@@ -1421,6 +1427,11 @@ class IntakeWorker:
         # AUTO course evidence for an alias-based course: config + USER Notion Aliases, with
         # duplicate aliases disabled; unreadable Notion aliases fail closed (r11 R1).
         alias_dependent = outcome.course_basis == "config_alias"
+        course_basis_type = outcome.course_basis or "none"
+        if alias_dependent:
+            config_only = transcript_signals(item.original_name, CourseAliasIndex.build(alias_entries)).get("course_key")
+            if config_only != outcome.course_key:
+                course_basis_type = "notion_alias"  # only the USER Notion Aliases resolve this course
         alias_block: str | None = None
         if alias_dependent and outcome.decided and self._auto_enabled() and notion_aliases is None:
             alias_block = BLOCK_ALIAS_EVIDENCE
@@ -1455,7 +1466,7 @@ class IntakeWorker:
                 week=outcome.week,
                 decided_date=None if outcome.recorded_date is None else outcome.recorded_date.isoformat(),
                 course_basis={
-                    "type": outcome.course_basis or "none",
+                    "type": course_basis_type,
                     "alias_inventory_hash": alias_hash,
                     "alias_dependent": alias_dependent,
                     "canvas_binding_seen": None if binding is None else self._canvas_basis(binding),
@@ -1834,8 +1845,10 @@ class IntakeWorker:
         self.state.record_intake_stage_event("auto_plan_superseded", intake_id=item.intake_id, operation_key=reason)
 
     def _supersede_auto_plans_for_record(self, item: IntakeItem, record: ClassificationRecord, reason: str) -> None:
-        for plan_row in self.state.list_intake_plans(plan_authority="AUTO_CLASSIFICATION"):
-            if plan_row["classification_revision_hash"] == record.classification_revision_hash:
+        for status in ("AUTO_PENDING", "PLANNED"):
+            for plan_row in self.state.list_intake_plans(
+                plan_authority="AUTO_CLASSIFICATION", status=status, intake_id=record.intake_id
+            ):
                 self.state.supersede_intake_plan(plan_row["plan_revision"], reason)
         self.state.update_intake_item(item.intake_id, classification_state="HUMAN")
         self.state.record_intake_stage_event("auto_plan_superseded", intake_id=item.intake_id, operation_key=reason)
@@ -1993,19 +2006,30 @@ class IntakeWorker:
                     self.state.record_intake_stage_event(
                         "auto_plan_retired", intake_id=item.intake_id, operation_key="AUTO_PLAN_RECLASSIFIED")
 
+    def _unresolved_closure(self, intake_id: str) -> bool:
+        for intent in self.state.list_auto_resolve_intents():
+            record = self.state.get_classification_record(intent.record_id)
+            if record is not None and record.intake_id == intake_id:
+                return True
+        return False
+
     def _release_auto_authority(self, item: IntakeItem) -> None:
         """AUTO is no longer usable (feature off, profile or capability lost): close the live
         AUTO plans (jobs VOID) and hand the item to the human path — unless a closure intent
         of this intake is unresolved, which stays a barrier (r10 R2)."""
 
-        for intent in self.state.list_auto_resolve_intents():
-            record = self.state.get_classification_record(intent.record_id)
-            if record is not None and record.intake_id == item.intake_id:
-                return
-        for status in ("AUTO_PENDING", "PLANNED"):
-            for row in self.state.list_intake_plans(plan_authority="AUTO_CLASSIFICATION", status=status, intake_id=item.intake_id):
-                if row["intake_id"] == item.intake_id:
-                    self.state.reconcile_intake_plan(row["plan_revision"], "AUTO_UNAVAILABLE")
+        if self._unresolved_closure(item.intake_id):
+            return
+        live = [
+            row
+            for status in ("AUTO_PENDING", "PLANNED")
+            for row in self.state.list_intake_plans(
+                plan_authority="AUTO_CLASSIFICATION", status=status, intake_id=item.intake_id)
+        ]
+        if not live:
+            return  # no AUTO authority ever existed here (a P-B1 CLASSIFIED item): leave it untouched
+        for row in live:
+            self.state.reconcile_intake_plan(row["plan_revision"], "AUTO_UNAVAILABLE")
         self.state.update_intake_item(item.intake_id, classification_state="HUMAN")
         self.state.record_intake_stage_event("auto_authority_released", intake_id=item.intake_id, operation_key="AUTO_UNAVAILABLE")
 

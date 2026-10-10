@@ -1435,8 +1435,8 @@ class ClassificationStateMixin:
             if record is not None:
                 plans = connection.execute(
                     "SELECT plan_revision FROM intake_plans WHERE plan_authority = 'AUTO_CLASSIFICATION' "
-                    "AND classification_revision_hash = ? AND status IN ('AUTO_PENDING', 'PLANNED')",
-                    (record["classification_revision_hash"],),
+                    "AND intake_id = ? AND status IN ('AUTO_PENDING', 'PLANNED')",
+                    (record["intake_id"],),
                 ).fetchall()
                 for plan in plans:
                     connection.execute(
