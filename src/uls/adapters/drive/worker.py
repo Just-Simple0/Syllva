@@ -128,7 +128,7 @@ class DriveWorkerPort(Protocol):
 
     def read_metadata(self, file_id: str) -> DriveMetadata: ...
 
-    def download(self, file_id: str) -> bytes: ...
+    def download(self, file_id: str, *, max_bytes: int | None = None) -> bytes: ...
 
     def search_marker(self, marker: dict[str, str]) -> list[DriveMetadata]: ...
 
@@ -244,10 +244,16 @@ class GoogleDriveWorkerAdapter:
             raise SourceUnavailableError("Drive file identity changed or is trashed")
         return metadata
 
-    def download(self, file_id: str) -> bytes:
+    def download(self, file_id: str, *, max_bytes: int | None = None) -> bytes:
+        """Bounded download: the declared size is checked before any byte is read, the
+        transfer is aborted chunk by chunk once it passes the bound, and the received
+        length must equal the declared size (plan §3.4 R3; P-B1 r2 R2).  ``max_bytes``
+        tightens the adapter's own ceiling for one call, never widens it."""
+
+        limit = self.max_bytes if max_bytes is None else min(self.max_bytes, int(max_bytes))
         metadata = self.read_metadata(file_id)
         size = metadata.size
-        if size is None or size < 0 or size > self.max_bytes:
+        if size is None or size < 0 or size > limit:
             raise SourcePartialError("Drive source is outside the bounded download limit")
         self._require_attested()
         try:
@@ -265,7 +271,7 @@ class GoogleDriveWorkerAdapter:
                 # provider chunk, not only before the first one.
                 self._require_attested()
                 _, done = downloader.next_chunk(num_retries=0)
-                if output.tell() > self.max_bytes:
+                if output.tell() > limit:
                     raise SourcePartialError("Drive source exceeds byte limit")
             data = output.getvalue()
         except (SourcePartialError, ReconnectRequiredError):
@@ -500,14 +506,26 @@ class InMemoryDriveWorker:
             raise SourceUnavailableError("in-memory Drive file is unavailable")
         return replace(item)
 
-    def download(self, file_id: str) -> bytes:
+    def download(self, file_id: str, *, max_bytes: int | None = None) -> bytes:
         metadata = self.read_metadata(file_id)
         self.events.append(("download", file_id))
         if metadata.mime_type == DRIVE_FOLDER_MIME:
             return b""
         if file_id not in self.contents:
             raise SourceUnavailableError("in-memory Drive content is unavailable")
-        return bytes(self.contents[file_id])
+        data = bytes(self.contents[file_id])
+        # Mirror the native adapter's boundaries: declared size and the caller's bound
+        # are checked before "receiving", an oversized body aborts, and the received
+        # length must match the declared size.
+        size = metadata.size
+        if max_bytes is not None:
+            if size is None or size < 0 or size > max_bytes:
+                raise SourcePartialError("Drive source is outside the bounded download limit")
+            if len(data) > max_bytes:
+                raise SourcePartialError("Drive source exceeds byte limit")
+            if len(data) != size:
+                raise SourcePartialError("Drive download length differs from the declared size")
+        return data
 
     def search_marker(self, marker: dict[str, str]) -> list[DriveMetadata]:
         validate_private_properties(marker)

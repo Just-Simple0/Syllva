@@ -300,3 +300,84 @@ def test_suggestion_flags_survive_ticks_and_restart(tmp_path: Path) -> None:
         assert system["state"].get_intake_suggestion(item.intake_id)["written_to_notion"] == 1
     with SQLiteStateStore(tmp_path / "state.sqlite3") as reopened:
         assert reopened.get_intake_suggestion(item.intake_id)["written_to_notion"] == 1
+
+
+# --- P-B1 review r2 regressions -------------------------------------------------------
+
+def test_download_is_bounded_and_must_match_the_declared_size(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    body = b"# [00:10] transcript line\n" * 4
+    # Declared size under the limit but the body is larger: the bounded transfer aborts
+    # before the whole body is accepted; nothing is proven, no record (r2 R2).
+    with _system(tmp_path / "oversized", name=TRANSCRIPT_NAME, raw=body) as system:
+        _enable(system)
+        system["config"].intake.classification.max_source_bytes = 64
+        drive = system["drive"]
+        drive.files[system["source_id"]] = replace(drive.files[system["source_id"]], size=32)
+        item = _tick_item(system)
+        assert item.classification_record_id is None and item.classification_state == "HUMAN"
+        assert "SOURCE_UNAVAILABLE" in system["state"].get_intake_suggestion(item.intake_id)["suggestion_note"]
+    # The body is shorter than declared (partial receive): not complete, no record.
+    with _system(tmp_path / "short", name=TRANSCRIPT_NAME, raw=body) as system:
+        _enable(system)
+        drive = system["drive"]
+        drive.files[system["source_id"]] = replace(drive.files[system["source_id"]], size=len(body) + 10)
+        item = _tick_item(system)
+        assert item.classification_record_id is None and item.classification_state == "HUMAN"
+    # The source changed between observation and download (the metadata readback right
+    # before the transfer carries another checksum): refused.
+    with _system(tmp_path / "changed", name=TRANSCRIPT_NAME, raw=body) as system:
+        _enable(system)
+        drive = system["drive"]
+        original_read = drive.read_metadata
+        drive.read_metadata = lambda file_id: replace(original_read(file_id), md5_checksum="0" * 32)
+        item = _tick_item(system)
+        assert item.classification_record_id is None and item.classification_state == "HUMAN"
+        assert "SOURCE_UNAVAILABLE" in system["state"].get_intake_suggestion(item.intake_id)["suggestion_note"]
+    # Within the bound and matching the declared size: proven, record created.
+    with _system(tmp_path / "ok", name=TRANSCRIPT_NAME, raw=body) as system:
+        _enable(system)
+        system["config"].intake.classification.max_source_bytes = len(body)
+        item = _tick_item(system)
+        assert item.classification_record_id is not None and item.classification_state == "CLASSIFIED"
+
+
+def test_verified_binding_settles_origin_and_p4_even_when_s1_is_undecided(tmp_path: Path) -> None:
+    import hashlib
+
+    raw = b"# lecture notes without a transcript name\n"
+    # Undecided by name, but a byte-proven Canvas binding: PROFESSOR_SOURCE is kept (r2 R3).
+    with _system(tmp_path / "lecture", name="lecture.md", raw=raw) as system:
+        _enable(system)
+        system["state"].record_canvas_drive_binding(
+            drive_file_id=system["source_id"], canvas_course_id=67535, resource_kind="announcement",
+            resource_id="a1", observation_revision=1, attachment_id="att-1", attachment_filename="lecture.md",
+            attachment_size=len(raw), byte_sha256=hashlib.sha256(raw).hexdigest())
+        item = _tick_item(system)
+        assert item.classified_kind is None and item.origin == "PROFESSOR_SOURCE"
+        assert item.classification_state == "HUMAN"
+    csv = b"name,score\nA,1\n"
+    # A proven Assignment attachment carries its resource kind into P4: ASSIGNMENT_RESOURCE (r2 #3) ...
+    with _system(tmp_path / "assignment", name="mbti.csv", mime_type="text/csv", raw=csv) as system:
+        _enable(system)
+        system["state"].record_canvas_drive_binding(
+            drive_file_id=system["source_id"], canvas_course_id=67535, resource_kind="assignment",
+            resource_id="as-1", observation_revision=1, attachment_id="att-9", attachment_filename="mbti.csv",
+            attachment_size=len(csv), byte_sha256=hashlib.sha256(csv).hexdigest())
+        item = _tick_item(system)
+        assert (item.classified_kind, item.origin) == ("ASSIGNMENT_RESOURCE", "PROFESSOR_SOURCE")
+        assert item.classification_source == "rule:P4:tabular_assignment_attachment"
+    # ... an unverified binding passes no signal, and a plain upload CSV stays undecided.
+    with _system(tmp_path / "unverified", name="mbti.csv", mime_type="text/csv", raw=csv) as system:
+        _enable(system)
+        system["state"].record_canvas_drive_binding(
+            drive_file_id=system["source_id"], canvas_course_id=67535, resource_kind="assignment",
+            resource_id="as-1", observation_revision=1, attachment_id="att-9", attachment_filename="mbti.csv",
+            attachment_size=len(csv), byte_sha256="e" * 64)
+        item = _tick_item(system)
+        assert item.classified_kind is None and item.origin == "UNKNOWN"
+    with _system(tmp_path / "plain", name="mbti.csv", mime_type="text/csv", raw=csv) as system:
+        _enable(system)
+        item = _tick_item(system)
+        assert item.classified_kind is None and item.origin == "UNKNOWN"

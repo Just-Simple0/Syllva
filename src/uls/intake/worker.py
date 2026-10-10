@@ -1263,7 +1263,9 @@ class IntakeWorker:
                 return SourceProbe(None, False, unavailable=True)  # size unknown: cannot bound the read
             if limit and size > limit:
                 return SourceProbe(None, False, too_large=True)
-            payload = self._read_source_bytes(item)
+            # The adapter aborts the transfer once it passes the bound and refuses a body
+            # whose length differs from the declared size; nothing oversized is kept.
+            payload = self._read_source_bytes(item, max_bytes=limit or None)
         except ReconnectRequiredError:
             raise
         except (SourceUnavailableError, SourcePartialError, PolicyDeniedError, ProviderUnavailableError):
@@ -1310,7 +1312,8 @@ class IntakeWorker:
 
         def classify(probe: SourceProbe | None) -> ClassificationOutcome:
             # S0: PROFESSOR_SOURCE only when the stored Canvas binding is proven by the
-            # bytes just read (exact file id + byte_sha256); never from a title.
+            # bytes just read (exact file id + byte_sha256); never from a title.  The
+            # proven binding's resource kind is the only Canvas signal S1 may use (r2 #3).
             verified_binding = (
                 binding is not None and probe is not None and probe.byte_sha256 is not None
                 and binding.get("byte_sha256") == probe.byte_sha256
@@ -1319,6 +1322,7 @@ class IntakeWorker:
                 name=item.original_name, mime_type=item.mime_type, from_upload_folder=True,
                 explicit_course_key=explicit,
                 origin=Origin.PROFESSOR_SOURCE if verified_binding else None,
+                canvas_attachment_of=str(binding["resource_kind"]) if verified_binding and binding else None,
                 alias_index=alias_index, semester=semester, calendar=calendar, probe=probe,
             )
 
@@ -1340,7 +1344,9 @@ class IntakeWorker:
             self.state.upsert_intake_suggestion(item.intake_id, **outcome.suggestion_fields())
             return outcome
         probe: SourceProbe | None = None
-        if outcome.decided:
+        if outcome.decided or binding is not None:
+            # S1-decided items need the byte proof; a stored Canvas binding needs it to
+            # settle S0 (and its P4 signal) even when S1 is undecided (r2 R3).
             probe = self._source_probe(item)
             outcome = classify(probe)
         record_id: str | None = None
@@ -3168,7 +3174,7 @@ class IntakeWorker:
             raise KeyError(intake_id)
         return item
 
-    def _read_source_bytes(self, item: IntakeItem) -> bytes:
+    def _read_source_bytes(self, item: IntakeItem, *, max_bytes: int | None = None) -> bytes:
         metadata = self.drive.read_metadata(item.provider_file_id)
         if metadata.file_id != item.provider_file_id or metadata.owned_by_me is not True:
             raise PolicyDeniedError("source identity or USER ownership readback failed")
@@ -3177,7 +3183,10 @@ class IntakeWorker:
             raise SourceUnavailableError("source checksum changed after the immutable observation")
         if item.source_hash.startswith("sha256:metadata-") and _metadata_source_hash(metadata) != item.source_hash:
             raise SourceUnavailableError("source metadata changed after the immutable observation")
-        data = self.drive.download(item.provider_file_id)
+        data = (
+            self.drive.download(item.provider_file_id) if max_bytes is None
+            else self.drive.download(item.provider_file_id, max_bytes=max_bytes)
+        )
         if not isinstance(data, bytes):
             raise SourceUnavailableError("Drive worker did not return bytes")
         return data

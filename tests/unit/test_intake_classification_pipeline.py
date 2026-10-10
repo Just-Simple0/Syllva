@@ -116,6 +116,20 @@ def test_probe_outcomes_drive_the_handling_mode() -> None:
     assert SourceProbe(b"x", False).byte_sha256 is None  # an incomplete payload proves nothing
 
 
+def test_verified_canvas_attachment_signal_reaches_p4() -> None:
+    csv = SourceProbe(b"name,score\nA,1\n", True)
+    plain = _classify("mbti.csv", mime_type="text/csv", probe=csv)
+    assert plain.kind is None and plain.origin is Origin.UNKNOWN
+    bound = _classify("mbti.csv", mime_type="text/csv", probe=csv, origin=Origin.PROFESSOR_SOURCE,
+                      canvas_attachment_of="assignment")
+    assert bound.kind is Kind.ASSIGNMENT_RESOURCE and bound.rule_id == "P4:tabular_assignment_attachment"
+    assert bound.origin is Origin.PROFESSOR_SOURCE and bound.handling is HandlingMode.REGISTER_OPAQUE_NO_RETRIEVAL
+    # An announcement attachment is not an assignment signal.
+    announced = _classify("mbti.csv", mime_type="text/csv", probe=csv, origin=Origin.PROFESSOR_SOURCE,
+                          canvas_attachment_of="announcement")
+    assert announced.kind is None and announced.origin is Origin.PROFESSOR_SOURCE
+
+
 def test_forbidden_formats_are_terminal_without_a_probe() -> None:
     outcome = _classify("VMware_installer.exe", mime_type="application/x-msdownload", probe=None)
     assert outcome.kind is Kind.UNSUPPORTED and NOTE_UNSUPPORTED in outcome.notes

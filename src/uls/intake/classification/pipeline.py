@@ -126,6 +126,7 @@ def classify_upload_item(
     calendar: CourseCalendar | None,
     probe: SourceProbe | None,
     s2_available: bool = False,
+    canvas_attachment_of: str | None = None,
 ) -> ClassificationOutcome:
     """Run S0/S1 and the assignment axes for one Drive file.
 
@@ -147,6 +148,9 @@ def classify_upload_item(
         mime_type=mime_type,
         origin=origin,
         from_upload_folder=from_upload_folder,
+        # Only a byte-proven Canvas binding may carry its resource kind into P4; the
+        # caller passes None for unverified or absent bindings.
+        canvas_attachment_of=canvas_attachment_of,
     )
     decision: RuleDecision = classify_by_rules(signals)
     notes: list[str] = []
