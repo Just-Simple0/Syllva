@@ -1363,7 +1363,13 @@ class IntakeWorker:
         if item.classification_source == "human":
             return None
         alias_entries = self._course_alias_entries(workspace.semester)
-        alias_index = CourseAliasIndex.build(alias_entries)
+        notion_aliases: list[tuple[str, tuple[str, ...]]] | None = None
+        if self._auto_enabled():
+            # Plan §2.3: the course is resolved against the union of config and USER Notion
+            # Aliases (duplicates disabled).  Unreadable Notion aliases fall back to the
+            # config-only index for the HUMAN suggestion and only block AUTO (r12 R2).
+            notion_aliases = self._notion_alias_entries(workspace.semester)
+        alias_index = CourseAliasIndex.build(self._merge_alias_entries(alias_entries, notion_aliases or ()))
         semester = self._semester_range(workspace.semester)
         explicit = self._explicit_course_candidate(item)
         axes = transcript_signals(item.original_name, alias_index)
@@ -1415,17 +1421,9 @@ class IntakeWorker:
         # AUTO course evidence for an alias-based course: config + USER Notion Aliases, with
         # duplicate aliases disabled; unreadable Notion aliases fail closed (r11 R1).
         alias_dependent = outcome.course_basis == "config_alias"
-        notion_aliases: list[tuple[str, tuple[str, ...]]] | None = None
         alias_block: str | None = None
-        if alias_dependent and outcome.decided and self._auto_enabled():
-            notion_aliases = self._notion_alias_entries(workspace.semester)
-            if notion_aliases is None:
-                alias_block = BLOCK_ALIAS_EVIDENCE
-            else:
-                combined = CourseAliasIndex.build(self._merge_alias_entries(alias_entries, notion_aliases))
-                resolved = transcript_signals(item.original_name, combined).get("course_key")
-                if resolved != outcome.course_key:
-                    alias_block = BLOCK_ALIAS_EVIDENCE
+        if alias_dependent and outcome.decided and self._auto_enabled() and notion_aliases is None:
+            alias_block = BLOCK_ALIAS_EVIDENCE
         alias_hash = self._alias_inventory_hash(alias_entries, notion_aliases if alias_dependent else None)
         session_mode, session_id, session_hash, session_block = outcome.session_mode, None, None, None
         if outcome.session_mode is not None and self._auto_enabled():
@@ -2040,8 +2038,14 @@ class IntakeWorker:
         entries: list[tuple[str, tuple[str, ...]]] = []
         for row in rows:
             key = row.get("Course Key")
-            if not isinstance(key, str) or not key.startswith(semester + "_"):
-                continue
+            if not isinstance(key, str):
+                return None  # semester membership cannot be judged: the whole source is uncertain
+            try:
+                parse_course_key(key)
+            except Exception:  # noqa: BLE001 - an unparseable Course Key is uncertain evidence
+                return None
+            if not key.startswith(semester + "_"):
+                continue  # a well-formed key of another semester is certainly out of scope
             raw = row.get("Aliases")
             if raw is None or raw == "":
                 aliases: tuple[str, ...] = ()
@@ -2261,11 +2265,7 @@ class IntakeWorker:
         once the intent settles (r2 R6); never confused with a source/plan reconcile."""
 
         current = self.state.get_intake_item(item.intake_id)
-        if (
-            current is not None
-            and current.status == IntakeStatus.RECONCILE_REQUIRED.value
-            and current.last_error_code not in (None, AUTO_CLOSE_RECONCILE_CODE)
-        ):
+        if current is not None and current.last_error_code not in (None, AUTO_CLOSE_RECONCILE_CODE):
             return  # an independent cause owns the item; the PENDING intent keeps tracking the closure
         self.state.update_intake_item(item.intake_id, status=IntakeStatus.RECONCILE_REQUIRED.value,
                                       last_error_code=AUTO_CLOSE_RECONCILE_CODE, last_error=message)

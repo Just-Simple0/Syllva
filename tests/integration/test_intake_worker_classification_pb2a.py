@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -1976,8 +1977,9 @@ def test_notion_user_aliases_join_the_auto_course_evidence(tmp_path: Path) -> No
         worker.run_once()
         item = _item(system)
         assert item.classification_state == "HUMAN" and _auto_plans(system["state"]) == []
-        assert "AUTO_BLOCK_ALIAS_EVIDENCE" in system["state"].get_intake_suggestion(item.intake_id)["suggestion_note"]
-        assert item.inferred_course_key == COURSE  # the HUMAN suggestion itself is unchanged (P-B1)
+        # the duplicated alias is disabled for both courses (plan §2.3): the course is unresolved
+        assert "AUTO_BLOCK_COURSE_UNRESOLVED" in system["state"].get_intake_suggestion(item.intake_id)["suggestion_note"]
+        assert item.inferred_course_key is None
     # r11 R1 (unreadable): alias-based AUTO fails closed.
     with _system(tmp_path / "unreadable", name=MATCHED_NAME, raw=RAW) as system:
         worker = _enable(system)
@@ -2059,3 +2061,90 @@ def test_preflight_blocks_on_the_items_own_state(tmp_path: Path) -> None:
             assert _item(system).last_error_code == fields["last_error_code"], label  # cause untouched
         finally:
             system_cm.__exit__(None, None, None)
+
+
+# ---------------------------------------------------------------------------
+# P-B2a FINAL r12 findings
+# ---------------------------------------------------------------------------
+def test_an_unreadable_notion_course_key_makes_the_alias_evidence_uncertain(tmp_path: Path) -> None:
+    # r12 R1: a row whose semester cannot be judged hides a possibly conflicting alias.
+    for label, key in (("missing", None), ("garbage", "not a course key")):
+        with _system(tmp_path / label, name=MATCHED_NAME, raw=RAW) as system:
+            worker = _enable(system)
+            _complete_calendar(system["state"])
+            system["notion"].data_sources["synthetic-courses"].append(
+                {"id": "synthetic-course-page-x", "Course Key": key, "Aliases": "Synthetic Course 1"})
+            worker.run_once()
+            item = _item(system)
+            assert item.classification_state == "HUMAN" and _auto_plans(system["state"]) == [], label
+            assert "AUTO_BLOCK_ALIAS_EVIDENCE" in system["state"].get_intake_suggestion(item.intake_id)["suggestion_note"]
+    # a well-formed key of another semester is certainly out of scope
+    with _system(tmp_path / "other-semester", name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        system["notion"].data_sources["synthetic-courses"].append(
+            {"id": "synthetic-course-page-y", "Course Key": "2025-1_TEST999-001", "Aliases": "Synthetic Course 1"})
+        worker.run_once()
+        assert _item(system).classification_state == "CLASSIFIED"
+
+
+def test_a_notion_only_alias_resolves_the_course_for_auto(tmp_path: Path) -> None:
+    # r12 R2: the alias exists only in the USER Notion Aliases.
+    name = "2026.09.10_별칭전용_2주차.md"
+    with _system(tmp_path / "ok", name=name, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        _course_rows(system["notion"])[COURSE]["Aliases"] = "별칭전용"
+        worker.run_once()
+        item = _item(system)
+        assert item.classification_state == "CLASSIFIED" and item.inferred_course_key == COURSE
+        assert len(_auto_plans(system["state"])) == 1 and system["notion"].data_sources["synthetic-requests"] == []
+        record = system["state"].get_classification_record(item.classification_record_id)
+        assert json.loads(record.course_basis_json)["alias_dependent"] is True
+    with _system(tmp_path / "duplicate", name=name, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        _course_rows(system["notion"])[COURSE]["Aliases"] = "별칭전용"
+        _course_rows(system["notion"])[COURSE_KEYS[3]]["Aliases"] = "별칭전용"
+        worker.run_once()
+        assert _item(system).classification_state == "HUMAN" and _auto_plans(system["state"]) == []
+    with _system(tmp_path / "unreadable", name=name, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        _course_rows(system["notion"])[COURSE]["Aliases"] = {"unexpected": "shape"}
+        worker.run_once()
+        item = _item(system)
+        assert item.classification_state == "HUMAN" and _auto_plans(system["state"]) == []
+
+
+def test_the_closure_mark_never_replaces_a_duplicate_candidate_code(tmp_path: Path) -> None:
+    # r12 R3: DUPLICATE_CANDIDATE arrives while the closure outcome is unknown.
+    system_cm, system = _pre_v2_draft(tmp_path)
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        notion, state = system["notion"], system["state"]
+        original_update = notion.update_record
+        done = {"once": False}
+
+        def update_record(data_source_id: str, page_id: str, properties):
+            status = ((properties.get("Request Status") or {}).get("status") or {}).get("name")
+            if data_source_id == "synthetic-requests" and status == "Auto Resolved" and not done["once"]:
+                done["once"] = True
+                state.update_intake_item(_item(system).intake_id, status="NEEDS_INPUT",
+                                         last_error_code="DUPLICATE_CANDIDATE", last_error="late duplicate")
+                return notion.read_record(data_source_id, page_id)  # the write is lost
+            return original_update(data_source_id, page_id, properties)
+        notion.update_record = update_record  # type: ignore[method-assign]
+        worker.run_once()
+        assert _item(system).last_error_code == "DUPLICATE_CANDIDATE"
+        receipt = next(r for r in state.list_request_receipts())
+        assert state.get_auto_resolve_intent(receipt.request_key).state == "PENDING"
+        since = len(notion.events)
+        worker.run_once()
+        assert _request_writes(notion, since) == []
+        assert _auto_plans(state)[0]["status"] == "RECONCILE_REQUIRED"
+        assert state.get_auto_resolve_intent(receipt.request_key).state == "ABORTED"
+        assert _item(system).last_error_code == "DUPLICATE_CANDIDATE"
+    finally:
+        system_cm.__exit__(None, None, None)
