@@ -1256,15 +1256,19 @@ class IntakeWorker:
         # S3 decision (HUMAN) opens a draft.
         return item.classification_state == "HUMAN"
 
-    def _course_alias_index(self, semester: str) -> CourseAliasIndex:
-        entries = [
-            (course.course_key, course_aliases_from_config(
+    def _course_alias_entries(self, semester: str) -> list[tuple[str, tuple[str, ...]]]:
+        """The raw alias inventory of the semester (one snapshot per use, r9 #3)."""
+
+        return [
+            (course.course_key, tuple(course_aliases_from_config(
                 course.course_key, course.name, course.code, getattr(course, "aliases", ()) or ()
-            ))
+            )))
             for course in self.config.courses
             if course.semester == semester
         ]
-        return CourseAliasIndex.build(entries)
+
+    def _course_alias_index(self, semester: str) -> CourseAliasIndex:
+        return CourseAliasIndex.build(self._course_alias_entries(semester))
 
     def _semester_range(self, semester: str) -> SemesterRange | None:
         for registry in self.config.google_drive.semester_registries:
@@ -1344,7 +1348,9 @@ class IntakeWorker:
 
         if item.classification_source == "human":
             return None
-        alias_index = self._course_alias_index(workspace.semester)
+        alias_entries = self._course_alias_entries(workspace.semester)
+        alias_index = CourseAliasIndex.build(alias_entries)
+        alias_hash = self._alias_inventory_hash(alias_entries)
         semester = self._semester_range(workspace.semester)
         explicit = self._explicit_course_candidate(item)
         axes = transcript_signals(item.original_name, alias_index)
@@ -1424,7 +1430,8 @@ class IntakeWorker:
                 decided_date=None if outcome.recorded_date is None else outcome.recorded_date.isoformat(),
                 course_basis={
                     "type": outcome.course_basis or "none",
-                    "alias_inventory_hash": self._alias_inventory_hash(workspace.semester),
+                    "alias_inventory_hash": alias_hash,
+                    "canvas_binding_seen": None if binding is None else self._canvas_basis(binding),
                     "canvas_binding": verified_basis if outcome.origin is Origin.PROFESSOR_SOURCE else None,
                 },
                 session_mode=session_mode,
@@ -1555,10 +1562,15 @@ class IntakeWorker:
             value = row.get("Date")
             if isinstance(value, Mapping):
                 value = value.get("start")
-            try:
-                return date.fromisoformat(str(value)[:10]).isoformat() if value else None
-            except ValueError:
+            if not value:
                 return None
+            text = str(value).strip()
+            try:
+                if len(text) == 10:
+                    return date.fromisoformat(text).isoformat()
+                return datetime.fromisoformat(text).date().isoformat()
+            except ValueError:
+                return None  # prefixes of invalid text prove nothing (r9 #4)
 
         if any(day(row) is None for row in rows):
             return None, None, None, BLOCK_SESSION_UNKNOWN  # a Session whose date cannot be read may be the target
@@ -1939,9 +1951,13 @@ class IntakeWorker:
             self.state.update_intake_item(item.intake_id, classification_state="HUMAN")
             self.state.record_intake_stage_event("auto_plan_superseded", intake_id=item.intake_id, operation_key=reason)
 
-    def _alias_inventory_hash(self, semester: str) -> str:
-        index = self._course_alias_index(semester)
-        return sha256_hex(["intake.alias-inventory.v1", sorted(index.resolved.items()), sorted(index.disabled)])
+    @staticmethod
+    def _alias_inventory_hash(entries: Sequence[tuple[str, Sequence[str]]]) -> str:
+        """Canonical hash of the raw alias inventory plus what it resolves to."""
+
+        canonical = sorted((key, sorted(aliases)) for key, aliases in entries)
+        index = CourseAliasIndex.build(entries)
+        return sha256_hex(["intake.alias-inventory.v2", canonical, sorted(index.resolved.items()), sorted(index.disabled)])
 
     @staticmethod
     def _canvas_basis(binding: Mapping[str, Any]) -> dict[str, Any]:
@@ -1962,8 +1978,11 @@ class IntakeWorker:
             return "COURSE_BASIS"
         if not isinstance(basis, dict):
             return "COURSE_BASIS"
-        if basis.get("alias_inventory_hash") != self._alias_inventory_hash(workspace.semester):
+        if basis.get("alias_inventory_hash") != self._alias_inventory_hash(self._course_alias_entries(workspace.semester)):
             return "ALIAS_BASIS"
+        seen = self.state.get_canvas_drive_binding(item.provider_file_id)
+        if (None if seen is None else self._canvas_basis(seen)) != basis.get("canvas_binding_seen"):
+            return "CANVAS_BINDING"  # a binding added, removed or changed since the decision (r9 #2)
         if record.origin == Origin.PROFESSOR_SOURCE.value:
             binding = self.state.get_canvas_drive_binding(item.provider_file_id)
             if binding is None or basis.get("canvas_binding") != self._canvas_basis(binding):
@@ -1983,8 +2002,20 @@ class IntakeWorker:
         if verdict == "HUMAN":
             self._supersede_auto_plans_for_record(item, record, reason)
         elif verdict == "RECONCILE":
-            self._record_item_error(item, workspace, IntakeReconcileRequired(reason),
-                                    default_status=IntakeStatus.NEEDS_INPUT)
+            current = self.state.get_intake_item(item.intake_id)
+            independent = (
+                current is not None and current.status == IntakeStatus.RECONCILE_REQUIRED.value
+                and current.last_error_code not in (None, AUTO_CLOSE_RECONCILE_CODE)
+            )
+            if not independent:
+                self._record_item_error(item, workspace, IntakeReconcileRequired(reason),
+                                        default_status=IntakeStatus.NEEDS_INPUT)
+            # HUMAN verification is impossible: the AUTO plan is parked (jobs VOID) and the
+            # human path keeps the Draft; nothing is written (r9 #1).
+            for plan_row in self.state.list_intake_plans(plan_authority="AUTO_CLASSIFICATION"):
+                if plan_row["classification_revision_hash"] == record.classification_revision_hash:
+                    self.state.reconcile_intake_plan(plan_row["plan_revision"], "HUMAN_VERIFICATION_UNAVAILABLE")
+            self.state.update_intake_item(item.intake_id, classification_state="HUMAN")
 
     def _close_blank_drafts(
         self, item: IntakeItem, plan: IntakePlan, record: ClassificationRecord, workspace: ResolvedSemesterWorkspace

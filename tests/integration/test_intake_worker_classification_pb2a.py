@@ -1749,3 +1749,96 @@ def test_a_session_with_an_unreadable_date_is_unknown(tmp_path: Path) -> None:
             assert item.classification_state == expected
             if expected == "HUMAN":
                 assert "AUTO_BLOCK_SESSION_UNKNOWN" in system["state"].get_intake_suggestion(item.intake_id)["suggestion_note"]
+
+
+# ---------------------------------------------------------------------------
+# P-B2a FINAL r9 findings
+# ---------------------------------------------------------------------------
+def test_reconcile_verdict_parks_the_plan_and_keeps_an_independent_cause(tmp_path: Path) -> None:
+    # r9 #1: first closure with a foreign Result Reference → plan RECONCILE_REQUIRED, jobs VOID,
+    # no write; and an independent RECONCILE_REQUIRED cause is not replaced.
+    system_cm, system = _pre_v2_draft(tmp_path)
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        notion, state = system["notion"], system["state"]
+        # first tick: classification only closes nothing yet because the reference is foreign
+        _assign_request(notion)["Result Reference"] = "someone-elses-record"
+        # a job that must not survive the parked plan is created once the plan exists
+        _spy_preflight(worker, lambda call: None)
+        since = len(notion.events)
+        worker.run_once()
+        assert _request_writes(notion, since) == []
+        plan = _auto_plans(state)[0]
+        assert plan["status"] == "RECONCILE_REQUIRED" and _item(system).classification_state == "HUMAN"
+        # direct verdict on an item carrying an independent cause
+        item = _item(system)
+        record = state.get_classification_record(item.classification_record_id)
+        state.update_intake_item(item.intake_id, status="RECONCILE_REQUIRED",
+                                 last_error_code="SOURCE_CHANGED_ELSEWHERE", last_error="independent cause")
+        worker._apply_human_verdict(_item(system), record, worker._workspace_for_item(item), "RECONCILE", "sibling unreadable")
+        kept = _item(system)
+        assert kept.status == "RECONCILE_REQUIRED" and kept.last_error_code == "SOURCE_CHANGED_ELSEWHERE"
+    finally:
+        system_cm.__exit__(None, None, None)
+
+
+def test_a_late_canvas_binding_changes_the_provenance(tmp_path: Path) -> None:
+    # r9 #2: a USER transcript decided without any Canvas binding; one appears before the write.
+    system_cm, system = _pre_v2_draft(tmp_path)
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        notion, state = system["notion"], system["state"]
+
+        def bind(call: int) -> None:
+            if call == 1:
+                state.record_canvas_drive_binding(
+                    drive_file_id=system["source_id"], canvas_course_id=99999, resource_kind="assignment",
+                    resource_id="as-9", observation_revision=1, attachment_id="att-1",
+                    attachment_filename="x.md", attachment_size=len(RAW), byte_sha256=hashlib.sha256(RAW).hexdigest())
+        _spy_preflight(worker, bind)
+        since = len(notion.events)
+        worker.run_once()
+        assert _request_writes(notion, since) == []
+        assert _auto_plans(state)[0]["status"] == "RECONCILE_REQUIRED"
+        assert _assign_request(notion)["Request Status"] == "Draft"
+    finally:
+        system_cm.__exit__(None, None, None)
+
+
+def test_the_alias_hash_comes_from_the_snapshot_the_decision_used(tmp_path: Path) -> None:
+    # r9 #3: the aliases change right after the classification snapshot was taken.
+    with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        original = worker._course_alias_entries
+        calls = {"n": 0}
+
+        def entries(semester: str):
+            calls["n"] += 1
+            snapshot = original(semester)
+            if calls["n"] == 1:
+                system["config"].courses[1].aliases = ["다른별칭"]  # changes after the first (decision) snapshot
+            return snapshot
+        worker._course_alias_entries = entries  # type: ignore[method-assign]
+        worker.run_once()
+        item = _item(system)
+        record = system["state"].get_classification_record(item.classification_record_id)
+        # the recorded hash is the *old* snapshot's, so a fresh readback differs and is detected
+        assert worker._provenance_mismatch(item, record, worker._workspace_for_item(item)) == "ALIAS_BASIS"
+
+
+def test_session_dates_must_be_complete_iso_values(tmp_path: Path) -> None:
+    # r9 #4: valid-looking prefixes of invalid text prove nothing; valid datetimes do.
+    cases = (("prefix", "2026-09-10invalid", "HUMAN"), ("bad-suffix", "2026-09-10T99:99:00", "HUMAN"),
+             ("datetime-other-day", "2026-09-11T09:00:00+09:00", "CLASSIFIED"),
+             ("date-other-day", "2026-09-11", "CLASSIFIED"))
+    for label, value, expected in cases:
+        with _system(tmp_path / label, name=MATCHED_NAME, raw=RAW) as system:
+            worker = _enable(system)
+            _complete_calendar(system["state"])
+            _seed_session(system["notion"], "TEST102-S01")
+            system["notion"].data_sources["synthetic-sessions"][0]["Date"] = value
+            worker.run_once()
+            assert _item(system).classification_state == expected, label
