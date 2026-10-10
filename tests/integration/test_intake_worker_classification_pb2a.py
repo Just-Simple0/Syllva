@@ -1,6 +1,7 @@
 """P-B2a: AUTO_PENDING plans (stage A), blank-draft auto-close (§3.5) with recovery, barriers."""
 from __future__ import annotations
 
+import contextlib
 import hashlib
 from datetime import date, timedelta
 from pathlib import Path
@@ -1102,11 +1103,10 @@ def test_session_occupancy_needs_pointer_and_binding_proof(tmp_path: Path) -> No
                     reservation_id="r-1", state="ACTIVE")
             worker.run_once()
             item = _item(system)
-            if name == "own-binding":
-                assert item.classification_state == "CLASSIFIED"
-            else:
-                assert item.classification_state == "HUMAN" and _auto_plans(system["state"]) == []
-                assert "AUTO_BLOCK_SESSION_OCCUPIED" in system["state"].get_intake_suggestion(item.intake_id)["suggestion_note"]
+            # r5 R1: even a binding to this very file is occupied — P-B2a carries no
+            # source-version/plan proof for an idempotent re-entry.
+            assert item.classification_state == "HUMAN" and _auto_plans(system["state"]) == []
+            assert "AUTO_BLOCK_SESSION_OCCUPIED" in system["state"].get_intake_suggestion(item.intake_id)["suggestion_note"]
 
 
 def test_preflight_rechecks_session_semester_and_metadata(tmp_path: Path) -> None:
@@ -1277,3 +1277,126 @@ def test_json_boolean_size_is_not_a_proven_size(tmp_path: Path) -> None:
         item = _item(system)
         assert item.classification_state == "HUMAN" and _auto_plans(system["state"]) == []
         assert "AUTO_BLOCK_DUPLICATE_UNPROVEN" in system["state"].get_intake_suggestion(item.intake_id)["suggestion_note"]
+
+
+# ---------------------------------------------------------------------------
+# P-B2a FINAL r5 findings
+# ---------------------------------------------------------------------------
+def test_a_session_without_an_exact_pending_status_is_occupied(tmp_path: Path) -> None:
+    # r5 R1: missing or empty Recording Status proves nothing.
+    for label, status in (("missing", None), ("empty", "")):
+        with _system(tmp_path / label, name=MATCHED_NAME, raw=RAW) as system:
+            worker = _enable(system)
+            _complete_calendar(system["state"])
+            _seed_session(system["notion"], "TEST102-S01", recording_status=status)
+            if status == "":
+                system["notion"].data_sources["synthetic-sessions"][0]["Recording Status"] = ""
+            worker.run_once()
+            item = _item(system)
+            assert item.classification_state == "HUMAN" and _auto_plans(system["state"]) == []
+            assert "AUTO_BLOCK_SESSION_OCCUPIED" in system["state"].get_intake_suggestion(item.intake_id)["suggestion_note"]
+
+
+def test_preflight_pins_the_original_parent_even_when_the_observation_follows(tmp_path: Path) -> None:
+    # r5 R2: the file moved to another registered folder and the item observation was
+    # updated to match; the bytes and md5 are unchanged.
+    from dataclasses import replace
+
+    system_cm, system = _pre_v2_draft(tmp_path)
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        drive, notion, state = system["drive"], system["notion"], system["state"]
+
+        def moved(call: int) -> None:
+            if call == 1:
+                drive.files[system["source_id"]] = replace(drive.files[system["source_id"]], parents=("synthetic-course-0",))
+                state.update_intake_item(_item(system).intake_id, observed_parent_id="synthetic-course-0")
+        _spy_preflight(worker, moved)
+        since = len(notion.events)
+        worker.run_once()
+        assert _request_writes(notion, since) == []
+        assert _auto_plans(state)[0]["status"] == "RECONCILE_REQUIRED"
+        assert _assign_request(notion)["Request Status"] == "Draft"
+    finally:
+        system_cm.__exit__(None, None, None)
+
+
+def test_stale_auto_plans_are_retired_and_a_human_claim_yields_them(tmp_path: Path) -> None:
+    # r5 R3 (late duplicate): the plan exists, then identical bytes appear under another id.
+    with _system(tmp_path / "late-duplicate", name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        worker.run_once()
+        plan = _auto_plans(system["state"])[0]
+        assert plan["status"] == "AUTO_PENDING"
+        state = system["state"]
+        state.create_job(job_key="sha256:" + "3" * 64, operation="intake.test", stage="intake",
+                         target_entity_id=plan["intake_id"], plan_revision=plan["plan_revision"],
+                         plan_authority="AUTO_CLASSIFICATION")
+        _second_file(system, name="zzz-copy.md", raw=RAW, md5=True)
+        worker.run_once()
+        item = _item(system)
+        assert item.classification_state == "HUMAN"
+        assert _auto_plans(state)[0]["status"] == "RECONCILE_REQUIRED"
+        assert state.get_job(job_key="sha256:" + "3" * 64).voided_at is not None
+        assert len(system["notion"].data_sources["synthetic-requests"]) >= 1  # the HUMAN draft appears
+    # r5 R3 (direct claim): a sibling HUMAN request is claimed while an AUTO plan is pending.
+    with _system(tmp_path / "claim", name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        worker.run_once()
+        state, notion = system["state"], system["notion"]
+        assert _auto_plans(state)[0]["status"] == "AUTO_PENDING"
+        item = _item(system)
+        receipt = worker._create_input_request_with_context(
+            item, worker._workspace_for_item(item), request_type="ASSIGN_COURSE", target_snapshot=None,
+            layout_context=worker._fresh_layout_context(worker._run_layout_workspaces()))
+        _assign_request(notion).update({"Course": ["synthetic-course-page-1"], "Submitted": True})
+        with contextlib.suppress(Exception):  # the claim outcome is irrelevant; the authority transition is not
+            worker.claim_request(receipt.request_key)
+        assert _auto_plans(state)[0]["status"] == "SUPERSEDED"
+        assert _item(system).classification_state == "HUMAN"
+
+
+def test_a_closed_sibling_that_lost_its_reference_stops_further_closures(tmp_path: Path) -> None:
+    # r5 R4: the first Draft is closed, then its system reference is removed.
+    system_cm, system = _pre_v2_draft(tmp_path)
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        _add_details_draft(worker, system)
+        notion, state = system["notion"], system["state"]
+
+        def drop_reference(call: int) -> None:
+            if call == 2:
+                for page in _auto_resolved_pages(notion):
+                    page["Result Reference"] = None
+        _spy_preflight(worker, drop_reference)
+        worker.run_once()
+        assert sum(1 for p in notion.data_sources["synthetic-requests"] if p["Request Status"] == "Draft") == 1
+        assert len(_auto_resolved_pages(notion)) == 1
+        assert _auto_resolved_pages(notion)[0].get("Result Reference") is None  # never silently restored
+        receipts = {r.request_type: r.state for r in state.list_request_receipts()}
+        assert sorted(receipts.values()) == ["AutoResolved", "Draft"]
+    finally:
+        system_cm.__exit__(None, None, None)
+
+
+def test_without_full_intake_capability_nothing_automatic_happens(tmp_path: Path) -> None:
+    # r5 O1: enabled + verified profile but no full-intake Drive capability.
+    from dataclasses import replace
+
+    system_cm, system = _pre_v2_draft(tmp_path)
+    try:
+        drive, notion, state = system["drive"], system["notion"], system["state"]
+        drive.capabilities = replace(drive.capabilities, file_id_preserving_move=False)
+        worker = _enable(system)
+        _complete_calendar(state)
+        since = len(notion.events)
+        worker.run_once()
+        assert _request_writes(notion, since) == [] and _auto_plans(state) == []
+        assert _assign_request(notion)["Request Status"] == "Draft"
+        assert all(r.state == "Draft" for r in state.list_request_receipts())
+    finally:
+        system_cm.__exit__(None, None, None)

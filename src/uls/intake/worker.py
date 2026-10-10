@@ -980,6 +980,7 @@ class IntakeWorker:
         if pending_intent is not None and pending_intent.state in {"PENDING", "RECONCILE"}:
             raise IntakeReconcileRequired("an automatic closure of this request is still unresolved")
         item_hint = self._item_for_receipt(receipt)
+        self._yield_auto_plans_to_human(item_hint, "HUMAN_REQUEST_CLAIMED")
         workspace = self._workspace_for_item(item_hint)
         if receipt.input_requests_data_source_id != workspace.input_requests_data_source_id:
             raise IntakeReconcileRequired("request belongs to a different current workspace")
@@ -1408,7 +1409,8 @@ class IntakeWorker:
                 rule_table_version=outcome.rule_table_version,
                 decision={"type": "rule", "rule_id": outcome.rule_id,
                           "candidates": [kind.value for kind in outcome.candidates],
-                          "source_name": item.original_name, "source_mime": item.mime_type},
+                          "source_name": item.original_name, "source_mime": item.mime_type,
+                          "source_parent": item.observed_parent_id},
                 kind=outcome.kind.value,
                 origin=outcome.origin.value,
                 course_key=outcome.course_key,
@@ -1440,6 +1442,7 @@ class IntakeWorker:
                 blockers = (plan_block,)
         if auto_plan is None and not blockers:
             blockers = (NOTE_AUTO_UNAVAILABLE,)
+        self._retire_stale_auto_plans(item, auto_plan)
         outcome_notes = outcome.suggestion_fields()
         if blockers:
             note = outcome_notes.get("suggestion_note")
@@ -1554,22 +1557,21 @@ class IntakeWorker:
             entity_id = row.get("ID")
             binding = self.state.session_source_binding_for(course_key, entity_id) if isinstance(entity_id, str) else None
             evidence.append([entity_id, day(row), row.get("Recording Status"), bool(row.get("Normalized Transcript")),
-                             None if binding is None else binding.get("provider_file_id")])
+                             None if binding is None else [binding.get("provider"), binding.get("provider_file_id"),
+                                                           binding.get("reservation_id"), binding.get("state")]])
         digest = sha256_hex(["intake.sessions-inventory.v2", course_key, wanted, evidence])
         if not same:
             return SessionMode.NEW.value, None, digest, None
         if len(same) > 1:
             return None, None, digest, BLOCK_SESSION_AMBIGUOUS
         row = same[0]
-        entity_id, binding_file = evidence[0][0], evidence[0][4]
+        entity_id, pointer, binding_proof = evidence[0][0], evidence[0][3], evidence[0][4]
         if not isinstance(entity_id, str) or not entity_id:
             return None, None, digest, BLOCK_SESSION_UNKNOWN
-        own_binding = binding_file == item.provider_file_id
-        if (
-            row.get("Recording Status") not in (None, "", "Pending")
-            or (evidence[0][3] and not own_binding)
-            or (binding_file is not None and not own_binding)
-        ):
+        # A free Session is exactly Recording Status=Pending with no transcript pointer and
+        # no canonical source binding.  An idempotent re-entry of this very file would need
+        # source-version and plan proof that P-B2a does not carry, so it is occupied (r5 R1).
+        if row.get("Recording Status") != "Pending" or pointer or binding_proof is not None:
             return None, None, digest, BLOCK_SESSION_OCCUPIED
         return SessionMode.EXISTING.value, entity_id, digest, None
 
@@ -1732,6 +1734,8 @@ class IntakeWorker:
                     return "RECONCILE", f"closed request page {receipt.request_key} is unavailable", []
                 if self._auto_request_snapshot(closed, receipt, item.intake_id) != done.terminal_snapshot_hash:
                     return "HUMAN", "HUMAN_TERMINAL_CHANGED", []
+                if not self._closure_bound(closed, receipt, workspace) or closed.get("Result Reference") != done.record_id:
+                    return "RECONCILE", f"closed request {receipt.request_key} lost its system reference or identity", []
                 continue
             if binding != "single" or not receipt.provider_page_id:
                 return "RECONCILE", f"request {receipt.request_key} binding or creation is unresolved", []
@@ -1806,7 +1810,12 @@ class IntakeWorker:
                     decision = json.loads(record.decision_json or "{}")
                 except ValueError:
                     decision = {}
-                if metadata.parent_id != current.observed_parent_id:
+                if record.provider_file_id != item.provider_file_id or current.provider_file_id != record.provider_file_id:
+                    reason = "SOURCE_IDENTITY"
+                elif (
+                    metadata.parent_id != current.observed_parent_id
+                    or metadata.parent_id != decision.get("source_parent")
+                ):
                     reason = "SOURCE_PARENT"
                 elif metadata.name != decision.get("source_name") or metadata.mime_type != decision.get("source_mime"):
                     reason = "SOURCE_METADATA"
@@ -1874,6 +1883,31 @@ class IntakeWorker:
             ):
                 return "SESSION_INVENTORY"
         return None
+
+    def _retire_stale_auto_plans(self, item: IntakeItem, keep: IntakePlan | None) -> None:
+        """Re-evaluation outcome is the only AUTO authority: every other live AUTO plan of
+        the intake (older record, new source version, late duplicate, blocked now) is closed
+        RECONCILE_REQUIRED with its jobs VOID in the same transaction (r5 R3)."""
+
+        for status in ("AUTO_PENDING", "PLANNED"):
+            for row in self.state.list_intake_plans(plan_authority="AUTO_CLASSIFICATION", status=status):
+                if row["intake_id"] == item.intake_id and (keep is None or row["plan_revision"] != keep.plan_revision):
+                    self.state.reconcile_intake_plan(row["plan_revision"], "AUTO_PLAN_RECLASSIFIED")
+                    self.state.record_intake_stage_event(
+                        "auto_plan_retired", intake_id=item.intake_id, operation_key="AUTO_PLAN_RECLASSIFIED")
+
+    def _yield_auto_plans_to_human(self, item: IntakeItem, reason: str) -> None:
+        """A submitted HUMAN request wins (plan §3.4 M2): persist SUPERSEDED + job VOID."""
+
+        superseded = False
+        for status in ("AUTO_PENDING", "PLANNED"):
+            for row in self.state.list_intake_plans(plan_authority="AUTO_CLASSIFICATION", status=status):
+                if row["intake_id"] == item.intake_id:
+                    self.state.supersede_intake_plan(row["plan_revision"], reason)
+                    superseded = True
+        if superseded:
+            self.state.update_intake_item(item.intake_id, classification_state="HUMAN")
+            self.state.record_intake_stage_event("auto_plan_superseded", intake_id=item.intake_id, operation_key=reason)
 
     def _alias_inventory_hash(self, semester: str) -> str:
         index = self._course_alias_index(semester)
