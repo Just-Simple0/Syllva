@@ -563,18 +563,82 @@ class ClassificationStateMixin:
             return [dict(r) for r in connection.execute(query + " ORDER BY created_at, plan_id", params).fetchall()]
 
     def supersede_intake_plan(self, plan_revision: str, reason: str) -> int:
-        """Close an AUTO plan a human overtook: status SUPERSEDED and its jobs VOID (plan §3.4)."""
+        """Close an AUTO plan a human overtook: status SUPERSEDED and its jobs VOID (plan §3.4).
 
+        The status change and the job VOID transition commit in one transaction, and a
+        plan that is already closed still voids any job left behind, so a crash between
+        the two can never leave a runnable job of a dead plan (P-B2a r1 R8).
+        """
+
+        return self._close_auto_plan(plan_revision, "SUPERSEDED", reason)
+
+    def reconcile_intake_plan(self, plan_revision: str, reason: str) -> int:
+        """Park an AUTO plan whose preflight failed (plan §3.5): RECONCILE_REQUIRED, jobs VOID."""
+
+        return self._close_auto_plan(plan_revision, "RECONCILE_REQUIRED", reason)
+
+    def _close_auto_plan(self, plan_revision: str, status: str, reason: str) -> int:
         with self._transaction(immediate=True) as connection:
             cursor = connection.execute(
-                "UPDATE intake_plans SET status = 'SUPERSEDED' WHERE plan_revision = ? "
+                "UPDATE intake_plans SET status = ? WHERE plan_revision = ? "
                 "AND plan_authority = 'AUTO_CLASSIFICATION' AND status IN ('AUTO_PENDING', 'PLANNED')",
-                (plan_revision,),
+                (status, plan_revision),
             )
             changed = cursor.rowcount
-        if changed:
-            self.void_jobs_for_plan(plan_revision, reason)
+            row = connection.execute(
+                "SELECT status FROM intake_plans WHERE plan_revision = ? "
+                "AND plan_authority = 'AUTO_CLASSIFICATION' ORDER BY created_at DESC LIMIT 1",
+                (plan_revision,),
+            ).fetchone()
+            if row is not None and row["status"] in ("SUPERSEDED", "RECONCILE_REQUIRED"):
+                self._void_plan_jobs(connection, plan_revision, reason)
         return int(changed)
+
+    def get_auto_resolve_rollback(self, intent_id: str) -> dict[str, Any] | None:
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM auto_resolve_rollbacks WHERE intent_id = ?", (intent_id,)
+            ).fetchone()
+            return None if row is None else dict(row)
+
+    def duplicate_content_candidates(
+        self, *, intake_id: str, provider: str, byte_sha256: str, byte_md5: str | None, size: int | None
+    ) -> dict[str, list[str]]:
+        """Plan §3.4 duplicate-content gate, complete over the whole store (P-B2a r1 R1).
+
+        ``proven`` lists other provider file IDs whose bytes are known to equal these
+        (an md5 observation or a byte-proven classification record).  ``unproven`` lists
+        other live items whose bytes are *not* provable (a metadata-surrogate hash with
+        no byte-proven record) but whose declared size equals this payload: the gate
+        cannot rule them out, so the caller fails closed.
+        """
+
+        proven: list[str] = []
+        unproven: list[str] = []
+        this_item = {"intake_id": intake_id}
+        with self._transaction() as connection:
+            rows = connection.execute(
+                "SELECT i.intake_id, i.provider_file_id, i.source_hash, i.status, "
+                "(SELECT c.byte_sha256 FROM classification_records c WHERE c.intake_id = i.intake_id "
+                " AND c.byte_sha256 IS NOT NULL ORDER BY c.rowid DESC LIMIT 1) AS proven_sha, "
+                "(SELECT json_extract(o.metadata_json, '$.size') FROM intake_observations o "
+                " WHERE o.intake_id = i.intake_id ORDER BY o.source_version DESC, o.observed_at DESC LIMIT 1) AS size "
+                "FROM intake_items i WHERE i.provider = ? AND i.intake_id != ?",
+                (provider, this_item["intake_id"]),
+            ).fetchall()
+        for row in rows:
+            file_id = str(row["provider_file_id"])
+            source_hash = str(row["source_hash"] or "")
+            if row["proven_sha"] == byte_sha256 or (byte_md5 and source_hash == "md5:" + byte_md5):
+                proven.append(file_id)
+                continue
+            if row["proven_sha"] is not None or source_hash.startswith("md5:"):
+                continue  # bytes known and different
+            if row["status"] in ("UNSUPPORTED", "ORGANIZED"):
+                continue  # terminal items never enter the AUTO path again
+            if size is not None and row["size"] == size:
+                unproven.append(file_id)  # same declared size, bytes unknown: cannot rule out
+        return {"proven": sorted(proven), "unproven": sorted(unproven)}
 
     def list_auto_resolve_intents(self, *, states: Iterable[str] = ("PENDING", "RECONCILE")) -> list[AutoResolveIntent]:
         wanted = tuple(states)
@@ -1806,12 +1870,16 @@ class ClassificationStateMixin:
         """Persistently retire every unfinished job of a superseded plan (r8 R2, r9 O1)."""
 
         with self._transaction(immediate=True) as connection:
-            cursor = connection.execute(
-                "UPDATE jobs SET voided_at = ?, void_reason = ?, updated_at = ? "
-                "WHERE plan_revision = ? AND voided_at IS NULL AND completed_at IS NULL",
-                (_now(), reason, _now(), plan_revision),
-            )
-            return int(cursor.rowcount)
+            return self._void_plan_jobs(connection, plan_revision, reason)
+
+    @staticmethod
+    def _void_plan_jobs(connection: sqlite3.Connection, plan_revision: str, reason: str) -> int:
+        cursor = connection.execute(
+            "UPDATE jobs SET voided_at = ?, void_reason = ?, updated_at = ? "
+            "WHERE plan_revision = ? AND voided_at IS NULL AND completed_at IS NULL",
+            (_now(), reason, _now(), plan_revision),
+        )
+        return int(cursor.rowcount)
 
 
 __all__ = [

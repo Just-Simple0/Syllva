@@ -62,6 +62,10 @@ from uls.intake.classification.calendar import CourseCalendar
 from uls.intake.classification.pipeline import (
     BLOCK_BYTES_UNPROVEN,
     BLOCK_DUPLICATE_CONTENT,
+    BLOCK_DUPLICATE_UNPROVEN,
+    BLOCK_PLAN_CONFLICT,
+    BLOCK_PLAN_RECONCILE,
+    BLOCK_PLAN_SUPERSEDED,
     NOTE_AUTO_UNAVAILABLE,
     NOTE_FORMAT_KIND_MISMATCH,
     ClassificationOutcome,
@@ -391,9 +395,10 @@ class IntakeWorker:
         if not self.state.acquire_local_worker_lock():
             return {"status": "already_running", "discovered": 0, "processed": 0}
         try:
-            if self._auto_enabled():
+            if self.notion is not None:
                 # Plan §3.5 recovery runs before discovery, claims and jobs so a pending
-                # closure never races a human claim in the same tick.
+                # closure never races a human claim in the same tick; it runs even when
+                # AUTO is switched off so an intent that already started is settled (r1 R9).
                 self._recover_auto_resolve_intents()
             discovered = self._sync_unlocked() if sync else 0
             processed = failed = needs_input = 0
@@ -1404,7 +1409,9 @@ class IntakeWorker:
         blockers = self._stage_a_blockers(item, outcome, record)
         auto_plan: IntakePlan | None = None
         if decided and record is not None and not blockers and self._auto_enabled():
-            auto_plan = self._ensure_auto_plan(item, outcome, record, workspace_fingerprint)
+            auto_plan, plan_block = self._ensure_auto_plan(item, outcome, record, workspace_fingerprint)
+            if plan_block is not None:
+                blockers = (plan_block,)
         if auto_plan is None and not blockers:
             blockers = (NOTE_AUTO_UNAVAILABLE,)
         outcome_notes = outcome.suggestion_fields()
@@ -1446,7 +1453,12 @@ class IntakeWorker:
     def _stage_a_blockers(
         self, item: IntakeItem, outcome: ClassificationOutcome, record: ClassificationRecord | None
     ) -> tuple[str, ...]:
-        """Plan §3.4 stage A: pure blockers + byte proof + the duplicate-content gate."""
+        """Plan §3.4 stage A: pure blockers + byte proof + the duplicate-content gate.
+
+        The duplicate gate is complete over the whole store (no listing bound) and fails
+        closed: another live item whose bytes cannot be proven different (metadata
+        surrogate hash, same declared size, no byte-proven record) blocks AUTO (r1 R1).
+        """
 
         blockers = list(outcome.stage_a_blockers())
         if not outcome.decided or outcome.kind is Kind.UNSUPPORTED:
@@ -1456,29 +1468,49 @@ class IntakeWorker:
             return tuple(dict.fromkeys(blockers))
         if item.last_error_code == "DUPLICATE_CANDIDATE":
             blockers.append(BLOCK_DUPLICATE_CONTENT)
-        others = [
-            r for r in self.state.list_classification_records_by_bytes(record.byte_sha256)
-            if r.provider_file_id != item.provider_file_id
-        ]
-        if others:
+        candidates = self.state.duplicate_content_candidates(
+            intake_id=item.intake_id, provider=self.provider, byte_sha256=record.byte_sha256,
+            byte_md5=record.byte_md5, size=self._declared_size(item),
+        )
+        if candidates["proven"]:
             blockers.append(BLOCK_DUPLICATE_CONTENT)
-        for other in self.state.list_intake_items(limit=10_000):
-            if other.provider_file_id != item.provider_file_id and other.canonical_entity_id:
-                canonical = other.canonical_source_json or ""
-                if record.byte_sha256 in canonical:
-                    blockers.append(BLOCK_DUPLICATE_CONTENT)
-                    break
+        if candidates["unproven"]:
+            blockers.append(BLOCK_DUPLICATE_UNPROVEN)
         return tuple(dict.fromkeys(blockers))
+
+    def _declared_size(self, item: IntakeItem) -> int | None:
+        for observation in reversed(self.state.list_intake_observations(item.intake_id)):
+            if observation.source_version != item.source_version:
+                continue
+            try:
+                size = json.loads(observation.metadata_json).get("size")
+            except (TypeError, ValueError, AttributeError):
+                return None
+            return size if isinstance(size, int) and not isinstance(size, bool) else None
+        return None
 
     def _ensure_auto_plan(
         self, item: IntakeItem, outcome: ClassificationOutcome, record: ClassificationRecord, workspace_fingerprint: str
-    ) -> IntakePlan:
-        """Create (or reuse) the AUTO_PENDING plan bound to this classification record."""
+    ) -> tuple[IntakePlan | None, str | None]:
+        """Create (or reuse) the AUTO_PENDING plan bound to this classification record.
+
+        A plan of the same revision that a human overtook (SUPERSEDED) or whose preflight
+        failed (RECONCILE_REQUIRED) is never revived: the item stays HUMAN with the
+        matching reason code (r1 R7).
+        """
 
         plan_revision = sha256_hex(["intake.auto-plan.v1", record.classification_revision_hash, workspace_fingerprint])
         existing: IntakePlan | None = self.state.get_intake_plan(plan_revision)
         if existing is not None:
-            return existing
+            if (
+                existing.plan_authority != "AUTO_CLASSIFICATION"
+                or existing.classification_revision_hash != record.classification_revision_hash
+                or existing.intake_id != item.intake_id
+            ):
+                return None, BLOCK_PLAN_CONFLICT
+            if existing.status in {"AUTO_PENDING", "PLANNED"}:
+                return existing, None
+            return None, {"SUPERSEDED": BLOCK_PLAN_SUPERSEDED}.get(existing.status, BLOCK_PLAN_RECONCILE)
         target = {
             "intake_id": item.intake_id,
             "course_key": outcome.course_key,
@@ -1501,7 +1533,7 @@ class IntakeWorker:
             plan_authority="AUTO_CLASSIFICATION",
             classification_revision_hash=record.classification_revision_hash,
         )
-        return created
+        return created, None
 
     def _blank_user_hash(self, request: RequestInput) -> str:
         return normalized_user_hash(RequestInput(request.request_key, request.request_type, intake_ids=tuple(request.intake_ids)))
@@ -1519,6 +1551,12 @@ class IntakeWorker:
             receipt.request_key,
             None if generation is None else generation.get("generation"),
         ])
+
+    def _snapshot_as_draft(self, page: Mapping[str, Any], receipt: RequestReceipt, intake_id: str) -> str:
+        """The AUTO snapshot of a readback with only the system status normalised to Draft,
+        so a terminal readback can be compared exactly with the pre-close snapshot (r1 R4)."""
+
+        return self._auto_request_snapshot({**dict(page), "Request Status": "Draft"}, receipt, intake_id)
 
     def _draft_receipts_for_intake(self, intake_id: str) -> list[RequestReceipt]:
         result = []
@@ -1538,28 +1576,112 @@ class IntakeWorker:
         self.state.update_intake_item(item.intake_id, classification_state="HUMAN")
         self.state.record_intake_stage_event("auto_plan_superseded", intake_id=item.intake_id, operation_key=reason)
 
+    def _supersede_auto_plans_for_record(self, item: IntakeItem, record: ClassificationRecord, reason: str) -> None:
+        for plan_row in self.state.list_intake_plans(plan_authority="AUTO_CLASSIFICATION"):
+            if plan_row["classification_revision_hash"] == record.classification_revision_hash:
+                self.state.supersede_intake_plan(plan_row["plan_revision"], reason)
+        self.state.update_intake_item(item.intake_id, classification_state="HUMAN")
+        self.state.record_intake_stage_event("auto_plan_superseded", intake_id=item.intake_id, operation_key=reason)
+
+    def _human_touched(self, page: Mapping[str, Any], receipt: RequestReceipt, workspace: ResolvedSemesterWorkspace) -> bool:
+        """Plan §3.5 conditions 1–3 on a Draft readback: anything else is a human change."""
+
+        request = self._request_from_page(page, workspace)
+        return (
+            page.get("Request Status") != "Draft"
+            or page.get("Submitted") is not False
+            or page.get("Cancelled") is not False
+            or page.get("Request Key") != receipt.request_key
+            or page.get("Request Revision Hash") != receipt.request_revision_hash
+            or bool(page.get("Input Hash")) or bool(page.get("Plan Revision"))
+            or normalized_user_hash(request) != self._blank_user_hash(request)
+        )
+
+    def _auto_preflight(
+        self, item: IntakeItem, plan: IntakePlan, record: ClassificationRecord, workspace: ResolvedSemesterWorkspace
+    ) -> bool:
+        """Plan §3.5 / §3.4 M3 preflight before the first AUTO provider mutation (r1 R3).
+
+        Live source identity, ownership and privacy, exact parent, source hash/version,
+        the re-downloaded bytes, workspace/config fingerprints and the plan↔record↔item
+        binding must all match the classification record.  Any mismatch parks the plan
+        as RECONCILE_REQUIRED with zero external writes.
+        """
+
+        reason: str | None = None
+        current = self._require_item(item.intake_id)
+        try:
+            metadata = self.drive.read_metadata(item.provider_file_id)
+            if metadata.file_id != item.provider_file_id or metadata.owned_by_me is not True:
+                reason = "SOURCE_IDENTITY"
+            else:
+                _check_private_drive_metadata(metadata)
+                if metadata.parent_id != current.observed_parent_id:
+                    reason = "SOURCE_PARENT"
+                elif _metadata_source_hash(metadata) != current.source_hash or current.source_version != record.source_version:
+                    reason = "SOURCE_VERSION"
+                elif metadata.md5_checksum and record.byte_md5 and metadata.md5_checksum != record.byte_md5:
+                    reason = "SOURCE_BYTES"
+            if reason is None:
+                probe = self._source_probe(current)
+                if not probe.complete or probe.byte_sha256 != record.byte_sha256:
+                    reason = "SOURCE_BYTES"
+        except ReconnectRequiredError:
+            raise
+        except (SourceUnavailableError, SourcePartialError, PolicyDeniedError, ProviderUnavailableError):
+            reason = "SOURCE_UNAVAILABLE"
+        if reason is None:
+            if (
+                self._semester_workspace_fingerprint(workspace.semester) != record.workspace_fingerprint
+                or self._semester_config_fingerprint(workspace.semester) != record.config_fingerprint
+            ):
+                reason = "FINGERPRINT"
+            elif (
+                plan.classification_revision_hash != record.classification_revision_hash
+                or plan.intake_id != item.intake_id
+                or current.classification_record_id != record.record_id
+                or current.classification_state != "CLASSIFIED"
+            ):
+                reason = "PLAN_BINDING"
+            else:
+                live = self.state.get_intake_plan(plan.plan_revision)
+                if live is None or live.status != "AUTO_PENDING":
+                    reason = "PLAN_STATUS"
+        if reason is None:
+            return True
+        self.state.reconcile_intake_plan(plan.plan_revision, f"PREFLIGHT_{reason}")
+        self.state.update_intake_item(
+            item.intake_id, status=IntakeStatus.RECONCILE_REQUIRED.value, classification_state="HUMAN",
+            last_error_code="RECONCILE_REQUIRED", last_error=f"AUTO preflight failed: {reason}",
+        )
+        self.state.record_intake_stage_event("auto_preflight_failed", intake_id=item.intake_id, operation_key=reason)
+        return False
+
     def _close_blank_drafts(
         self, item: IntakeItem, plan: IntakePlan, record: ClassificationRecord, workspace: ResolvedSemesterWorkspace
     ) -> None:
-        """Plan §3.5: close an untouched pre-v2 Draft as Auto Resolved, or step aside.
+        """Plan §3.5: close the untouched pre-v2 Drafts of this intake as Auto Resolved, or step aside.
 
-        Any human change (USER field, Submitted, Claimed) supersedes the AUTO plan and
-        leaves the HUMAN path alone.  The Notion write is the first AUTO mutation and
-        is preceded by the preflight (bytes, source version, fingerprints).
+        Every HUMAN request of the intake is read back and judged *before* any write
+        (r1 R2): one human change (USER field, Submitted, Cancelled, Claimed) supersedes
+        the AUTO plan and no Draft is closed.  The first write is preceded by the full
+        preflight; each closure then runs preflight → durable PENDING intent → write →
+        readback → atomic receipt+intent commit.
         """
 
         if self.notion is None:
             return
+        untouched: list[tuple[RequestReceipt, Mapping[str, Any]]] = []
         for receipt in self._draft_receipts_for_intake(item.intake_id):
+            if receipt.state in {"Submitted", "Claimed"}:
+                self._supersede_auto_plan(item, plan, "HUMAN_REQUEST_ACTIVE")
+                return
             if receipt.state != "Draft":
-                if receipt.state in {"Submitted", "Claimed"}:
-                    self._supersede_auto_plan(item, plan, "HUMAN_REQUEST_ACTIVE")
-                    return
-                continue
+                continue  # Applied / Cancelled / AutoResolved are terminal
             intent = self.state.get_auto_resolve_intent(receipt.request_key)
             if intent is not None:
                 if intent.state in {"PENDING", "RECONCILE"}:
-                    return  # recovery owns it (§3.5 ii–iv)
+                    return  # recovery owns it (§3.5 ii–iv); nothing else is written meanwhile
                 if intent.state == "DONE":
                     continue
             page = self.notion.read_record("input_request", receipt.provider_page_id or "")
@@ -1567,36 +1689,33 @@ class IntakeWorker:
                 self._record_item_error(item, workspace, IntakeReconcileRequired("Draft page for auto-close is unavailable"),
                                         default_status=IntakeStatus.NEEDS_INPUT)
                 return
-            request = self._request_from_page(page, workspace)
-            human_touched = (
-                page.get("Request Status") != "Draft"
-                or page.get("Submitted") is not False
-                or page.get("Cancelled") is not False
-                or normalized_user_hash(request) != self._blank_user_hash(request)
-                or page.get("Request Revision Hash") != receipt.request_revision_hash
-            )
-            if human_touched:
+            if self._human_touched(page, receipt, workspace):
                 self._supersede_auto_plan(item, plan, "HUMAN_DRAFT_CHANGED")
                 return
-            # Preflight: the bytes and observation the record was built on are current.
-            probe = self._source_probe(item)
-            current = self._require_item(item.intake_id)
-            if probe.byte_sha256 != record.byte_sha256 or current.source_version != record.source_version:
-                self.state.update_intake_item(item.intake_id, status=IntakeStatus.RECONCILE_REQUIRED.value,
-                                              last_error_code="RECONCILE_REQUIRED",
-                                              last_error="source changed after classification")
-                return
-            snapshot = self._auto_request_snapshot(page, receipt, item.intake_id)
+            untouched.append((receipt, page))
+        if not untouched:
+            return
+        if not self._auto_preflight(item, plan, record, workspace):
+            return
+        for receipt, draft_page in untouched:
+            snapshot = self._auto_request_snapshot(draft_page, receipt, item.intake_id)
             intent = self.state.create_auto_resolve_intent(
                 record_id=record.record_id, request_key=receipt.request_key, expected_user_snapshot_hash=snapshot
             )
             self.state.record_auto_resolve_snapshots(intent.intent_id, pre_close_snapshot_hash=snapshot)
-            self._write_auto_resolved(item, receipt, record, intent, workspace, snapshot)
+            if not self._write_auto_resolved(item, receipt, record, intent, workspace, snapshot):
+                return  # the barrier stands; recovery settles it before any further closure
 
     def _write_auto_resolved(
         self, item: IntakeItem, receipt: RequestReceipt, record: ClassificationRecord,
         intent: AutoResolveIntent, workspace: ResolvedSemesterWorkspace, expected_snapshot: str,
-    ) -> None:
+    ) -> bool:
+        """Write Auto Resolved + Result Reference, read back, and commit receipt+intent DONE
+        atomically.  Returns True only for a verified closure (r1 R4): the readback must
+        equal the pre-close snapshot except for the status, carry exactly this record as
+        Result Reference and keep both checkboxes false; a landed write the human overtook
+        goes to recovery (iii); an unknown readback keeps the barrier (iv)."""
+
         assert self.notion is not None
         page_id = receipt.provider_page_id or ""
         patch = {"Request Status": AUTO_RESOLVED_STATUS, "Result Reference": record.record_id}
@@ -1622,20 +1741,31 @@ class IntakeWorker:
             self.state.update_intake_item(item.intake_id, status=IntakeStatus.RECONCILE_REQUIRED.value,
                                           last_error_code="RECONCILE_REQUIRED",
                                           last_error="Auto Resolved readback is missing or mismatched")
-            return
-        after = self._request_from_page(readback, workspace)
-        if normalized_user_hash(after) != self._blank_user_hash(after) or readback.get("Submitted") is not False:
-            # The human raced the closure: recovery (iii) rolls the status back.
-            self.state.update_provider_write_attempt(op_key, response_state="READBACK_OK", readback_json=readback)
-            self._recover_auto_resolve_intents()
-            return
+            return False
         self.state.update_provider_write_attempt(op_key, response_state="READBACK_OK", readback_json=readback)
+        if self._snapshot_as_draft(readback, receipt, item.intake_id) != expected_snapshot:
+            # The human raced the closure (USER field, Submitted or Cancelled): recovery
+            # (iii) rolls the status back and supersedes the plan.
+            self._recover_auto_resolve_intents()
+            return False
         terminal = self._auto_request_snapshot(readback, receipt, item.intake_id)
         self.state.transition_auto_resolve_intent(intent.intent_id, "DONE", terminal_snapshot_hash=terminal)
         self.state.record_intake_stage_event("draft_auto_resolved", intake_id=item.intake_id, operation_key=op_key)
+        return True
+
+    def _mark_reconcile(self, item: IntakeItem, message: str) -> None:
+        self.state.update_intake_item(item.intake_id, status=IntakeStatus.RECONCILE_REQUIRED.value,
+                                      last_error_code="RECONCILE_REQUIRED", last_error=message)
 
     def _recover_auto_resolve_intents(self) -> None:
-        """Plan §3.5 (i)–(iv): settle every pending closure from the provider readback."""
+        """Plan §3.5 (i)–(iv): settle every pending closure from the provider readback.
+
+        Runs at every tick start whenever Notion is reachable, independent of the AUTO
+        feature gate (r1 R9): an intent that already started must be settled or kept
+        barred even after the feature was switched off.  Only the *retry* of a closure
+        whose write never landed needs AUTO to be enabled; otherwise that intent is
+        ABORTED with zero writes and the HUMAN path resumes.
+        """
 
         if self.notion is None:
             return
@@ -1647,47 +1777,81 @@ class IntakeWorker:
             item = self.state.get_intake_item(record.intake_id)
             if item is None:
                 continue
+            if receipt.state != "Draft":
+                # receipt AutoResolved + intent PENDING cannot exist (atomic commit); any
+                # other state means the binding broke: invariant violation, barrier kept.
+                self._mark_reconcile(item, f"auto resolve intent bound to a {receipt.state} receipt")
+                continue
             workspace = self._workspace_for_item(item)
             page = self.notion.read_record("input_request", receipt.provider_page_id)
             if page is None:
-                self.state.update_intake_item(item.intake_id, status=IntakeStatus.RECONCILE_REQUIRED.value,
-                                              last_error_code="RECONCILE_REQUIRED",
-                                              last_error="Auto Resolved readback is unavailable")
+                self._mark_reconcile(item, "Auto Resolved readback is unavailable")
                 continue  # (iv) stays PENDING
-            request = self._request_from_page(page, workspace)
-            untouched = (
-                normalized_user_hash(request) == self._blank_user_hash(request)
-                and page.get("Submitted") is False and page.get("Cancelled") is False
-            )
-            plan_rows = [p for p in self.state.list_intake_plans(plan_authority="AUTO_CLASSIFICATION")
-                         if p["classification_revision_hash"] == record.classification_revision_hash]
-            if untouched and page.get("Request Status") == AUTO_RESOLVED_STATUS and receipt.state == "Draft":
-                terminal = self._auto_request_snapshot(page, receipt, item.intake_id)  # (i)
-                self.state.transition_auto_resolve_intent(intent.intent_id, "DONE", terminal_snapshot_hash=terminal)
+            status = page.get("Request Status")
+            rollback = self.state.get_auto_resolve_rollback(intent.intent_id)
+            if rollback is not None:
+                self._settle_rollback(item, record, receipt, intent, rollback, page)
                 continue
-            if untouched and page.get("Request Status") == "Draft":
-                continue  # write never landed: the next sync retries the closure (idempotent op key)
-            # (ii)/(iii): the human changed the draft.
-            for plan_row in plan_rows:
-                self.state.supersede_intake_plan(plan_row["plan_revision"], "HUMAN_DRAFT_CHANGED")
-            self.state.update_intake_item(item.intake_id, classification_state="HUMAN")
-            if page.get("Request Status") == AUTO_RESOLVED_STATUS:
+            pre_close = intent.pre_close_snapshot_hash
+            untouched = pre_close is not None and self._snapshot_as_draft(page, receipt, item.intake_id) == pre_close
+            if status == AUTO_RESOLVED_STATUS:
+                if untouched and page.get("Result Reference") == record.record_id:
+                    terminal = self._auto_request_snapshot(page, receipt, item.intake_id)  # (i)
+                    self.state.transition_auto_resolve_intent(intent.intent_id, "DONE", terminal_snapshot_hash=terminal)
+                    continue
+                # (iii): the write landed and the human changed the page meanwhile.
+                self._supersede_auto_plans_for_record(item, record, "HUMAN_DRAFT_CHANGED")
                 target = "Submitted" if page.get("Submitted") is True else "Draft"
                 rollback = self.state.create_auto_resolve_rollback(intent.intent_id, target)
-                if rollback["state"] != "DONE":
-                    self.notion.update_system_record(
-                        "input_request", receipt.provider_page_id,
-                        {"Request Status": target, "Result Reference": None},
-                    )
-                    confirm = self.notion.read_record("input_request", receipt.provider_page_id)
-                    if confirm is None or confirm.get("Request Status") != target:
-                        self.state.update_intake_item(item.intake_id, status=IntakeStatus.RECONCILE_REQUIRED.value,
-                                                      last_error_code="RECONCILE_REQUIRED",
-                                                      last_error="Auto Resolved rollback readback failed")
-                        continue
-                    self.state.complete_auto_resolve_rollback(intent.intent_id)
-            else:
+                self._settle_rollback(item, record, receipt, intent, rollback, page)
+                continue
+            if status == "Draft" and untouched:
+                # The write never landed.  Retry under the same intent and operation key
+                # when AUTO may still write; otherwise release the human path (r1 R5).
+                plan = self._live_auto_plan_for_record(record)
+                if self._auto_enabled() and plan is not None and self._auto_preflight(item, plan, record, workspace):
+                    self._write_auto_resolved(item, receipt, record, intent, workspace, pre_close or "")
+                    continue
                 self.state.transition_auto_resolve_intent(intent.intent_id, "ABORTED")
+                self._supersede_auto_plans_for_record(item, record, "AUTO_CLOSURE_ABORTED")
+                continue
+            # (ii): the human changed the Draft (or moved it on) before any write landed.
+            self.state.transition_auto_resolve_intent(intent.intent_id, "ABORTED")
+            self._supersede_auto_plans_for_record(item, record, "HUMAN_DRAFT_CHANGED")
+
+    def _live_auto_plan_for_record(self, record: ClassificationRecord) -> IntakePlan | None:
+        for plan_row in self.state.list_intake_plans(plan_authority="AUTO_CLASSIFICATION", status="AUTO_PENDING"):
+            if plan_row["classification_revision_hash"] == record.classification_revision_hash:
+                plan: IntakePlan | None = self.state.get_intake_plan(plan_row["plan_revision"])
+                return plan
+        return None
+
+    def _settle_rollback(
+        self, item: IntakeItem, record: ClassificationRecord, receipt: RequestReceipt,
+        intent: AutoResolveIntent, rollback: Mapping[str, Any], page: Mapping[str, Any],
+    ) -> None:
+        """Drive a §3.5 (iii) rollback to completion from the readback (r1 R6): the page
+        must show the target status *and* an empty Result Reference before the rollback is
+        DONE and the intent ABORTED in one transaction; a crash after the provider write
+        completes on the next tick from the same persisted rollback."""
+
+        assert self.notion is not None
+        target = str(rollback["target_status"])
+        self._supersede_auto_plans_for_record(item, record, "HUMAN_DRAFT_CHANGED")
+        if rollback["state"] == "DONE":
+            return
+        confirm: Mapping[str, Any] | None = page
+        if page.get("Request Status") == AUTO_RESOLVED_STATUS or page.get("Result Reference"):
+            self.notion.update_system_record(
+                "input_request", receipt.provider_page_id or "",
+                {"Request Status": target, "Result Reference": None},
+            )
+            confirm = self.notion.read_record("input_request", receipt.provider_page_id or "")
+        if confirm is None or confirm.get("Request Status") != target or confirm.get("Result Reference"):
+            self._mark_reconcile(item, "Auto Resolved rollback readback failed")
+            return
+        self.state.complete_auto_resolve_rollback(intent.intent_id)
+        self.state.record_intake_stage_event("auto_resolve_rolled_back", intake_id=item.intake_id, operation_key=target)
 
     def _suggestion_properties(self, item: IntakeItem) -> dict[str, Any]:
         """§3.3 suggestion fields for a new draft; only under a verified v2 profile."""
