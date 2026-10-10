@@ -3586,6 +3586,13 @@ class IntakeWorker:
                 if not (isinstance(request, ClassificationExecutionContext)
                         and self._session_in_own_progress(page, properties, course_id)):
                     raise
+            if isinstance(request, ClassificationExecutionContext) and (
+                prior is None or not prior.target_id or prior.target_id != _page_id(page)
+            ):
+                # The row exists, but this plan never recorded the page ID its own create call returned:
+                # a lookup result is not evidence that we made it (r5 R1).
+                self.state.reconcile_intake_plan(plan.plan_revision, "FOREIGN_ROW")
+                raise IntakeReconcileRequired("an existing row carries the reserved ID but this plan did not create it")
             self.state.update_provider_write_attempt(op_key, target_id=_page_id(page), response_state="READBACK_OK", readback_json=page) if prior else self.state.record_provider_write_attempt(operation=INTAKE_SESSION_OPERATION, operation_key=op_key, provider=self.provider, target_id=_page_id(page), response_state="READBACK_OK", readback_json=page)
             return page
         if prior is not None:
@@ -3656,6 +3663,13 @@ class IntakeWorker:
         if matches:
             page = matches[0]
             self._validate_material_snapshot(page, properties, course_id)
+            if isinstance(request, ClassificationExecutionContext) and (
+                prior is None or not prior.target_id or prior.target_id != _page_id(page)
+            ):
+                # The row exists, but this plan never recorded the page ID its own create call returned:
+                # a lookup result is not evidence that we made it (r5 R1).
+                self.state.reconcile_intake_plan(plan.plan_revision, "FOREIGN_ROW")
+                raise IntakeReconcileRequired("an existing row carries the reserved ID but this plan did not create it")
             if prior is None:
                 self.state.record_provider_write_attempt(operation=INTAKE_MATERIAL_OPERATION, operation_key=op_key, provider=self.provider, target_id=_page_id(page), response_state="READBACK_OK", readback_json=page)
             else:

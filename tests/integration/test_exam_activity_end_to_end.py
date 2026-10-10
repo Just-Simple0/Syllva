@@ -8,7 +8,6 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures")
 
 from fake_drive import FakeDriveReader
 from fake_notion import FakeNotionAdapter, FakeNotionReader
-from no_v2_state import NoV2State
 from phase4 import (
     COURSE_KEY,
     COURSE_PAGE_ID,
@@ -17,6 +16,7 @@ from phase4 import (
     activity_record,
     exam_record,
 )
+from tests.fixtures.no_v2_state import NoV2State
 
 from uls.adapters.drive.binding import ValidatedSourceBindingResolver
 from uls.adapters.notion.base import HumanApprovalApplier, QueueState, upsert_proposal

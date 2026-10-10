@@ -4,7 +4,7 @@ import pathlib
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
-from no_v2_state import NoV2State
+from tests.fixtures.no_v2_state import NoV2State
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures"))
 

@@ -695,3 +695,30 @@ def test_the_read_only_state_of_a_database_that_predates_v2_has_no_v2_product(tm
         connection.execute("CREATE TABLE jobs(id TEXT, source_file_id TEXT)")
         connection.execute("CREATE TABLE source_files(source_file_id TEXT, canonical_entity_id TEXT)")
     assert ReadOnlyState(path).is_v2_material("COMP319-M03") is False
+
+
+def test_a_row_that_appears_after_the_last_check_is_never_adopted(tmp_path: Path) -> None:
+    # r5 R1: a person's Session with the reserved ID/Course/Date appears between the last inventory
+    # check and the lookup inside _ensure_session_page; a lookup result is no proof of creation.
+    with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        original = worker._ensure_session_page
+
+        def ensure(item, plan, request, workspace, course_id, reservation, existing_page, receipt):
+            _seed_session(system["notion"], reservation.entity_app_id)
+            system["notion"].data_sources["synthetic-sessions"][-1]["Status"] = "Not started"  # a faithful copy
+            return original(item, plan, request, workspace, course_id, reservation, existing_page, receipt)
+        worker._ensure_session_page = ensure  # type: ignore[method-assign]
+        worker.run_once()
+        (row,) = _sessions(system)
+        assert not row.get("Normalized Transcript")  # their Session is never written to
+        assert _auto_plans(system["state"])[0]["status"] == "RECONCILE_REQUIRED"
+        assert _item(system).status != "ORGANIZED"
+        attempts = [a for k in _all_attempt_keys(system["state"]) if (a := system["state"].get_provider_write_attempt(k))]
+        assert not [a for a in attempts if a.operation == "intake_session" and a.response_state == "READBACK_OK"]
+
+
+def _all_attempt_keys(state) -> list[str]:
+    with state._transaction() as connection:
+        return [row["operation_key"] for row in connection.execute("SELECT operation_key FROM provider_write_attempts")]
