@@ -114,7 +114,13 @@ def test_human_v2_kind_that_never_takes_pdf_is_rejected_before_the_pdf_path(tmp_
         worker.run_once()
         assert notion.data_sources["synthetic-materials"] == []
         item = system["state"].get_intake_item_by_provider_file("google_drive", system["source_id"])
-        assert "never takes a PDF source" in (item.last_error or "")
+        # P-B1: the §6.1 matrix is checked at claim time, before any plan, job or
+        # status write; the request goes back to Needs Input with the fixed code.
+        assert item.last_error == "FORMAT_KIND_MISMATCH" and item.plan_revision is None
+        assert system["state"].list_jobs() == []
+        page = next(r for r in notion.data_sources["synthetic-requests"] if r["Request Type"] == "FILE_DETAILS")
+        assert page["Request Status"] == "Needs Input" and "FORMAT_KIND_MISMATCH" in page["Error"]
+        assert system["state"].get_request_receipt(details_key(system)).state == "Draft"
 
 
 def test_material_ai_kind_backfill_is_limited_and_idempotent(tmp_path: Path) -> None:
