@@ -707,3 +707,56 @@ def test_service_account_live_composition_without_google_oauth_installs_no_attes
         # study notes disabled neither publishes a READY extension.
         assert worker.request_extension_readiness.get("2026-2", {}).get("status") != "READY"
         assert worker.request_coordinators == []
+
+
+def test_native_download_bound_is_enforced_before_an_oversized_chunk_is_buffered(monkeypatch) -> None:
+    """P-B1 r3 O1: a single oversized response, multi-chunk growth past the bound and a short
+    response are all refused; nothing beyond the bound is ever buffered."""
+
+    from uls.domain.errors import SourcePartialError, SourceUnavailableError
+
+    attestor = StaticAttestor()
+    service = _MutationService()
+    adapter = GoogleDriveWorkerAdapter(service, attestor=attestor, max_bytes=1_000)
+    service._record = lambda name, kwargs: {**_RecordingService._record(service, name, kwargs), "size": "40"}  # type: ignore[method-assign]
+    import googleapiclient.http
+
+    def downloader_with(chunks: list[bytes]):
+        sinks: list[Any] = []
+
+        class _Downloader:
+            def __init__(self, output: Any, request: Any, chunksize: int) -> None:
+                self.output = output
+                self.pending = list(chunks)
+                sinks.append(output)
+
+            def next_chunk(self, num_retries: int = 0) -> tuple[None, bool]:
+                self.output.write(self.pending.pop(0))
+                return None, not self.pending
+
+        return _Downloader, sinks
+
+    # One oversized chunk: refused at the write, buffer never exceeds the bound.
+    downloader, sinks = downloader_with([b"x" * 41])
+    monkeypatch.setattr(googleapiclient.http, "MediaIoBaseDownload", downloader)
+    with adapter.attested(attestor.attest_entry()), pytest.raises(SourcePartialError):
+        adapter.download("f1", max_bytes=40)
+    assert sinks[0].tell() == 0
+    # Several chunks that cross the bound at the third write: the third is refused.
+    downloader, sinks = downloader_with([b"x" * 20, b"x" * 20, b"x" * 1])
+    monkeypatch.setattr(googleapiclient.http, "MediaIoBaseDownload", downloader)
+    with adapter.attested(attestor.attest_entry()), pytest.raises(SourcePartialError):
+        adapter.download("f1", max_bytes=40)
+    assert sinks[0].tell() == 40
+    # A short response (fewer bytes than declared) is not a complete download.
+    downloader, _ = downloader_with([b"x" * 39])
+    monkeypatch.setattr(googleapiclient.http, "MediaIoBaseDownload", downloader)
+    with adapter.attested(attestor.attest_entry()), pytest.raises(SourceUnavailableError):
+        adapter.download("f1", max_bytes=40)
+    # An exact match within the bound succeeds; the caller bound never widens the adapter ceiling.
+    downloader, _ = downloader_with([b"x" * 20, b"x" * 20])
+    monkeypatch.setattr(googleapiclient.http, "MediaIoBaseDownload", downloader)
+    with adapter.attested(attestor.attest_entry()):
+        assert adapter.download("f1", max_bytes=40) == b"x" * 40
+    with adapter.attested(attestor.attest_entry()), pytest.raises(SourcePartialError):
+        adapter.download("f1", max_bytes=10)  # declared 40 > caller bound 10: refused before reading

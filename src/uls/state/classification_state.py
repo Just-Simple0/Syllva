@@ -574,6 +574,31 @@ class ClassificationStateMixin:
             ).fetchone()
             return dict(row)
 
+    def classification_counts(self) -> dict[str, int]:
+        """Readiness counters (plan §4 O2): items per classification_state and tag manifests."""
+
+        with self._transaction() as connection:
+            states = {
+                str(row["classification_state"]): int(row["n"])
+                for row in connection.execute(
+                    "SELECT classification_state, COUNT(*) AS n FROM intake_items "
+                    "GROUP BY classification_state"
+                ).fetchall()
+            }
+            manifests = {
+                str(row["status"]): int(row["n"])
+                for row in connection.execute(
+                    "SELECT status, COUNT(*) AS n FROM document_tag_manifests GROUP BY status"
+                ).fetchall()
+            }
+        return {
+            "deferred_items": states.get("DEFERRED", 0),
+            "classified_items": states.get("CLASSIFIED", 0),
+            "human_fallback_items": states.get("HUMAN", 0),
+            "partial_tag_documents": manifests.get("PARTIAL", 0),
+            "stale_tag_documents": manifests.get("STALE", 0),
+        }
+
     def get_intake_suggestion(self, intake_id: str) -> dict[str, Any] | None:
         with self._transaction() as connection:
             row = connection.execute(
@@ -954,6 +979,15 @@ class ClassificationStateMixin:
                          week, _now()),
                     )
         return self.list_recording_calendar_current(course_key)
+
+    def recording_calendar_course(self, course_key: str) -> dict[str, Any] | None:
+        """The course's collection row (None when no collection was ever recorded)."""
+
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM recording_calendar_courses WHERE course_key = ?", (course_key,)
+            ).fetchone()
+            return None if row is None else dict(row)
 
     def recording_calendar_projection_hash(self, course_key: str) -> str | None:
         with self._transaction() as connection:

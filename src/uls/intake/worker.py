@@ -15,7 +15,7 @@ import json
 import threading
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from uls.adapters.drive.worker import (
@@ -42,6 +42,29 @@ from uls.domain.ids import parse_course_key, parse_entity_id
 from uls.domain.source_ref import SourceRef
 from uls.ingestion.discovery import discover_intake
 from uls.intake.attestation import ReconnectRequiredError, WorkerEntryAttestation
+from uls.intake.classification import (
+    AI_KIND_OPTIONS,
+    ORIGIN_OPTIONS,
+    RULE_TABLE_VERSION,
+    TAG_RULE_VERSION,
+    CourseAliasIndex,
+    HandlingMode,
+    Kind,
+    Origin,
+    RecordingEntry,
+    SemesterRange,
+    build_calendar,
+    course_aliases_from_config,
+    handling_mode,
+    transcript_signals,
+)
+from uls.intake.classification.calendar import CourseCalendar
+from uls.intake.classification.pipeline import (
+    NOTE_FORMAT_KIND_MISMATCH,
+    ClassificationOutcome,
+    SourceProbe,
+    classify_upload_item,
+)
 from uls.intake.identity import (
     derivative_marker,
     derive_operation_key,
@@ -90,6 +113,12 @@ INTAKE_OPERATIONS = frozenset(
 
 class IntakeReconcileRequired(UlsError):
     code = "RECONCILE_REQUIRED"
+
+
+class RequestTerminalError(UlsError):
+    """A terminal receipt (Applied/Cancelled/AutoResolved) is never re-claimed (plan §3.4 R2)."""
+
+    code = "REQUEST_TERMINAL"
 
 
 @dataclass(frozen=True)
@@ -203,6 +232,7 @@ class IntakeWorker:
             "semester_count": len(self.workspaces),
             "sources_json_optional": True,
             "request_extensions": dict(self.request_extension_readiness),
+            "classification": self._classification_readiness(),
         }
 
     @contextlib.contextmanager
@@ -280,9 +310,17 @@ class IntakeWorker:
             )
             total += discovery.count
             for item in discovery.items:
+                if item.status == IntakeStatus.NEEDS_INPUT.value and self._classification_enabled():
+                    # Plan §4 boundary: observe → classify → S3 decision → request.
+                    self._classify_discovered_item(item, workspace, config_fingerprint, workspace_fingerprint)
+                    item = self._require_item(item.intake_id)
                 if self.provider_account_binding_id:
                     self._project_file_intake_safe(item, workspace, workspace_fingerprint)
-                if item.status == IntakeStatus.NEEDS_INPUT.value and self.provider_account_binding_id:
+                if (
+                    item.status == IntakeStatus.NEEDS_INPUT.value
+                    and self.provider_account_binding_id
+                    and self._request_creation_allowed(item)
+                ):
                     request_type = self._initial_request_type(item)
                     try:
                         self._create_input_request_with_context(
@@ -490,7 +528,7 @@ class IntakeWorker:
             receipt = receipts.get(request_key)
             if receipt is None or receipt.provider_page_id != page_id:
                 continue
-            if receipt.state in {"Applied", "Cancelled"}:
+            if receipt.state in {"Applied", "Cancelled", "AutoResolved"}:
                 continue
             if receipt.state == "Claimed":
                 # A claimed receipt has a durable plan/job.  Re-entering it
@@ -834,6 +872,8 @@ class IntakeWorker:
                 "Request Status": "Draft",
                 "Workspace Fingerprint": workspace_fingerprint,
             }
+            suggestion_props = self._suggestion_properties(item)
+            properties.update(suggestion_props)
             self.state.record_provider_write_attempt(
                 operation=INTAKE_REQUEST_SYNC_OPERATION,
                 operation_key=attempt_key,
@@ -870,6 +910,8 @@ class IntakeWorker:
                 readback_json=readback,
             )
             self.state.bind_request_page(generation.request_key, page_id)
+            if suggestion_props:
+                self.state.upsert_intake_suggestion(item.intake_id, written_to_notion=1)
         receipt = self.state.get_request_receipt(generation.request_key)
         if receipt is None:
             raise SourceUnavailableError("request receipt disappeared after provider readback")
@@ -907,6 +949,9 @@ class IntakeWorker:
         receipt = self.state.get_request_receipt(request_key)
         if receipt is None or not receipt.provider_page_id:
             raise SourceUnavailableError("Request Key is not bound to a provider page")
+        if receipt.state in {"Applied", "Cancelled", "AutoResolved"}:
+            # Fixed refusal with no plan, job or Notion write (plan §3.4 R2).
+            raise RequestTerminalError(f"request receipt is terminal ({receipt.state})")
         item_hint = self._item_for_receipt(receipt)
         workspace = self._workspace_for_item(item_hint)
         if receipt.input_requests_data_source_id != workspace.input_requests_data_source_id:
@@ -929,6 +974,10 @@ class IntakeWorker:
             session_course=lambda value: self._session_course_key(value, workspace),
             schema_profile=getattr(self.notion, "schema_profile", "legacy5") or "legacy5",
         )
+        if not errors and request.request_type == RequestType.FILE_DETAILS.value:
+            # §6.1 common precondition: the (Kind, MIME, extension, signature) combination
+            # must be in the handling matrix before any external write (r10 R4).
+            errors = self._human_handling_errors(request)
         if errors:
             if self.notion:
                 self._guarded_notion_update(
@@ -1122,6 +1171,270 @@ class IntakeWorker:
                 )
             return self._process_material(item, plan, receipt, request, workspace)
         raise RequestValidationError(("unsupported plan kind",))
+
+    # ------------------------------------------------------------------
+    # Intake classification v2 (P-B1): S0/S1 in the sync path, S3 suggestions
+    # ------------------------------------------------------------------
+    def _classification_enabled(self) -> bool:
+        configured = getattr(getattr(self.config, "intake", None), "classification", None)
+        return bool(getattr(configured, "enabled", False))
+
+    def _classification_readiness(self) -> dict[str, Any]:
+        """Plan §4 O2 readiness block; P-C adds the model counters."""
+
+        counts = self.state.classification_counts() if hasattr(self.state, "classification_counts") else {}
+        if not self._classification_enabled():
+            status, reason = "DISABLED", "intake.classification.enabled is false"
+        elif not self._classification_profile_active():
+            status, reason = "DISABLED", "no verified v2 Notion schema profile"
+        else:
+            status, reason = "READY", None
+        return {
+            "status": status,
+            "reason": reason,
+            "rule_table_version": RULE_TABLE_VERSION,
+            "tag_rule_version": TAG_RULE_VERSION,
+            "calls_remaining": 0,
+            "deferred_items": counts.get("deferred_items", 0),
+            "human_fallback_items": counts.get("human_fallback_items", 0),
+            "partial_tag_documents": counts.get("partial_tag_documents", 0),
+            "stale_tag_documents": counts.get("stale_tag_documents", 0),
+            "invalid_response_count": 0,
+            "transport_failure_count": 0,
+        }
+
+    def _request_creation_allowed(self, item: IntakeItem) -> bool:
+        """observe → classify → S3 decision → request (plan §4): with classification
+        enabled a draft needs an explicit CLASSIFIED/HUMAN decision (or a human-labelled
+        item); with it disabled the current behaviour is unchanged."""
+
+        if not self._classification_enabled():
+            return True
+        if item.classification_source == "human":
+            return True
+        return item.classification_state in {"CLASSIFIED", "HUMAN"}
+
+    def _course_alias_index(self, semester: str) -> CourseAliasIndex:
+        entries = [
+            (course.course_key, course_aliases_from_config(
+                course.course_key, course.name, course.code, getattr(course, "aliases", ()) or ()
+            ))
+            for course in self.config.courses
+            if course.semester == semester
+        ]
+        return CourseAliasIndex.build(entries)
+
+    def _semester_range(self, semester: str) -> SemesterRange | None:
+        for registry in self.config.google_drive.semester_registries:
+            if registry.semester != semester:
+                continue
+            start, end = getattr(registry, "start_date", ""), getattr(registry, "end_date", "")
+            if start and end:
+                return SemesterRange(date.fromisoformat(start), date.fromisoformat(end), "config")
+        return None
+
+    def _course_calendar(self, course_key: str, semester: SemesterRange | None) -> CourseCalendar | None:
+        rows = self.state.list_recording_calendar_current(course_key)
+        complete = self.state.recording_calendar_complete(course_key)
+        if not rows:
+            if self.state.recording_calendar_course(course_key) is None:
+                return None  # no collection ever recorded: NO_CALENDAR
+            if complete:
+                return build_calendar(course_key, [], semester=semester, collection_complete=True)
+            # A collection was started but is not complete: AMBIGUOUS, never NO_CALENDAR (r7).
+            return build_calendar(course_key, [], semester=semester, collection_complete=False)
+        entries = [
+            RecordingEntry(row.canvas_course_id, row.resource_id, row.observation_revision, row.week,
+                           date.fromisoformat(row.recorded_on))
+            for row in rows
+        ]
+        return build_calendar(course_key, entries, semester=semester, collection_complete=complete)
+
+    def _source_probe(self, item: IntakeItem) -> SourceProbe:
+        """Bounded, proven download (plan §3.4 R3): the declared size must exist and
+        be within ``max_source_bytes`` before any byte is read, and the received
+        payload must match it exactly, otherwise nothing is proven."""
+
+        limit = int(getattr(getattr(self.config.intake, "classification", None), "max_source_bytes", 0) or 0)
+        try:
+            metadata = self.drive.read_metadata(item.provider_file_id)
+            size = getattr(metadata, "size", None)
+            if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+                return SourceProbe(None, False, unavailable=True)  # size unknown: cannot bound the read
+            if limit and size > limit:
+                return SourceProbe(None, False, too_large=True)
+            # The adapter aborts the transfer once it passes the bound and refuses a body
+            # whose length differs from the declared size; nothing oversized is kept.
+            payload = self._read_source_bytes(item, max_bytes=limit or None)
+        except ReconnectRequiredError:
+            raise
+        except (SourceUnavailableError, SourcePartialError, PolicyDeniedError, ProviderUnavailableError):
+            return SourceProbe(None, False, unavailable=True)
+        if limit and len(payload) > limit:
+            return SourceProbe(None, False, too_large=True)
+        if len(payload) != size:
+            return SourceProbe(None, False, unavailable=True)  # partial or misreported: not complete
+        return SourceProbe(payload, True)
+
+    def _explicit_course_candidate(self, item: IntakeItem) -> str | None:
+        candidates = item.course_candidates_json
+        if isinstance(candidates, str):
+            try:
+                candidates = json.loads(candidates)
+            except (TypeError, ValueError):
+                return None
+        if not isinstance(candidates, list):
+            return None
+        keys = [
+            value.get("course_key") for value in candidates
+            if isinstance(value, Mapping) and value.get("reason") == "registered upload folder"
+        ]
+        return keys[0] if len(keys) == 1 and isinstance(keys[0], str) else None
+
+    def _classify_discovered_item(
+        self,
+        item: IntakeItem,
+        workspace: ResolvedSemesterWorkspace,
+        config_fingerprint: str,
+        workspace_fingerprint: str,
+    ) -> ClassificationOutcome | None:
+        """S0/S1 + axes + calendar for one discovered upload; persists record, item columns and suggestion."""
+
+        if item.classification_source == "human":
+            return None
+        alias_index = self._course_alias_index(workspace.semester)
+        semester = self._semester_range(workspace.semester)
+        explicit = self._explicit_course_candidate(item)
+        axes = transcript_signals(item.original_name, alias_index)
+        course_key = explicit or (str(axes["course_key"]) if axes.get("course_key") else None)
+        calendar = self._course_calendar(course_key, semester) if course_key else None
+        binding = self.state.get_canvas_drive_binding(item.provider_file_id)
+
+        def classify(probe: SourceProbe | None) -> ClassificationOutcome:
+            # S0: PROFESSOR_SOURCE only when the stored Canvas binding is proven by the
+            # bytes just read (exact file id + byte_sha256); never from a title.  The
+            # proven binding's resource kind is the only Canvas signal S1 may use (r2 #3).
+            verified_binding = (
+                binding is not None and probe is not None and probe.byte_sha256 is not None
+                and binding.get("byte_sha256") == probe.byte_sha256
+            )
+            return classify_upload_item(
+                name=item.original_name, mime_type=item.mime_type, from_upload_folder=True,
+                explicit_course_key=explicit,
+                origin=Origin.PROFESSOR_SOURCE if verified_binding else None,
+                canvas_attachment_of=str(binding["resource_kind"]) if verified_binding and binding else None,
+                alias_index=alias_index, semester=semester, calendar=calendar, probe=probe,
+            )
+
+        outcome = classify(None)
+        if outcome.kind is Kind.UNSUPPORTED:
+            # P0 is terminal (plan §3.1): no download, no draft, no Material; File Intake
+            # carries UNSUPPORTED and the fixed reason code (r5).
+            self.state.update_intake_item(
+                item.intake_id,
+                status=IntakeStatus.UNSUPPORTED.value,
+                content_status="Unavailable",
+                last_error_code="UNSUPPORTED_FORMAT",
+                last_error="The file format is not part of the current deterministic intake path.",
+                origin=outcome.origin.value,
+                classified_kind=Kind.UNSUPPORTED.value,
+                classification_source=f"rule:{outcome.rule_id}",
+                classification_state="CLASSIFIED",
+            )
+            self.state.upsert_intake_suggestion(item.intake_id, **outcome.suggestion_fields())
+            return outcome
+        probe: SourceProbe | None = None
+        if outcome.decided or binding is not None:
+            # S1-decided items need the byte proof; a stored Canvas binding needs it to
+            # settle S0 (and its P4 signal) even when S1 is undecided (r2 R3).
+            probe = self._source_probe(item)
+            outcome = classify(probe)
+        record_id: str | None = None
+        byte_proven = probe is not None and probe.complete and probe.byte_sha256 is not None
+        if outcome.decided and outcome.kind is not None and byte_proven and probe is not None:
+            record = self.state.create_classification_record(
+                intake_id=item.intake_id,
+                provider_file_id=item.provider_file_id,
+                byte_sha256=probe.byte_sha256 if probe else None,
+                byte_md5=probe.byte_md5 if probe else None,
+                snapshot_sha256=None,
+                source_version=item.source_version,
+                workspace_fingerprint=workspace_fingerprint,
+                config_fingerprint=config_fingerprint,
+                rule_table_version=outcome.rule_table_version,
+                decision={"type": "rule", "rule_id": outcome.rule_id,
+                          "candidates": [kind.value for kind in outcome.candidates]},
+                kind=outcome.kind.value,
+                origin=outcome.origin.value,
+                course_key=outcome.course_key,
+                week=outcome.week,
+                decided_date=None if outcome.recorded_date is None else outcome.recorded_date.isoformat(),
+                course_basis={"type": outcome.course_basis or "none"},
+                calendar_projection_revision_hash=None if calendar is None else calendar.revision_hash(),
+                semester_range_basis=None if semester is None else semester.basis(),
+            )
+            record_id = record.record_id
+        # A Kind without a byte proof (download failed / too large) stays a local
+        # suggestion only: no record, no classified_kind, HUMAN fallback (r1).
+        decided = outcome.decided and record_id is not None
+        self.state.update_intake_item(
+            item.intake_id,
+            origin=outcome.origin.value,
+            classified_kind=outcome.kind.value if decided and outcome.kind is not None else None,
+            classification_source=f"rule:{outcome.rule_id}" if decided else None,
+            classification_record_id=record_id,
+            inferred_course_key=outcome.course_key,
+            inferred_week=outcome.week,
+            inferred_date=None if outcome.recorded_date is None else outcome.recorded_date.isoformat(),
+            calendar_match=None if outcome.calendar is None else outcome.calendar.status.value,
+            # P-B1 has no AUTO path: a byte-proven decided item is CLASSIFIED, the rest
+            # HUMAN; both still receive a HUMAN draft with suggestions (plan §3.3).
+            classification_state="CLASSIFIED" if decided else "HUMAN",
+        )
+        self.state.upsert_intake_suggestion(item.intake_id, **outcome.suggestion_fields())
+        return outcome
+
+    def _suggestion_properties(self, item: IntakeItem) -> dict[str, Any]:
+        """§3.3 suggestion fields for a new draft; only under a verified v2 profile."""
+
+        if not self._classification_enabled() or not self._classification_profile_active():
+            return {}
+        suggestion = self.state.get_intake_suggestion(item.intake_id)
+        if not suggestion:
+            return {}
+        props: dict[str, Any] = {}
+        if suggestion.get("suggested_course_key"):
+            props["Suggested Course"] = suggestion["suggested_course_key"]
+        if suggestion.get("suggested_kind") in AI_KIND_OPTIONS:
+            props["Suggested Kind"] = suggestion["suggested_kind"]
+        if suggestion.get("suggested_date"):
+            props["Suggested Date"] = suggestion["suggested_date"]
+        if isinstance(suggestion.get("suggested_week"), int):
+            props["Suggested Week"] = suggestion["suggested_week"]
+        if suggestion.get("suggestion_source"):
+            props["Suggestion Source"] = suggestion["suggestion_source"]
+        if suggestion.get("suggestion_note"):
+            props["Suggestion Note"] = suggestion["suggestion_note"]
+        return props
+
+    def _human_handling_errors(self, request: RequestInput) -> tuple[str, ...]:
+        """Reject a HUMAN Kind×format combination outside the §6.1 matrix before any write."""
+
+        if not self._classification_profile_active() or len(request.intake_ids) != 1:
+            return ()
+        item = self.state.get_intake_item(request.intake_ids[0])
+        if item is None or not request.kind:
+            return ()
+        kind = Kind.LECTURE_SLIDES if request.kind == FileKind.MATERIAL_PDF.value else Kind(request.kind)
+        probe = self._source_probe(item)
+        extension = item.original_name.rsplit(".", 1)[1].lower() if "." in item.original_name else None
+        if probe.payload is None:
+            return (NOTE_FORMAT_KIND_MISMATCH + (": source too large" if probe.too_large else ": source unavailable"),)
+        mode = handling_mode(kind, mime_type=item.mime_type, extension=extension,
+                             head=probe.payload, payload_complete=probe.complete)
+        if mode not in (HandlingMode.NORMALIZE, HandlingMode.REGISTER_OPAQUE_NO_RETRIEVAL):
+            return (NOTE_FORMAT_KIND_MISMATCH,)
+        return ()
 
     def _human_material_kinds(self) -> frozenset[str]:
         """HUMAN-selectable v2 Material Kinds under the active profile (plan §5)."""
@@ -2302,6 +2615,17 @@ class IntakeWorker:
             props["Error"] = item.last_error
         if item.last_successful_stage:
             props["Last Successful Stage"] = item.last_successful_stage
+        if self._classification_enabled() and self._classification_profile_active():
+            # SYSTEM_DERIVED classification projection (plan §5): only while the feature
+            # is enabled under a verified v2 profile (r6).
+            if item.origin in ORIGIN_OPTIONS:
+                props["Origin"] = item.origin
+            if item.classified_kind in AI_KIND_OPTIONS:
+                props["AI Kind"] = item.classified_kind
+            if item.classification_source:
+                props["Classification Source"] = item.classification_source
+            if item.classification_record_id:
+                props["Classification Record"] = item.classification_record_id
         return props
 
     def _validate_file_intake_readback(
@@ -2850,7 +3174,7 @@ class IntakeWorker:
             raise KeyError(intake_id)
         return item
 
-    def _read_source_bytes(self, item: IntakeItem) -> bytes:
+    def _read_source_bytes(self, item: IntakeItem, *, max_bytes: int | None = None) -> bytes:
         metadata = self.drive.read_metadata(item.provider_file_id)
         if metadata.file_id != item.provider_file_id or metadata.owned_by_me is not True:
             raise PolicyDeniedError("source identity or USER ownership readback failed")
@@ -2859,7 +3183,10 @@ class IntakeWorker:
             raise SourceUnavailableError("source checksum changed after the immutable observation")
         if item.source_hash.startswith("sha256:metadata-") and _metadata_source_hash(metadata) != item.source_hash:
             raise SourceUnavailableError("source metadata changed after the immutable observation")
-        data = self.drive.download(item.provider_file_id)
+        data = (
+            self.drive.download(item.provider_file_id) if max_bytes is None
+            else self.drive.download(item.provider_file_id, max_bytes=max_bytes)
+        )
         if not isinstance(data, bytes):
             raise SourceUnavailableError("Drive worker did not return bytes")
         return data
