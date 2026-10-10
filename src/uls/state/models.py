@@ -41,6 +41,7 @@ class Job:
     # P-B2b: the authority and classification revision the job's source identity was bound under.
     bound_authority: str | None = None
     bound_revision_hash: str | None = None
+    bound_kind: str | None = None
 
     def __post_init__(self) -> None:
         self.status = to_processing_status(self.status)

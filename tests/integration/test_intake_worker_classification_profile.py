@@ -80,6 +80,10 @@ def test_human_v2_material_kind_is_preserved_through_claim_and_dispatch(tmp_path
         material["Type"] = "Lecture Slides"
         assert worker.backfill_material_ai_kind() == {"scanned": 0, "updated": 0}
         assert notion.data_sources["synthetic-materials"][0].get("AI Kind") is None
+        # plan §9 P-B (r2 R3): a HUMAN v2-Kind Material is a v2 product for the retrieval gate too
+        from uls.state.reader import ReadOnlyState
+
+        assert ReadOnlyState(system["state"].db_path).is_v2_material(material["ID"]) is True
 
 
 def test_human_v2_kind_on_an_opaque_source_registers_without_retrieval(tmp_path: Path) -> None:
@@ -196,3 +200,19 @@ def details_key(system) -> str:
     receipts = [r for r in system["state"].list_request_receipts() if r.request_type == "FILE_DETAILS"]
     assert len(receipts) == 1
     return receipts[0].request_key
+
+
+def test_a_legacy_material_pdf_is_not_a_v2_product(tmp_path: Path) -> None:
+    with _system(tmp_path, raw=_pdf_bytes(), name="week3_notes.pdf", mime_type="application/pdf") as system:
+        worker = _rewire(system, "legacy5-cls")
+        notion = system["notion"]
+        worker.run_once()
+        _assign_request(notion).update({"Course": ["synthetic-course-page-0"], "Submitted": True})
+        worker.run_once()
+        _details_request(notion).update({"Course": ["synthetic-course-page-0"], "Kind": "MATERIAL_PDF",
+                                          "Material Role": "Lecture Slides", "Submitted": True})
+        worker.run_once()
+        (material,) = notion.data_sources["synthetic-materials"]
+        from uls.state.reader import ReadOnlyState
+
+        assert ReadOnlyState(system["state"].db_path).is_v2_material(material["ID"]) is False

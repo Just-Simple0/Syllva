@@ -1291,13 +1291,15 @@ class RetrievalEngine:
         return result
 
     def _v2_material_hidden(self, material_id: str) -> bool:
-        """A Material created by an AUTO run stays unexposed until the v2 gate is switched on."""
+        """A v2 Material (AUTO run or HUMAN v2 Kind) stays unexposed until the v2 gate is switched on."""
 
         if self._config_mapping("v2_exposure_gate", {}) is True:
             return False
-        marker = getattr(self.state_store, "is_v2_auto_material", None)
+        if self.state_store is None:
+            return False  # no durable state at all: nothing can be a v2 product
+        marker = getattr(self.state_store, "is_v2_material", None)
         if marker is None:
-            return False
+            raise SourceUnavailableError("the v2 exposure marker is unavailable")  # fail closed
         return bool(marker(material_id))
 
     def _user_references(self, session_id: str) -> tuple[Mapping[str, Any], ...]:

@@ -144,8 +144,8 @@ def test_a_lecture_pdf_is_normalized_with_the_initial_type(tmp_path: Path) -> No
         from uls.state.reader import ReadOnlyState
 
         reader = ReadOnlyState(system["state"].db_path)
-        assert reader.is_v2_auto_material(material["ID"]) is True
-        assert reader.is_v2_auto_material("COMP319-M99") is False
+        assert reader.is_v2_material(material["ID"]) is True
+        assert reader.is_v2_material("COMP319-M99") is False
 
 
 def test_a_blank_draft_is_closed_and_the_plan_runs_in_the_same_tick(tmp_path: Path) -> None:
@@ -318,7 +318,8 @@ def test_only_our_own_session_is_an_own_effect(tmp_path: Path) -> None:
                 from uls.intake.worker import INTAKE_SESSION_OPERATION
 
                 op_key = worker._plan_operation_key(INTAKE_SESSION_OPERATION, item, plan, workspace, context, target_id=None)
-                system["state"].update_provider_write_attempt(op_key, response_state="UNKNOWN")
+                with system["state"]._transaction(immediate=True) as connection:
+                    connection.execute("DELETE FROM provider_write_attempts WHERE operation_key = ?", (op_key,))
             if label == "own":
                 worker._session_point_of_use(context, workspace)  # must not raise
             else:
@@ -404,3 +405,139 @@ def test_job_record_and_workspace_must_agree_on_the_course(tmp_path: Path) -> No
         worker._promote_ready_plans = promote_then_corrupt  # type: ignore[method-assign]
         worker.run_once()
         assert _sessions(system) == [] and _auto_plans(system["state"])[0]["status"] == "RECONCILE_REQUIRED"
+
+
+def _retry_after_failure(system, worker, status: str) -> None:
+    """Simulate the operator/worker re-running a failed job: item and job are made runnable again."""
+
+    state = system["state"]
+    item = _item(system)
+    state.update_intake_item(item.intake_id, status=status, last_error_code=None, last_error=None)
+    with state._transaction(immediate=True) as connection:
+        connection.execute("UPDATE jobs SET status = 'PENDING', completed_at = NULL, error_class = NULL, last_error = NULL")
+
+
+def test_a_source_without_md5_is_reproven_before_every_write(tmp_path: Path) -> None:
+    # r2 R1: no MD5 -> SHA-256 of the downloaded bytes is compared at each write, not only at the entry.
+    with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
+        drive = system["drive"]
+        drive.files[system["source_id"]] = replace(drive.files[system["source_id"]], md5_checksum=None)
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        original = worker._auto_write_gate
+        calls = {"n": 0}
+
+        def gate(context, workspace, *, entry=False):
+            calls["n"] += 1
+            if calls["n"] == 3:  # after the first writes: same length, different content
+                drive.contents[system["source_id"]] = b"X" * len(RAW)
+            return original(context, workspace, entry=entry)
+        worker._auto_write_gate = gate  # type: ignore[method-assign]
+        worker.run_once()
+        assert _item(system).status != "ORGANIZED"
+        assert _auto_plans(system["state"])[0]["status"] == "RECONCILE_REQUIRED"
+        assert system["state"].get_job(_jobs(system)[0].id).voided_at is not None
+
+
+def test_a_second_session_before_the_pointer_write_is_refused(tmp_path: Path) -> None:
+    # r2 R2: NEW (our Session exists, a human adds another one) and EXISTING (a second Session appears).
+    for label in ("new", "existing"):
+        with _system(tmp_path / label, name=MATCHED_NAME, raw=RAW) as system:
+            worker = _enable(system)
+            _complete_calendar(system["state"])
+            if label == "existing":
+                _seed_session(system["notion"], "TEST102-S01")
+            original = worker._session_pointer_gate
+
+            def gate(context, page, derivative_file_id, _o=original, _sy=system):
+                _seed_session(_sy["notion"], "TEST102-S88")
+                return _o(context, page, derivative_file_id)
+            worker._session_pointer_gate = gate  # type: ignore[method-assign]
+            worker.run_once()
+            first = system["notion"].data_sources["synthetic-sessions"][0]
+            assert not first.get("Normalized Transcript"), label
+            assert _auto_plans(system["state"])[0]["status"] == "RECONCILE_REQUIRED", label
+
+
+def test_a_response_lost_session_create_is_proven_by_a_read_and_resumed(tmp_path: Path) -> None:
+    # r2 R4 (A): Notion created the Session but the response was lost.
+    with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        system["notion"].drop_next_create_response = False
+        original_create = system["notion"].create_record
+        lost = {"done": False}
+
+        def create_record(data_source_id, properties):
+            row = original_create(data_source_id, properties)
+            if data_source_id == "synthetic-sessions" and not lost["done"]:
+                lost["done"] = True
+                raise ConnectionError("response lost after a successful create")
+            return row
+        system["notion"].create_record = create_record  # type: ignore[method-assign]
+        worker.run_once()
+        assert len(_sessions(system)) == 1 and _item(system).status != "ORGANIZED"
+        assert _auto_plans(system["state"])[0]["status"] == "PLANNED"  # not parked: the effect is still ours to prove
+        _retry_after_failure(system, worker, "PLANNED")
+        worker.run_once()
+        assert len(_sessions(system)) == 1  # no duplicate Session
+        assert _item(system).status == "ORGANIZED" and _sessions(system)[0].get("Normalized Transcript")
+
+
+def test_a_response_lost_drive_move_is_proven_by_a_read_before_it_is_judged(tmp_path: Path) -> None:
+    # r2 R4 (B): the provider moved the file but the response (and so READBACK_OK) was lost.  The gate
+    # proves the move from a read (same plan, file ID, destination, private) instead of calling it external.
+    with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        system["drive"].drop_next_move_response = True
+        worker.run_once()
+        state = system["state"]
+        item = _item(system)
+        assert item.status != "ORGANIZED"
+        assert system["drive"].files[system["source_id"]].parent_id != "synthetic-upload"  # it did move
+        plan = state.get_intake_plan(item.plan_revision)
+        context = worker._auto_context(item, plan, worker._auto_record_for_item(item), job_id=None)
+        state.update_intake_item(item.intake_id, status="REGISTERED", last_error_code=None, last_error=None)
+        assert state.get_intake_plan(plan.plan_revision).status == "PLANNED"
+        worker._auto_write_gate(context, worker._workspace_for_item(item))  # must not raise
+        move_attempts = [
+            a for a in (state.get_provider_write_attempt(k) for k in _move_keys(state)) if a is not None]
+        assert move_attempts and all(a.response_state == "READBACK_OK" for a in move_attempts)
+    # without any recorded attempt the same parent is an external change
+    with _system(tmp_path / "foreign", name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        system["drive"].drop_next_move_response = True
+        worker.run_once()
+        state = system["state"]
+        item = _item(system)
+        plan = state.get_intake_plan(item.plan_revision)
+        context = worker._auto_context(item, plan, worker._auto_record_for_item(item), job_id=None)
+        state.update_intake_item(item.intake_id, status="REGISTERED", last_error_code=None, last_error=None)
+        with state._transaction(immediate=True) as connection:
+            connection.execute("DELETE FROM provider_write_attempts WHERE operation LIKE '%move%'")
+        with pytest.raises(IntakeReconcileRequired):
+            worker._auto_write_gate(context, worker._workspace_for_item(item))
+        assert state.get_intake_plan(plan.plan_revision).status == "RECONCILE_REQUIRED"
+
+
+def _move_keys(state) -> list[str]:
+    with state._transaction() as connection:
+        return [row["operation_key"] for row in connection.execute(
+            "SELECT operation_key FROM provider_write_attempts WHERE operation LIKE '%move%'")]
+
+
+def test_the_claimed_job_tuple_itself_must_match_the_stored_job(tmp_path: Path) -> None:
+    # r2 H1
+    with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        worker.run_once(process=False)
+        worker._promote_ready_plans()
+        item = _item(system)
+        job = system["state"].claim_job(_jobs(system)[0].id)
+        forged = replace(job, plan_revision="other-plan")
+        with pytest.raises(IntakeReconcileRequired):
+            worker._process_item_unlocked(item.intake_id, claimed=forged)
+        assert _sessions(system) == []

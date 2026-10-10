@@ -76,11 +76,13 @@ class ReadOnlyState:
         pointer = derivative.web_url or f'https://drive.google.com/file/d/{derivative.file_id}/view'
         return SourceBindingRecord(entity_id, pointer, derivative, SourceRef(provider, file_id))
 
-    def is_v2_auto_material(self, entity_id: str) -> bool:
-        """True when the Material was created by an AUTO_CLASSIFICATION run (plan §7, P-B gate)."""
+    def is_v2_material(self, entity_id: str) -> bool:
+        """True when the Material came in through a v2 Kind — an AUTO run or a HUMAN request with a
+        v2 Kind (plan §7, P-B gate).  Legacy Materials carry neither marker."""
 
         rows = self._rows('''SELECT 1 FROM source_files sf JOIN jobs j ON j.source_file_id = sf.source_file_id
-            WHERE sf.canonical_entity_id=? AND j.bound_authority='AUTO_CLASSIFICATION' LIMIT 1''', (entity_id,))
+            WHERE sf.canonical_entity_id=?
+            AND (j.bound_authority='AUTO_CLASSIFICATION' OR j.bound_kind IS NOT NULL) LIMIT 1''', (entity_id,))
         return bool(rows)
 
     def lookup_source_binding(self, entity_id: str, normalized_source_url: str) -> Any:

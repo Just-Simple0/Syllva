@@ -601,7 +601,7 @@ class SQLiteStateStore(UsageRangeStateMixin, ClassificationStateMixin):
                 )
         job_columns = {row[1] for row in self._connection.execute("PRAGMA table_info(jobs)")}
         for column in ("plan_revision", "plan_authority", "voided_at", "void_reason",
-                       "bound_authority", "bound_revision_hash"):
+                       "bound_authority", "bound_revision_hash", "bound_kind"):
             if column not in job_columns:
                 self._connection.execute(f"ALTER TABLE jobs ADD COLUMN {column} TEXT")
         self._connection.execute(
@@ -4016,6 +4016,7 @@ class SQLiteStateStore(UsageRangeStateMixin, ClassificationStateMixin):
         course_key: str | None = None,
         authority: str | None = None,
         classification_revision_hash: str | None = None,
+        kind: str | None = None,
     ) -> Job:
         """Bind a plan job to the verified source generation before provenance.
 
@@ -4058,11 +4059,12 @@ class SQLiteStateStore(UsageRangeStateMixin, ClassificationStateMixin):
                 SET source_file_id = ?, source_hash = ?,
                     course_key = COALESCE(course_key, ?), updated_at = ?,
                     bound_authority = COALESCE(bound_authority, ?),
-                    bound_revision_hash = COALESCE(bound_revision_hash, ?)
+                    bound_revision_hash = COALESCE(bound_revision_hash, ?),
+                    bound_kind = COALESCE(bound_kind, ?)
                 WHERE id = ?
                 """,
                 (source_file_id, source_hash, course_key, _utc_now(), authority,
-                 classification_revision_hash, row["id"]),
+                 classification_revision_hash, kind, row["id"]),
             )
             return _job_from_row(
                 connection.execute("SELECT * FROM jobs WHERE id = ?", (row["id"],)).fetchone()

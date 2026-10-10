@@ -1994,7 +1994,8 @@ class IntakeWorker:
                     reason = "SOURCE_VERSION"
                 elif metadata.md5_checksum and record.byte_md5 and metadata.md5_checksum != record.byte_md5:
                     reason = "SOURCE_BYTES"
-            if reason is None and entry:
+            if reason is None and (entry or not (metadata.md5_checksum and record.byte_md5)):
+                # Without an MD5 to compare, every write re-proves the bytes (plan §3.4 R3).
                 probe = self._source_probe(current)
                 if not probe.complete or probe.byte_sha256 != record.byte_sha256:
                     reason = "SOURCE_BYTES"
@@ -2061,10 +2062,22 @@ class IntakeWorker:
         target = metadata.parent_id
         if target is None:
             return False
-        prior = self.state.get_provider_write_attempt(self._operation_key(
+        op_key = self._operation_key(
             INTAKE_MOVE_OPERATION, self.provider, item.provider_file_id, item.original_parent_id, target,
-            item.source_hash, plan.plan_revision))
-        return prior is not None and prior.response_state == "READBACK_OK" and prior.target_id == item.provider_file_id
+            item.source_hash, plan.plan_revision)
+        prior = self.state.get_provider_write_attempt(op_key)
+        if prior is None or prior.target_id != item.provider_file_id:
+            return False
+        if prior.response_state == "READBACK_OK":
+            return True
+        # The move may have succeeded without its response.  The attempt names this plan, this file
+        # and exactly this destination; the file is there, private and ID-preserved: confirm it.
+        if metadata.file_id != item.provider_file_id or metadata.parents != (target,):
+            return False
+        _check_private_drive_metadata(metadata, require_move=True)
+        self.state.update_provider_write_attempt(
+            op_key, target_id=metadata.file_id, response_state="READBACK_OK", readback_json=asdict(metadata))
+        return True
 
     def _eligibility_mismatch(
         self, item: IntakeItem, record: ClassificationRecord, workspace: ResolvedSemesterWorkspace,
@@ -2283,7 +2296,14 @@ class IntakeWorker:
             return False
         op_key = self._plan_operation_key(INTAKE_SESSION_OPERATION, item, plan, workspace, context, target_id=None)
         attempt = self.state.get_provider_write_attempt(op_key)
-        return attempt is not None and attempt.response_state == "READBACK_OK"
+        if attempt is None:
+            return False
+        if attempt.response_state != "READBACK_OK":
+            # The create may have succeeded without its response: the page is exactly the reserved
+            # ID/Course/Date of THIS plan's attempt, so it is ours — confirm the attempt (r2 R4).
+            self.state.update_provider_write_attempt(
+                op_key, target_id=_page_id(rows[0]), response_state="READBACK_OK", readback_json=rows[0])
+        return True
 
     def _session_pointer_gate(
         self, context: ClassificationExecutionContext, session_page: Mapping[str, Any], derivative_file_id: str
@@ -2294,6 +2314,7 @@ class IntakeWorker:
 
         if self.notion is None:
             return
+        self._session_point_of_use(context, self._workspace_for_item(self._require_item(context.intake_id)))
         reservation = self.state.get_entity_reservation(intake_id=context.intake_id, entity_kind="SESSION")
         expected_id = context.session_id if context.session_mode == SessionMode.EXISTING.value else (
             None if reservation is None else reservation.entity_app_id)
@@ -2336,6 +2357,7 @@ class IntakeWorker:
         job = self.state.get_job(claimed.id)
         if (
             job is None or job.voided_at is not None or job.plan_revision != plan.plan_revision
+            or claimed.plan_revision != job.plan_revision or claimed.plan_authority != job.plan_authority
             or job.plan_authority != plan.plan_authority
             or item.plan_revision != plan.plan_revision
         ):
@@ -3232,6 +3254,7 @@ class IntakeWorker:
             ),
             source_hash=source_hash,
             status=_job_status(IntakeStatus.ORGANIZED.value, text_status),
+            kind=request.kind if request.kind in {k.value for k in Kind} else None,
         )
         return {"status": IntakeStatus.ORGANIZED.value, "entity_id": reservation.entity_app_id, "file_id": item.provider_file_id, "content_status": text_status}
 
@@ -3258,7 +3281,7 @@ class IntakeWorker:
             self.state.bind_job_source_identity(
                 request.job_id, source_file_id=item.provider_file_id, source_hash=source_hash,
                 course_key=request.course_key, authority=request.plan_authority,
-                classification_revision_hash=request.classification_revision_hash)
+                classification_revision_hash=request.classification_revision_hash, kind=request.kind)
         source_ref = SourceRef(self.provider, item.provider_file_id, _drive_link(item.provider_file_id))
         self._apply_binding(item, plan, reservation, source_ref, source_hash, "material", receipt, request, workspace)
         self.state.record_intake_stage_event("APPLIED", intake_id=item.intake_id)
@@ -3288,6 +3311,7 @@ class IntakeWorker:
         derivative_ref: SourceRef,
         source_hash: str,
         status: str,
+        kind: str | None = None,
     ) -> None:
         """Publish the existing source-to-derivative retrieval contract.
 
@@ -3328,6 +3352,7 @@ class IntakeWorker:
             course_key=self._item_course_key(item),
             authority=auto_plan.plan_authority if auto_plan is not None else None,
             classification_revision_hash=auto_plan.classification_revision_hash if auto_plan is not None else None,
+            kind=kind,
         )
         existing = get_record(job.id, operation=operation)
         if existing is None:
@@ -3382,7 +3407,11 @@ class IntakeWorker:
             entity_id = str(target_page.get("ID", ""))
             self._validate_entity_for_course(entity_id, "S", request.course_key or item.selected_course_key or "", target_page, course_id)
         else:
-            entity_id = self._next_entity_id(rows, request.course_key or item.selected_course_key or "", "S")
+            # A reservation of this very plan already fixed the ID (a retry after a lost response):
+            # reuse it instead of recomputing from an inventory that may now contain our own page.
+            held = self.state.get_entity_reservation(intake_id=item.intake_id, entity_kind="SESSION")
+            entity_id = held.entity_app_id if held is not None and held.plan_revision == plan.plan_revision else \
+                self._next_entity_id(rows, request.course_key or item.selected_course_key or "", "S")
         parent = workspace.recordings_folder_id
         marker = folder_marker_key(
             provider=self.provider,
@@ -3415,7 +3444,9 @@ class IntakeWorker:
         course_id: str,
     ) -> EntityReservation:
         rows = self._inventory("materials", workspace, course_id)
-        entity_id = self._next_entity_id(rows, request.course_key or item.selected_course_key or "", "M")
+        held = self.state.get_entity_reservation(intake_id=item.intake_id, entity_kind="MATERIAL")
+        entity_id = held.entity_app_id if held is not None and held.plan_revision == plan.plan_revision else \
+            self._next_entity_id(rows, request.course_key or item.selected_course_key or "", "M")
         parent = workspace.materials_folder_id
         reservation_id = sha256_hex(["intake.reservation.v1", item.intake_id, plan.plan_revision, "M"])
         marker = folder_marker_key(
@@ -3518,7 +3549,14 @@ class IntakeWorker:
             raise IntakeReconcileRequired("multiple Session pages have the reserved ID")
         if matches:
             page = matches[0]
-            self._validate_new_session_snapshot(page, properties, course_id)
+            try:
+                self._validate_new_session_snapshot(page, properties, course_id)
+            except IntakeReconcileRequired:
+                # An AUTO retry may meet its own Session after a later step (pointer, status) already
+                # succeeded; the pointer write below is idempotent and fails closed on a foreign pointer.
+                if not (isinstance(request, ClassificationExecutionContext)
+                        and self._session_in_own_progress(page, properties, course_id)):
+                    raise
             self.state.update_provider_write_attempt(op_key, target_id=_page_id(page), response_state="READBACK_OK", readback_json=page) if prior else self.state.record_provider_write_attempt(operation=INTAKE_SESSION_OPERATION, operation_key=op_key, provider=self.provider, target_id=_page_id(page), response_state="READBACK_OK", readback_json=page)
             return page
         if prior is not None:
@@ -4509,6 +4547,14 @@ class IntakeWorker:
             raise IntakeReconcileRequired("new Session creation snapshot readback mismatch")
         if "Session No" in properties and page.get("Session No") != properties["Session No"]:
             raise IntakeReconcileRequired("new Session user Session No readback mismatch")
+
+    @staticmethod
+    def _session_in_own_progress(page: Mapping[str, Any], properties: Mapping[str, Any], course_id: str) -> bool:
+        return (
+            page.get("ID") == properties.get("ID") and _relation_ids(page.get("Course")) == [course_id]
+            and page.get("Date") == properties.get("Date") and page.get("Status") == "Not started"
+            and page.get("Recording Status") in {"Ready", "Partial"} and bool(page.get("Normalized Transcript"))
+        )
 
     @staticmethod
     def _validate_material_snapshot(page: Mapping[str, Any], properties: Mapping[str, Any], course_id: str) -> None:
