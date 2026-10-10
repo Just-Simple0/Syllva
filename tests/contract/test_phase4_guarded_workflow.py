@@ -7,6 +7,7 @@ import sys
 import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures"))
+from no_v2_state import NoV2State
 from phase4 import phase4_applier_kwargs, ready_phase4
 
 from uls.adapters.notion.base import (
@@ -96,7 +97,7 @@ def test_guarded_approval_refreshes_same_engine_capability() -> None:
     engine = RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         UlsConfig(),
         source_binding_resolver=resolver,

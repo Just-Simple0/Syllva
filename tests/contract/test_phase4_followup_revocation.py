@@ -6,6 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from tests.fixtures.no_v2_state import NoV2State
 
 from uls.adapters.drive.binding import SourceBindingRecord
 from uls.config.schema import UlsConfig
@@ -24,7 +25,7 @@ def _ready_context():
     reader, _, drive, resolver = ready_phase4()
     reader.material_usage["COMP319-S05"][0]["Verified"] = True
     engine = RetrievalEngine(
-        reader, drive, None, MemoryEphemeralStore(), UlsConfig(),
+        reader, drive, NoV2State(), MemoryEphemeralStore(), UlsConfig(),
         source_binding_resolver=resolver,
     )
     return reader, drive, engine

@@ -4,9 +4,11 @@ import sys
 import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
+from no_v2_state import NoV2State
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures"))
 
 from fake_notion import COURSE_KEY, FakeNotionReader
+
 from uls.config.schema import UlsConfig
 from uls.domain.errors import EntityNotFoundError, InvalidCandidateError, ResolutionExpiredError
 from uls.ephemeral.memory import MemoryEphemeralStore
@@ -16,7 +18,7 @@ from uls.retrieval.engine import RetrievalEngine
 def _engine(notion: FakeNotionReader | None = None, *, ttl: int = 900) -> RetrievalEngine:
     config = UlsConfig()
     config.retrieval.resolution_ttl_seconds = ttl
-    return RetrievalEngine(notion or FakeNotionReader(), object(), None, MemoryEphemeralStore(), config)
+    return RetrievalEngine(notion or FakeNotionReader(), object(), NoV2State(), MemoryEphemeralStore(), config)
 
 
 def test_exact_id_alias_session_number_and_intent_suffix_resolve_same_session() -> None:

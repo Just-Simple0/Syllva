@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import pathlib
 import sys
+from collections.abc import Callable
 from copy import deepcopy
 from typing import Any
-from collections.abc import Callable
 
 import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures"))
 
 from phase4 import COURSE_KEY, phase4_applier_kwargs, phase4_proposal, ready_phase4
+from no_v2_state import NoV2State
 
 from uls.adapters.notion.base import HumanApprovalApplier, QueueState, upsert_proposal
 from uls.adapters.notion.guarded import GuardedNotionWriter
@@ -26,7 +27,7 @@ def _engine(reader: Any, drive: Any, resolver: Any) -> RetrievalEngine:
     return RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         UlsConfig(),
         source_binding_resolver=resolver,

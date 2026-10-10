@@ -10,6 +10,7 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures"))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
+from no_v2_state import NoV2State
 from phase4 import ready_phase4
 
 from uls.adapters.drive.binding import ValidatedSourceBindingResolver
@@ -31,7 +32,7 @@ def _engine(reader, drive, *, config: UlsConfig | None = None) -> RetrievalEngin
     return RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         config or UlsConfig(),
         source_binding_resolver=ValidatedSourceBindingResolver(drive),
@@ -40,7 +41,7 @@ def _engine(reader, drive, *, config: UlsConfig | None = None) -> RetrievalEngin
 
 def test_source_binding_resolver_is_explicit_and_never_made_from_drive() -> None:
     reader, _, drive, _ = ready_phase4()
-    engine = RetrievalEngine(reader, drive, None, MemoryEphemeralStore(), UlsConfig())
+    engine = RetrievalEngine(reader, drive, NoV2State(), MemoryEphemeralStore(), UlsConfig())
 
     with pytest.raises(SourceUnavailableError):
         engine.get_session_context("COMP319-S05")

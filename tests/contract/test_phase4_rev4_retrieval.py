@@ -20,6 +20,7 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures"))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
+from no_v2_state import NoV2State
 from phase4 import ready_phase4
 
 from uls.config.schema import RetrievalCfg, UlsConfig
@@ -39,7 +40,7 @@ def _engine(reader: Any, drive: Any, *, config: UlsConfig | None = None) -> Retr
     return RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         config or UlsConfig(),
         source_binding_resolver=resolver,
@@ -145,7 +146,7 @@ def test_initial_session_transcript_read_rechecks_the_mutated_basis(mutation: st
     engine = RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         UlsConfig(),
         source_binding_resolver=resolver,
@@ -179,7 +180,7 @@ def test_initial_direct_material_read_does_not_issue_mutated_evidence(mutation: 
     engine = RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         UlsConfig(),
         source_binding_resolver=resolver,
@@ -219,7 +220,7 @@ def test_initial_usage_material_read_rechecks_every_authorization_basis(mutation
     engine = RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         UlsConfig(),
         source_binding_resolver=resolver,
@@ -256,7 +257,7 @@ def test_initial_provisional_usage_revocation_does_not_leave_provisional_flags(
     engine = RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         UlsConfig(),
         source_binding_resolver=resolver,
@@ -302,7 +303,7 @@ def test_mutated_usage_drops_only_that_overlapping_sibling(
     engine = RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         UlsConfig(),
         source_binding_resolver=resolver,
@@ -343,7 +344,7 @@ def test_retain_current_evidence_preserves_a_sibling_when_one_check_raises() -> 
     engine = RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         UlsConfig(),
         source_binding_resolver=resolver,
@@ -382,7 +383,7 @@ def test_retain_current_evidence_rejects_count_mismatch_as_structured_failure() 
     engine = RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         UlsConfig(),
         source_binding_resolver=resolver,
@@ -404,7 +405,7 @@ def test_retain_current_evidence_rejects_same_length_provisional_misalignment() 
     engine = RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         UlsConfig(),
         source_binding_resolver=resolver,
@@ -448,7 +449,7 @@ def test_budget_keeps_only_the_binding_for_the_returned_duplicate_locator() -> N
     engine = RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         config,
         source_binding_resolver=resolver,
@@ -490,7 +491,7 @@ def test_final_usage_body_read_rechecks_full_authorization_basis(
     engine = RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         UlsConfig(),
         source_binding_resolver=resolver,
@@ -535,7 +536,7 @@ def test_final_direct_material_body_read_rechecks_graph_and_fingerprint(
     engine = RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         UlsConfig(),
         source_binding_resolver=resolver,
@@ -570,7 +571,7 @@ def test_final_transcript_body_read_rechecks_graph_and_fingerprint(mutation: str
     engine = RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         UlsConfig(),
         source_binding_resolver=resolver,
@@ -606,7 +607,7 @@ def test_navigation_only_pointer_change_during_initial_material_read_preserves_i
     engine = RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         UlsConfig(),
         source_binding_resolver=resolver,
@@ -636,7 +637,7 @@ def test_navigation_only_pointer_change_during_final_material_read_preserves_ide
     engine = RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         UlsConfig(),
         source_binding_resolver=resolver,

@@ -4,6 +4,8 @@ import sys
 import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
+from no_v2_state import NoV2State
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures"))
 
 from fake_drive import FakeDriveReader
@@ -69,7 +71,7 @@ def _engine(*, notion=None, drive=None, retrieval=None) -> RetrievalEngine:
     return RetrievalEngine(
         notion or FakeNotionReader(),
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         UlsConfig(retrieval=retrieval or RetrievalCfg()),
         source_binding_resolver=ValidatedSourceBindingResolver(drive),

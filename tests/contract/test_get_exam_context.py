@@ -9,6 +9,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures")
 
 from fake_drive import FakeDriveReader
 from fake_notion import FakeNotionReader
+from no_v2_state import NoV2State
 from phase4 import COURSE_KEY, COURSE_PAGE_ID, exam_record
 
 from uls.adapters.drive.binding import SourceBindingRecord, ValidatedSourceBindingResolver
@@ -80,7 +81,7 @@ def _engine(*, included_sessions=None, confirmed=True, omit_included=False):
     engine = RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         UlsConfig(),
         source_binding_resolver=ValidatedSourceBindingResolver(drive),

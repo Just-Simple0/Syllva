@@ -2006,9 +2006,7 @@ class IntakeWorker:
         except (SourceUnavailableError, SourcePartialError, PolicyDeniedError, ProviderUnavailableError):
             reason = "SOURCE_UNAVAILABLE"
         if reason is None:
-            sessions_open = (not executing) or (
-                entry and self.state.get_entity_reservation(intake_id=item.intake_id, entity_kind="SESSION") is None
-            )
+            sessions_open = not executing  # execution checks the Sessions at every gate (_auto_write_gate)
             reason = (
                 self._provenance_mismatch(item, record, workspace)
                 or self._eligibility_mismatch(item, record, workspace, sessions=sessions_open)
@@ -2241,6 +2239,8 @@ class IntakeWorker:
             raise IntakeReconcileRequired("AUTO is no longer usable")
         if not self._auto_preflight(item, plan, record, workspace, executing=True, entry=entry):
             raise IntakeReconcileRequired("AUTO preflight failed")
+        if context.kind == Kind.TRANSCRIPT.value:
+            self._session_point_of_use(context, workspace)  # E7/E9 before EVERY external write of a transcript
         verdict, reason, drafts = self._judge_human_requests(item, workspace)
         if verdict == "UNTOUCHED" and drafts:
             verdict, reason = "HUMAN", "HUMAN_REQUEST_ACTIVE"  # a HUMAN request exists: it wins
@@ -2263,19 +2263,41 @@ class IntakeWorker:
         recorded = None if context.actual_date is None else date.fromisoformat(context.actual_date)
         expected = (record.session_mode, record.session_id, record.sessions_inventory_hash)
         ok = False
-        if reservation is not None and context.session_mode == SessionMode.NEW.value:
-            if reservation.plan_revision == context.plan_revision:
-                mode, session_id, digest, block = self._session_binding(
-                    item, context.course_key, recorded, workspace, ignore_ids=frozenset({reservation.entity_app_id}))
-                ok = block is None and (mode, session_id, digest) == expected and self._own_session_effect_ok(
+        if reservation is not None and reservation.plan_revision == context.plan_revision:
+            # Our reserved Session is the only own effect: nothing else may share the day, and the
+            # Session we hold must be exactly the decided one.
+            mode, _sid, _digest, block = self._session_binding(
+                item, context.course_key, recorded, workspace, ignore_ids=frozenset({reservation.entity_app_id}))
+            others_clear = block is None and mode == SessionMode.NEW.value
+            if context.session_mode == SessionMode.NEW.value:
+                ok = others_clear and (mode, _sid, _digest) == expected and self._own_session_effect_ok(
                     item, plan, context, reservation.entity_app_id, workspace)
-        else:
+            else:
+                ok = others_clear and reservation.entity_app_id == context.session_id and self._existing_session_intact(
+                    item, context, workspace)
+        elif reservation is None:
             mode, session_id, digest, block = self._session_binding(item, context.course_key, recorded, workspace)
             ok = block is None and (mode, session_id, digest) == expected
         if ok:
             return
         self.state.reconcile_intake_plan(plan.plan_revision, "SESSION_INVENTORY")
         raise IntakeReconcileRequired("the Sessions inventory changed after the decision")
+
+    def _existing_session_intact(
+        self, item: IntakeItem, context: ClassificationExecutionContext, workspace: ResolvedSemesterWorkspace
+    ) -> bool:
+        """The EXISTING Session we hold still has the decided ID, Course and Date and is not bound
+        to another file; its pointer is judged by the pointer gate."""
+
+        if self.notion is None:
+            return False
+        rows = [r for r in self.notion.list_records("sessions") if r.get("ID") == context.session_id]
+        course_id = self._course_page_map(workspace).get(context.course_key)
+        if len(rows) != 1 or course_id is None or _relation_ids(rows[0].get("Course")) != [course_id] \
+                or _parse_session_day(rows[0].get("Date")) != context.actual_date:
+            return False
+        binding = self.state.session_source_binding_for(context.course_key, context.session_id or "")
+        return binding is None or binding.get("provider_file_id") == context.source_file_id
 
     def _own_session_effect_ok(
         self, item: IntakeItem, plan: IntakePlan, context: ClassificationExecutionContext, entity_id: str,
@@ -2296,15 +2318,14 @@ class IntakeWorker:
             return False
         op_key = self._plan_operation_key(INTAKE_SESSION_OPERATION, item, plan, workspace, context, target_id=None)
         attempt = self.state.get_provider_write_attempt(op_key)
-        if attempt is None:
+        if attempt is None or not attempt.target_id or attempt.target_id != _page_id(rows[0]):
+            # ID/Course/Date are user-editable: without the page ID that the create call itself
+            # returned and we recorded, a row cannot be shown to be ours (a person may have created
+            # the same one after a lost request).  RECONCILE_REQUIRED, never a guess (r4 R2).
             return False
-        if attempt.target_id and attempt.target_id != _page_id(rows[0]):
-            return False  # the page with our reserved ID is not the page this attempt created (r3 H2)
         if attempt.response_state != "READBACK_OK":
-            # The create may have succeeded without its response: the page is exactly the reserved
-            # ID/Course/Date of THIS plan's attempt, so it is ours — confirm the attempt (r2 R4).
-            self.state.update_provider_write_attempt(
-                op_key, target_id=_page_id(rows[0]), response_state="READBACK_OK", readback_json=rows[0])
+            # The create response arrived (target recorded) but its readback was lost: confirm it.
+            self.state.update_provider_write_attempt(op_key, response_state="READBACK_OK", readback_json=rows[0])
         return True
 
     def _session_pointer_gate(

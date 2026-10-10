@@ -70,7 +70,9 @@ def test_a_capability_issued_before_the_material_was_hidden_is_revoked() -> None
     package = engine.get_session_context("COMP319-S05")
     assert _material_locators(package)
     state.auto_ids.add("COMP319-M03")  # the Material is (re)classified as an AUTO product afterwards
-    with pytest.raises(Exception):  # noqa: B017 - any refusal: the capability no longer authorizes it
+    from uls.domain.errors import LocatorNotAllowedError
+
+    with pytest.raises(LocatorNotAllowedError):  # the capability no longer authorizes the hidden Material
         engine.get_source_chunk(package.context_id, _material_locators(package)[0])
 
 
@@ -78,18 +80,24 @@ class _StateWithoutMarker:
     """A state object that cannot say whether a Material is a v2 product."""
 
 
-def test_a_state_that_cannot_classify_materials_fails_closed_while_the_gate_is_off() -> None:
-    # r2 H2: no marker interface -> refuse rather than expose; no state at all -> nothing can be v2.
-    engine, _ = _engine(set())
-    engine.state_store = _StateWithoutMarker()
+def test_an_engine_without_usable_state_fails_closed_while_the_gate_is_off() -> None:
+    # r4 R3: neither a state without the marker interface nor NO state proves that no v2 Material
+    # exists — a disabled classification flag says nothing about Materials created earlier.
     from uls.domain.errors import SourceUnavailableError
 
+    engine, _ = _engine(set())
+    engine.state_store = _StateWithoutMarker()
     with pytest.raises(SourceUnavailableError):
         engine.get_material_context("COMP319-M03")
-    engine.state_store = None
-    assert engine.get_material_context("COMP319-M03").sources
+    for classification_enabled in (False, True):
+        stateless, _ = _engine(set())
+        stateless.state_store = None
+        stateless.config.intake.classification.enabled = classification_enabled
+        with pytest.raises(SourceUnavailableError):
+            stateless.get_material_context("COMP319-M03")
+        assert _material_locators(stateless.get_session_context("COMP319-S05")) == []  # degraded, never exposed
     gate_on, _ = _engine(set(), gate=True)
-    gate_on.state_store = _StateWithoutMarker()
+    gate_on.state_store = None
     assert gate_on.get_material_context("COMP319-M03").sources  # the gate on needs no marker
 
 
@@ -100,15 +108,3 @@ def test_a_human_v2_kind_material_is_hidden_like_an_auto_one() -> None:
         engine.get_material_context("COMP319-M03")
     state.auto_ids.clear()
     assert engine.get_material_context("COMP319-M03").sources
-
-
-def test_a_stateless_engine_refuses_when_v2_classification_is_configured() -> None:
-    # r3 R2: no state cannot prove the absence of v2 Materials once classification is enabled.
-    from uls.domain.errors import SourceUnavailableError
-
-    engine, _ = _engine(set())
-    engine.state_store = None
-    assert engine.get_material_context("COMP319-M03").sources  # a legacy-only configuration is unchanged
-    engine.config.intake.classification.enabled = True
-    with pytest.raises(SourceUnavailableError):
-        engine.get_material_context("COMP319-M03")

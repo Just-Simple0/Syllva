@@ -12,6 +12,7 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures"))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
+from no_v2_state import NoV2State
 from phase4 import material_derivative, ready_phase4
 
 from uls.config.schema import RetrievalCfg, UlsConfig
@@ -45,7 +46,7 @@ def test_usage_material_snapshot_never_bypasses_current_material_lookup(mutation
     engine = RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         UlsConfig(),
         source_binding_resolver=resolver,
@@ -78,7 +79,7 @@ def test_expanded_material_snapshot_without_current_material_is_excluded() -> No
     engine = RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         UlsConfig(),
         source_binding_resolver=resolver,
@@ -106,7 +107,7 @@ def test_provisional_reporting_uses_retained_bindings_after_budget_replacement()
     engine = RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         config,
         source_binding_resolver=resolver,
@@ -153,7 +154,7 @@ def test_provisional_and_verified_overlapping_bases_are_reported_independently()
     engine = RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         config,
         source_binding_resolver=resolver,
@@ -182,7 +183,7 @@ def test_followup_rejects_source_advance_after_selected_binding_is_authorized() 
     engine = RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         UlsConfig(),
         source_binding_resolver=resolver,
@@ -216,7 +217,7 @@ def test_non_ready_material_status_is_not_factual_initially_or_on_followup(statu
     engine = RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         UlsConfig(),
         source_binding_resolver=resolver,
@@ -238,7 +239,7 @@ def test_non_ready_material_status_is_not_factual_initially_or_on_followup(statu
     ready_engine = RetrievalEngine(
         ready_reader,
         ready_drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         UlsConfig(),
         source_binding_resolver=ready_resolver,
@@ -259,7 +260,7 @@ def test_partial_material_status_keeps_partial_warning_and_valid_pages() -> None
     engine = RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         UlsConfig(),
         source_binding_resolver=resolver,

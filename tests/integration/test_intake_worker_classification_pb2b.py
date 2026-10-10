@@ -459,29 +459,84 @@ def test_a_second_session_before_the_pointer_write_is_refused(tmp_path: Path) ->
             assert _auto_plans(system["state"])[0]["status"] == "RECONCILE_REQUIRED", label
 
 
-def test_a_response_lost_session_create_is_proven_by_a_read_and_resumed(tmp_path: Path) -> None:
-    # r2 R4 (A): Notion created the Session but the response was lost.
+def test_a_session_create_whose_readback_was_lost_is_resumed(tmp_path: Path) -> None:
+    # r4 R2 (A): the create response arrived (target page recorded), only the readback was lost.
     with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
         worker = _enable(system)
         _complete_calendar(system["state"])
-        system["notion"].drop_next_create_response = False
-        original_create = system["notion"].create_record
-        lost = {"done": False}
+        notion = system["notion"]
+        original_read = notion.read_record
+        armed = {"on": False, "fired": False}
+        original_create = notion.create_record
 
         def create_record(data_source_id, properties):
             row = original_create(data_source_id, properties)
-            if data_source_id == "synthetic-sessions" and not lost["done"]:
-                lost["done"] = True
-                raise ConnectionError("response lost after a successful create")
+            if data_source_id == "synthetic-sessions":
+                armed["on"] = True
             return row
-        system["notion"].create_record = create_record  # type: ignore[method-assign]
+
+        def read_record(data_source_id, page_id):
+            if armed["on"] and not armed["fired"] and data_source_id == "synthetic-sessions":
+                armed["fired"] = True
+                raise ConnectionError("readback lost")
+            return original_read(data_source_id, page_id)
+        notion.create_record = create_record  # type: ignore[method-assign]
+        notion.read_record = read_record  # type: ignore[method-assign]
         worker.run_once()
         assert len(_sessions(system)) == 1 and _item(system).status != "ORGANIZED"
-        assert _auto_plans(system["state"])[0]["status"] == "PLANNED"  # not parked: the effect is still ours to prove
+        assert _auto_plans(system["state"])[0]["status"] == "PLANNED"
         _retry_after_failure(system, worker, "PLANNED")
         worker.run_once()
         assert len(_sessions(system)) == 1  # no duplicate Session
         assert _item(system).status == "ORGANIZED" and _sessions(system)[0].get("Normalized Transcript")
+
+
+def test_a_totally_lost_create_never_adopts_a_row_a_person_created(tmp_path: Path) -> None:
+    # r4 R2 (B): the request may not have been applied; a person then created the same ID/Course/Date.
+    with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        notion = system["notion"]
+        original_create = notion.create_record
+        lost = {"done": False}
+
+        def create_record(data_source_id, properties):
+            if data_source_id == "synthetic-sessions" and not lost["done"]:
+                lost["done"] = True
+                raise ConnectionError("request lost, nothing was applied")
+            return original_create(data_source_id, properties)
+        notion.create_record = create_record  # type: ignore[method-assign]
+        worker.run_once()
+        assert _sessions(system) == []
+        _seed_session(notion, "TEST102-S01")  # the person's page: same reserved ID, Course and Date
+        _retry_after_failure(system, worker, "PLANNED")
+        worker.run_once()
+        (row,) = _sessions(system)
+        assert not row.get("Normalized Transcript")  # the person's Session is never used
+        assert _auto_plans(system["state"])[0]["status"] == "RECONCILE_REQUIRED"
+        assert _item(system).status != "ORGANIZED"
+
+
+def test_every_gate_after_the_session_exists_checks_the_inventory(tmp_path: Path) -> None:
+    # r4 R1: a change between the Session creation and the derivative stops all further writes.
+    for label, change in (("date", lambda sy: sy["notion"].data_sources["synthetic-sessions"][0].__setitem__("Date", "2026-09-11")),
+                          ("second-session", lambda sy: _seed_session(sy["notion"], "TEST102-S88"))):
+        with _system(tmp_path / label, name=MATCHED_NAME, raw=RAW) as system:
+            worker = _enable(system)
+            _complete_calendar(system["state"])
+            original = worker._stage_derivative
+            seen: dict[str, int | None] = {"files": None}
+
+            def stage(*args, _o=original, _sy=system, _c=change, _seen=seen, **kwargs):
+                _seen["files"] = len(_sy["drive"].files)
+                _c(_sy)
+                return _o(*args, **kwargs)
+            worker._stage_derivative = stage  # type: ignore[method-assign]
+            worker.run_once()
+            assert seen["files"] is not None
+            assert len(system["drive"].files) == seen["files"], label  # nothing was written after the change
+            assert _auto_plans(system["state"])[0]["status"] == "RECONCILE_REQUIRED", label
+            assert not system["notion"].data_sources["synthetic-sessions"][0].get("Normalized Transcript"), label
 
 
 def test_a_response_lost_drive_move_is_proven_by_a_read_before_it_is_judged(tmp_path: Path) -> None:

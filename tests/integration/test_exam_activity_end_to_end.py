@@ -8,6 +8,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures")
 
 from fake_drive import FakeDriveReader
 from fake_notion import FakeNotionAdapter, FakeNotionReader
+from no_v2_state import NoV2State
 from phase4 import (
     COURSE_KEY,
     COURSE_PAGE_ID,
@@ -42,7 +43,7 @@ def test_activity_derivative_provenance_and_exam_approval_flow_use_provider_neut
     engine = RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         UlsConfig(),
         source_binding_resolver=resolver,

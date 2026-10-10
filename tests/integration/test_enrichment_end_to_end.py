@@ -4,6 +4,8 @@ import pathlib
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
+from no_v2_state import NoV2State
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures"))
 
 from fake_drive import FakeDriveReader
@@ -100,7 +102,7 @@ def _engine(reader, drive):
     return RetrievalEngine(
         reader,
         drive,
-        None,
+        NoV2State(),
         MemoryEphemeralStore(),
         UlsConfig(),
         source_binding_resolver=ValidatedSourceBindingResolver(drive),
