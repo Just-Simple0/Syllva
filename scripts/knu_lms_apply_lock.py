@@ -128,6 +128,81 @@ class Reservation:
             os.close(fd)
 
 
+class ReconciliationGuard:
+    """Exclusive manual recovery guard for one exact interrupted owner.
+
+    This is intentionally separate from ``Reservation.begin`` so normal
+    automation cannot silently convert an interrupted reservation into a new
+    owner.  The caller must hold this guard while it binds external evidence
+    and, only after an explicit operator decision, marks the old reservation
+    complete with reconciliation audit metadata.
+    """
+
+    def __init__(self, runtime: Path, fd: int, owner_id: str, scope_hash: str) -> None:
+        self.runtime = runtime
+        self.fd: int | None = fd
+        self.owner_id = owner_id
+        self.scope_hash = scope_hash
+
+    @classmethod
+    def begin(cls, runtime: Path, owner_id: str, scope_hash: str) -> ReconciliationGuard:
+        if not re.fullmatch(r"[0-9a-f]{32}", owner_id):
+            raise ReservationError("reservation_binding_mismatch")
+        if not re.fullmatch(r"[0-9a-f]{64}", scope_hash):
+            raise ReservationError("scope_hash_invalid")
+        prepare_directory(runtime)
+        lock_path = runtime / "apply.lock"
+        fd = fsplat.open_nofollow(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or not fsplat.owns_path(lock_path, posix_stat=info)
+                    or (not fsplat.IS_WINDOWS and stat.S_IMODE(info.st_mode) != 0o600)):
+                raise ReservationError("lock_path_invalid")
+            if not fsplat.try_lock_exclusive(fd):
+                raise ReservationError("run_busy")
+            record = ensure_participant(runtime, owner_id, scope_hash)
+            if any(
+                key in record
+                for key in (
+                    "completed_at",
+                    "completion_kind",
+                    "reconciled_at",
+                    "reconciliation_candidate_hash",
+                )
+            ):
+                raise ReservationError("reservation_invalid")
+            return cls(runtime, fd, owner_id, scope_hash)
+        except BaseException:
+            os.close(fd)
+            raise
+
+    def record(self) -> dict[str, Any]:
+        if self.fd is None:
+            raise ReservationError("keeper_stopped")
+        return ensure_participant(self.runtime, self.owner_id, self.scope_hash)
+
+    def complete(self, candidate_hash: str) -> None:
+        if self.fd is None:
+            raise ReservationError("keeper_stopped")
+        if not re.fullmatch(r"[0-9a-f]{64}", candidate_hash):
+            raise ReservationError("reconciliation_candidate_invalid")
+        record = ensure_participant(self.runtime, self.owner_id, self.scope_hash)
+        now = dt.datetime.now(dt.UTC).isoformat()
+        atomic_record(self.runtime / "active-run.json", {
+            **record,
+            "state": "completed",
+            "completed_at": now,
+            "completion_kind": "operator_reconciled",
+            "reconciled_at": now,
+            "reconciliation_candidate_hash": candidate_hash,
+        })
+
+    def close(self) -> None:
+        if self.fd is not None:
+            fd, self.fd = self.fd, None
+            os.close(fd)
+
+
 def ensure_participant(runtime: Path, owner_id: str, scope_hash: str) -> dict[str, Any]:
     record = read_record(runtime / "active-run.json")
     if (record is None or record["state"] != "active"

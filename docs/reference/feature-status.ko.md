@@ -17,7 +17,7 @@
 | --- | --- | --- |
 | Read-only MCP 검색 표면(`get_context` 등) | 현재 사용 가능 | v1.2의 핵심 release invariant이며 read-only입니다. [MCP 도구](mcp-tools.ko.md) 참고. |
 | 기존 전역 Notion/Drive registry(7개 전역 데이터 소스) | 현재 사용 가능 | frozen 명세가 설명하는 v1.2 검색 경로입니다. |
-| 학기 단위 native Notion workspace + Drive 학기 registry | 제한된 preview | 구현된 intake slice입니다. `docs/ux/intake-v1.3-preview.md` 참고. intake worker 자신의 `readiness()` 출력이 별도의 read-only MCP 구성을 `NOT_PROVEN_BY_INTAKE_PREVIEW`로 명시합니다 — intake 성공이 그 자체로 MCP를 통한 검색 가능성을 증명하지 않습니다. |
+| 학기 단위 native Notion workspace + Drive 학기 registry | 제한된 preview | intake와 명시적 opt-in read-only retrieval lane이 구현되어 있습니다. `retrieval.notion_lane: semester_workspace`가 정확히 한 학기를 선택하고 legacy fallback 없이 direct data-source ID를 사용합니다. intake `readiness()`는 별도 증거이며 live provider/client E2E는 따로 검증해야 합니다. `docs/ux/intake-v1.3-preview.md` 참고. |
 | 개념 검색용 bounded LLM re-rank | 운영 보류(기본 정지) | `retrieval.allow_bounded_llm_rerank`로 opt-in하며 기본값은 결정적 lexical/index 검색입니다. |
 
 ## Intake·파일 처리

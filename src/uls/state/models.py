@@ -31,13 +31,24 @@ class Job:
     created_at: str = ""
     updated_at: str = ""
     completed_at: str | None = None
+    # Intake classification v2 (plan §3.4): a job is bound to the exact plan
+    # revision and authority it was enqueued for; a superseded plan voids its
+    # unfinished jobs persistently (VOID is ``voided_at`` being set).
+    plan_revision: str | None = None
+    plan_authority: str | None = None
+    voided_at: str | None = None
+    void_reason: str | None = None
 
     def __post_init__(self) -> None:
         self.status = to_processing_status(self.status)
 
     @property
+    def is_void(self) -> bool:
+        return self.voided_at is not None
+
+    @property
     def is_terminal(self) -> bool:
-        return self.status in {
+        return self.is_void or self.status in {
             JobStatus.READY,
             JobStatus.PARTIAL,
             JobStatus.NEEDS_REVIEW,
@@ -153,6 +164,16 @@ class IntakeItem:
     last_successful_stage: str | None = None
     first_seen_at: str = ""
     last_seen_at: str = ""
+    # Intake classification v2 (plan §5).
+    origin: str = "UNKNOWN"
+    classified_kind: str | None = None
+    classification_source: str | None = None
+    classification_record_id: str | None = None
+    inferred_course_key: str | None = None
+    inferred_week: int | None = None
+    inferred_date: str | None = None
+    calendar_match: str | None = None
+    classification_state: str = "NONE"
 
 
 @dataclass(frozen=True)
@@ -194,6 +215,9 @@ class IntakePlan:
     plan_hash: str
     status: str = "PLANNED"
     created_at: str = ""
+    # Intake classification v2 (plan §3.4): HUMAN_REQUEST | AUTO_CLASSIFICATION.
+    plan_authority: str = "HUMAN_REQUEST"
+    classification_revision_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -204,10 +228,13 @@ class ProviderWriteAttempt:
     provider: str
     target_id: str | None
     prewrite_committed_at: str
+    reservation_id: str | None = None
+    stage: str | None = None
     dispatched_at: str | None = None
     response_state: str = "PREPARED"
     readback_json: str | None = None
     error_class: str | None = None
+    pre_dispatch_snapshot_json: str | None = None
 
 
 @dataclass(frozen=True)
@@ -221,7 +248,149 @@ class EntityReservation:
     state: str
     plan_revision: str
     source_file_id: str | None = None
+    receipt_id: str | None = None
+    plan_hash: str | None = None
+    source_snapshot_hash: str | None = None
+    target_snapshot_hash: str | None = None
+    operation_key: str | None = None
     created_at: str = ""
+    updated_at: str = ""
+    released_at: str | None = None
+
+
+@dataclass(frozen=True)
+class StudyNoteHead:
+    provider: str
+    session_provider_page_id: str
+    course_key: str
+    session_id: str
+    current_request_id: str
+    current_receipt_id: str
+    generation: int
+    active: int
+    receipt_hash: str
+    evidence_mode: str | None = None
+    selected_materials_json: str = "[]"
+    inactive_reason: str | None = None
+    current_note_key: str | None = None
+    current_attempt_no: int | None = None
+    created_at: str = ""
+    updated_at: str = ""
+
+
+@dataclass(frozen=True)
+class RangeIntentHead:
+    """Generation-bound slot state for one (Session, Material, Role) usage slot.
+
+    current_usage_app_id is the PERMANENT slot-to-Usage binding (persists across
+    generations, like current_receipt_id on StudyNoteHead). reservation_state,
+    reserved_generation, reserved_target_id, and dispatch_attempt_no are
+    TRANSIENT, scoped to one in-flight _create_usage() dispatch attempt, and
+    always return to NONE once that attempt reaches any terminal outcome.
+    """
+
+    usage_slot_key: str
+    session_app_id: str
+    material_app_id: str
+    usage_role: str
+    current_request_id: str
+    current_receipt_id: str
+    receipt_hash: str
+    current_operation: str
+    intent_generation: int
+    current_usage_app_id: str | None = None
+    current_target_entity_id: str | None = None
+    current_proposal_id: str | None = None
+    reservation_state: str = "NONE"
+    reserved_generation: int | None = None
+    reserved_target_id: str | None = None
+    dispatch_attempt_no: int = 0
+    apply_lease_expires_at: str | None = None
+    current_usage_provider: str | None = None
+    current_usage_provider_row_id: str | None = None
+    slot_identity_json: str | None = None
+    active: int = 1
+    inactive_reason: str | None = None
+    input_mode: str | None = None
+    created_at: str = ""
+    updated_at: str = ""
+
+
+@dataclass(frozen=True)
+class UsageProposalOutboxEntry:
+    """One durable, immutable-per-generation v2 usage-proposal publication intent."""
+
+    proposal_id: str
+    usage_slot_key: str
+    request_id: str
+    intent_generation: int
+    action_json: str
+    envelope_json: str
+    publish_state: str = "PREPARED"
+    queue_page_id: str | None = None
+    created_at: str = ""
+    updated_at: str = ""
+
+
+@dataclass(frozen=True)
+class NoteJob:
+    note_key: str
+    course_key: str
+    session_id: str
+    evidence_manifest_hash: str
+    learner_request_hash: str
+    template_version: str
+    generator_config_version: str
+    current_attempt_no: int | None = None
+    created_at: str = ""
+    updated_at: str = ""
+
+
+@dataclass(frozen=True)
+class NoteAttempt:
+    note_key: str
+    attempt_no: int
+    state: str
+    seed_artifact_id: str | None = None
+    retry_count: int = 0
+    next_retry_at: str | None = None
+    last_successful_stage: str | None = None
+    error_class: str | None = None
+    error_code: str | None = None
+    created_at: str = ""
+    updated_at: str = ""
+    terminal_at: str | None = None
+
+
+@dataclass(frozen=True)
+class NoteRequestReference:
+    reference_id: str
+    receipt_id: str
+    provider_request_id: str
+    note_key: str
+    attempt_no: int
+    head_generation: int
+    state: str = "ACTIVE"
+    created_at: str = ""
+    updated_at: str = ""
+    ended_at: str | None = None
+
+
+@dataclass(frozen=True)
+class NoteArtifact:
+    artifact_id: str
+    note_key: str
+    output_identity: str
+    output_hash: str
+    manifest_hash: str
+    writer_version: str
+    state: str
+    ai_region_id: str | None = None
+    ai_block_ids_json: str = "[]"
+    last_publish_hash: str | None = None
+    created_at: str = ""
+    verified_at: str | None = None
+    updated_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -244,11 +413,18 @@ __all__ = [
     "IntakeObservation",
     "IntakePlan",
     "Job",
+    "NoteArtifact",
+    "NoteAttempt",
+    "NoteJob",
+    "NoteRequestReference",
     "ProcessingRecord",
     "ProviderWriteAttempt",
+    "RangeIntentHead",
     "RequestReceipt",
     "SemesterRegistration",
     "SessionSourceBinding",
     "SourceFile",
     "SourceVersion",
+    "StudyNoteHead",
+    "UsageProposalOutboxEntry",
 ]

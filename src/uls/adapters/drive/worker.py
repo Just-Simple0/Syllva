@@ -8,9 +8,11 @@ matching folder names.
 
 from __future__ import annotations
 
+import contextlib
 import io
 import re
-from collections.abc import Iterable, Mapping
+import threading
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, runtime_checkable
 
@@ -20,9 +22,12 @@ from uls.domain.errors import (
     SourcePartialError,
     SourceUnavailableError,
 )
-
+from uls.intake.attestation import (
+    ReconnectRequiredError,
+    WorkerEntryAttestation,
+    attestation_matches,
+)
 from uls.intake.identity import validate_private_properties
-
 
 DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
 _FILE_ID = re.compile(r"\A[A-Za-z0-9_-]+\Z")
@@ -159,11 +164,42 @@ class GoogleDriveWorkerAdapter:
         private_owner_readback=True,
     )
 
-    def __init__(self, service: Any, *, max_bytes: int = 20_000_000, max_files: int = 10_000) -> None:
+    def __init__(self, service: Any, *, max_bytes: int = 20_000_000, max_files: int = 10_000,
+                 attestor: Any | None = None) -> None:
         self._service = service
         self._files = service.files()
         self.max_bytes = max_bytes
         self.max_files = max_files
+        # Personal OAuth compositions share one attestor with the worker. Every
+        # provider call then requires a fresh attestation issued by that exact
+        # object for the current entry (P2 plan §5). Service-account
+        # compositions pass None and keep their existing behaviour.
+        self._attestor = attestor
+        self._context = threading.local()
+
+    @contextlib.contextmanager
+    def attested(self, attestation: WorkerEntryAttestation | None) -> Iterator[None]:
+        """Operation-scoped context carrying the worker's current entry attestation."""
+
+        if self._attestor is not None:
+            self._require_valid(attestation)
+        previous = getattr(self._context, "current", None)
+        self._context.current = attestation
+        try:
+            yield
+        finally:
+            self._context.current = previous
+
+    def _require_valid(self, attestation: WorkerEntryAttestation | None) -> None:
+        # Identity, role, exact scope, binding digest, issued generation and
+        # freshness must all match the attestor this adapter was built with.
+        if self._attestor is None or not attestation_matches(self._attestor, attestation):
+            raise ReconnectRequiredError()
+
+    def _require_attested(self) -> None:
+        if self._attestor is None:
+            return
+        self._require_valid(getattr(self._context, "current", None))
 
     def list_folder(self, folder_id: str) -> list[DriveMetadata]:
         _require_id(folder_id)
@@ -213,6 +249,7 @@ class GoogleDriveWorkerAdapter:
         size = metadata.size
         if size is None or size < 0 or size > self.max_bytes:
             raise SourcePartialError("Drive source is outside the bounded download limit")
+        self._require_attested()
         try:
             from googleapiclient.http import MediaIoBaseDownload  # type: ignore[import-untyped]
 
@@ -224,11 +261,14 @@ class GoogleDriveWorkerAdapter:
             )
             done = False
             while not done:
+                # The attestation context must still be valid before every
+                # provider chunk, not only before the first one.
+                self._require_attested()
                 _, done = downloader.next_chunk(num_retries=0)
                 if output.tell() > self.max_bytes:
                     raise SourcePartialError("Drive source exceeds byte limit")
             data = output.getvalue()
-        except SourcePartialError:
+        except (SourcePartialError, ReconnectRequiredError):
             raise
         except Exception:
             raise ProviderUnavailableError("Drive download failed") from None
@@ -305,6 +345,8 @@ class GoogleDriveWorkerAdapter:
                 fields="id,name,mimeType,parents,modifiedTime,size,md5Checksum,trashed,ownedByMe,webViewLink,driveId,permissions(type,role,allowFileDiscovery),capabilities(canEdit,canMoveItemWithinDrive),appProperties",
                 supportsAllDrives=True,
             )
+        except ReconnectRequiredError:
+            raise
         except Exception:
             raise ProviderUnavailableError("Drive create failed") from None
         metadata = _metadata(result)
@@ -333,6 +375,8 @@ class GoogleDriveWorkerAdapter:
                 fields="id,name,mimeType,parents,modifiedTime,size,md5Checksum,trashed,ownedByMe,webViewLink,driveId,permissions(type,role,allowFileDiscovery),capabilities(canEdit,canMoveItemWithinDrive),appProperties",
                 supportsAllDrives=True,
             )
+        except ReconnectRequiredError:
+            raise
         except Exception:
             raise ProviderUnavailableError("Drive move failed") from None
         moved = _metadata(result)
@@ -372,11 +416,11 @@ class GoogleDriveWorkerAdapter:
         if require_move and metadata.can_move is not True:
             raise PolicyDeniedError("Drive item cannot be moved by the configured worker")
 
-    @staticmethod
-    def _call(method: Any, **kwargs: Any) -> Any:
+    def _call(self, method: Any, **kwargs: Any) -> Any:
+        self._require_attested()
         try:
             return method(**kwargs).execute()
-        except (SourcePartialError, SourceUnavailableError, PolicyDeniedError):
+        except (SourcePartialError, SourceUnavailableError, PolicyDeniedError, ReconnectRequiredError):
             raise
         except Exception:
             raise ProviderUnavailableError("Drive worker operation failed") from None
@@ -572,12 +616,22 @@ def ensure_marked_folder(
         item = matches[0]
         if item.mime_type != DRIVE_FOLDER_MIME or item.parents != (parent_id,) or item.app_properties != marker:
             raise SourceUnavailableError("Drive marker match failed exact parent/MIME readback")
-        if item.owned_by_me is not True:
-            raise PolicyDeniedError("Drive marker item is not USER owned")
+        require_private_ownership(item, context="Drive marker folder")
         return item
     if create_attempted:
         raise SourceUnavailableError("Drive create response was lost; marker lookup is indeterminate")
-    return port.create_folder_with_marker(parent_id, name, marker)
+    created = port.create_folder_with_marker(parent_id, name, marker)
+    # Apply the exact same postcondition as the reuse branch above, at this
+    # port-level abstraction rather than relying on each DriveWorkerPort
+    # implementation's own internal validation (which may not check every
+    # field identically -- for example a folder create's internal readback
+    # validation may skip the move-capability check that reuse always
+    # enforces). This keeps a freshly created marker folder and a
+    # later-recovered one held to one identical private-ownership boundary.
+    if created.mime_type != DRIVE_FOLDER_MIME or created.parents != (parent_id,) or created.app_properties != marker:
+        raise SourceUnavailableError("Drive create readback failed exact parent/MIME/marker check")
+    require_private_ownership(created, context="Drive marker folder")
+    return created
 
 
 def _metadata(value: Any) -> DriveMetadata:
@@ -587,6 +641,12 @@ def _metadata(value: Any) -> DriveMetadata:
     name = value.get("name")
     mime_type = value.get("mimeType")
     parents = value.get("parents", [])
+    drive_id: str | None = None
+    if "driveId" in value:
+        raw_drive_id = value["driveId"]
+        if not isinstance(raw_drive_id, str):
+            raise SourceUnavailableError("Drive driveId is malformed")
+        drive_id = raw_drive_id
     if not isinstance(file_id, str) or not file_id or not isinstance(name, str) or not name or not isinstance(mime_type, str) or not isinstance(parents, list) or any(not isinstance(item, str) for item in parents):
         raise SourceUnavailableError("Drive metadata identity is malformed")
     properties = value.get("appProperties", {})
@@ -660,7 +720,7 @@ def _metadata(value: Any) -> DriveMetadata:
         owned_by_me=value.get("ownedByMe") if isinstance(value.get("ownedByMe"), bool) else None,
         web_view_link=value.get("webViewLink") if isinstance(value.get("webViewLink"), str) else None,
         md5_checksum=value.get("md5Checksum") if isinstance(value.get("md5Checksum"), str) else None,
-        drive_id=value.get("driveId") if isinstance(value.get("driveId"), str) else None,
+        drive_id=drive_id,
         permission_types=permission_types,
         permission_roles=permission_roles,
         permission_count=permission_count,

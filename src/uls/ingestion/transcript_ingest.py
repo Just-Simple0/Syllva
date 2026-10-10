@@ -752,6 +752,7 @@ def _fail_job(state: Any | None, job: Any | None, exc: Exception) -> None:
                     "job_id": _job_id(job),
                     "error_class": _job_error_class(exc),
                     "last_error": str(exc),
+                    "error": exc,
                 },
                 [((_job_id(job),), {})],
             )

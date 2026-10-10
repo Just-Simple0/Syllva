@@ -82,6 +82,54 @@ def snapshot() -> sync.CanonicalSnapshot:
     return sync.validate_snapshot(raw_snapshot(), CONFIG)
 
 
+def api_registry() -> sync.SemesterCourseRegistry:
+    courses = [
+        {
+            "id": 12345 + index,
+            "name": f"API 과목 {index + 1}",
+            "code": f"API-{index + 1:03d}",
+            "term": "2026-2",
+            "verification_state": "api_code_verified",
+            "academic_import": True,
+            "module_positions": list(range(1, 16)),
+        }
+        for index in range(5)
+    ]
+    courses.append(
+        {
+            "id": 99999,
+            "name": "비교과 후보",
+            "code": "EXTRA",
+            "term": "비학술",
+            "verification_state": "observed_candidate",
+            "academic_import": False,
+        }
+    )
+    return sync.registry_from_document(
+        {"version": "knu-lms-semester-registry.v1", "semester": "2026-2", "courses": courses}
+    )
+
+
+def api_semester_raw(registry: sync.SemesterCourseRegistry) -> dict[str, Any]:
+    courses: dict[str, Any] = {}
+    for spec in registry.academic_courses:
+        value = raw_snapshot()
+        value["course"] = {
+            "id": spec.course_id,
+            "name": spec.expected_name,
+            "course_code": spec.expected_code,
+            "term": spec.expected_term,
+        }
+        value["announcements"][0]["context_code"] = f"course_{spec.course_id}"
+        courses[str(spec.course_id)] = value
+    return {
+        "status": "complete",
+        "provenance": sync.CANVAS_API_TRANSPORT,
+        "scope_hash": registry.scope_hash(transport=sync.CANVAS_API_TRANSPORT),
+        "courses": courses,
+    }
+
+
 def test_validates_sanitized_probe_term_and_stable_routes() -> None:
     result = snapshot()
     assert result.payload["course"]["term"] == "2026-2"
@@ -541,6 +589,33 @@ def _install_auth_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, documen
     return sync.config_scope_hash(document)
 
 
+def _install_semester_api_files(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    registry: sync.SemesterCourseRegistry,
+) -> str:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    monkeypatch.setattr(sync, "RUNTIME_DIR", runtime)
+    monkeypatch.setattr(sync, "SEMESTER_API_CONFIG_PATH", runtime / "semester-api-config.json")
+    monkeypatch.setattr(
+        sync,
+        "SEMESTER_API_AUTH_MANIFEST_PATH",
+        runtime / "semester-api-auth-manifest.json",
+    )
+    result = sync.prepare_semester_api(
+        registry,
+        issued_at="2026-09-01T00:00:00+00:00",
+        expires_at="2026-09-30T00:00:00+00:00",
+    )
+    config = json.loads(sync.SEMESTER_API_CONFIG_PATH.read_text(encoding="utf-8"))
+    manifest = sync._semester_api_manifest(config, "enrolled")
+    sync.SEMESTER_API_AUTH_MANIFEST_PATH.write_text(json.dumps(manifest), encoding="utf-8")
+    sync.SEMESTER_API_AUTH_MANIFEST_PATH.chmod(0o600)
+    assert result["scope_hash"] == registry.scope_hash(transport=sync.CANVAS_API_TRANSPORT)
+    return result["scope_hash"]
+
+
 def test_failed_atomic_state_write_keeps_private_temporary(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     runtime = tmp_path / "runtime"
     monkeypatch.setattr(sync, "RUNTIME_DIR", runtime)
@@ -646,6 +721,219 @@ def test_collect_rejects_config_scope_drift_before_keychain_or_probe(monkeypatch
             now=dt.datetime(2026, 9, 13, tzinfo=dt.UTC),
         )
     assert calls == {"keychain": 0, "probe": 0}
+
+
+def test_semester_api_binding_rejects_registry_drift_before_keychain(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry = api_registry()
+    scope_hash = _install_semester_api_files(monkeypatch, tmp_path, registry)
+    calls = {"keychain": 0}
+    monkeypatch.setattr(
+        sync,
+        "_explicit_os_keyring",
+        lambda: calls.__setitem__("keychain", calls["keychain"] + 1),
+    )
+    changed = list(registry.courses)
+    changed[0] = sync.CourseSpec(
+        course_id=changed[0].course_id,
+        expected_name="변경된 과목",
+        expected_code=changed[0].expected_code,
+        expected_term=changed[0].expected_term,
+        origin=changed[0].origin,
+        verification_state=changed[0].verification_state,
+        academic_import=True,
+        module_positions=changed[0].module_positions,
+    )
+    drifted = sync.SemesterCourseRegistry(registry.semester, tuple(changed))
+    with pytest.raises(sync.SyncError, match="semester_api_registry_binding_mismatch"):
+        sync.read_semester_api_token(
+            drifted,
+            now=dt.datetime(2026, 9, 13, tzinfo=dt.UTC),
+            expected_scope_hash=scope_hash,
+        )
+    assert calls["keychain"] == 0
+
+
+def test_semester_api_manifest_and_expiry_fail_closed_before_keychain(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry = api_registry()
+    scope_hash = _install_semester_api_files(monkeypatch, tmp_path, registry)
+    config = json.loads(sync.SEMESTER_API_CONFIG_PATH.read_text(encoding="utf-8"))
+    pending = sync._semester_api_manifest(config, "pending")
+    sync.SEMESTER_API_AUTH_MANIFEST_PATH.write_text(json.dumps(pending), encoding="utf-8")
+    sync.SEMESTER_API_AUTH_MANIFEST_PATH.chmod(0o600)
+    calls = {"keychain": 0}
+    monkeypatch.setattr(
+        sync,
+        "_explicit_os_keyring",
+        lambda: calls.__setitem__("keychain", calls["keychain"] + 1),
+    )
+    with pytest.raises(sync.SyncError, match="semester_api_manifest_not_enrolled"):
+        sync.read_semester_api_token(
+            registry,
+            now=dt.datetime(2026, 9, 13, tzinfo=dt.UTC),
+            expected_scope_hash=scope_hash,
+        )
+    assert calls["keychain"] == 0
+    expired_config = {**config, "expires_at": "2026-09-02T00:00:00+00:00"}
+    sync.SEMESTER_API_CONFIG_PATH.write_text(json.dumps(expired_config), encoding="utf-8")
+    sync.SEMESTER_API_CONFIG_PATH.chmod(0o600)
+    with pytest.raises(sync.SyncError, match="auth_manifest_expired"):
+        sync.read_semester_api_token(registry, now=dt.datetime(2026, 9, 13, tzinfo=dt.UTC))
+    assert calls["keychain"] == 0
+
+
+def test_semester_api_enrollment_uses_one_stable_account_and_no_echo(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry = api_registry()
+    _install_semester_api_files(monkeypatch, tmp_path, registry)
+
+    class FakeReservation:
+        completed = False
+        closed = False
+
+        def complete(self) -> None:
+            self.completed = True
+
+        def close(self) -> None:
+            self.closed = True
+
+    reservation = FakeReservation()
+    monkeypatch.setattr(sync, "_begin_reservation", lambda _scope: reservation)
+
+    class FakeBackend:
+        keychain: Any = object()
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, str]] = []
+
+        def set_password(self, service: str, account: str, token: str) -> None:
+            assert self.keychain is None
+            self.calls.append((service, account, token))
+
+    backend = FakeBackend()
+    writes: list[str] = []
+    original_write = sync._atomic_json_write
+
+    def record_write(path: Path, value: dict[str, Any], mode: int) -> None:
+        writes.append(value.get("state", "config"))
+        original_write(path, value, mode)
+
+    monkeypatch.setattr(sync, "_atomic_json_write", record_write)
+    result = sync.enroll_semester_api(
+        registry,
+        prompt=lambda _label: "synthetic-api-token",
+        stdin=type("TTY", (), {"isatty": lambda self: True})(),
+        now=dt.datetime(2026, 9, 13, 1, tzinfo=dt.UTC),
+        backend=backend,
+    )
+    assert result["status"] == "enrolled"
+    assert writes == ["pending", "enrolled"]
+    assert backend.calls == [
+        (sync.KEYCHAIN_SERVICE, "canvas.knu.ac.kr/semester/2026-2", "synthetic-api-token")
+    ]
+    assert "synthetic-api-token" not in sync.SEMESTER_API_CONFIG_PATH.read_text(encoding="utf-8")
+    assert "synthetic-api-token" not in sync.SEMESTER_API_AUTH_MANIFEST_PATH.read_text(encoding="utf-8")
+    assert reservation.completed is True
+    assert reservation.closed is True
+    assert "synthetic-api-token" not in json.dumps(result)
+
+
+def test_collect_semester_api_uses_exact_binding_and_probe_registry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry = api_registry()
+    scope_hash = _install_semester_api_files(monkeypatch, tmp_path, registry)
+    calls: list[dict[str, Any]] = []
+
+    class Backend:
+        keychain: Any = None
+
+        def get_password(self, service: str, account: str) -> str:
+            assert service == sync.KEYCHAIN_SERVICE
+            assert account == "canvas.knu.ac.kr/semester/2026-2"
+            return "synthetic-api-token"
+
+    class FakeProbe:
+        @staticmethod
+        def run_registry_api(courses: list[dict[str, Any]], **kwargs: Any) -> dict[str, Any]:
+            calls.append({"courses": courses, **kwargs})
+            return api_semester_raw(registry)
+
+    monkeypatch.setattr(sync, "_explicit_os_keyring", lambda: Backend())
+    monkeypatch.setattr(sync, "_ensure_participant", lambda _owner, _scope: None)
+    monkeypatch.setattr(sync, "_probe_module", lambda: FakeProbe)
+    result = sync.collect_semester_api(
+        registry,
+        owner_id="owner",
+        scope_hash=scope_hash,
+        now=dt.datetime(2026, 9, 13, 14, 30, tzinfo=dt.UTC),
+    )
+    assert result["status"] == "complete"
+    assert result["transport"] == sync.CANVAS_API_TRANSPORT
+    assert result["academic_complete"] == 5
+    assert calls[0]["scope_hash"] == scope_hash
+    assert len(calls[0]["courses"]) == 6
+    assert "synthetic-api-token" not in json.dumps(result)
+
+
+def test_reconciliation_is_locked_audited_and_rejects_evidence_drift(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runtime = tmp_path / "runtime"
+    monkeypatch.setattr(sync, "RUNTIME_DIR", runtime)
+    scope_hash = "a" * 64
+    lock_module = sync._lock_module()
+    holder = lock_module.Reservation.begin(runtime, scope_hash)
+    with pytest.raises(sync.SyncError, match="run_busy"):
+        sync.reconciliation_check(holder.owner_id, scope_hash)
+    holder.close()
+    with pytest.raises(sync.SyncError, match="reservation_binding_mismatch"):
+        sync.reconciliation_check("b" * 32, scope_hash)
+    with pytest.raises(sync.SyncError, match="reservation_binding_mismatch"):
+        sync.reconciliation_check(holder.owner_id, "b" * 64)
+    with pytest.raises(sync.SyncError, match="reconciliation_evidence_invalid"):
+        sync.reconciliation_check(holder.owner_id, scope_hash)
+    for name in sync.RECONCILIATION_EVIDENCE_FILES:
+        path = runtime / name
+        path.write_bytes(b"{}")
+        path.chmod(0o600)
+    candidate = sync.reconciliation_check(holder.owner_id, scope_hash)
+    active_before = json.loads((runtime / "active-run.json").read_text(encoding="utf-8"))
+    assert active_before["state"] == "active"
+    assert candidate["status"] == "candidate"
+    evidence = runtime / sync.RECONCILIATION_EVIDENCE_FILES[0]
+    evidence.write_bytes(b'{"changed":true}')
+    evidence.chmod(0o600)
+    with pytest.raises(sync.SyncError, match="reconciliation_candidate_stale"):
+        sync.reconciliation_apply(
+            holder.owner_id,
+            scope_hash,
+            candidate["candidate_hash"],
+            sync.RECONCILIATION_CONFIRMATION,
+        )
+    still_active = json.loads((runtime / "active-run.json").read_text(encoding="utf-8"))
+    assert still_active["state"] == "active"
+    fresh = sync.reconciliation_check(holder.owner_id, scope_hash)
+    with pytest.raises(sync.SyncError, match="authorization_required"):
+        sync.reconciliation_apply(holder.owner_id, scope_hash, fresh["candidate_hash"], "NO")
+    result = sync.reconciliation_apply(
+        holder.owner_id,
+        scope_hash,
+        fresh["candidate_hash"],
+        sync.RECONCILIATION_CONFIRMATION,
+    )
+    assert result["status"] == "reconciled"
+    completed = json.loads((runtime / "active-run.json").read_text(encoding="utf-8"))
+    assert completed["state"] == "completed"
+    assert completed["completion_kind"] == "operator_reconciled"
+    assert completed["owner_id"] == holder.owner_id
+    next_reservation = lock_module.Reservation.begin(runtime, scope_hash)
+    next_reservation.complete()
+    next_reservation.close()
 
 
 def test_write_json_serializes_before_touching_stdout() -> None:
@@ -983,6 +1271,54 @@ def test_semester_registry_preserves_per_course_partial_and_excluded_candidate()
     })
     assert partial["status"] == "incomplete"
     assert partial["courses"]["12345"]["status"] == "partial"
+
+
+def test_canvas_api_semester_snapshot_canonicalizes_five_courses_and_excludes_candidate() -> None:
+    registry = api_registry()
+    result = sync.validate_semester_snapshot(
+        registry,
+        api_semester_raw(registry),
+        expected_scope_hash=registry.scope_hash(transport=sync.CANVAS_API_TRANSPORT),
+        transport=sync.CANVAS_API_TRANSPORT,
+    )
+    assert result["status"] == "complete"
+    assert result["transport"] == sync.CANVAS_API_TRANSPORT
+    assert result["academic_expected"] == 5
+    assert result["academic_complete"] == 5
+    assert result["apply_ready"] is True
+    assert set(result["snapshots"]) == {str(course.course_id) for course in registry.academic_courses}
+    assert result["courses"]["99999"]["status"] == "excluded"
+    with pytest.raises(sync.SyncError, match="invalid_provenance"):
+        sync.validate_semester_snapshot(
+            registry,
+            {**api_semester_raw(registry), "provenance": "aside-readonly"},
+            transport=sync.CANVAS_API_TRANSPORT,
+        )
+
+
+def test_canvas_api_projection_requires_and_preserves_api_scope() -> None:
+    registry = api_registry()
+    semester = sync.validate_semester_snapshot(
+        registry,
+        api_semester_raw(registry),
+        transport=sync.CANVAS_API_TRANSPORT,
+    )
+    plan = sync.build_semester_projection(
+        registry,
+        semester,
+        notion_readback={
+            "rows": [],
+            "course_pages": [],
+            "course_parent_verified": True,
+            "private_root_verified": True,
+        },
+    )
+    assert plan["status"] == "complete"
+    assert plan["apply_ready"] is True
+    assert plan["transport"] == sync.CANVAS_API_TRANSPORT
+    stale = {**semester, "scope_hash": registry.scope_hash(transport=sync.ASIDE_TRANSPORT)}
+    with pytest.raises(sync.SyncError, match="scope_hash_mismatch"):
+        sync.build_semester_projection(registry, stale)
 
 
 def test_semester_projection_emits_one_datasource_and_course_qualified_views() -> None:

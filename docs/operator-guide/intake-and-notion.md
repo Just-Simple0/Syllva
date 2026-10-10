@@ -57,6 +57,25 @@ Before enabling writes, validate:
 
 If a provider response is lost or ambiguous, re-read external state and reconcile. Do not blindly create a duplicate page or repeat a mutation whose outcome is unknown.
 
+## Next-version prerequisite: Automation Queue `Proposal Envelope`
+
+The accepted next-version design (`docs/ux/intake-execution-contract.md`, rev10, §5.3) adds one new
+SYSTEM-owned Notion property to the `Automation Queue` database, beyond the current v1.2 schema in
+implementation-spec-frozen.md §14.7:
+
+| Property | Type | Owner |
+|---|---|---|
+| Proposal Envelope | Rich text | SYSTEM |
+
+This property must exist in the live `Automation Queue` database before rev10's C5 slice (v2 proposal
+identity/envelope) can read or write it. No code in this repository provisions Notion database schemas,
+and `Automation Queue` currently has no declarative schema/validator equivalent to `INTAKE_SCHEMAS` --
+create the property manually in the Notion database alongside the existing `Proposal ID` /
+`Proposed Action` properties. Existing Queue `Proposal Type`, `State`, `Decision` enum
+values and all current write-permission rules (§15.1) are unchanged; this is an additive schema
+change only -- no existing Queue properties, enums, or permissions are changed. C5 owns the actual
+v2 envelope read/write/content validation and Reader/HAA guard logic for its contents.
+
 ## Dashboard UX
 
 The intended semester dashboard order is:
@@ -68,6 +87,21 @@ The intended semester dashboard order is:
 5. Files
 
 Sessions remain under their course rather than becoming global navigation items.
+
+Live status (rev10 C7): the personal-schedule/todo linked-view portion of C7 was already applied
+natively in the user's Notion workspace on 2026-09-13 -- reusing the existing personal schedule
+database for the To DO/Calendar views (not a fresh dedicated schema), see
+`docs/ux/dashboard-native-application.md`, readback evidence in `dashboard-native-readback.md`, and
+the GO disposition (independent web review + Gemini) in `review-20260913-native-dashboard.md`. The
+section order recorded by that 2026-09-13 application (My Courses -> Continue Studying -> To DO ->
+Calendar -> Check Files) predates and differs from the current rev10 contract §7 order (today's
+tasks/deadlines -> courses -> continue studying -> academic schedule -> check files); this status note
+covers only the linked-view requirement in the C7 row and does not claim the separate §7 dashboard-
+order requirement is satisfied. Per the contract's §2 storage table, this schedule database is
+entirely user-edited, and the system never auto-modifies its content; the cited native application does
+not depend on or claim any worker/product-writer integration with this database, and explicitly leaves
+a future worker mapping to it open (for this reused schedule database specifically -- along with
+automatic recent-visit ranking and automatic file intake, neither of which this application connects).
 
 ## No implicit lane fallback
 

@@ -39,6 +39,8 @@ def test_mcp_dispatch_rejects_identical_mcp_and_worker_notion_token(tmp_path, mo
     path = _write_config(tmp_path)
     google_mcp_file = tmp_path / "google-mcp-credentials.json"
     google_mcp_file.write_text("{}", encoding="utf-8")
+    google_mcp_file.chmod(0o600)
+    monkeypatch.delenv("GOOGLE_WORKER_CREDENTIALS_FILE", raising=False)
     monkeypatch.setenv("GOOGLE_MCP_CREDENTIALS_FILE", str(google_mcp_file))
     monkeypatch.setenv("NOTION_MCP_TOKEN", "shared-token-value")
     monkeypatch.setenv("NOTION_WORKER_TOKEN", "shared-token-value")
@@ -53,6 +55,7 @@ def test_mcp_dispatch_rejects_identical_mcp_and_worker_drive_file(tmp_path, monk
     path = _write_config(tmp_path)
     shared_file = tmp_path / "shared-credentials.json"
     shared_file.write_text("{}", encoding="utf-8")
+    shared_file.chmod(0o600)
     monkeypatch.setenv("GOOGLE_MCP_CREDENTIALS_FILE", str(shared_file))
     monkeypatch.setenv("GOOGLE_WORKER_CREDENTIALS_FILE", str(shared_file))
     monkeypatch.setenv("NOTION_MCP_TOKEN", "mcp-token-value")

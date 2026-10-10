@@ -22,6 +22,7 @@ The checked-in deployment profile documents these environment variables:
 | Worker | `GOOGLE_WORKER_CREDENTIALS_FILE`, `NOTION_WORKER_TOKEN` |
 | Local/remote MCP | `GOOGLE_MCP_CREDENTIALS_FILE`, `NOTION_MCP_TOKEN`; `GITHUB_READ_TOKEN` when private GitHub sources are used |
 | Remote development bearer | `REMOTE_MCP_SECRET`, `REMOTE_MCP_EXPIRES_AT` |
+| Remote MCP OAuth browser login | `REMOTE_MCP_GOOGLE_CLIENT_SECRET` plus non-secret `remote_mcp.oauth.google_client_id` / `authorized_email` config |
 
 Use provider-side least privilege. MCP credentials should be read-only where the provider supports it. Worker credentials may need write permissions for the specific configured workflow.
 
@@ -72,6 +73,33 @@ notion:
 ```
 
 Do not mix these five current-semester intake data-source IDs with the existing global IDs used by the legacy read-only retrieval composition. There is no implicit fallback between those lanes.
+
+## Semester-scoped read-only retrieval
+
+The v1.2 global registry remains the default. To read one current-semester
+workspace directly, opt in with an exact semester:
+
+```yaml
+retrieval:
+  notion_lane: semester_workspace
+  semester: "2026-2"
+```
+
+This mode uses the selected workspace's Courses, Sessions, and Materials
+`data_source_id` values directly; it never copies them into or falls back to
+the legacy global `*_db_id` fields. Course relations are checked against the
+selected Courses source and semester before a Course, Session, or Material can
+be returned.
+
+`material_usage_data_source_id` is optional. When it is absent, Session
+retrieval remains available from transcript evidence and reports Material Usage
+as unavailable; it does not treat the missing source as a verified empty
+database. Semester-scoped Exam and Activity retrieval is unavailable until
+explicit mappings exist. `uls doctor --live` probes a Course from the
+selected semester when this lane is enabled.
+
+To return to the frozen v1.2 path, use `notion_lane: legacy_global` with an
+empty `semester`.
 
 ## Source registrations
 

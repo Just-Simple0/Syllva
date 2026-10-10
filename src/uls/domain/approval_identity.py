@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
+from uuid import UUID
 
 from .ids import strict_entity_id
 from .page_range import PageRange, parse_page_range
@@ -902,19 +905,409 @@ def _sha256(value: Any) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+
+USAGE_PROPOSAL_ENVELOPE_SCHEMA = "uls.usage-proposal.v2"
+_ENVELOPE_KEYS = frozenset({"schema", "usage_slot_key", "request_id", "intent_generation"})
+_HEX64_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_UUID_PATTERN = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+
+
+def canonical_notion_page_id(value: str) -> str:
+    """Normalize a real provider UUID; application IDs are never substitutes."""
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-fA-F]{32}|[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", value) is None:
+        raise ValueError("Notion identity must be a page UUID")
+    return str(UUID(value))
+
+
+@dataclass(frozen=True)
+class UsageSlotIdentity:
+    """Provider-qualified, range-independent identity from validated relations."""
+
+    course_page_id: str
+    session_page_id: str
+    material_page_id: str
+    role: str
+    provider: str = "notion"
+
+    def __post_init__(self) -> None:
+        if self.provider != "notion" or self.role not in {"Primary", "Supporting", "Reference"}:
+            raise ValueError("unsupported Usage provider/role")
+        for name in ("course_page_id", "session_page_id", "material_page_id"):
+            object.__setattr__(self, name, canonical_notion_page_id(getattr(self, name)))
+
+    @property
+    def canonical_json(self) -> str:
+        return json.dumps(
+            ["uls.usage-slot.v2", self.provider, self.course_page_id, self.session_page_id, self.material_page_id, self.role],
+            ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+        )
+
+    @property
+    def key(self) -> str:
+        return hashlib.sha256(self.canonical_json.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def from_json(cls, value: str) -> UsageSlotIdentity:
+        payload = json.loads(value)
+        if not isinstance(payload, list) or len(payload) != 6 or payload[0] != "uls.usage-slot.v2":
+            raise ValueError("invalid physical slot identity")
+        result = cls(payload[2], payload[3], payload[4], payload[5], payload[1])
+        if result.canonical_json != value:
+            raise ValueError("physical slot identity must be canonical")
+        return result
+
+
+def derive_usage_slot_key(session_app_id: str, material_app_id: str, role: str) -> str:
+    """Range-agnostic slot identity: SHA256 of the (session, material, role) tuple.
+
+    This deliberately excludes page range -- a slot may hold at most one live
+    Usage across all ranges (contract Sec 5.2).
+    """
+
+    for value, name in (
+        (session_app_id, "session_app_id"),
+        (material_app_id, "material_app_id"),
+        (role, "role"),
+    ):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{name} must be a non-empty string")
+    return _sha256_v2([session_app_id.strip(), material_app_id.strip(), role.strip()])
+
+
+def build_usage_proposal_envelope(
+    usage_slot_key: str, request_id: str, intent_generation: int
+) -> OrderedDict[str, Any]:
+    """Build and validate the exact 4-key v2 envelope shape before it is stored."""
+
+    if not isinstance(usage_slot_key, str) or _HEX64_PATTERN.fullmatch(usage_slot_key) is None:
+        raise ValueError("usage_slot_key must be 64 lowercase hexadecimal characters")
+    if not isinstance(request_id, str) or _UUID_PATTERN.fullmatch(request_id) is None:
+        raise ValueError("request_id must be a canonical lowercase-hyphenated UUID")
+    if (
+        isinstance(intent_generation, bool)
+        or not isinstance(intent_generation, int)
+        or intent_generation < 1
+    ):
+        raise ValueError("intent_generation must be an integer >= 1")
+    envelope: OrderedDict[str, Any] = OrderedDict()
+    envelope["schema"] = USAGE_PROPOSAL_ENVELOPE_SCHEMA
+    envelope["usage_slot_key"] = usage_slot_key
+    envelope["request_id"] = request_id
+    envelope["intent_generation"] = intent_generation
+    return envelope
+
+
+def canonical_usage_proposal_envelope_json(envelope: Mapping[str, Any]) -> str:
+    """Serialize the v2 envelope with the same canonical rules as action JSON."""
+
+    return json.dumps(
+        dict(envelope), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+
+
+def parse_usage_proposal_envelope(record: Any) -> OrderedDict[str, Any] | None:
+    """Read and strictly validate the Queue's Proposal Envelope Rich text field.
+
+    Returns None ONLY when the property itself is genuinely absent. A PRESENT
+    property that is empty, malformed, has duplicate/unknown keys, fails the
+    canonical-JSON roundtrip check, or has an out-of-range generation raises
+    ValueError -- it is NEVER treated as a legacy/absent envelope, on any
+    Queue state.
+    """
+
+    raw = _field(record, "Proposal Envelope", "proposal_envelope", default=_MISSING)
+    if raw is _MISSING:
+        return None
+    # A PRESENT-but-null value (e.g. an explicit {"Proposal Envelope": None})
+    # is NOT absence -- it is present-and-invalid, and must raise below like
+    # any other malformed present value, never be silently downgraded to the
+    # legacy-absent case.
+    text = _unwrap(raw)
+    if isinstance(text, Mapping):
+        # Already-parsed callers (e.g. a locally-built candidate) may supply a
+        # mapping directly; still re-validate/re-serialize through the same
+        # canonical path as a stored Rich text value.
+        text = canonical_usage_proposal_envelope_json(text)
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("Proposal Envelope is present but empty")
+
+    def _reject_duplicate_envelope_keys(pairs_value: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, item in pairs_value:
+            if key in result:
+                raise ValueError(f"duplicate JSON key in Proposal Envelope: {key}")
+            result[key] = item
+        return result
+
+    try:
+        parsed = json.loads(text, object_pairs_hook=_reject_duplicate_envelope_keys)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Proposal Envelope is not valid JSON") from exc
+    if not isinstance(parsed, Mapping):
+        # Malformed stored envelopes uniformly raise ValueError for callers.
+        raise ValueError("Proposal Envelope must be a JSON object")  # noqa: TRY004
+    keys = set(parsed.keys())
+    if keys != _ENVELOPE_KEYS:
+        raise ValueError("Proposal Envelope has unknown or missing keys")
+    if parsed.get("schema") != USAGE_PROPOSAL_ENVELOPE_SCHEMA:
+        raise ValueError("Proposal Envelope schema is not uls.usage-proposal.v2")
+    slot_key = parsed.get("usage_slot_key")
+    request_id = parsed.get("request_id")
+    generation = parsed.get("intent_generation")
+    if not isinstance(slot_key, str) or _HEX64_PATTERN.fullmatch(slot_key) is None:
+        raise ValueError("Proposal Envelope usage_slot_key is malformed")
+    if not isinstance(request_id, str) or _UUID_PATTERN.fullmatch(request_id) is None:
+        raise ValueError("Proposal Envelope request_id is malformed")
+    if (
+        isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or generation < 1
+    ):
+        raise ValueError("Proposal Envelope intent_generation is malformed")
+    envelope = build_usage_proposal_envelope(slot_key, request_id, generation)
+    if canonical_usage_proposal_envelope_json(envelope) != canonical_usage_proposal_envelope_json(parsed):
+        raise ValueError("Proposal Envelope does not roundtrip to its canonical form")
+    return envelope
+
+
+def derive_proposal_id_v2(
+    proposal_type: Any,
+    semantics: Mapping[str, Any],
+    generation_token: Sequence[Any],
+) -> str:
+    """The v2 Proposal ID: 64 lowercase hex, no type prefix (contract Sec 5.3)."""
+
+    type_value = _wire(proposal_type)
+    if hasattr(type_value, "value"):
+        type_value = type_value.value
+    if not isinstance(type_value, str) or not type_value.strip():
+        raise ValueError("proposal_type must be a non-empty string")
+    canonical = _json_value(semantics)
+    payload = [
+        "uls.usage-proposal.v2",
+        type_value.strip(),
+        canonical,
+        list(generation_token),
+    ]
+    return _sha256_v2(payload)
+
+
+def derive_proposal_id_for_read(
+    proposal_type: Any, record: Any, semantics: Mapping[str, Any]
+) -> str:
+    """The ID a stored Queue record's action(+envelope) must equal, for READING.
+
+    EXAM_SCOPE: always v1. MATERIAL_USAGE/PAGE_RANGE with a present, VALID
+    Proposal Envelope: v2. MATERIAL_USAGE/PAGE_RANGE with no envelope: v1
+    (legacy-row identity check only -- callers decide separately whether a
+    legacy row may be approved/applied; see the four-way split in the HAA
+    generation guard). A present-but-INVALID envelope raises via
+    parse_usage_proposal_envelope and is never silently treated as absent.
+    """
+
+    type_value = _wire(proposal_type)
+    if hasattr(type_value, "value"):
+        type_value = type_value.value
+    if type_value == "EXAM_SCOPE":
+        return derive_proposal_id(proposal_type, semantics)
+    envelope = parse_usage_proposal_envelope(record)
+    if envelope is None:
+        return derive_proposal_id(proposal_type, semantics)
+    generation_token = [
+        envelope["usage_slot_key"],
+        envelope["request_id"],
+        envelope["intent_generation"],
+    ]
+    return derive_proposal_id_v2(proposal_type, semantics, generation_token)
+
+
+def derive_proposal_id_for_create(
+    proposal_type: Any,
+    envelope: Mapping[str, Any] | None,
+    semantics: Mapping[str, Any],
+) -> str:
+    """The ID a NEW Queue record must be created with (envelope MANDATORY for M/P).
+
+    EXAM_SCOPE: always v1 (envelope must be None; ValueError otherwise).
+    MATERIAL_USAGE/PAGE_RANGE: envelope is mandatory -- ValueError if
+    absent. Always v2 for these two types; no envelope-less MATERIAL_USAGE/
+    PAGE_RANGE row may ever be freshly created.
+    """
+
+    type_value = _wire(proposal_type)
+    if hasattr(type_value, "value"):
+        type_value = type_value.value
+    if type_value not in {"MATERIAL_USAGE", "PAGE_RANGE", "EXAM_SCOPE"}:
+        raise ValueError(f"unsupported proposal_type for create-time dispatch: {type_value!r}")
+    if type_value == "EXAM_SCOPE":
+        if envelope is not None:
+            raise ValueError("EXAM_SCOPE proposals do not use a Proposal Envelope")
+        return derive_proposal_id(proposal_type, semantics)
+    if envelope is None:
+        raise ValueError(
+            "MATERIAL_USAGE/PAGE_RANGE creation requires a Proposal Envelope"
+        )
+    # Re-validate the EXACT 4-key shape (schema/hex64/UUID/generation, no
+    # unknown/duplicate/missing keys) -- callers may pass an already-parsed
+    # mapping that skipped parse_usage_proposal_envelope()'s strict checks
+    # (e.g. a hand-built dict with a wrong schema string or an extra key).
+    # Route through the SAME parser used for the read-time path (not a
+    # partial re-check of only 3 fields) so create-time can never accept a
+    # malformed shape that the read-time path would have rejected.
+    revalidated = parse_usage_proposal_envelope({"Proposal Envelope": envelope})
+    if revalidated is None:
+        raise ValueError("Proposal Envelope is required for MATERIAL_USAGE/PAGE_RANGE creation")
+    envelope = revalidated
+    generation_token = [
+        envelope["usage_slot_key"],
+        envelope["request_id"],
+        envelope["intent_generation"],
+    ]
+    return derive_proposal_id_v2(proposal_type, semantics, generation_token)
+
+
+def _canonical_json_value_v2(value: Any, name: str) -> Any:
+    try:
+        result = _json_value(value)
+        json.dumps(result, ensure_ascii=False, sort_keys=True, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} is not strict JSON-compatible (v2)") from exc
+    return result
+
+
+def _sha256_v2(value: Any) -> str:
+    """Strict v2 canonical serializer: rejects NaN/Infinity (contract Sec 5.3).
+
+    Kept separate from the shared v1 _sha256 so changing v2's strictness can
+    never silently change any already-computed v1 Proposal ID.
+    """
+
+    payload = json.dumps(
+        _json_value(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def parse_c5_usage_snapshot(raw: str) -> list[dict[str, Any]]:
+    """Strict physical-row evidence; semantic-only producer snapshots are not proof."""
+    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate C5 snapshot key")
+            result[key] = value
+        return result
+
+    payload = json.loads(raw, object_pairs_hook=unique)
+    if not isinstance(payload, dict) or set(payload) != {"schema", "rows"}:
+        raise ValueError("invalid C5 snapshot shape")
+    if payload["schema"] != "uls.c5-usage-snapshot.v1" or not isinstance(payload["rows"], list):
+        raise ValueError("invalid C5 snapshot schema/rows")
+    keys = {"provider", "provider_row_id", "usage_app_id", "session_app_id",
+            "material_app_id", "usage_role", "start_page", "end_page", "verified"}
+    rows: list[dict[str, Any]] = []
+    physical: set[tuple[str, str]] = set()
+    for row in payload["rows"]:
+        if not isinstance(row, dict) or set(row) != keys:
+            raise ValueError("invalid C5 physical row shape")
+        for key in keys - {"start_page", "end_page", "verified"}:
+            if not isinstance(row[key], str) or not row[key] or row[key] != row[key].strip():
+                raise ValueError("invalid C5 row identity")
+        if row["provider"] != "notion" or re.fullmatch(
+            r"[0-9a-f]{32}|[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}", row["provider_row_id"]
+        ) is None:
+            raise ValueError("unsupported or malformed physical provider identity")
+        row["provider_row_id"] = row["provider_row_id"].replace("-", "")
+        identity = (row["provider"], row["provider_row_id"])
+        if identity in physical:
+            raise ValueError("duplicate physical row in C5 snapshot")
+        physical.add(identity)
+        start, end = row["start_page"], row["end_page"]
+        if not ((start is None and end is None) or (
+            type(start) is int and type(end) is int and 1 <= start <= end
+        )) or type(row["verified"]) is not bool:
+            raise ValueError("invalid C5 range/Verified")
+        rows.append(row)
+    return rows
+
+
+def c5_usage_snapshot_json(rows: Sequence[Mapping[str, Any]]) -> str:
+    raw = json.dumps({"schema": "uls.c5-usage-snapshot.v1", "rows": list(rows)})
+    normalized = parse_c5_usage_snapshot(raw)
+    normalized.sort(key=lambda row: json.dumps(row, sort_keys=True))
+    return json.dumps({"schema": "uls.c5-usage-snapshot.v1", "rows": normalized}, sort_keys=True)
+
+
+def prove_c5_usage_outcome(baseline: str, readback: str, expected: str, outcome: str) -> dict[str, Any] | None:
+    """Prove exact no-effect, one physical addition, or one bound physical update."""
+    from collections import Counter
+
+    before = parse_c5_usage_snapshot(baseline)
+    after = parse_c5_usage_snapshot(readback)
+    intended = parse_c5_usage_snapshot(expected)
+    if len(intended) != 1:
+        raise ValueError("one exact expected physical row is required")
+    target = intended[0]
+    def multiset(rows: list[dict[str, Any]]) -> Counter[str]:
+        return Counter(json.dumps(row, sort_keys=True) for row in rows)
+    if outcome == "not_applied":
+        if multiset(before) != multiset(after):
+            raise ValueError("no-effect baseline differs")
+        return None
+    if outcome != "effect":
+        raise ValueError("unsupported C5 proof outcome")
+    slot = (target["session_app_id"], target["material_app_id"], target["usage_role"])
+    occupants = [row for row in after if (row["session_app_id"], row["material_app_id"], row["usage_role"]) == slot]
+    if len(occupants) != 1:
+        raise ValueError("readback lacks unique full expected identity/range/Verified")
+    old = [row for row in before if row["provider_row_id"] == target["provider_row_id"]]
+    if not old:
+        candidate = occupants[0]
+        if any(candidate[key] != target[key] for key in (
+            "provider", "session_app_id", "material_app_id", "usage_role", "start_page", "end_page", "verified"
+        )):
+            raise ValueError("added physical row differs from intended slot/range/Verified")
+        target = candidate
+    elif occupants != [target]:
+        raise ValueError("bound physical target differs from expected row")
+    if old and old[0]["usage_app_id"] != target["usage_app_id"]:
+        raise ValueError("physical row changed logical identity")
+    remaining_before = [row for row in before if row not in old]
+    remaining_after = [row for row in after if row != target]
+    if multiset(remaining_before) != multiset(remaining_after):
+        raise ValueError("baseline physical rows were removed/replaced/changed")
+    if multiset(before) == multiset(after):
+        raise ValueError("unchanged desired state is not attributable effect")
+    return target
+
+
 __all__ = [
     "APPROVAL_ACTION_SCHEMA",
     "EXAM_SCOPE_APPROVAL_ACTION_SCHEMA",
     "EXAM_SCOPE_TARGET_DB",
     "MATERIAL_USAGE_TARGET_DB",
     "SUPPORTED_MATERIAL_SOURCE_CLASSES",
+    "USAGE_PROPOSAL_ENVELOPE_SCHEMA",
     "VALID_USAGE_ROLES",
     "build_exam_scope_semantics",
     "build_material_usage_semantics",
+    "build_usage_proposal_envelope",
     "canonical_action_json",
     "canonical_exam_scope_semantics",
     "canonical_semantics_from_queue",
+    "canonical_usage_proposal_envelope_json",
     "derive_proposal_id",
+    "derive_proposal_id_for_create",
+    "derive_proposal_id_for_read",
+    "derive_proposal_id_v2",
     "derive_usage_id",
+    "derive_usage_slot_key",
     "parse_action_json",
+    "parse_usage_proposal_envelope",
 ]

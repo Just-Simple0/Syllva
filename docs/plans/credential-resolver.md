@@ -2,6 +2,26 @@
 
 Status: draft for independent plan review. No implementation yet.
 
+> **Amendment (2026-09-17, required by insane-review's rev3 AND rev4 reviews
+> of `docs/plans/credential-secret-file-launcher.md` §8.4/§9):** This
+> plan's rev2 decision to keep `source: file` "deferred" and to leave
+> `GOOGLE_WORKER_CREDENTIALS_FILE`/`GOOGLE_MCP_CREDENTIALS_FILE` untouched
+> is **superseded and actually amended in place** (not just noted) by the
+> "Scope of this plan" section below: the "In scope" `file` source item,
+> the "Out of scope" bullets for the protected-secret-file pattern/`source:
+> file`/Google credential handling, and the composition-root table's
+> `google_service(...)` row all now carry inline amendment text pointing
+> to `docs/plans/credential-secret-file-launcher.md` rev4 §2.1/§2.3/§2.4/
+> §8.2/§8.3 as the authoritative contract for those two points. The
+> pre-existing changelog entries elsewhere in this document (rev1/rev2
+> BLOCKER 1 discussion) are left as unedited historical review record — only
+> the *current-contract* sections ("Scope of this plan", the composition
+> table) were amended, per the rev4 review's requirement that this not be a
+> footnote-only fix. This document remains authoritative, unchanged, for
+> every other credential (`NOTION_MCP_TOKEN`, `GITHUB_READ_TOKEN`,
+> `LLM_API_KEY`, `REMOTE_MCP_SECRET`'s environment path, composition-root
+> ownership discipline in general).
+
 ## rev3 changelog (response to rev2 REVISE, 2 blockers)
 
 1. **BLOCKER A (`ResolvedCredentials` not actually immutable)** — `frozen=True`
@@ -138,12 +158,15 @@ migration:
 
 In scope:
 1. A `CredentialResolver` abstraction with an explicit `source` per credential
-   (`environment` | `keyring` — `file` deferred, see rev2 changelog #1),
+   (`environment` | `keyring` | `file` — `file` is now fully specified by
+   `docs/plans/credential-secret-file-launcher.md` rev4 §2.1/§2.3/§8.2 for
+   `NOTION_WORKER_TOKEN`/`REMOTE_MCP_SECRET`, superseding the rev2 "deferred"
+   note below),
    used everywhere `src/uls/runtime.py`, `src/uls/worker.py`, and
    `src/uls/cli/main.py` currently read `os.environ` directly (full
    inventory below).
 2. Config schema addition: a `credentials:` section mapping credential name to
-   `{source: environment|keyring}` — no other fields are legal per entry.
+   `{source: environment|keyring|file}` — no other fields are legal per entry.
    Default behavior when a credential has no explicit `credentials:` entry,
    or when the whole `credentials:` section is absent, is the current
    behavior (`environment`), so existing deployments are observably
@@ -172,17 +195,34 @@ In scope:
    default for all three.
 
 Out of scope for this plan (tracked as follow-ups, not implemented here):
-- The main-worker "protected secret file + minimal-env launcher" pattern
-  (macOS `~/Library/Application Support/Syllva/secrets/` with `0700`/`0600`,
-  Windows NTFS DACL via `icacls`). This depends on the Stage D Windows
-  scheduler `Password` logon fix (already committed) and deserves its own
-  design + review pass focused on the launcher's own attack surface.
-- `source: file` as a general `CredentialResolver` source (see rev2
-  changelog #1) — will be designed together with the item above, sharing one
-  read-boundary implementation instead of two.
+- ~~The main-worker "protected secret file + minimal-env launcher" pattern~~
+  **Now specified** by `docs/plans/credential-secret-file-launcher.md`
+  rev4 — note the launcher itself was designed then removed again in that
+  plan's §7.2/§8.3 (scheduled execution calls `uls` directly; no separate
+  launcher process). The protected-secret-file read/write boundary (macOS
+  `~/Library/Application Support/Syllva/secrets/` `0700`/`0600`, Windows
+  NTFS DACL) is specified there.
+- ~~`source: file` as a general `CredentialResolver` source~~ **Now
+  specified** by the same plan (rev4 §2.1/§2.3) for `NOTION_WORKER_TOKEN`/
+  `REMOTE_MCP_SECRET`.
 - `REMOTE_MCP_SECRET` → OAuth/OIDC replacement.
-- Any change to `GOOGLE_WORKER_CREDENTIALS_FILE`/`GOOGLE_MCP_CREDENTIALS_FILE`
-  beyond documenting the existing file+ACL expectation; these stay file-based.
+- ~~Any change to `GOOGLE_WORKER_CREDENTIALS_FILE`/`GOOGLE_MCP_CREDENTIALS_FILE`
+  beyond documenting the existing file+ACL expectation~~ **Now specified**
+  by `docs/plans/credential-secret-file-launcher.md` rev4 §2.4/§8.2/§8.3:
+  these two names stay `source: environment` (or a non-secret
+  `google_worker_credentials_path`/`google_mcp_credentials_path` config
+  field per §8.3), but the value they produce is no longer handed to
+  `google_service(...)` as a bare path string. The composition-root
+  diagnosis/composition operation that selects and secure-reads that path
+  owns the resulting immutable payload (parsed JSON / validated bytes; exact
+  container type decided in the implementation PR) and passes that payload
+  — not the path — to `google_service(...)`/provider adapters as a
+  required argument. Downstream code may not call the resolver again,
+  re-invoke the secure-file reader, or reopen the path itself. This
+  replaces the composition-table row below that still shows
+  `google_service(snapshot['GOOGLE_MCP_CREDENTIALS_FILE'], ...)` receiving
+  a bare string; that row is retained below as the pre-rev4 historical
+  contract and is superseded by this paragraph.
 - Any change to the Canvas/KNU LMS sidecar's existing keyring implementation.
   `scripts/knu_lms_sync.py` deliberately avoids importing the `uls` package
   so it stays runnable as a bare script without a full `pip install
@@ -227,10 +267,10 @@ ALLOWED_SOURCES: Final[dict[str, frozenset[str]]] = {
     "NOTION_MCP_TOKEN": frozenset({"environment", "keyring"}),
     "GITHUB_READ_TOKEN": frozenset({"environment", "keyring"}),
     "LLM_API_KEY": frozenset({"environment", "keyring"}),
-    "NOTION_WORKER_TOKEN": frozenset({"environment"}),
+    "NOTION_WORKER_TOKEN": frozenset({"environment", "file"}),
     "GOOGLE_WORKER_CREDENTIALS_FILE": frozenset({"environment"}),
     "GOOGLE_MCP_CREDENTIALS_FILE": frozenset({"environment"}),
-    "REMOTE_MCP_SECRET": frozenset({"environment"}),
+    "REMOTE_MCP_SECRET": frozenset({"environment", "file"}),
     "REMOTE_MCP_EXPIRES_AT": frozenset({"environment"}),
 }
 
@@ -396,6 +436,15 @@ convention alone.
 | `cli/main.py: dispatch()`, `mcp local|remote` branch | `resolve(required={GOOGLE_MCP_CREDENTIALS_FILE, NOTION_MCP_TOKEN}, optional={GITHUB_READ_TOKEN: '', REMOTE_MCP_SECRET: '', REMOTE_MCP_EXPIRES_AT: '0', NOTION_WORKER_TOKEN: '', GOOGLE_WORKER_CREDENTIALS_FILE: ''})` once, covering both retrieval build and `BearerCredential` while retaining worker/MCP distinctness checks in `require_mcp_credentials()` | `runtime.build_retrieval(config, credentials)`; `BearerCredential(credentials['REMOTE_MCP_SECRET'], float(credentials['REMOTE_MCP_EXPIRES_AT']))` from the SAME snapshot |
 | `runtime.py: build_retrieval(config, credentials)` | never | reads `credentials[...]` directly |
 | `cli/main.py: doctor(config, live=False)` | `diagnose(ALL_CREDENTIAL_NAMES)` once | `.require(...)` on that SAME `DiagnosticResolution` (no new read) for the separation check and, when `live=True`, for `build_retrieval(config, credentials=snapshot)` / `google_service(snapshot['GOOGLE_MCP_CREDENTIALS_FILE'], ...)` |
+
+> **Amendment (2026-09-17):** the `google_service(snapshot['GOOGLE_MCP_CREDENTIALS_FILE'], ...)`
+> cell above is the pre-rev4 contract and is superseded by
+> `docs/plans/credential-secret-file-launcher.md` rev4 §8.2/§8.3: the same
+> composition operation that selects/secure-reads the Google credentials
+> path owns the resulting immutable payload and passes that payload (not
+> `snapshot['GOOGLE_MCP_CREDENTIALS_FILE']` as a bare string) to
+> `google_service(...)`. See the "Out of scope" section above for the full
+> updated contract text.
 
 `doctor()`'s `checks`/`optional_checks` booleans are derived directly from
 `DiagnosticResolution.results[name].status` (`"ready"` → `True`, anything

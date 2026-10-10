@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from uls.adapters.notion.base import normalize_alias, parse_aliases
-from uls.domain.errors import ProviderUnavailableError, SourcePartialError, SourceUnavailableError
+from uls.domain.errors import (
+    ProviderUnavailableError,
+    SourcePartialError,
+    SourceUnavailableError,
+    UlsError,
+)
+from uls.domain.ids import parse_course_key
 
 _RELATION_DATABASES = {
     'Session': 'sessions', 'Sessions': 'sessions', 'Included Sessions': 'sessions',
@@ -21,12 +28,24 @@ def _plain(value: Any) -> str:
 
 
 class NotionAPIReader:
-    def __init__(self, client: Any, config: Any, *, max_records: int = 1000) -> None:
+    def __init__(
+        self,
+        client: Any,
+        config: Any,
+        *,
+        max_records: int = 1000,
+        data_source_ids: Mapping[str, str] | None = None,
+        expected_semester: str = "",
+    ) -> None:
         self._database = client.databases.retrieve
         self._query = client.data_sources.query
         self._page = client.pages.retrieve
         self._children = client.blocks.children.list
         self._cfg = config
+        self._direct_sources = None if data_source_ids is None else dict(data_source_ids)
+        self._expected_semester = expected_semester
+        if self._direct_sources is not None and not self._expected_semester:
+            raise ValueError("direct Notion data sources require an expected semester")
         self._sources: dict[str, str] = {}
         self.max_records = max_records
 
@@ -37,6 +56,13 @@ class NotionAPIReader:
             raise ProviderUnavailableError('Notion read failed') from None
 
     def _data_source(self, kind: str) -> str:
+        if self._direct_sources is not None:
+            source_id = self._direct_sources.get(kind, "")
+            if not source_id:
+                raise SourceUnavailableError(
+                    f"Selected semester retrieval lane has no {kind} data source"
+                )
+            return source_id
         if kind not in self._sources:
             database_id = getattr(self._cfg, kind + '_db_id')
             result = self._call(self._database, database_id=database_id)
@@ -45,6 +71,68 @@ class NotionAPIReader:
                 raise SourceUnavailableError('Configured Notion database must have exactly one data source')
             self._sources[kind] = sources[0]['id']
         return self._sources[kind]
+
+    def supports_data_source(self, kind: str) -> bool:
+        """Report explicit semester-lane support without changing legacy behavior."""
+        if self._direct_sources is None:
+            return True
+        return bool(self._direct_sources.get(kind))
+
+    def _validate_course_key_semester(self, course_key: Any) -> None:
+        if self._direct_sources is None:
+            return
+        if not isinstance(course_key, str) or not course_key:
+            raise SourceUnavailableError(
+                "Semester-scoped Course is missing its canonical Course Key"
+            )
+        try:
+            parsed = parse_course_key(course_key)
+        except UlsError:
+            raise SourceUnavailableError(
+                "Semester-scoped Course Key is invalid"
+            ) from None
+        if parsed.semester != self._expected_semester:
+            raise SourceUnavailableError(
+                "Notion Course is outside the selected retrieval semester"
+            )
+
+    def _validate_course_page(self, relation_page_id: str) -> None:
+        page = self._call(self._page, page_id=relation_page_id)
+        self._check_parent(page, 'courses')
+        if page.get('id', '').replace('-', '') != relation_page_id.replace('-', ''):
+            raise SourceUnavailableError('Course page identity mismatch')
+        properties = page.get('properties')
+        if not isinstance(properties, dict):
+            raise SourceUnavailableError('Notion Course properties are malformed')
+        prop = properties.get('Course Key')
+        if not isinstance(prop, dict):
+            raise SourceUnavailableError('Notion Course Key property is missing')
+        kind = prop.get('type')
+        if kind not in {'title', 'rich_text'}:
+            raise SourceUnavailableError('Notion Course Key property is malformed')
+        self._validate_course_key_semester(_plain(prop.get(kind)))
+
+    def _validate_direct_scope(self, kind: str, row: dict[str, Any]) -> None:
+        if self._direct_sources is None:
+            return
+        if kind == 'courses':
+            self._validate_course_key_semester(row.get('Course Key'))
+            return
+        if kind not in {'sessions', 'materials'}:
+            return
+        relation = row.get('Course')
+        values = relation.get('relation') if isinstance(relation, dict) else None
+        if (
+            not isinstance(values, list)
+            or len(values) != 1
+            or not isinstance(values[0], dict)
+            or not isinstance(values[0].get('id'), str)
+            or not values[0]['id']
+        ):
+            raise SourceUnavailableError(
+                "Semester-scoped Session/Material must have exactly one Course relation"
+            )
+        self._validate_course_page(values[0]['id'])
 
     def _check_parent(self, page: Any, kind: str) -> None:
         parent = page.get('parent', {})
@@ -68,7 +156,9 @@ class NotionAPIReader:
                 raise SourceUnavailableError('Notion query is malformed')
             for page in pages:
                 self._check_parent(page, kind)
-                rows.append(self._normalize(page))
+                normalized = self._normalize(page)
+                self._validate_direct_scope(kind, normalized)
+                rows.append(normalized)
                 if len(rows) > self.max_records:
                     raise SourcePartialError('Notion catalog exceeds bounded read limit')
             if result.get('has_more') is False:
@@ -129,7 +219,9 @@ class NotionAPIReader:
         self._check_parent(page, 'courses')
         if page['id'].replace('-', '') != relation_page_id.replace('-', ''):
             raise SourceUnavailableError('Course page identity mismatch')
-        return self._normalize(page)
+        row = self._normalize(page)
+        self._validate_direct_scope('courses', row)
+        return row
 
     def get_course_by_alias(self, alias_norm: str) -> Any:
         wanted = normalize_alias(alias_norm)

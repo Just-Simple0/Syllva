@@ -4,7 +4,7 @@ This is the operating contract for a Codex heartbeat in the current project and 
 
 ## Fixed inputs and activation
 
-Use `/Users/admin/Project/Syllva` and its `.review/venv311/bin/python` runtime. Read private local bindings from `.review/knu-lms-hourly/cloud-receipt.json`, last accepted projection/readback state, and the secret-free `config.json`/`auth-manifest.json`. Runtime metadata is mode0600 under a mode0700 directory. Never expose private records to review services. Compare the reviewed script hashes recorded at acceptance before execution; code drift stops the run for review, never triggers self-modification.
+Use `/Users/admin/Project/Syllva` and its `.review/venv311/bin/python` runtime. Read private local bindings from `.review/knu-lms-hourly/cloud-receipt.json`, last accepted projection/readback state, the secret-free semester API config/manifest, and the registry. Runtime metadata is mode0600 under a mode0700 directory. Never expose private records to review services. Compare the reviewed script hashes recorded at acceptance before execution; code drift stops the run for review, never triggers self-modification.
 
 The run uses the private `knu-lms-semester-registry.v1` with the five verified
 2026-2 academic courses and their exact origin, ID, name, code and term. The
@@ -16,37 +16,37 @@ selected. No grades, submissions, attendance, original downloads, hidden
 LearningX APIs or public sharing.
 
 The hourly automation remains PAUSED until the final operational decision. The
-preferred Aside branch reuses the already logged-in browser session for
-same-origin read-only collection and does not read or enroll a token or Keychain
-item. The legacy token branch remains separate: it requires its own valid
-enrolled manifest and authorization, cannot authorize added courses, and is
-never an automatic fallback from an Aside failure. Never run `enroll` from the
-heartbeat or renew a token automatically.
+2026-2 rollout uses the explicitly prepared and enrolled `canvas-api-readonly`
+semester binding. The legacy token branch and Aside collector remain separate
+compatibility paths; neither is an automatic fallback from an API failure. The
+heartbeat never enrolls a token, reads a browser session, renews a token, or
+reconciles an interrupted reservation automatically.
 
 ## One complete run
 
 1. Check acceptance hashes, the private semester registry, its canonical
-   64-hex run hash, and the bound Aside tab/origin before execution. The Aside
-   branch has no token or Keychain preflight and must not inspect `.env`, an
-   auth manifest, or a Keychain item. The legacy token branch independently
-   validates its fixed config/manifest, expiry and course scope before any
-   credential or network operation.
+   64-hex `canvas-api-readonly` scope hash, and the secret-free API
+   config/manifest before execution. Validate the exact five academic entries,
+   the excluded candidate, origin, resource list, backend, and expiry before
+   any Keychain read or provider request. A changed or stale binding stops the
+   run. Aside and legacy single-course runs independently validate their own
+   bindings when explicitly selected.
 2. Start `scripts/knu_lms_sync.py hold-lock --scope-hash <validated-hash>` in a retained local TTY process. Record the returned owner ID and keep its process alive through the whole run. If busy, do no dependent work. An interrupted durable reservation is never timed out, stolen or deleted; stop and request operator reconciliation. Before each mutation send `status` to the same live process and require the matching `lock_held` owner.
-3. For the preferred branch, run the complete registry through the fixed
-   Aside collector in the same runtime:
+3. For the API rollout, run the complete registry through the bounded Canvas
+   collector in the same runtime:
 
    ```text
-   .review/venv311/bin/python scripts/knu_lms_probe.py collect --transport aside --aside-tab-id <private-bound-target-id> --registry <private-semester-registry.json> --owner-id <owner> --scope-hash <run-hash> --start-date <YYYY-MM-DD> --end-date <YYYY-MM-DD> --output <private-aside-snapshot.json>
+   .review/venv311/bin/python scripts/knu_lms_sync.py collect-semester-api --registry <private-semester-registry.json> --owner-id <owner> --scope-hash <canvas-api-readonly-scope-hash> --output <private-api-snapshot.json>
    ```
 
-   The collector checks the active owner/hash before starting the Aside
-   subprocess and again after it returns. It requires one exact configured tab,
-   same-origin bounded GETs, and a complete per-course result. It reads no
-   Keychain item. Save metadata only in the private runtime. Do not reuse stale
-   data to present a failed fetch as current. A failure leaves accepted state
-   unchanged and causes no Notion mutation. The legacy token collector is a
-   separate explicitly selected branch and cannot silently widen its manifest
-   scope to the semester registry.
+   The collector checks the active owner/hash before reading the one enrolled
+   Keychain item, performs only bounded GETs through `probe.run_probe`, and
+   checks the owner/hash again after all five courses return. It validates each
+   course ID, name, code, and term; it never collects the excluded candidate or
+   files. Save metadata only in the private runtime. Do not reuse stale data to
+   present a failed fetch as current. A failure leaves accepted state unchanged
+   and causes no Notion mutation. The Aside collector and legacy single-course
+   collector remain explicitly selected compatibility paths.
 4. With official Notion tools, freshly verify the connected workspace, root privacy and semester identity, exact course binding and parent, datasource schema and its recorded containing toggle/semester ancestor, all view bindings/filters, and every previously bound row. Enumerate complete datasource rows including completed rows (not only To DO) and all pages/candidates needed to prove absence. Follow pagination; truncated/unavailable readbacks stop dependent writes. Missing formerly bound components are reconciliation, never permission to recreate them. First-time new assignment creation requires verified zero exact-key candidates with no ambiguous title/key candidates and no pending intent for that identity.
 5. Fetch the course with discussion indicators and retrieve all child-block discussions including resolved discussions. Comments or pending suggestions in the source region block replacement. If their locations or availability are uncertain, conservatively block source-region replacement. A course-level comment may be preserved outside the region only when its attachment is proved; otherwise reconcile. Row bodies/comments and user properties are never rewritten.
 6. Assemble the pure projection's readback using actual values and independently persisted last-applied values/hashes. Preserve source-field order only for presentation; hash canonical JSON. Normalize only documented connector formatting: exact canonical URL wrappers for `LMS 키`, omitted null date start/end, Unicode/line endings/trailing spaces in source blocks. Do not treat arbitrary missing fields as empty or discard meaningful user edits. Normalize UUID punctuation consistently for identity comparisons. Include tombstones for every missing previously bound row/course so the pure helper cannot classify it as newly absent. Pass the verified friendly course title separately from its API identity.
@@ -66,7 +66,8 @@ heartbeat or renew a token automatically.
    the KST observation date:
 
    ```text
-   .review/venv311/bin/python scripts/knu_lms_sync.py project --registry <semester-registry.json> --owner-id <keeper-owner> --scope-hash <aside-readonly-registry-scope-hash> --snapshot <semester-snapshot.json> --readback <sanitized-notion-readback.json> --prior <semester-prior.json> --observed-on <YYYY-MM-DD> --output <plan.json>
+   .review/venv311/bin/python scripts/knu_lms_sync.py snapshot --transport canvas-api-readonly --registry <semester-registry.json> --owner-id <keeper-owner> --scope-hash <canvas-api-readonly-scope-hash> --input <private-api-snapshot.json> --output <semester-snapshot.json>
+   .review/venv311/bin/python scripts/knu_lms_sync.py project --transport canvas-api-readonly --registry <semester-registry.json> --owner-id <keeper-owner> --scope-hash <canvas-api-readonly-scope-hash> --snapshot <semester-snapshot.json> --readback <sanitized-notion-readback.json> --prior <semester-prior.json> --observed-on <YYYY-MM-DD> --output <plan.json>
    ```
 
    The prior document has one entry per academic course: retained accepted
@@ -110,6 +111,6 @@ produces `notify=true`. This state controls duplicate suppression only; the
 existing Codex heartbeat and official notification integration remain the
 delivery mechanism.
 
-Expired/missing auth needs user enrollment, not token discovery. An unavailable connector, unverifiable sharing, missing prior binding, ambiguous create result, source edit/comment, changed script or interrupted reservation needs reconciliation. Preserve all prior accepted data while blocked. Do not broaden permissions, modify code, create replacement databases or automatically run reviews to clear these conditions.
+Expired/missing API auth needs user enrollment, not token discovery. An unavailable connector, unverifiable sharing, missing prior binding, ambiguous create result, source edit/comment, changed script or interrupted reservation needs reconciliation. For an interrupted reservation, run `reconcile-check`, obtain a current human decision on its exact candidate/evidence, and only then run `reconcile-apply --confirm-settled yes`; the heartbeat never runs either command. Preserve all prior accepted data while blocked. Do not broaden permissions, modify code, create replacement databases or automatically run reviews to clear these conditions.
 
 The guard protects cooperating local runners. Fresh readback does not provide an atomic Notion compare-and-swap against simultaneous external user edits; keep changes narrowly scoped and recheck actual results. This limitation must not be described as absolute overwrite prevention.

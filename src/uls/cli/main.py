@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -11,9 +12,15 @@ from typing import Any
 import yaml  # type: ignore[import-untyped]
 
 from uls.behavior import asset_root, lint_behavior
-from uls.config.credentials import ALLOWED_SOURCES, CredentialResolver
+from uls.config.credentials import (
+    ALLOWED_SOURCES,
+    GOOGLE_CREDENTIAL_PATH_NAMES,
+    CredentialResolver,
+)
 from uls.config.errors import ConfigurationError
+from uls.config.mutation import ConfigFileLock
 from uls.domain.errors import UlsError
+from uls.domain.ids import parse_course_key
 from uls.runtime import build_retrieval, require_mcp_credentials, state_path
 
 
@@ -22,6 +29,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument('--config', type=Path, default=Path('config.yaml'))
     commands = result.add_subparsers(dest='command', required=True)
     commands.add_parser('init', help='Create missing config, state and source registrations')
+    setup_parser = commands.add_parser('setup', help='Open the local Settings web interface')
+    setup_parser.add_argument(
+        '--no-browser', action='store_true',
+        help='Print the one-time local URL instead of opening a browser',
+    )
     doctor_parser = commands.add_parser('doctor', help='Check configuration and credential readiness')
     doctor_parser.add_argument('--live', action='store_true', help='Perform read-only provider checks')
     for name in ('sync', 'process', 'run'):
@@ -31,7 +43,16 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser('retry').add_argument('job_id')
     commands.add_parser('reprocess').add_argument('entity_id')
     commands.add_parser('mcp').add_argument('mode', choices=('local', 'remote', 'status'))
+    commands.add_parser('study-notes', help='Separate AI draft submission service').add_argument(
+        'mode', choices=('local', 'status'))
     commands.add_parser('behavior').add_argument('action', choices=('lint',))
+    credential_parser = commands.add_parser('credential', help='Manage stored credentials')
+    credential_sub = credential_parser.add_subparsers(dest='credential_action', required=True)
+    credential_set_parser = credential_sub.add_parser(
+        'set', help='Interactively register a credential value (never accepted as a CLI argument)')
+    credential_set_parser.add_argument('name', help='Credential name (see uls doctor for the list)')
+    credential_set_parser.add_argument('--overwrite', action='store_true',
+                                       help='Skip the confirmation prompt when a value already exists')
     return result
 
 
@@ -46,6 +67,12 @@ def _config(path: Path) -> Any:
             candidate = Path(value).expanduser()
             setattr(obj, name, str((path.resolve().parent / candidate).resolve()
                                   if not candidate.is_absolute() else candidate))
+    for name in ('google_worker_credentials_path', 'google_mcp_credentials_path'):
+        value = getattr(config, name, None)
+        if value:
+            candidate = Path(value).expanduser()
+            setattr(config, name, str((path.resolve().parent / candidate).resolve()
+                                  if not candidate.is_absolute() else candidate))
     errors = validate_config(config)
     if errors:
         raise ConfigurationError(errors)
@@ -54,12 +81,18 @@ def _config(path: Path) -> Any:
 
 def initialize(path: Path) -> dict[str, Any]:
     from uls.state.sqlite import SQLiteStateStore
-    if not path.exists():
-        template = yaml.safe_load((asset_root() / 'config.example.yaml').read_text(encoding='utf-8'))
-        template['behavior_contract']['path'] = str(asset_root() / 'contracts/study-behavior.md')
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open('x', encoding='utf-8') as handle:
-            yaml.safe_dump(template, handle, allow_unicode=True, sort_keys=False)
+    with ConfigFileLock(path):
+        if not path.exists():
+            template = yaml.safe_load((asset_root() / 'config.example.yaml').read_text(encoding='utf-8'))
+            template['behavior_contract']['path'] = str(asset_root() / 'contracts/study-behavior.md')
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            try:
+                payload = yaml.safe_dump(template, allow_unicode=True, sort_keys=False).encode('utf-8')
+                os.write(fd, payload)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
     config = _config(path)
     workspace = state_path(config).parent
     workspace.mkdir(parents=True, exist_ok=True)
@@ -172,20 +205,75 @@ def _readiness_funnel(job_counts: dict[str, int], *, state: Any = None) -> dict[
     }
 
 
-def doctor(config: Any, *, live: bool = False) -> dict[str, Any]:
+def _live_retrieval_probe_course_key(config: Any) -> str:
+    if not config.courses:
+        raise ConfigurationError('live retrieval probe requires a configured Course')
+    if config.retrieval.notion_lane != 'semester_workspace':
+        course_key = config.courses[0].course_key
+        if not isinstance(course_key, str) or not course_key:
+            raise ConfigurationError('live retrieval probe requires a valid Course Key')
+        return course_key
+    for course in config.courses:
+        course_key = getattr(course, 'course_key', None)
+        if not isinstance(course_key, str) or not course_key:
+            continue
+        try:
+            parsed = parse_course_key(course_key)
+        except UlsError:
+            continue
+        if parsed.semester == config.retrieval.semester:
+            return course_key
+    raise ConfigurationError('selected retrieval semester has no configured Course')
+
+
+def doctor(
+    config: Any, *, live: bool = False, include_credentials: bool = True,
+) -> dict[str, Any]:
+    if not include_credentials:
+        local_checks: dict[str, Any] = {
+            'behavior_contract': not lint_behavior(Path(config.behavior_contract.path)),
+            'state': status(config)['status'] == 'ok',
+        }
+        try:
+            from uls.mcp.server import ReadOnlyMCP
+            ReadOnlyMCP(None).sdk_server()
+            local_checks['mcp_startable'] = True
+        except ImportError:
+            local_checks['mcp_startable'] = False
+        return {
+            'status': 'ok' if all(local_checks.values()) else 'needs_configuration',
+            'checks': local_checks,
+            'optional_checks': {},
+            'client_e2e': 'not_proven_by_doctor',
+            'credential_readiness': 'not_checked',
+        }
     # doctor() is a composition root (see docs/plans/credential-resolver.md):
     # it builds one CredentialResolver from config.credentials and calls
     # diagnose() exactly once, over every known credential name. Every
     # check below, including the separation check and the --live provider
     # calls, slices values out of that same DiagnosticResolution via
     # select()/require() instead of diagnosing or resolving again.
-    resolver = CredentialResolver(config.credentials)
-    diagnostic = resolver.diagnose(frozenset(ALLOWED_SOURCES))
+    diagnose_names = frozenset(ALLOWED_SOURCES)
+    remote_credential_names = {
+        'REMOTE_MCP_SECRET', 'REMOTE_MCP_EXPIRES_AT', 'REMOTE_MCP_GOOGLE_CLIENT_SECRET'
+    }
+    if not config.remote_mcp.enabled:
+        diagnose_names = diagnose_names - remote_credential_names
+    elif config.remote_mcp.auth_mode in {'oidc', 'mcp_oauth'}:
+        diagnose_names = diagnose_names - {'REMOTE_MCP_SECRET', 'REMOTE_MCP_EXPIRES_AT'}
+        if config.remote_mcp.auth_mode == 'oidc':
+            diagnose_names = diagnose_names - {'REMOTE_MCP_GOOGLE_CLIENT_SECRET'}
+    else:
+        diagnose_names = diagnose_names - {'REMOTE_MCP_GOOGLE_CLIENT_SECRET'}
+    resolver = CredentialResolver(config.credentials, path_overrides=getattr(config, 'google_path_overrides', {}))
+    diagnostic = resolver.diagnose(diagnose_names)
 
     def _ready(key: str) -> bool:
         result = diagnostic.results.get(key)
         if result is None or result.status != 'ready':
             return False
+        if key in GOOGLE_CREDENTIAL_PATH_NAMES:
+            return diagnostic.get_google_payload(key) is not None
         if key.endswith('_FILE'):
             return Path(diagnostic._ready_values[key]).expanduser().is_file()
         return True
@@ -215,9 +303,14 @@ def doctor(config: Any, *, live: bool = False) -> dict[str, Any]:
     # must never fail an otherwise complete minimal configuration.
     optional_checks['GITHUB_READ_TOKEN'] = _ready('GITHUB_READ_TOKEN')
     try:
+        opt_separation: dict[str, str] = {}
+        for w_key in ('NOTION_WORKER_TOKEN', 'GOOGLE_WORKER_CREDENTIALS_FILE'):
+            res = diagnostic.results.get(w_key)
+            if res is not None and res.status != 'error':
+                opt_separation[w_key] = ''
         separation_snapshot = diagnostic.select(
             required=frozenset({'GOOGLE_MCP_CREDENTIALS_FILE', 'NOTION_MCP_TOKEN'}),
-            optional={'NOTION_WORKER_TOKEN': '', 'GOOGLE_WORKER_CREDENTIALS_FILE': ''},
+            optional=opt_separation,
         )
         require_mcp_credentials(separation_snapshot)
         checks['credential_separation'] = True
@@ -231,16 +324,103 @@ def doctor(config: Any, *, live: bool = False) -> dict[str, Any]:
         checks['mcp_startable'] = False
     if config.remote_mcp.enabled:
         try:
-            from uls.mcp.transports.remote import BearerCredential, validate_remote_profile
+            from uls.mcp.transports.remote import validate_remote_profile
             validate_remote_profile(config)
-            remote_snapshot = diagnostic.select(
-                required=frozenset(),
-                optional={'REMOTE_MCP_SECRET': '', 'REMOTE_MCP_EXPIRES_AT': '0'},
+            tls_ok = (
+                config.remote_mcp.edge_mode == 'cloudflare_tunnel'
+                or all(Path(p).is_file() for p in (config.remote_mcp.tls_certfile, config.remote_mcp.tls_keyfile))
             )
-            BearerCredential(remote_snapshot['REMOTE_MCP_SECRET'],
-                             float(remote_snapshot['REMOTE_MCP_EXPIRES_AT'])).validate()
-            checks['remote_profile'] = all(Path(p).is_file() for p in
-                                           (config.remote_mcp.tls_certfile, config.remote_mcp.tls_keyfile))
+            if not tls_ok:
+                checks['remote_profile'] = False
+            elif config.remote_mcp.auth_mode == 'mcp_oauth':
+                from uls.mcp.transports.oauth import (
+                    GOOGLE_ISSUER,
+                    canonical_public_identity,
+                    validate_oauth_state_boundary,
+                )
+                from uls.mcp.transports.oidc import JwksKeyManager
+                oauth = config.remote_mcp.oauth
+                identity = canonical_public_identity(config.remote_mcp.public_url)
+                secret_ok = _ready('REMOTE_MCP_GOOGLE_CLIENT_SECRET')
+                state_dir = Path(config.system.workspace_dir).expanduser()
+                db_path = state_dir / 'remote-oauth.sqlite3'
+                try:
+                    validate_oauth_state_boundary(db_path)
+                    state_ok = True
+                except ConfigurationError:
+                    state_ok = False
+                oauth_ok = bool(
+                    identity.resource_uri
+                    and oauth.google_client_id
+                    and oauth.authorized_email
+                    and secret_ok
+                    and state_ok
+                )
+                if live and oauth_ok:
+                    try:
+                        JwksKeyManager(GOOGLE_ISSUER).live_check_sync()
+                    except (ConfigurationError, OSError, ValueError):
+                        oauth_ok = False
+                checks['remote_profile'] = oauth_ok
+            elif config.remote_mcp.auth_mode == 'oidc':
+                oidc = config.remote_mcp.oidc
+                oidc_ok = bool(oidc.issuer and oidc.audience and (oidc.authorized_subject or oidc.authorized_email))
+                if live and oidc_ok:
+                    from uls.mcp.transports.oidc import JwksKeyManager
+                    try:
+                        JwksKeyManager(oidc.issuer, oidc.jwks_uri).live_check_sync()
+                    except (ConfigurationError, OSError, ValueError):
+                        oidc_ok = False
+                checks['remote_profile'] = oidc_ok
+            elif config.remote_mcp.auth_mode == 'bearer':
+                from uls.mcp.transports.remote import BearerCredential
+                remote_snapshot = diagnostic.select(
+                    required=frozenset(),
+                    optional={'REMOTE_MCP_SECRET': '', 'REMOTE_MCP_EXPIRES_AT': '0'},
+                )
+                BearerCredential(remote_snapshot['REMOTE_MCP_SECRET'],
+                                 float(remote_snapshot['REMOTE_MCP_EXPIRES_AT'])).validate()
+                checks['remote_profile'] = True
+            else:  # oauth_or_bearer
+                from uls.mcp.transports.remote import BearerCredential
+                remote_snapshot = diagnostic.select(
+                    required=frozenset(),
+                    optional={'REMOTE_MCP_SECRET': '', 'REMOTE_MCP_EXPIRES_AT': '0'},
+                )
+                # rev3 plan section 3.1 state machine: a lane that is not
+                # configured at all is simply absent from the requirement;
+                # a lane that *is* configured (a Bearer secret is present,
+                # or oidc.issuer is set) must be fully valid, and at least
+                # one lane must end up configured-and-valid. "any lane
+                # valid" (the previous `bearer_ok or oidc_ok`) let an
+                # invalid configured lane hide behind a valid unrelated
+                # one, which could diverge from the runtime dispatch path.
+                bearer_configured = bool(remote_snapshot['REMOTE_MCP_SECRET'])
+                bearer_valid = False
+                if bearer_configured:
+                    try:
+                        BearerCredential(remote_snapshot['REMOTE_MCP_SECRET'],
+                                         float(remote_snapshot['REMOTE_MCP_EXPIRES_AT'])).validate()
+                        bearer_valid = True
+                    except (ConfigurationError, ValueError):
+                        bearer_valid = False
+                oidc = config.remote_mcp.oidc
+                oidc_configured = bool(oidc.issuer)
+                oidc_valid = False
+                if oidc_configured:
+                    oidc_valid = bool(oidc.audience and (oidc.authorized_subject or oidc.authorized_email))
+                    if live and oidc_valid:
+                        from uls.mcp.transports.oidc import JwksKeyManager
+                        try:
+                            JwksKeyManager(oidc.issuer, oidc.jwks_uri).live_check_sync()
+                        except (ConfigurationError, OSError, ValueError):
+                            oidc_valid = False
+                configured_lanes_valid = [
+                    valid for configured, valid in
+                    ((bearer_configured, bearer_valid), (oidc_configured, oidc_valid))
+                    if configured
+                ]
+                checks['remote_profile'] = bool(configured_lanes_valid) and all(configured_lanes_valid)
         except (UlsError, ValueError):
             checks['remote_profile'] = False
     else:
@@ -253,8 +433,16 @@ def doctor(config: Any, *, live: bool = False) -> dict[str, Any]:
                 optional={'GITHUB_READ_TOKEN': ''},
             )
             engine = build_retrieval(config, live_snapshot)
-            checks['live_notion_read'] = engine.notion_reader.get_course_by_alias(config.courses[0].course_key) is not None
-            service = google_service(live_snapshot['GOOGLE_MCP_CREDENTIALS_FILE'], read_only=True)
+            checks['live_notion_read'] = (
+                engine.notion_reader.get_course_by_alias(
+                    _live_retrieval_probe_course_key(config)
+                )
+                is not None
+            )
+            live_mcp = live_snapshot.get_google_payload('GOOGLE_MCP_CREDENTIALS_FILE')
+            if live_mcp is None:
+                raise ConfigurationError('GOOGLE_MCP_CREDENTIALS_FILE payload is missing')
+            service = google_service(live_mcp, read_only=True, oauth_client=getattr(config, 'google_oauth', None))
             root = service.files().get(fileId=config.google_drive.university_root_id, fields='id,trashed').execute()
             checks['live_drive_read'] = root.get('id') == config.google_drive.university_root_id and root.get('trashed') is False
         except Exception:  # noqa: BLE001 - health checks report booleans, never provider payloads
@@ -267,10 +455,33 @@ def doctor(config: Any, *, live: bool = False) -> dict[str, Any]:
 def dispatch(args: argparse.Namespace) -> Any:
     if args.command == 'init':
         return initialize(args.config)
+    if args.command == 'setup':
+        from uls.settings.launcher import preflight, run_setup
+        refusal = preflight()
+        if refusal is not None:
+            print(refusal.message, file=sys.stderr)
+            return {'status': 'failed', 'code': refusal.code}
+        if not args.config.is_file():
+            raise ConfigurationError('Run uls init before opening Local Settings')
+        return run_setup(args.config, open_browser=not args.no_browser)
     if args.command == 'behavior':
         problems = lint_behavior()
         return {'status': 'failed' if problems else 'ok', 'problems': problems}
     config = _config(args.config)
+    if args.command == 'study-notes':
+        if args.mode == 'status':
+            return {'enabled': config.study_notes.enabled,
+                    'service': 'uls_submit', 'transport': 'local_stdio',
+                    'client_e2e': 'not_proven', 'search_read_only': True}
+        from uls.mcp.transports.local import run_local
+        from uls.runtime import build_study_note_submission_server
+
+        server = build_study_note_submission_server(config)
+        try:
+            run_local(server)
+        finally:
+            server.close()
+        return None
     if args.command == 'status':
         return status(config)
     if args.command == 'doctor':
@@ -279,7 +490,7 @@ def dispatch(args: argparse.Namespace) -> Any:
         if not config.worker.enabled:
             return {'status': 'disabled', 'processed': 0}
         from uls.worker import build_worker
-        credentials = CredentialResolver(config.credentials).resolve(
+        credentials = CredentialResolver(config.credentials, path_overrides=getattr(config, 'google_path_overrides', {})).resolve(
             required=frozenset({'GOOGLE_WORKER_CREDENTIALS_FILE', 'NOTION_WORKER_TOKEN'})
         )
         worker = build_worker(config, credentials)
@@ -287,7 +498,11 @@ def dispatch(args: argparse.Namespace) -> Any:
             return worker.runner.run_once(sync=args.command != 'process', process=args.command != 'sync',
                                            max_jobs=args.max_jobs)
         finally:
-            worker.state.close()
+            close = getattr(worker, 'close', None)
+            if callable(close):
+                close()
+            else:
+                worker.state.close()
     if args.command in {'jobs', 'retry', 'reprocess'}:
         from uls.state.sqlite import SQLiteStateStore
         if not state_path(config).is_file():
@@ -315,15 +530,39 @@ def dispatch(args: argparse.Namespace) -> Any:
                 return {'status': 'queued', 'job_id': updated.id}
             finally:
                 state.release_local_worker_lock()
+    if args.command == 'credential':
+        from uls.cli.credential_set import CredentialSetError, _remediation_for
+        from uls.cli.credential_set import run as run_credential_set
+        if args.credential_action != 'set':
+            raise ValueError('Unsupported credential action')
+        try:
+            return run_credential_set(config=config, config_path=args.config,
+                                      name=args.name, overwrite=args.overwrite)
+        except KeyboardInterrupt:
+            print('Aborted.', file=sys.stderr)
+            raise SystemExit(130) from None
+        except CredentialSetError as exc:
+            code = exc.args[0] if exc.args else 'credential_set_failed'
+            return {'status': 'failed',
+                   'error': {'code': code, 'message': _remediation_for(code)}}
     if args.command == 'mcp':
         if args.mode == 'status':
             return status(config)
-        # One resolve() covers both local and remote modes; REMOTE_MCP_SECRET
-        # and REMOTE_MCP_EXPIRES_AT are simply unused when mode == 'local'.
-        credentials = CredentialResolver(config.credentials).resolve(
-            required=frozenset({'GOOGLE_MCP_CREDENTIALS_FILE', 'NOTION_MCP_TOKEN'}),
-            optional={'GITHUB_READ_TOKEN': '', 'REMOTE_MCP_SECRET': '', 'REMOTE_MCP_EXPIRES_AT': '0',
-                      'NOTION_WORKER_TOKEN': '', 'GOOGLE_WORKER_CREDENTIALS_FILE': ''},
+        optional_creds = {'GITHUB_READ_TOKEN': '', 'NOTION_WORKER_TOKEN': '', 'GOOGLE_WORKER_CREDENTIALS_FILE': ''}
+        required_creds = {'GOOGLE_MCP_CREDENTIALS_FILE', 'NOTION_MCP_TOKEN'}
+        if args.mode == 'remote' and config.remote_mcp.auth_mode in {'bearer', 'oauth_or_bearer'}:
+            # auth_mode == 'oidc' must resolve zero REMOTE_MCP_SECRET /
+            # REMOTE_MCP_EXPIRES_AT credentials (rev3 plan section 5.1):
+            # the OIDC-only lane never consults CredentialResolver for
+            # them, so they must not even enter this resolve() call's
+            # input set.
+            optional_creds['REMOTE_MCP_SECRET'] = ''
+            optional_creds['REMOTE_MCP_EXPIRES_AT'] = '0'
+        if args.mode == 'remote' and config.remote_mcp.auth_mode == 'mcp_oauth':
+            required_creds.add('REMOTE_MCP_GOOGLE_CLIENT_SECRET')
+        credentials = CredentialResolver(config.credentials, path_overrides=getattr(config, 'google_path_overrides', {})).resolve(
+            required=frozenset(required_creds),
+            optional=optional_creds,
         )
         from uls.mcp.server import ReadOnlyMCP
         registry = ReadOnlyMCP(build_retrieval(config, credentials))
@@ -332,9 +571,34 @@ def dispatch(args: argparse.Namespace) -> Any:
             run_local(registry)
         else:
             from uls.mcp.transports.remote import BearerCredential, run_remote
-            credential = BearerCredential(credentials['REMOTE_MCP_SECRET'],
-                                           float(credentials['REMOTE_MCP_EXPIRES_AT']))
-            run_remote(registry, config, credential)
+            credential: BearerCredential | None = None
+            verifier = None
+            if config.remote_mcp.auth_mode in ('bearer', 'oauth_or_bearer') and credentials.get('REMOTE_MCP_SECRET'):
+                credential = BearerCredential(credentials['REMOTE_MCP_SECRET'],
+                                               float(credentials['REMOTE_MCP_EXPIRES_AT']))
+            if config.remote_mcp.auth_mode in ('oidc', 'oauth_or_bearer'):
+                oidc = config.remote_mcp.oidc
+                if oidc.issuer:
+                    from uls.mcp.transports.oidc import JwksKeyManager, OidcTokenVerifier
+                    km = JwksKeyManager(oidc.issuer, oidc.jwks_uri)
+                    verifier = OidcTokenVerifier(
+                        issuer=oidc.issuer,
+                        audience=oidc.audience,
+                        authorized_subject=oidc.authorized_subject,
+                        authorized_email=oidc.authorized_email,
+                        leeway_seconds=oidc.leeway_seconds,
+                        key_manager=km,
+                    )
+            if config.remote_mcp.auth_mode == 'mcp_oauth':
+                run_remote(
+                    registry,
+                    config,
+                    credential=None,
+                    oidc_verifier=None,
+                    google_client_secret=credentials['REMOTE_MCP_GOOGLE_CLIENT_SECRET'],
+                )
+            else:
+                run_remote(registry, config, credential=credential, oidc_verifier=verifier)
         return None
     raise ValueError('Unsupported command')
 

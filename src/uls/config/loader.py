@@ -3,28 +3,38 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import fields
+from datetime import date as _date
 from pathlib import Path
 from typing import Any, TypeVar
 
 import yaml
 
+from uls.domain.ids import parse_course_key
+
 from .credentials import ALLOWED_SOURCES
 from .errors import ConfigurationError
+from .google_oauth import parse_google_oauth_section
 from .schema import (
     BehaviorContractCfg,
+    ClassificationCfg,
     CourseCfg,
     CourseStaticFolderCfg,
     DriveCfg,
+    IntakeCfg,
     McpCfg,
     NormalizationCfg,
     NotionCfg,
+    OidcCfg,
     RemoteMcpCfg,
+    RemoteOAuthCfg,
     RetrievalCfg,
     SemesterRegistryCfg,
     SemesterWorkspaceCfg,
     StorageCfg,
+    StudyNotesCfg,
     SystemCfg,
     UlsConfig,
     WorkerCfg,
@@ -40,6 +50,7 @@ SECRET_KEYS = (
     "LLM_API_KEY",
     "REMOTE_MCP_SECRET",
     "REMOTE_MCP_EXPIRES_AT",
+    "REMOTE_MCP_GOOGLE_CLIENT_SECRET",
 )
 
 # Every top-level YAML section name this loader recognizes. Used only by the
@@ -49,7 +60,8 @@ SECRET_KEYS = (
 _KNOWN_TOP_LEVEL_KEYS = frozenset({
     "system", "worker", "storage", "google_drive", "drive", "notion",
     "normalization", "retrieval", "mcp", "remote_mcp", "behavior_contract",
-    "courses", "credentials",
+    "courses", "credentials", "google_worker_credentials_path", "google_mcp_credentials_path",
+    "google_oauth", "intake",
 })
 
 _CfgT = TypeVar("_CfgT")
@@ -73,6 +85,12 @@ def load_config_unvalidated(path: str | os.PathLike[str]) -> UlsConfig:
         raw = yaml.safe_load(handle)
     if raw is None:
         raw = {}
+    return load_config_mapping(raw)
+
+
+def load_config_mapping(raw: Mapping[str, Any]) -> UlsConfig:
+    """Build the existing typed config model from an already-parsed YAML mapping."""
+
     if not isinstance(raw, Mapping):
         raise ValueError("configuration root must be a YAML mapping")
 
@@ -88,7 +106,14 @@ def load_config_unvalidated(path: str | os.PathLike[str]) -> UlsConfig:
         if isinstance(value, CourseCfg):
             courses.append(value)
         elif isinstance(value, Mapping):
-            courses.append(_from_mapping(CourseCfg, value))
+            course = _from_mapping(CourseCfg, value)
+            if course.aliases is None:
+                course.aliases = []
+            if not isinstance(course.aliases, list) or any(
+                not isinstance(alias, str) or not alias.strip() for alias in course.aliases
+            ):
+                raise ValueError(f"courses[{index}].aliases must be a list of non-empty strings")
+            courses.append(course)
         else:
             raise ValueError(f"courses[{index}] must be a YAML mapping")
 
@@ -98,11 +123,32 @@ def load_config_unvalidated(path: str | os.PathLike[str]) -> UlsConfig:
     semester_registries = _semester_registries(drive_raw.get("semester_registries", []))
     drive_values = dict(drive_raw)
     drive_values["semester_registries"] = semester_registries
+    worker_cred_path = str(raw.get("google_worker_credentials_path", drive_raw.get("worker_credentials_path", "")) or "")
+    mcp_cred_path = str(raw.get("google_mcp_credentials_path", drive_raw.get("mcp_credentials_path", "")) or "")
+    drive_values["worker_credentials_path"] = worker_cred_path
+    drive_values["mcp_credentials_path"] = mcp_cred_path
     notion_raw = _section(raw, "notion")
     notion_values = dict(notion_raw)
     notion_values["semester_workspaces"] = _semester_workspaces(
         notion_raw.get("semester_workspaces", [])
     )
+    remote_raw = _section(raw, "remote_mcp")
+    remote_values = dict(remote_raw)
+    oidc_raw = remote_raw.get("oidc", {})
+    if oidc_raw is None:
+        oidc_raw = {}
+    if not isinstance(oidc_raw, Mapping):
+        raise ValueError("remote_mcp.oidc must be a YAML mapping")
+    remote_values["oidc"] = _from_mapping(OidcCfg, oidc_raw)
+    oauth_raw = remote_raw.get("oauth", {})
+    if oauth_raw is None:
+        oauth_raw = {}
+    if not isinstance(oauth_raw, Mapping):
+        raise ValueError("remote_mcp.oauth must be a YAML mapping")
+    remote_values["oauth"] = _from_mapping(RemoteOAuthCfg, oauth_raw)
+    retrieval_cfg = _from_mapping(RetrievalCfg, _section(raw, "retrieval"))
+    if type(retrieval_cfg.v2_exposure_gate) is not bool:
+        raise ValueError("retrieval.v2_exposure_gate must be boolean")
     return UlsConfig(
         system=_from_mapping(SystemCfg, _section(raw, "system")),
         worker=_from_mapping(WorkerCfg, _section(raw, "worker")),
@@ -110,14 +156,21 @@ def load_config_unvalidated(path: str | os.PathLike[str]) -> UlsConfig:
         google_drive=_from_mapping(DriveCfg, drive_values),
         notion=_from_mapping(NotionCfg, notion_values),
         normalization=_from_mapping(NormalizationCfg, _section(raw, "normalization")),
-        retrieval=_from_mapping(RetrievalCfg, _section(raw, "retrieval")),
+        retrieval=retrieval_cfg,
         mcp=_from_mapping(McpCfg, _section(raw, "mcp")),
-        remote_mcp=_from_mapping(RemoteMcpCfg, _section(raw, "remote_mcp")),
+        study_notes=_from_mapping(StudyNotesCfg, _section(raw, "study_notes")),
+        remote_mcp=_from_mapping(RemoteMcpCfg, remote_values),
         behavior_contract=_from_mapping(
             BehaviorContractCfg, _section(raw, "behavior_contract")
         ),
         courses=courses,
+        intake=_intake_section(raw),
         credentials=_credentials_section(raw),
+        credential_revisions=_credential_revisions_section(raw),
+        canvas=_canvas_section(raw),
+        google_worker_credentials_path=worker_cred_path,
+        google_mcp_credentials_path=mcp_cred_path,
+        google_oauth=parse_google_oauth_section(raw.get("google_oauth")),
     )
 
 
@@ -217,6 +270,59 @@ def _credentials_section(raw: Mapping[str, Any]) -> dict[str, str]:
     return result
 
 
+_REVISION_ROLE = re.compile(r"^[a-z][a-z0-9:-]{0,63}$")
+_REVISION_VALUE = re.compile(r"^[a-f0-9]{32}$")
+
+
+def _canvas_section(raw: Mapping[str, Any]) -> dict[str, Any]:
+    section = raw.get("canvas", {})
+    if not isinstance(section, Mapping) or set(section) - {"profile", "registry", "lease", "sync_enabled"}:
+        raise ValueError("canvas section is invalid")
+    if not isinstance(section.get("sync_enabled", False), bool):
+        raise ValueError("canvas.sync_enabled must be boolean")  # noqa: TRY004 - parser contract uses ValueError
+    for name in ("profile", "registry", "lease"):
+        if name in section and not isinstance(section[name], Mapping):
+            raise ValueError("canvas metadata must be a mapping")
+    profile = section.get("profile")
+    if profile:
+        if set(profile) != {"id", "origin", "user_id", "display_name", "credential"} or not all(isinstance(value, str) for value in profile.values()):
+            raise ValueError("canvas profile is invalid")
+        if not re.fullmatch(r"c[a-f0-9]{32}", profile["id"]) or profile["credential"] != "keyring":
+            raise ValueError("canvas profile identity is invalid")
+    registry = section.get("registry")
+    if registry:
+        if set(registry) != {"term_id", "courses"} or not isinstance(registry["term_id"], str) or not isinstance(registry["courses"], list):
+            raise ValueError("canvas registry is invalid")
+        if len(registry["courses"]) > 20:
+            raise ValueError("canvas registry exceeds selection limit")
+        for course in registry["courses"]:
+            if not isinstance(course, dict) or set(course) != {"course_id", "term_id", "name", "code"} or not all(isinstance(value, str) for value in course.values()):
+                raise ValueError("canvas registry course is invalid")
+    return dict(section)
+
+
+def _credential_revisions_section(raw: Mapping[str, Any]) -> dict[str, str]:
+    """Parse the optional credential_revisions: section (Local Settings GUI-2).
+
+    Maps a fixed role slug to a random, non-secret 128-bit hex revision.
+    Malformed entries fail closed.
+    """
+
+    section = raw.get("credential_revisions")
+    if section is None:
+        return {}
+    if not isinstance(section, Mapping):
+        raise ValueError("credential_revisions must be a YAML mapping")  # noqa: TRY004 - parser contract uses ValueError
+    result: dict[str, str] = {}
+    for role, revision in section.items():
+        if not isinstance(role, str) or not _REVISION_ROLE.fullmatch(role):
+            raise ValueError("credential_revisions keys must be Settings role slugs")
+        if not isinstance(revision, str) or not _REVISION_VALUE.fullmatch(revision):
+            raise ValueError(f"credential_revisions.{role} must be a 32-character hex revision")
+        result[role] = revision
+    return result
+
+
 def _from_mapping(cls: type[_CfgT], value: Any) -> _CfgT:
     if value is None:
         value = {}
@@ -262,8 +368,75 @@ def _semester_registries(value: Any) -> list[SemesterRegistryCfg]:
             if not isinstance(nested, Mapping):
                 raise ValueError(f"semester_registries[{index}].{name} must be a mapping")
             values[name] = dict(nested)
-        result.append(_from_mapping(SemesterRegistryCfg, values))
+        registry = _from_mapping(SemesterRegistryCfg, values)
+        for name in ("start_date", "end_date"):
+            raw_date = getattr(registry, name)
+            if raw_date in (None, ""):
+                setattr(registry, name, "")
+                continue
+            text = raw_date.isoformat() if hasattr(raw_date, "isoformat") else str(raw_date)
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+                raise ValueError(f"semester_registries[{index}].{name} must be YYYY-MM-DD")
+            try:
+                _date.fromisoformat(text)
+            except ValueError as exc:
+                raise ValueError(
+                    f"semester_registries[{index}].{name} must be a real calendar date"
+                ) from exc
+            setattr(registry, name, text)
+        if registry.start_date and registry.end_date and registry.start_date > registry.end_date:
+            raise ValueError(f"semester_registries[{index}] start_date must not exceed end_date")
+        result.append(registry)
     return result
+
+
+def _intake_section(raw: Mapping[str, Any]) -> IntakeCfg:
+    section = _section(raw, "intake")
+    if set(section) - {"classification"}:
+        raise ValueError("intake section accepts only: classification")
+    cls_raw = section.get("classification", {})
+    if cls_raw is None:
+        cls_raw = {}
+    if not isinstance(cls_raw, Mapping):
+        raise ValueError("intake.classification must be a YAML mapping")  # noqa: TRY004 - parser contract uses ValueError
+    allowed = {item.name for item in fields(ClassificationCfg)}
+    unknown = set(cls_raw) - allowed
+    if unknown:
+        raise ValueError("intake.classification has unknown keys: " + ", ".join(sorted(unknown)))
+    cfg = _from_mapping(ClassificationCfg, cls_raw)
+    if not isinstance(cfg.enabled, bool):
+        raise ValueError("intake.classification.enabled must be boolean")  # noqa: TRY004
+    if cfg.schema_profile not in ("", "legacy5-cls", "c5-range-v2"):
+        raise ValueError("intake.classification.schema_profile must be legacy5-cls or c5-range-v2")
+    for name in ("min_confidence", "min_top_probability"):
+        value = getattr(cfg, name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 <= value <= 1.0:
+            raise ValueError(f"intake.classification.{name} must be a number in [0, 1]")
+        setattr(cfg, name, float(value))
+    for name in ("max_calls_per_tick", "max_source_bytes", "max_terminal_scan"):
+        value = getattr(cfg, name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"intake.classification.{name} must be a positive integer")
+    course_map = cfg.canvas_course_map
+    if course_map is None:
+        course_map = {}
+    if not isinstance(course_map, Mapping):
+        raise ValueError("intake.classification.canvas_course_map must be a mapping")  # noqa: TRY004 - parser contract uses ValueError
+    normalized: dict[int, str] = {}
+    for key, value in course_map.items():
+        if isinstance(key, bool) or not isinstance(key, int) or key <= 0:
+            raise ValueError("intake.classification.canvas_course_map keys must be positive integers")
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("intake.classification.canvas_course_map values must be course keys")
+        try:
+            parse_course_key(value)
+        except Exception as exc:
+            raise ValueError(
+                "intake.classification.canvas_course_map values must be canonical course keys"
+            ) from exc
+        normalized[key] = value
+    cfg.canvas_course_map = normalized
+    return IntakeCfg(classification=cfg)
 
 
 def _semester_workspaces(value: Any) -> list[SemesterWorkspaceCfg]:
@@ -308,8 +481,8 @@ def _read_dotenv(path: Path) -> dict[str, str]:
 
 
 __all__ = [
-    "ConfigurationError",
     "SECRET_KEYS",
+    "ConfigurationError",
     "load_config",
     "load_config_unvalidated",
     "load_secrets",

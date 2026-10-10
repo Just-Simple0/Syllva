@@ -76,12 +76,16 @@ def test_resolve_optional_environment_unset_uses_default():
     assert snap['GITHUB_READ_TOKEN'] == ''
 
 
-def test_no_credentials_section_matches_environment_default():
+def test_no_credentials_section_matches_environment_default(tmp_path):
     """Absent credentials: config -> every name defaults to 'environment',
     observably behavior-equivalent to the pre-resolver os.environ reads."""
-    resolver = CredentialResolver(None, environ={'GOOGLE_MCP_CREDENTIALS_FILE': '/x.json'})
+    creds_file = tmp_path / 'x.json'
+    from uls.config._secure_file import write_secure_file
+    write_secure_file(creds_file, b'{}')
+    resolver = CredentialResolver(None, environ={'GOOGLE_MCP_CREDENTIALS_FILE': str(creds_file)})
     snap = resolver.resolve(required=frozenset({'GOOGLE_MCP_CREDENTIALS_FILE'}))
-    assert snap['GOOGLE_MCP_CREDENTIALS_FILE'] == '/x.json'
+    assert snap['GOOGLE_MCP_CREDENTIALS_FILE'] == str(creds_file)
+    assert snap.get_google_payload('GOOGLE_MCP_CREDENTIALS_FILE') is not None
 
 
 # ---------------------------------------------------------------------------
@@ -291,8 +295,11 @@ def test_require_performs_no_new_keyring_read(monkeypatch):
     assert counter == [(service, account)], 'require()/select() must not read the backend again'
 
 
-def test_select_mixed_required_and_optional_with_default():
-    resolver = CredentialResolver({}, environ={'GOOGLE_MCP_CREDENTIALS_FILE': '/mcp.json',
+def test_select_mixed_required_and_optional_with_default(tmp_path):
+    creds_file = tmp_path / 'mcp.json'
+    from uls.config._secure_file import write_secure_file
+    write_secure_file(creds_file, b'{}')
+    resolver = CredentialResolver({}, environ={'GOOGLE_MCP_CREDENTIALS_FILE': str(creds_file),
                                                'NOTION_MCP_TOKEN': 'mcp-tok'})
     diagnostic = resolver.diagnose(frozenset({
         'GOOGLE_MCP_CREDENTIALS_FILE', 'NOTION_MCP_TOKEN',
@@ -302,7 +309,7 @@ def test_select_mixed_required_and_optional_with_default():
         required=frozenset({'GOOGLE_MCP_CREDENTIALS_FILE', 'NOTION_MCP_TOKEN'}),
         optional={'NOTION_WORKER_TOKEN': '', 'GOOGLE_WORKER_CREDENTIALS_FILE': ''},
     )
-    assert snap['GOOGLE_MCP_CREDENTIALS_FILE'] == '/mcp.json'
+    assert snap['GOOGLE_MCP_CREDENTIALS_FILE'] == str(creds_file)
     assert snap['NOTION_MCP_TOKEN'] == 'mcp-tok'
     assert snap['NOTION_WORKER_TOKEN'] == ''
     assert snap['GOOGLE_WORKER_CREDENTIALS_FILE'] == ''

@@ -57,9 +57,13 @@ def classify_source_detailed(
     if content:
         # The marker check is intentionally narrow; arbitrary bracketed prose
         # must not turn an unrelated source into a transcript.
-        import re
+        from uls.normalization.transcript import contains_timestamp_marker
 
-        if re.search(r"\[\d{1,2}:\d{2}:\d{2}\]", content):
+        # Shares the exact two-/three-part timestamp and bracket-pair grammar
+        # ([...], 【...】, (...)) with the normalizer so a transcript whose only
+        # evidence is a two-part timestamp (for example "[0:01]") or a non-square
+        # bracket pair is still recognized as a transcript candidate here.
+        if contains_timestamp_marker(content):
             return SourceClassification(SourceKind.TRANSCRIPT, 0.8, "timestamp marker")
     if stem:
         return SourceClassification(SourceKind.MATERIAL, 0.5, "default academic file")

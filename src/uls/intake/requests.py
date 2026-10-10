@@ -40,9 +40,19 @@ def validate_request_input(
     intake_exists: Callable[[str], bool] | None = None,
     course_exists: Callable[[str], bool] | None = None,
     session_course: Callable[[str], str | None] | None = None,
+    schema_profile: str = "legacy5",
 ) -> tuple[str, ...]:
-    """Return field-level errors without performing provider mutations."""
+    """Return field-level errors without performing provider mutations.
 
+    ``schema_profile`` selects the HUMAN Kind contract: the legacy profiles
+    accept TRANSCRIPT/MATERIAL_PDF only; the classification v2 profiles accept
+    FILE_KINDS_V2 with the Materials.Type role matrix (plan §5, r3 R4, r4 M5).
+    """
+
+    from uls.intake.classification.taxonomy import FILE_KINDS_V2, MATERIAL_ROLES_V2
+
+    v2 = schema_profile in ("legacy5-cls", "c5-range-v2")
+    allowed_kinds = set(FILE_KINDS_V2) if v2 else {FileKind.TRANSCRIPT.value, FileKind.MATERIAL_PDF.value}
     errors: list[str] = []
     request_type = _enum_value(request.request_type)
     if request_type not in {RequestType.ASSIGN_COURSE.value, RequestType.FILE_DETAILS.value}:
@@ -88,12 +98,19 @@ def validate_request_input(
         if request.course_key is None:
             errors.append("FILE_DETAILS requires exactly one Course")
         kind = _enum_value(request.kind)
-        if kind not in {FileKind.TRANSCRIPT.value, FileKind.MATERIAL_PDF.value}:
-            errors.append("FILE_DETAILS Kind must be TRANSCRIPT or MATERIAL_PDF")
+        if kind not in allowed_kinds:
+            errors.append(
+                "FILE_DETAILS Kind must be one of " + ", ".join(sorted(allowed_kinds))
+                if v2 else "FILE_DETAILS Kind must be TRANSCRIPT or MATERIAL_PDF"
+            )
         if kind == FileKind.TRANSCRIPT.value:
             _validate_transcript_fields(request, errors, session_course)
         elif kind == FileKind.MATERIAL_PDF.value:
-            _validate_pdf_fields(request, errors)
+            _validate_pdf_fields(
+                request, errors, MATERIAL_ROLES_V2 if v2 else ("Lecture Slides", "Textbook")
+            )
+        elif kind in allowed_kinds:
+            _validate_material_kind_fields(request, errors, MATERIAL_ROLES_V2)
     if request.raw:
         forbidden = {
             "Verified", "Scope Confirmed", "Decision", "Decision By", "Approval",
@@ -304,9 +321,14 @@ def _validate_transcript_fields(
             errors.append("selected Session does not belong to selected Course")
 
 
-def _validate_pdf_fields(request: RequestInput, errors: list[str]) -> None:
-    if request.material_role not in {"Lecture Slides", "Textbook"}:
-        errors.append("PDF FILE_DETAILS requires Lecture Slides or Textbook role")
+def _validate_pdf_fields(
+    request: RequestInput, errors: list[str], roles: tuple[str, ...] = ("Lecture Slides", "Textbook")
+) -> None:
+    if request.material_role not in roles:
+        if roles == ("Lecture Slides", "Textbook"):
+            errors.append("PDF FILE_DETAILS requires Lecture Slides or Textbook role")
+        else:
+            errors.append("PDF FILE_DETAILS requires a Material Role from " + ", ".join(roles))
     for name, value in (
         ("Actual Date", request.actual_date),
         ("Session Mode", request.session_mode),
@@ -315,6 +337,23 @@ def _validate_pdf_fields(request: RequestInput, errors: list[str]) -> None:
     ):
         if value is not None:
             errors.append(f"{name} must be empty for PDF FILE_DETAILS")
+
+
+def _validate_material_kind_fields(
+    request: RequestInput, errors: list[str], roles: tuple[str, ...]
+) -> None:
+    """v2 Material Kinds: a USER role from the Materials.Type set, no Session fields."""
+
+    if request.material_role not in roles:
+        errors.append("Material FILE_DETAILS requires a Material Role from " + ", ".join(roles))
+    for name, value in (
+        ("Actual Date", request.actual_date),
+        ("Session Mode", request.session_mode),
+        ("Session", request.session_id),
+        ("Session No", request.session_no),
+    ):
+        if value is not None:
+            errors.append(f"{name} must be empty for Material FILE_DETAILS")
 
 
 def _enum_value(value: Any) -> Any:

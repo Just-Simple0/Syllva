@@ -9,10 +9,12 @@ surface.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
-from dataclasses import asdict
+import threading
+from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -21,6 +23,7 @@ from uls.adapters.drive.worker import (
     DriveMetadata,
     DriveWorkerPort,
     ensure_marked_folder,
+    require_private_ownership,
 )
 from uls.adapters.notion.intake import NotionIntakeWriter, NotionWorkerPort
 from uls.config.intake import (
@@ -38,6 +41,7 @@ from uls.domain.errors import (
 from uls.domain.ids import parse_course_key, parse_entity_id
 from uls.domain.source_ref import SourceRef
 from uls.ingestion.discovery import discover_intake
+from uls.intake.attestation import ReconnectRequiredError, WorkerEntryAttestation
 from uls.intake.identity import (
     derivative_marker,
     derive_operation_key,
@@ -88,6 +92,16 @@ class IntakeReconcileRequired(UlsError):
     code = "RECONCILE_REQUIRED"
 
 
+@dataclass(frozen=True)
+class _LayoutValidationContext:
+    """Proof that each listed semester layout passed a fresh provider read."""
+
+    workspace_fingerprints: tuple[tuple[str, str], ...]
+
+    def fingerprint_for(self, semester: str) -> str | None:
+        return dict(self.workspace_fingerprints).get(semester)
+
+
 class IntakeWorker:
     """One local, bounded, single-active worker for configured semesters."""
 
@@ -101,11 +115,23 @@ class IntakeWorker:
         provider_account_binding_id: str = "",
         semester: str | None = None,
         max_files: int = 10_000,
+        entry_attestor: Any | None = None,
     ) -> None:
         self.config = config
         self.state = state
         self.drive = drive
         self.provider_account_binding_id = provider_account_binding_id
+        # Personal OAuth compositions install the same attestor object on the
+        # Drive adapter; every public entry below obtains one fresh
+        # attestation before its first effect (P2 plan §5). Service-account
+        # compositions leave this None and are unchanged.
+        self.entry_attestor = entry_attestor
+        # Intake classification v2: a configured Notion profile that does not
+        # match the configured data sources is recorded, never applied.
+        self._classification_profile_mismatch: str | None = None
+        # OAuth compositions hold this for a whole public entry so no other
+        # entry can refresh the shared credential while provider work runs.
+        self._entry_lock = threading.Lock()
         self.max_files = max_files
         self.workspaces = self._resolve_workspaces(semester)
         selected_semester = semester or self.workspaces[0].semester
@@ -119,6 +145,21 @@ class IntakeWorker:
         # ``runner`` with ``run_once``.  Keeping this alias makes the preview
         # worker a drop-in local runner without importing the legacy pipeline.
         self.runner = self
+        # Installed only by the explicit v1.3 composition after readiness checks.
+        # The runner remains the sole local-worker-lock owner.
+        self.request_coordinators: list[Any] = []
+        self.request_extension_readiness: dict[str, Any] = {}
+        self.extension_resources: list[Any] = []
+
+    def close(self) -> None:
+        """Close extension stores and the main state even if one close fails."""
+        from contextlib import ExitStack
+
+        with ExitStack() as resources:
+            resources.callback(self.state.close)
+            for resource in self.extension_resources:
+                resources.callback(resource.close)
+            self.extension_resources.clear()
 
     @property
     def provider(self) -> str:
@@ -161,17 +202,43 @@ class IntakeWorker:
             "provider_capability": asdict(self.drive.capabilities),
             "semester_count": len(self.workspaces),
             "sources_json_optional": True,
+            "request_extensions": dict(self.request_extension_readiness),
         }
+
+    @contextlib.contextmanager
+    def _attested_entry(self) -> Iterator[WorkerEntryAttestation | None]:
+        """Gate one public entry: fresh attestation first, then the adapter context.
+
+        Raises ``ReconnectRequiredError`` before any lock, provider, receipt,
+        generation or plan effect when the attestor rejects the entry.
+        """
+
+        if self.entry_attestor is None:
+            yield None
+            return
+        if not self._entry_lock.acquire(blocking=False):
+            raise ProviderUnavailableError("intake worker is already running")
+        try:
+            attestation = self.entry_attestor.attest_entry()
+            enter = getattr(self.drive, "attested", None)
+            if callable(enter):
+                with enter(attestation):
+                    yield attestation
+            else:
+                yield attestation
+        finally:
+            self._entry_lock.release()
 
     def sync(self) -> int:
         """Discover current uploads under the single-active worker lock."""
 
-        if not self.state.acquire_local_worker_lock():
-            return 0
-        try:
-            return self._sync_unlocked()
-        finally:
-            self.state.release_local_worker_lock()
+        with self._attested_entry():
+            if not self.state.acquire_local_worker_lock():
+                return 0
+            try:
+                return self._sync_unlocked()
+            finally:
+                self.state.release_local_worker_lock()
 
     def _sync_unlocked(self) -> int:
         """Discover current registered upload folders after the lock is held."""
@@ -182,6 +249,7 @@ class IntakeWorker:
         for semester, workspaces in self._group_workspaces().items():
             workspace = workspaces[0]
             validate_registered_drive_layout(self.drive, workspaces)
+            layout_context = self._context_for_validated_workspaces(workspaces)
             config_fingerprint = self._config_fingerprint(workspaces)
             workspace_fingerprint = self._workspace_fingerprint(workspaces)
             self.state.register_semester_registration(
@@ -217,7 +285,13 @@ class IntakeWorker:
                 if item.status == IntakeStatus.NEEDS_INPUT.value and self.provider_account_binding_id:
                     request_type = self._initial_request_type(item)
                     try:
-                        self.create_input_request(item.intake_id, request_type=request_type)
+                        self._create_input_request_with_context(
+                            item,
+                            workspace,
+                            request_type=request_type,
+                            target_snapshot=None,
+                            layout_context=layout_context,
+                        )
                     except (
                         IntakeReconcileRequired,
                         ProviderUnavailableError,
@@ -229,6 +303,7 @@ class IntakeWorker:
                             workspace,
                             exc,
                             default_status=IntakeStatus.NEEDS_INPUT,
+                            layout_context=layout_context,
                         )
         return total
 
@@ -237,17 +312,71 @@ class IntakeWorker:
 
         if type(max_jobs) is not int or not 1 <= max_jobs <= 1000:
             raise ValueError("max_jobs must be 1–1000")
+        entry: contextlib.AbstractContextManager[Any] = (
+            contextlib.nullcontext() if self.entry_attestor is None else self._attested_entry()
+        )
+        try:
+            entry.__enter__()
+        except ProviderUnavailableError:
+            return {"status": "already_running", "discovered": 0, "processed": 0}
+        except ReconnectRequiredError:
+            # Fail closed before the lock, discovery, claims, jobs or extensions.
+            return {
+                "status": "failed",
+                "code": "RECONNECT_REQUIRED",
+                "discovered": 0,
+                "processed": 0,
+                "failed": 1,
+                "needs_input": 0,
+                "request_extensions": {},
+            }
+        try:
+            return self._run_once_attested(sync=sync, process=process, max_jobs=max_jobs)
+        except ReconnectRequiredError:
+            return {
+                "status": "failed",
+                "code": "RECONNECT_REQUIRED",
+                "discovered": 0,
+                "processed": 0,
+                "failed": 1,
+                "needs_input": 0,
+                "request_extensions": {},
+            }
+        finally:
+            entry.__exit__(None, None, None)
+
+    def _run_once_attested(self, *, sync: bool, process: bool, max_jobs: int) -> dict[str, Any]:
         if not self.state.acquire_local_worker_lock():
             return {"status": "already_running", "discovered": 0, "processed": 0}
         try:
             discovered = self._sync_unlocked() if sync else 0
             processed = failed = needs_input = 0
+            run_layout_context: _LayoutValidationContext | None = None
             if process:
+                try:
+                    run_layout_context = self._fresh_layout_context(
+                        self._run_layout_workspaces()
+                    )
+                except ReconnectRequiredError:
+                    raise  # a rejected OAuth refresh is never converted or recorded as another failure
+                except Exception:  # noqa: BLE001 - fail closed before any request-page access
+                    return {
+                        "status": "failed",
+                        "discovered": discovered,
+                        "processed": 0,
+                        "failed": 1,
+                        "needs_input": 0,
+                        "request_extensions": {},
+                    }
                 for request_key in self._submitted_request_keys()[:max_jobs]:
                     try:
-                        self._claim_request_unlocked(request_key)
+                        self._claim_request_unlocked(
+                            request_key, layout_context=run_layout_context
+                        )
                     except RequestValidationError as exc:
-                        self._record_request_error(request_key, exc)
+                        self._record_request_error(
+                            request_key, exc, layout_context=run_layout_context
+                        )
                         needs_input += 1
                     except (
                         IntakeReconcileRequired,
@@ -255,7 +384,9 @@ class IntakeWorker:
                         SourceUnavailableError,
                         NotImplementedError,
                     ) as exc:
-                        self._record_request_error(request_key, exc)
+                        self._record_request_error(
+                            request_key, exc, layout_context=run_layout_context
+                        )
                         failed += 1
                 jobs = [
                     job
@@ -267,8 +398,15 @@ class IntakeWorker:
                     job = self.state.claim_job(pending.id)
                     if job is None:
                         continue
+                    item_layout_context: _LayoutValidationContext | None = None
                     try:
-                        result = self._process_item_unlocked(job.target_entity_id)
+                        item = self._require_item(job.target_entity_id)
+                        workspace = self._workspace_for_item(item)
+                        item_layout_context = self._fresh_item_layout_context(workspace)
+                        result = self._process_item_unlocked(
+                            job.target_entity_id,
+                            layout_context=item_layout_context,
+                        )
                         status = result.get("status", IntakeStatus.ORGANIZED.value)
                         content_status = result.get("content_status")
                         self.state.complete_job(
@@ -278,10 +416,36 @@ class IntakeWorker:
                         self._mark_request_applied(job.target_entity_id, result)
                         processed += 1
                     except RequestValidationError as exc:
-                        self._record_job_error(job, exc, default_status=IntakeStatus.NEEDS_INPUT)
+                        self._record_job_error(
+                            job,
+                            exc,
+                            default_status=IntakeStatus.NEEDS_INPUT,
+                            layout_context=item_layout_context,
+                        )
                         needs_input += 1
+                    except ReconnectRequiredError:
+                        # A rejected OAuth refresh ends the tick: no further job,
+                        # extension, Notion or Drive effect is attempted.
+                        raise
                     except Exception as exc:  # noqa: BLE001 - worker records a safe durable failure
-                        self._record_job_error(job, exc)
+                        self._record_job_error(
+                            job, exc, layout_context=item_layout_context
+                        )
+                        failed += 1
+            extensions: dict[str, Any] = {}
+            if process:
+                for coordinator in self.request_coordinators:
+                    try:
+                        snapshot = coordinator.snapshot()
+                        barrier = coordinator.receive(snapshot)
+                        result = coordinator.publish(barrier)
+                        extensions[coordinator.workspace] = result
+                        if result.get("status") != "ok":
+                            needs_input += 1
+                    except ReconnectRequiredError:
+                        raise
+                    except Exception:  # noqa: BLE001 - no provider payload in status
+                        extensions[coordinator.workspace] = {"status": "failed"}
                         failed += 1
             return {
                 "status": "failed" if failed else "needs_input" if needs_input else "ok",
@@ -290,6 +454,7 @@ class IntakeWorker:
                 "failed": failed,
                 "needs_input": needs_input,
                 "readiness": self.readiness(),
+                "request_extensions": extensions,
             }
         finally:
             self.state.release_local_worker_lock()
@@ -342,6 +507,7 @@ class IntakeWorker:
         error: BaseException,
         *,
         default_status: IntakeStatus | str = IntakeStatus.RETRYABLE_ERROR,
+        layout_context: _LayoutValidationContext | None = None,
     ) -> IntakeItem:
         """Persist an actionable intake failure and project File Intake.
 
@@ -363,7 +529,9 @@ class IntakeWorker:
                 item.intake_id,
                 content_status="Partial",
             )
-        if self.notion is not None:
+        if self.notion is not None and self._layout_context_allows(
+            layout_context, workspace
+        ):
             try:
                 self._project_file_intake(item, workspace, self._semester_workspace_fingerprint(workspace.semester))
             except (IntakeReconcileRequired, PolicyDeniedError, ProviderUnavailableError, SourceUnavailableError):
@@ -372,7 +540,13 @@ class IntakeWorker:
                 pass
         return item
 
-    def _record_request_error(self, request_key: str, error: BaseException) -> None:
+    def _record_request_error(
+        self,
+        request_key: str,
+        error: BaseException,
+        *,
+        layout_context: _LayoutValidationContext | None = None,
+    ) -> None:
         """Record a request failure without touching USER input fields."""
 
         receipt = self.state.get_request_receipt(request_key)
@@ -383,8 +557,18 @@ class IntakeWorker:
             workspace = self._workspace_for_item(item)
         except (IntakeConfigurationError, SourceUnavailableError):
             return
-        self._record_item_error(item, workspace, error, default_status=IntakeStatus.NEEDS_INPUT)
-        if self.notion is None or not receipt.provider_page_id:
+        self._record_item_error(
+            item,
+            workspace,
+            error,
+            default_status=IntakeStatus.NEEDS_INPUT,
+            layout_context=layout_context,
+        )
+        if (
+            self.notion is None
+            or not receipt.provider_page_id
+            or not self._layout_context_allows(layout_context, workspace)
+        ):
             return
         page = self.notion.read_record("input_request", receipt.provider_page_id)
         if page is None:
@@ -429,6 +613,7 @@ class IntakeWorker:
         error: BaseException,
         *,
         default_status: IntakeStatus | str = IntakeStatus.RETRYABLE_ERROR,
+        layout_context: _LayoutValidationContext | None = None,
     ) -> None:
         """Persist a safe job failure and its File Intake/request projection."""
 
@@ -442,7 +627,13 @@ class IntakeWorker:
                 except IntakeConfigurationError:
                     workspace = None
         if item is not None and workspace is not None:
-            self._record_item_error(item, workspace, error, default_status=default_status)
+            self._record_item_error(
+                item,
+                workspace,
+                error,
+                default_status=default_status,
+                layout_context=layout_context,
+            )
 
         error_class = _error_class(error)
         message = _safe_error_text(error)
@@ -475,7 +666,9 @@ class IntakeWorker:
         if item is not None and item.plan_revision:
             receipt = self._receipt_for_plan(self.state.get_intake_plan(item.plan_revision)) if self.state.get_intake_plan(item.plan_revision) else None
             if receipt is not None:
-                self._record_request_error(receipt.request_key, error)
+                self._record_request_error(
+                    receipt.request_key, error, layout_context=layout_context
+                )
 
     def _mark_request_applied(self, intake_id: str, result: Mapping[str, Any]) -> None:
         """Close the claimed request only after the intake path succeeds."""
@@ -529,6 +722,30 @@ class IntakeWorker:
 
         item = self._require_item(intake_id)
         workspace = self._workspace_for_item(item)
+        self._require_binding()
+        if self.notion is None:
+            raise SourceUnavailableError("Notion worker port is not configured")
+        with self._attested_entry():
+            layout_context = self._fresh_item_layout_context(workspace)
+            return self._create_input_request_with_context(
+                item,
+                workspace,
+                request_type=request_type,
+                target_snapshot=target_snapshot,
+                layout_context=layout_context,
+            )
+
+    def _create_input_request_with_context(
+        self,
+        item: IntakeItem,
+        workspace: ResolvedSemesterWorkspace,
+        *,
+        request_type: str,
+        target_snapshot: Mapping[str, Any] | None,
+        layout_context: _LayoutValidationContext,
+    ) -> RequestReceipt:
+        if not self._layout_context_allows(layout_context, workspace):
+            raise IntakeReconcileRequired("Input Request layout context is stale or missing")
         self._require_binding()
         if self.notion is None:
             raise SourceUnavailableError("Notion worker port is not configured")
@@ -627,6 +844,8 @@ class IntakeWorker:
             self.state.record_intake_stage_event("request_write_attempt_started", intake_id=item.intake_id, operation_key=attempt_key)
             try:
                 page = self.notion.create_record("input_request", properties)
+            except ReconnectRequiredError:
+                raise  # a rejected OAuth refresh is never converted or recorded as another failure
             except Exception:
                 self.state.update_provider_write_attempt(attempt_key, response_state="UNKNOWN", error_class="PROVIDER_UNAVAILABLE")
                 raise
@@ -670,13 +889,19 @@ class IntakeWorker:
     def claim_request(self, request_key: str) -> dict[str, Any]:
         """Claim one submitted request under the single-active-worker lock."""
 
-        self._acquire_public_worker_lock()
-        try:
-            return self._claim_request_unlocked(request_key)
-        finally:
-            self.state.release_local_worker_lock()
+        with self._attested_entry():
+            self._acquire_public_worker_lock()
+            try:
+                return self._claim_request_unlocked(request_key)
+            finally:
+                self.state.release_local_worker_lock()
 
-    def _claim_request_unlocked(self, request_key: str) -> dict[str, Any]:
+    def _claim_request_unlocked(
+        self,
+        request_key: str,
+        *,
+        layout_context: _LayoutValidationContext | None = None,
+    ) -> dict[str, Any]:
         """Validate one USER-submitted request and enqueue its immutable plan."""
 
         receipt = self.state.get_request_receipt(request_key)
@@ -686,6 +911,10 @@ class IntakeWorker:
         workspace = self._workspace_for_item(item_hint)
         if receipt.input_requests_data_source_id != workspace.input_requests_data_source_id:
             raise IntakeReconcileRequired("request belongs to a different current workspace")
+        if layout_context is None:
+            layout_context = self._fresh_item_layout_context(workspace)
+        elif not self._layout_context_allows(layout_context, workspace):
+            raise IntakeReconcileRequired("request claim layout context is stale or missing")
         page = self.notion.read_record("input_request", receipt.provider_page_id) if self.notion else None
         if page is None:
             raise SourceUnavailableError("submitted Input Request page is unavailable")
@@ -698,6 +927,7 @@ class IntakeWorker:
             intake_exists=lambda value: self.state.get_intake_item(value) is not None,
             course_exists=lambda value: value in self._course_page_map(workspace),
             session_course=lambda value: self._session_course_key(value, workspace),
+            schema_profile=getattr(self.notion, "schema_profile", "legacy5") or "legacy5",
         )
         if errors:
             if self.notion:
@@ -795,9 +1025,12 @@ class IntakeWorker:
                     attempt_operation=INTAKE_REQUEST_SYNC_OPERATION,
                 )
                 self.state.update_request_receipt(request_key, state="Applied")
-                next_receipt = self.create_input_request(
-                    item.intake_id,
+                next_receipt = self._create_input_request_with_context(
+                    self._require_item(item.intake_id),
+                    workspace,
                     request_type=RequestType.FILE_DETAILS.value,
+                    target_snapshot=None,
+                    layout_context=layout_context,
                 )
                 plans.append({"intake_id": item.intake_id, "next_request_key": next_receipt.request_key})
                 continue
@@ -829,13 +1062,19 @@ class IntakeWorker:
     def process_item(self, intake_id: str) -> dict[str, Any]:
         """Process one claimed item under the single-active-worker lock."""
 
-        self._acquire_public_worker_lock()
-        try:
-            return self._process_item_unlocked(intake_id)
-        finally:
-            self.state.release_local_worker_lock()
+        with self._attested_entry():
+            self._acquire_public_worker_lock()
+            try:
+                return self._process_item_unlocked(intake_id)
+            finally:
+                self.state.release_local_worker_lock()
 
-    def _process_item_unlocked(self, intake_id: str) -> dict[str, Any]:
+    def _process_item_unlocked(
+        self,
+        intake_id: str,
+        *,
+        layout_context: _LayoutValidationContext | None = None,
+    ) -> dict[str, Any]:
         """Execute a previously claimed plan, preserving the ordered gates."""
 
         item = self._require_item(intake_id)
@@ -848,6 +1087,10 @@ class IntakeWorker:
         if receipt is None or not receipt.provider_page_id:
             raise SourceUnavailableError("plan has no submitted request receipt")
         workspace = self._workspace_for_item(item)
+        if layout_context is None:
+            layout_context = self._fresh_item_layout_context(workspace)
+        elif not self._layout_context_allows(layout_context, workspace):
+            raise IntakeReconcileRequired("item processing layout context is stale or missing")
         request_page = self.notion.read_record("input_request", receipt.provider_page_id) if self.notion else None
         if request_page is None:
             raise SourceUnavailableError("request receipt page is unavailable")
@@ -859,7 +1102,76 @@ class IntakeWorker:
             return self._process_transcript(item, plan, receipt, request, workspace)
         if request.kind == FileKind.MATERIAL_PDF.value:
             return self._process_material(item, plan, receipt, request, workspace)
+        if request.kind in self._human_material_kinds():
+            # A v2 HUMAN Material Kind keeps the user's Role as Materials.Type and
+            # takes the PDF normalization path only where the Kind×format matrix of
+            # plan §6.1 allows PDF.  Opaque formats (code, tabular) need the
+            # REGISTER_OPAQUE_NO_RETRIEVAL path of P-B and fail closed (P-A r2 #4).
+            from uls.intake.classification.taxonomy import PDF_MATERIAL_KINDS, Kind
+
+            kind = Kind(request.kind)
+            pdf_allowed = kind in PDF_MATERIAL_KINDS or kind is Kind.ASSIGNMENT_RESOURCE
+            is_pdf = (item.mime_type or "").lower() == "application/pdf"
+            if not pdf_allowed and is_pdf:
+                raise RequestValidationError(
+                    (f"Kind {request.kind} never takes a PDF source (plan §6.1 matrix)",)
+                )
+            if not is_pdf:
+                raise RequestValidationError(
+                    (f"Kind {request.kind} on a non-PDF source needs the opaque registration path (not available yet)",)
+                )
+            return self._process_material(item, plan, receipt, request, workspace)
         raise RequestValidationError(("unsupported plan kind",))
+
+    def _human_material_kinds(self) -> frozenset[str]:
+        """HUMAN-selectable v2 Material Kinds under the active profile (plan §5)."""
+
+        from uls.intake.classification.taxonomy import FILE_KINDS_V2
+
+        if not self._classification_profile_active():
+            return frozenset()
+        return frozenset(k for k in FILE_KINDS_V2 if k not in (FileKind.TRANSCRIPT.value, FileKind.MATERIAL_PDF.value))
+
+    def _classification_profile_active(self) -> bool:
+        profile = getattr(self.notion, "schema_profile", "legacy5") or "legacy5"
+        return profile in ("legacy5-cls", "c5-range-v2")
+
+    def backfill_material_ai_kind(self) -> dict[str, int]:
+        """Limited, idempotent Materials ``AI Kind`` backfill of plan §5 (P-A migration).
+
+        Only ``Type == "Lecture Slides"`` rows with an empty ``AI Kind`` receive
+        ``LECTURE_SLIDES``; every other Type keeps ``AI Kind`` empty until a verified
+        Kind exists.  ``Type``, source binding and canonical ID are never touched, and
+        nothing runs unless the v2 profile readback is VERIFIED.  A second run is 0.
+        """
+
+        if self.notion is None or not self._classification_profile_active():
+            raise SourceUnavailableError("Materials AI Kind backfill needs a verified v2 classification profile")
+        self._require_notion_workspace_verified()
+        rows = {_page_id(row): row for row in self.notion.list_records("materials") if _page_id(row)}
+        # The target set was fixed when the v2 profile first verified (r8 R4, r10 R5).
+        targets = self.state.material_backfill_targets() or []
+        scanned = updated = 0
+        for target in targets:
+            row = rows.get(target["page_id"])
+            if row is None:
+                continue
+            scanned += 1
+            if target["applied_at"] or target.get("material_type") != "Lecture Slides":
+                continue
+            if row.get("Type") != "Lecture Slides":
+                continue
+            if row.get("AI Kind") == "LECTURE_SLIDES":
+                # The remote write landed earlier but the local mark was lost: the readback
+                # proves the exact value, so only the ledger is completed (r13 O1).
+                self.state.mark_material_backfill_applied(target["page_id"])
+                continue
+            if row.get("AI Kind"):
+                continue
+            self.notion.update_system_record("materials", target["page_id"], {"AI Kind": "LECTURE_SLIDES"})
+            self.state.mark_material_backfill_applied(target["page_id"])
+            updated += 1
+        return {"scanned": scanned, "updated": updated}
 
     # ------------------------------------------------------------------
     # Ordered transcript/material paths
@@ -1367,6 +1679,8 @@ class IntakeWorker:
         self.state.record_provider_write_attempt(operation=INTAKE_SESSION_OPERATION, operation_key=op_key, provider=self.provider, target_id=None, response_state="PREPARED")
         try:
             page = self.notion.create_record("sessions", properties)
+        except ReconnectRequiredError:
+            raise  # a rejected OAuth refresh is never converted or recorded as another failure
         except Exception:
             self.state.update_provider_write_attempt(op_key, response_state="UNKNOWN", error_class="PROVIDER_UNAVAILABLE")
             raise
@@ -1428,6 +1742,8 @@ class IntakeWorker:
         self.state.record_provider_write_attempt(operation=INTAKE_MATERIAL_OPERATION, operation_key=op_key, provider=self.provider, target_id=None, response_state="PREPARED")
         try:
             page = self.notion.create_record("materials", properties)
+        except ReconnectRequiredError:
+            raise  # a rejected OAuth refresh is never converted or recorded as another failure
         except Exception:
             self.state.update_provider_write_attempt(op_key, response_state="UNKNOWN", error_class="PROVIDER_UNAVAILABLE")
             raise
@@ -1522,6 +1838,8 @@ class IntakeWorker:
                 marker=marker,
                 create_attempted=prior is not None,
             )
+        except ReconnectRequiredError:
+            raise  # a rejected OAuth refresh is never converted or recorded as another failure
         except Exception:
             self.state.update_provider_write_attempt(op_key, response_state="UNKNOWN", error_class="PROVIDER_UNAVAILABLE")
             raise
@@ -1582,11 +1900,22 @@ class IntakeWorker:
         if len(matches) > 1:
             raise IntakeReconcileRequired("multiple derivative marker matches require reconciliation")
         if matches:
-            result = matches[0]
-            if result.parents != (parent_id,) or result.app_properties != marker:
-                raise IntakeReconcileRequired("derivative marker tuple does not match target")
-            if self.drive.download(result.file_id) != content:
-                raise IntakeReconcileRequired("existing derivative content does not match immutable tuple")
+            candidate = matches[0]
+            try:
+                result = self.drive.read_metadata(candidate.file_id)
+                self._check_derivative_metadata(
+                    result, candidate.file_id, parent_id, marker
+                )
+                if self.drive.download(candidate.file_id) != content:
+                    raise IntakeReconcileRequired(
+                        "existing derivative content does not match immutable tuple"
+                    )
+            except ReconnectRequiredError:
+                raise  # a rejected OAuth refresh is never converted or recorded as another failure
+            except Exception:  # noqa: BLE001 - a selected marker candidate must fail closed
+                raise IntakeReconcileRequired(
+                    "existing derivative marker candidate could not be verified"
+                ) from None
             if prior is None:
                 self.state.record_provider_write_attempt(operation=INTAKE_DERIVATIVE_OPERATION, operation_key=op_key, provider=self.provider, target_id=result.file_id, response_state="READBACK_OK", readback_json=asdict(result))
             else:
@@ -1600,18 +1929,58 @@ class IntakeWorker:
         self.state.record_intake_stage_event("stage_write_attempt_started", intake_id=item.intake_id, operation_key=op_key)
         try:
             result = self.drive.create_file_with_marker(parent_id, name, "text/markdown", content, marker)
-        except Exception:
-            self.state.update_provider_write_attempt(op_key, response_state="UNKNOWN", error_class="PROVIDER_UNAVAILABLE")
-            raise
-        self.state.update_provider_write_attempt(op_key, target_id=result.file_id, dispatched_at=_utc_now(), response_state="DISPATCHED")
-        readback = self.drive.read_metadata(result.file_id)
-        _check_private_drive_metadata(readback)
-        if readback.file_id != result.file_id or readback.parents != (parent_id,) or readback.app_properties != marker or self.drive.download(readback.file_id) != content:
-            self.state.update_provider_write_attempt(op_key, response_state="UNKNOWN")
-            raise SourceUnavailableError("staged derivative full readback failed")
+        except ReconnectRequiredError:
+            raise  # a rejected OAuth refresh is never converted or recorded as another failure
+        except Exception:  # noqa: BLE001 - the dispatched create outcome is indeterminate
+            self.state.update_provider_write_attempt(
+                op_key, response_state="UNKNOWN", error_class="AMBIGUOUS"
+            )
+            raise IntakeReconcileRequired(
+                "derivative create outcome is indeterminate after dispatch"
+            ) from None
+        try:
+            file_id = result.file_id
+            self.state.update_provider_write_attempt(
+                op_key,
+                target_id=file_id,
+                dispatched_at=_utc_now(),
+                response_state="DISPATCHED",
+            )
+            readback = self.drive.read_metadata(file_id)
+            self._check_derivative_metadata(readback, file_id, parent_id, marker)
+            if self.drive.download(file_id) != content:
+                raise IntakeReconcileRequired("staged derivative bytes differ from intent")
+        except ReconnectRequiredError:
+            raise  # a rejected OAuth refresh is never converted or recorded as another failure
+        except Exception:  # noqa: BLE001 - post-create verification must fail closed
+            self.state.update_provider_write_attempt(
+                op_key, response_state="UNKNOWN", error_class="AMBIGUOUS"
+            )
+            raise IntakeReconcileRequired(
+                "staged derivative create readback is indeterminate"
+            ) from None
         self.state.update_provider_write_attempt(op_key, response_state="READBACK_OK", readback_json=asdict(readback))
         self.state.record_intake_stage_event("stage_validate_readback", intake_id=item.intake_id, operation_key=op_key)
         return readback
+
+    @staticmethod
+    def _check_derivative_metadata(
+        metadata: DriveMetadata,
+        file_id: str,
+        parent_id: str,
+        marker: Mapping[str, str],
+    ) -> None:
+        if (
+            metadata.file_id != file_id
+            or metadata.trashed
+            or metadata.mime_type != "text/markdown"
+            or metadata.parents != (parent_id,)
+            or metadata.app_properties != dict(marker)
+        ):
+            raise IntakeReconcileRequired(
+                "Drive derivative identity, parent, MIME, marker, or trash state mismatch"
+            )
+        require_private_ownership(metadata, context="Drive derivative")
 
     def _move_after_freshness(
         self,
@@ -1673,6 +2042,8 @@ class IntakeWorker:
                     self.state.record_provider_write_attempt(operation=INTAKE_MOVE_OPERATION, operation_key=op_key, provider=self.provider, target_id=item.provider_file_id, response_state="PREPARED")
                 try:
                     moved = self.drive.move_file(item.provider_file_id, item.original_parent_id, target_folder.file_id)
+                except ReconnectRequiredError:
+                    raise  # a rejected OAuth refresh is never converted or recorded as another failure
                 except Exception:
                     self.state.update_provider_write_attempt(op_key, response_state="UNKNOWN", error_class="PROVIDER_UNAVAILABLE")
                     raise
@@ -1782,6 +2153,8 @@ class IntakeWorker:
             self.state.record_provider_write_attempt(operation=INTAKE_STATUS_OPERATION, operation_key=op_key, provider=self.provider, target_id=None, response_state="PREPARED")
             try:
                 page = self.notion.create_record("file_intake", properties)
+            except ReconnectRequiredError:
+                raise  # a rejected OAuth refresh is never converted or recorded as another failure
             except Exception:
                 self.state.update_provider_write_attempt(op_key, response_state="UNKNOWN", error_class="PROVIDER_UNAVAILABLE")
                 raise
@@ -1833,6 +2206,8 @@ class IntakeWorker:
                         )
                     try:
                         self.notion.update_system_record("file_intake", page_id, update_properties)
+                    except ReconnectRequiredError:
+                        raise  # a rejected OAuth refresh is never converted or recorded as another failure
                     except Exception:
                         self.state.update_provider_write_attempt(
                             op_key,
@@ -2200,6 +2575,8 @@ class IntakeWorker:
             )
         try:
             self.notion.update_system_record(logical, page_id, patch)
+        except ReconnectRequiredError:
+            raise  # a rejected OAuth refresh is never converted or recorded as another failure
         except Exception:
             self.state.update_provider_write_attempt(operation_key, response_state="UNKNOWN", error_class="PROVIDER_UNAVAILABLE")
             raise
@@ -2279,6 +2656,97 @@ class IntakeWorker:
         for workspace in self.workspaces:
             result.setdefault(workspace.semester, []).append(workspace)
         return result
+
+    def _context_for_validated_workspaces(
+        self, workspaces: Sequence[ResolvedSemesterWorkspace]
+    ) -> _LayoutValidationContext:
+        fingerprints = tuple(
+            sorted(
+                (
+                    semester,
+                    self._workspace_fingerprint(rows),
+                )
+                for semester, rows in _group_workspace_rows(workspaces).items()
+            )
+        )
+        return _LayoutValidationContext(fingerprints)
+
+    def _fresh_layout_context(
+        self, workspaces: Sequence[ResolvedSemesterWorkspace]
+    ) -> _LayoutValidationContext:
+        grouped = _group_workspace_rows(workspaces)
+        for rows in grouped.values():
+            validate_registered_drive_layout(self.drive, rows)
+        return self._context_for_validated_workspaces(workspaces)
+
+    def _fresh_item_layout_context(
+        self, workspace: ResolvedSemesterWorkspace
+    ) -> _LayoutValidationContext:
+        return self._fresh_layout_context(self._semester_workspaces(workspace.semester))
+
+    def _layout_context_allows(
+        self,
+        context: _LayoutValidationContext | None,
+        workspace: ResolvedSemesterWorkspace,
+    ) -> bool:
+        return (
+            context is not None
+            and context.fingerprint_for(workspace.semester)
+            == self._semester_workspace_fingerprint(workspace.semester)
+        )
+
+    def _run_layout_workspaces(self) -> list[ResolvedSemesterWorkspace]:
+        """Resolve the complete local request/job scope without provider reads."""
+
+        rows_by_course = {workspace.course_key: workspace for workspace in self.workspaces}
+        items = self.state.list_intake_items(limit=10_000)
+        for job in self.state.list_jobs(limit=1000):
+            if (
+                job.operation not in {INTAKE_SESSION_OPERATION, INTAKE_MATERIAL_OPERATION}
+                or str(job.status) != "PENDING"
+            ):
+                continue
+            item = self.state.get_intake_item(job.target_entity_id)
+            if item is None:
+                raise SourceUnavailableError("pending intake job has no local intake item")
+            workspace = self._workspace_for_item(item)
+            rows_by_course.update(
+                {row.course_key: row for row in self._semester_workspaces(workspace.semester)}
+            )
+
+        for receipt in self.state.list_request_receipts(provider=self.provider):
+            if receipt.state in {"Applied", "Cancelled"}:
+                continue
+            matches = [
+                item
+                for item in items
+                if item.pending_request_key == receipt.request_key
+                or (
+                    receipt.provider_page_id is not None
+                    and item.input_request_page_id == receipt.provider_page_id
+                )
+            ]
+            if not matches and receipt.intake_ids_json:
+                try:
+                    intake_ids = json.loads(receipt.intake_ids_json)
+                except (TypeError, json.JSONDecodeError):
+                    intake_ids = []
+                if isinstance(intake_ids, list):
+                    matches = [
+                        item
+                        for intake_id in intake_ids
+                        if isinstance(intake_id, str)
+                        for item in [self.state.get_intake_item(intake_id)]
+                        if item is not None
+                    ]
+            if not matches:
+                raise SourceUnavailableError("nonterminal request receipt has no local intake item")
+            for item in matches:
+                workspace = self._workspace_for_item(item)
+                rows_by_course.update(
+                    {row.course_key: row for row in self._semester_workspaces(workspace.semester)}
+                )
+        return [rows_by_course[key] for key in sorted(rows_by_course)]
 
     def _workspace_for_item(self, item: IntakeItem) -> ResolvedSemesterWorkspace:
         candidates = [workspace for workspace in self.workspaces if workspace.semester == item.semester]
@@ -2372,6 +2840,8 @@ class IntakeWorker:
             stage="intake",
             course_key=item.selected_course_key,
             target_entity_id=item.intake_id,
+            plan_revision=plan.plan_revision,
+            plan_authority=plan.plan_authority,
         )
 
     def _require_item(self, intake_id: str) -> IntakeItem:
@@ -2409,11 +2879,25 @@ class IntakeWorker:
     def _notion_workspace_readiness(self) -> dict[str, Any]:
         if self.notion is None:
             return {"status": "NOT_VERIFIED", "reason": "Notion worker port is not configured"}
+        if self._classification_profile_mismatch:
+            # A requested classification profile that does not match the configured
+            # data sources fails readiness closed; nothing is written under a
+            # silently downgraded profile (P-A review R6).
+            return {
+                "status": "NOT_VERIFIED",
+                "reason": (
+                    "intake.classification.schema_profile "
+                    f"{self._classification_profile_mismatch!r} does not match the configured "
+                    "Notion data sources"
+                ),
+            }
         validator = getattr(self.notion, "validate_workspace", None)
         if not callable(validator):
             return {"status": "NOT_VERIFIED", "reason": "Notion schema/parent readback is unavailable"}
         try:
             result = validator()
+        except ReconnectRequiredError:
+            raise  # a rejected OAuth refresh is never converted or recorded as another failure
         except Exception:  # noqa: BLE001 - readiness fails closed on any adapter failure
             return {"status": "NOT_VERIFIED", "reason": "Notion schema/parent readback failed"}
         if not isinstance(result, Mapping):
@@ -2424,7 +2908,25 @@ class IntakeWorker:
                 "status": "NOT_VERIFIED",
                 "reason": reason if isinstance(reason, str) else "Notion schema/parent readback is not verified",
             }
+        if self._classification_profile_active():
+            # The pre-v2 Material set is fixed the first time a v2 profile verifies, i.e.
+            # before any v2 HUMAN write can happen (mutations require this readiness),
+            # so later HUMAN MATERIAL_PDF rows are never backfill targets (r10 R5).
+            try:
+                self._ensure_material_backfill_snapshot()
+            except ReconnectRequiredError:
+                raise
+            except Exception:  # noqa: BLE001 - readiness fails closed
+                return {"status": "NOT_VERIFIED", "reason": "pre-v2 Materials snapshot could not be recorded"}
         return dict(result)
+
+    def _ensure_material_backfill_snapshot(self) -> None:
+        if self.notion is None or self.state.material_backfill_targets() is not None:
+            return
+        rows = self.notion.list_records("materials")
+        self.state.snapshot_material_backfill_targets(
+            (_page_id(row) or "", row.get("Type")) for row in rows
+        )
 
     def _require_notion_workspace_verified(self) -> None:
         result = self._notion_workspace_readiness()
@@ -2467,6 +2969,27 @@ class IntakeWorker:
         if not candidates:
             return None
         row = candidates[0]
+        profile: dict[str, Any] = {}
+        extra_sources: dict[str, str] = {}
+        if row.material_usage_data_source_id and row.automation_queue_data_source_id:
+            profile["schema_profile"] = "c5-range-v1"
+            extra_sources = {
+                "material_usage": row.material_usage_data_source_id,
+                "automation_queue": row.automation_queue_data_source_id,
+            }
+        # Intake classification v2 (plan §5): an explicit profile replaces the
+        # default selection only after a human added the Notion properties.
+        configured = getattr(getattr(self.config, "intake", None), "classification", None)
+        requested = getattr(configured, "schema_profile", "") or ""
+        if requested == "c5-range-v2" and extra_sources:
+            profile["schema_profile"] = "c5-range-v2"
+        elif requested == "legacy5-cls" and not extra_sources:
+            profile["schema_profile"] = "legacy5-cls"
+        elif requested:
+            # A profile that does not match the configured data sources is
+            # never silently downgraded; readback stays on the default profile
+            # and the mismatch is visible in readiness.
+            self._classification_profile_mismatch = requested
         return NotionIntakeWriter(
             notion,
             {
@@ -2475,9 +2998,11 @@ class IntakeWorker:
                 "materials": row.materials_data_source_id,
                 "file_intake": row.file_intake_data_source_id,
                 "input_request": row.input_requests_data_source_id,
+                **extra_sources,
             },
             parent_page_id=row.connection_settings_files_parent_id,
             semester=row.semester,
+            **profile,
         )
 
     @staticmethod
@@ -2540,6 +3065,18 @@ def _metadata_source_hash(metadata: DriveMetadata) -> str:
             metadata.size,
         ]
     )
+
+
+def _group_workspace_rows(
+    workspaces: Sequence[ResolvedSemesterWorkspace],
+) -> dict[str, list[ResolvedSemesterWorkspace]]:
+    grouped: dict[str, list[ResolvedSemesterWorkspace]] = {}
+    for workspace in workspaces:
+        grouped.setdefault(workspace.semester, []).append(workspace)
+    return {
+        semester: sorted(rows, key=lambda workspace: workspace.course_key)
+        for semester, rows in grouped.items()
+    }
 
 
 def _check_private_drive_metadata(metadata: DriveMetadata, *, require_move: bool = False) -> None:

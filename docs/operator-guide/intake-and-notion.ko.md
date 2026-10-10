@@ -57,6 +57,24 @@ write 활성화 전 다음을 검증합니다.
 
 provider 응답이 유실되거나 결과가 모호하면 외부 상태를 다시 읽고 reconcile하세요. 결과가 불명확한 mutation을 무작정 반복하거나 중복 page를 만들지 않습니다.
 
+## 다음 버전 준비 사항: Automation Queue `Proposal Envelope`
+
+수용된 다음 버전 설계(`docs/ux/intake-execution-contract.md`, rev10, §5.3)는 v1.2 §14.7 현재
+스키마(`implementation-spec-frozen.md`)에 없는 새 SYSTEM 소유 Notion 속성 하나를 `Automation Queue`
+데이터베이스에 추가한다:
+
+| 속성 | 타입 | 소유 |
+|---|---|---|
+| Proposal Envelope | Rich text | SYSTEM |
+
+이 속성은 rev10의 C5(v2 proposal identity/envelope)가 읽고 쓰기 전에 실제 `Automation Queue`
+데이터베이스에 미리 존재해야 한다. 이 저장소는 Notion 데이터베이스 스키마를 자동 생성·프로비저닝하지
+않으며, `Automation Queue`에는 현재 `INTAKE_SCHEMAS`에 해당하는 선언형 schema/validator가 없다 --
+기존 `Proposal ID`/`Proposed Action` 속성과 함께 Notion에서 수동으로 만든다.
+기존 Queue `Proposal Type`/`State`/`Decision` enum 값과 현재 쓰기 권한 규칙(§15.1)은 그대로 유지되며,
+이는 추가적인 schema 변경일 뿐이며 기존 Queue 속성·enum·권한은 전혀 변경되지 않는다. 실제 v2 envelope
+읽기/쓰기/내용 검증과 Reader/HAA guard 로직은 C5가 담당한다.
+
 ## 대시보드 UX
 
 학기 대시보드의 의도된 순서는 다음과 같습니다.
@@ -68,6 +86,18 @@ provider 응답이 유실되거나 결과가 모호하면 외부 상태를 다�
 5. 파일 확인
 
 수업은 전역 navigation이 아니라 각 과목 아래에 둡니다.
+
+현재 상태(rev10 C7): C7의 개인 일정/할 일 연결 뷰 부분은 2026-09-13에 사용자의 실제 Notion
+워크스페이스에 이미 native로 적용됐다 -- 기존 개인 일정 DB를 재사용해(새 전용 스키마가 아님) To
+DO/캘린더 뷰를 구성했다. `docs/ux/dashboard-native-application.md`, readback 증거는
+`dashboard-native-readback.md`, GO 판정(독립 웹 리뷰 + Gemini)은 `review-20260913-native-dashboard.md`
+참고. 그 2026-09-13 적용이 기록한 섹션 순서(내 과목 → 이어서 공부 → To DO → 캘린더 → 파일 확인)는
+현재 rev10 계약 §7의 순서(오늘 할 일/마감 → 과목 → 이어서 공부 → 학사 일정 → 파일 확인)보다 앞서고
+그와 다르다. 이 상태 메모는 C7 행의 연결 뷰 요구만 다루며, 별도인 §7 대시보드 순서 요구까지
+충족됐다고 주장하지 않는다. 계약 §2 저장소 표에 따르면 이 일정 DB는 전부 사용자 편집이며
+시스템은 그 내용을 자동으로 변경하지 않는다. 인용된 native 적용은 이 DB에 대한 worker/product
+writer 연동을 요구하거나 주장하지 않으며, 이 재사용 일정 DB에 대한 미래 worker 매핑을 명시적으로
+미완료로 남겨둔다(자동 최근 방문 순위, 자동 파일 접수 연결도 이번 적용이 연결하지 않은 것과 함께).
 
 ## 암묵적 lane fallback 금지
 

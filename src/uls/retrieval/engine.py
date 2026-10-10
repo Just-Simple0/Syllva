@@ -393,7 +393,12 @@ class RetrievalEngine:
         except SourceUnavailableError as exc:
             warnings.append(_warning("SOURCE_UNAVAILABLE", exc.message))
 
-        usages = self._material_usages(canonical_id)
+        supports_data_source = getattr(self.notion_reader, "supports_data_source", None)
+        if callable(supports_data_source) and not supports_data_source("material_usage"):
+            warnings.append(_warning("SOURCE_UNAVAILABLE", "Material Usage is unavailable in the selected semester lane"))
+            usages = []
+        else:
+            usages = self._material_usages(canonical_id)
         usage_scopes = self._safe_usage_scopes(
             usages,
             session_id=canonical_id,

@@ -15,7 +15,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - run: python -m pip install -e ".[dev,mcp,drive,notion,pdf]"
-      - run: python -m pytest -q
+      - run: python -m pip install -e ".[dev,mcp,drive,notion,pdf,web]"
+      - run: python -m pytest -q -ra
+      - name: Windows secure-file regressions
+        if: ${{ (success() || failure()) && runner.os == 'Windows' }}
+        run: python -m pytest -q -ra tests/unit/test_secure_file.py
       - run: python scripts/lint_behavior_projection.py
       - run: python -m compileall -q src

@@ -1,889 +1,508 @@
-# Syllva (ULS v1.2) — Handoff
+# Syllva 인수인계 — 현재 상태 (2026-10-07)
 
-**Last updated:** 2026-09-17
+기준일: 2026-10-07. 현재 결과는 `a3e32472142a09b0bb5a7adda885ffcbd9e9c85d` (`codex/gui23-pr13-followups`)로 로컬 커밋 완료했다. 최신 인계와 재개 기준은 이 `handoff.md`가 직접 제공한다. 별도 파일 동기화는 하지 않는다. 기존 School 전체 흐름 통과 전 커밋 보류는 이번 명시 지시의 현재 로컬 커밋 범위에 한해 해제한다. push·PR·공개 배포·실제 provider 작업은 승인하지 않았다.
 
-## PR #8 안정화 작업 (Stage A, B, C, D) 및 CredentialResolver 완료 및 main 머지 (2026-09-16)
+## School 전체 흐름 진행 — 2026-10-07 (사용자 지시 "School 실제 전체 흐름 통과까지 진행", 필수 리뷰 포함)
 
-PR #8 머지 이후 제기되었던 종합 안정화 지적 사항(Stage A~D)과 자격증명 저장소 재설계 작업이 전원 웹 독립 리뷰(GO) 및 GitHub Actions CI 통과를 거쳐 `main` 브랜치에 완전히 병합되었다.
+P2 백엔드 이후 추가로 구현한 범위(미커밋):
 
-### 1. Stage A: 보안, 이식성 및 CI 의존성 안정화 (PR #9, commit `f694b74`)
-- **Drive 파생본 출력 폴더 비공개 검증 (`src/uls/worker.py`)**: `DerivedDriveWriter`에서 기존 전사 출력 대상 폴더의 비공개 여부, 소유권, 등록 경로 검증을 강화하여 공유 폴더 업로드 위험 차단.
-- **Windows LMS 사이드카 크로스플랫폼 이식성 (`scripts/_lms_platform.py`)**: `os.getuid()`, `os.O_NOFOLLOW` 등 Unix 전용 호출을 Windows `CreateFileW(FILE_FLAG_OPEN_REPARSE_POINT)`와 `GetFileInformationByHandle` 기반의 reparse-point 링크 방어로 교체.
-- **Aside REPL 스트림 파이프 바운딩 (`scripts/knu_lms_probe.py`)**: 큐 크기/바이트 상한 보장 및 읽기 에러와 EOF 분리 처리.
-- **CI 환경 복구 (`.github/workflows/ci.yml`)**: `pyproject.toml`의 `pdf` extra(`pypdf`)를 CI 설치 단계에 추가하여 테스트 수집 실패 해결.
+- **Settings UI(GUI-4 일부)**: `src/uls/settings/static/app.js`에 Google 카드용 "Sign in with Google" / "Replace with Google sign-in", 흐름 상태 표시(`google-oauth-status-<role>`), 1.5초 폴링, "Confirm Google connection"/"Cancel Google sign-in", 고정 코드→문구 매핑. `/api/v1/credentials` 응답에 `google_oauth_ready` boolean 추가(`credential_service.cards`). 클라이언트 미설정이면 안내 문구만 표시. UI harness 시나리오 5개(`google_oauth_success/denied/cancel/not_ready/commit_mismatch`)와 `test_settings_ui.py` 테스트 5개 추가.
+- **Notion 2025-09-03 호환**: `src/uls/adapters/notion/intake.py`의 `_data_source_parent_page_id`가 `parent.database_id + database_parent.page_id` 형태를 해석(불완전·상충 시 거부), `_status_group_names`가 `{id,name,color,option_ids}` 배열을 option id→name으로 정규화(미참조/중복/누락/malformed 거부). legacy 형태 동작 불변. `tests/integration/test_notion_modern_schema.py` 22개.
+- 검사: 전체 `pytest` **2639 passed, 1 failed(기존 환경 의존 keyring), 5 skipped**. ruff 208·mypy 135로 HEAD 동일, projection lint·diff-check 통과.
+- **독립 리뷰 진행(2026-10-09)**: Settings FINAL 1차 = **REVISE REQUIRED 9 / OPTIONAL 1**(원본 결속 회수, 최신/Extra High). 10건 모두 반영: --no-browser에서 auth URL 미출력(`BROWSER_REQUIRED` fail-closed), callback/result가 replacement 상태에서도 session-free, OAuth 저장의 모든 정책 거부를 journal/admission/stage 이전으로 이동(AU `_verify`는 구조+분리만, Drive 자원 검사 제거), peer fresh grant scope 정확 비교, external/environment peer 사전 거부, Connection Test의 AU exact 계약, lifecycle 순서 통합(`SettingsServer._terminate`: invalidate→barrier close→drain→close/replace/expire; app close도 동일), callback error ≤64 ASCII, OAuth 오류 응답 code-only, config 권한 drift 재검사. 처분 기록 `native-final-p2-settings/parent-disposition.json`. 각 지적마다 회귀 테스트 추가(전체 2658 passed). Settings r2 패킷(19파일, 81,827토큰)을 slot1로, Runtime 패킷을 slot2로 송신 중(첫 두 번은 중복 프로젝트 생성·모델 불일치로 전송 전 중단, 재전송은 `projects.json` 교정 후). **2026-10-09 관측:** ChatGPT picker가 플래그십을 `최신` 대신 `GPT-6`로 표기해 `--require-model 최신`이 두 슬롯 모두에서 전송 전 실패했다. 두 패킷의 launch-argv를 `--require-model GPT-6`로 바꿔 재전송했고(Pro radio disabled, slider [0,3,3] Extra High 최대, `pro_option_unavailable`), 올바른 프로젝트에서 USER_BOUND 스트리밍을 확인했다. 실패한 첫 Runtime 시도가 slot2 workspace에 중복 프로젝트 `g-p-6ac8757e…`를 만들었으며 내용은 없다.
+- **리뷰 2라운드(2026-10-09)**: Runtime FINAL 1차 = REVISE 9/1(타입 디스패치 미닫힘, grant 증명 없이 저장 scope 신뢰, legacy NativeWorker 우회, attestor 동시 refresh 경합, adapter 일치 검사 불완전, 오류 코드 소실·chunk gate, Notion parent/group 중복), Settings r2 = REVISE 4/2(drain timeout 후 종료, idle 조기 상태 변경, 같은 role SA↔OAuth 교체, Connection Test 응답 형태). 전부 반영: `_prove_authorized_user_grant`(MCP/WORKER 로드 시 fresh grant·client 증명, 로컬 scope 대체 금지), closed type dispatch, `build_worker`/`google_worker_service`의 OAuth 거부, attestor lock, `attestation_matches` 전체 필드, adapter chunk별 gate·코드 보존, Notion 완전성·중복 검사, drain을 idle까지 반복, `SessionSecurity.expire()/expire_bootstrap()`로 terminal 전이를 coordinator에만 위임, 동일 role 타입 전환 거부(양방향), AU Connection Test code-only. 처분 `native-final-p2-runtime/parent-disposition.json`, `native-final-p2-settings-r2/parent-disposition.json`. 전체 **2683 passed**, ruff 208·mypy 135 동일. Settings r3(20파일 84,894토큰)·Runtime r2(18파일 76,025토큰) 송신.
+- **리뷰 3라운드(2026-10-09)**: Settings r3 = REVISE 3/2(idle 종료 중 replacement 무시, Connection Test의 인증 전 credential 읽기·비원자적 타입 판정, 만료 flow를 첫 callback이 failed로 덮어씀), Runtime r2 = REVISE 4/2(Notion modern marker 불완전, 공유 credential의 entry 간 refresh 경합, OAuth SDK build 오류 비고정, SDK 내부 refresh의 bounded/proof 미보장). 전부 반영: `_terminate`가 pending terminal을 교체 요청으로 승격, `CredentialService.test`가 검사한 snapshot에서 `code_only` 표시, expired flow 보존, `database_parent` 키 존재를 modern marker로·`parent.type==database_id` 강제, `IntakeWorker._entry_lock`(entry 전체 mutex, 바쁘면 즉시 거부), `_build_drive` OAuth 분기 고정 코드, `_bind_bounded_refresh`로 credential 객체의 모든 refresh를 bounded transport+grant 증명에 결속. 처분 `native-final-p2-settings-r3/parent-disposition.json`, `native-final-p2-runtime-r2/parent-disposition.json`. **사고 기록:** 테스트 lint 중 `ruff --fix tests src`가 무관한 56파일을 자동 수정했고, HEAD 자동수정 목록으로 식별해 전부 `git checkout`으로 복원했다(ruff 208·mypy 동일, 변경 파일 20개로 복귀). Settings r4·Runtime r3(이번엔 `intake/worker.py` 전문 포함) 송신.
+- **리뷰 4라운드(2026-10-09)**: Settings r4 = REVISE 1/2(config에 미선택이지만 보호 저장소에 남은 peer credential이 fresh 계정 증명에서 누락), Runtime r3 = REVISE 2/2(SDK 내부 refresh의 grant 검증 경합, OAuth 분기 SDK import·클래스 재결속 오류 비고정). 전부 반영 + 선택 2건(close 후 idle 적용, settings bounded transport 직접 테스트)도 반영. `_oauth_snapshot`이 미선택 peer의 managed active를 증명에 포함, `_bind_bounded_refresh`에 credential별 lock과 재결속 실패 고정화, OAuth 분기 SDK import를 고정 코드로. 처분 `native-final-p2-settings-r4/`, `native-final-p2-runtime-r3/parent-disposition.json`. 전체 **2700 passed**(이전 라운드 기준), ruff 208·mypy 동일. Settings r5(22파일 89,287토큰)·Runtime r4 송신.
+- **리뷰 5라운드(2026-10-09)**: Settings r5 = REVISE 1/1(미확인 Google credential type이 SA로 분류됨). `_google_identity`가 SA/AU만 분기하고 나머지 INVALID_CREDENTIAL, `test()`가 미확인 타입을 provider 호출 전 code-only로 거부, `LiveReadOnlyTransport._google`이 비SA/비AU를 거부. 선택 지적(동시 cross-role commit 경쟁)도 테스트로 추가. 처분 `native-final-p2-settings-r5/parent-disposition.json`. Settings r6 송신. Runtime r4는 응답 생성 중.
+- **리뷰 6라운드(2026-10-09)**: Runtime r4 = REVISE 1/2(malformed/모순 legacy parent가 `_parent_page_id`로 통과). `parent` 키가 있으면 Mapping이어야 하고 명시 type은 `page_id`+유효 `page_id`만 허용(untyped legacy·내부 `_parent_page_id` 단독은 유지). 선택 2건도 반영: startup attestation을 `SQLiteStateStore` 생성 전으로 이동(cold-start 효과 0), 설치자·tick 전 phase가 같은 attestation context에서 동작함을 양성 테스트로 증명. 처분 `native-final-p2-runtime-r4/parent-disposition.json`. 전체 **2712 passed**, ruff 208·mypy 동일. Runtime r5(22파일 118,902토큰; 예산 초과로 Notion 계획 문서 제외) 송신, Settings r6 응답 대기.
+- **Settings 범위 Native FINAL GO(2026-10-09, r6)**: `GO — REQUIRED 0 / OPTIONAL 2`. 원본 결속 회수, GPT-6/Extra High, 대화 `…/c/6ac887a1-b708-83ee-b78e-cf0c1e12c5f2`. r1 9/1 → r2 4/2 → r3 3/2 → r4 1/2 → r5 1/1 → r6 0/2. 총괄(Claude Fable 5.1) 기술 수락; 인간 승인·핀 갱신·실제 Google 로그인 증명은 아니다. 처분 `native-final-p2-settings-r6/parent-disposition.json`. Runtime r5 응답 대기.
+- **리뷰 7라운드(2026-10-09)**: Runtime r5 = REVISE 1/2(SDK 내부 refresh 거부 후 기존 attestation으로 후속 Drive 호출 가능). bound refresh 실패 시 credential을 revoked로 표시 → `attestation_matches`가 모든 attestation 거부(새 entry proof 성공 시에만 해제), generation은 attestor 현재 값과 일치해야 유효, worker job/coordinator loop가 `ReconnectRequiredError`를 삼키지 않고 tick을 `RECONNECT_REQUIRED`로 종료. 선택: owner-uid 회귀 추가. Settings GO 선택 2건(post-provider config lock 경쟁, cancel↔commit 경쟁)도 테스트로 반영. 처분 `native-final-p2-runtime-r5/parent-disposition.json`. Runtime r6 송신. 전체 **2719 passed**, ruff 208·mypy 동일.
+- **리뷰 8라운드(2026-10-09)**: Runtime r6 = REVISE 2/2(`_stage_derivative` 등 broad except가 `ReconnectRequiredError`를 `IntakeReconcileRequired`/일반 실패로 변환, 레이아웃 사전검증 except가 고정 코드 누락). `intake/worker.py`의 broad `except Exception` 14곳 앞에 `except ReconnectRequiredError: raise` 삽입. 선택: attest_entry의 계정 변경 시 이전 proof revoke. 처분 `native-final-p2-runtime-r6/parent-disposition.json`. Runtime r7(예산 초과로 unchanged `config/credentials.py`·`worker.py` 제외) 송신. 전체 **2722 passed**, ruff 208·mypy 동일.
+- **리뷰 9라운드(2026-10-09)**: Runtime r7 = REVISE 2/1 — OAuth runtime/worker 결함은 모두 종결, Notion legacy 형태 2건(명시된 빈/무효 legacy parent가 `_parent_page_id`로 보완됨, malformed legacy status group이 조용히 제거됨). 둘 다 fail-closed로 수정하고 회귀 추가(legacy parent 4건, legacy group 5건). 선택: C5/C6 phase별 attestation 전파 계측 테스트 추가. 처분 `native-final-p2-runtime-r7/parent-disposition.json`. Runtime r8 송신. 전체 **2732 passed**, ruff 208·mypy 동일.
+- **리뷰 10라운드(2026-10-09)**: Runtime r8 = REVISE 1/2(select/status `options` readback에서 malformed 항목이 제외되어 VERIFIED 가능). `_property_option_names`가 malformed·빈 이름·중복 시 None을 반환하고 비교에서 거부, legacy group 내부 중복 이름도 거부. 회귀 13건 추가. 처분 `native-final-p2-runtime-r8/parent-disposition.json`. Runtime r9(18파일 113,828토큰) 송신. 전체 **2745 passed**, ruff 208·mypy 동일.
+- **Runtime 범위 Native FINAL GO(2026-10-09, r9)**: `GO — REQUIRED 0 / OPTIONAL 3`. 원본 결속 회수, GPT-6/Extra High, 대화 `…/c/6ac896fc-a814-83e8-8954-53670cb62bb2`. r1 9/1 → r2 4/2 → r3 2/2 → r4 1/2 → r5 1/2 → r6 2/2 → r7 2/1 → r8 1/2 → r9 0/3. 선택 3건 모두 테스트로 반영: 실제 `merge_request_handler`의 `after_publish`가 tick attestation 안에서 1회 실행됨(`test_real_after_publish_callback_runs_inside_the_tick_attestation`), `google_oauth=None`·SA payload로 비주입 `build_intake_worker` 실제 조립(fake google.auth/googleapiclient/notion_client; attestor 없음, SA binding, context 없는 provider 호출 허용), POSIX 권한 테스트 Windows skip + nt 분기 의미 보존 테스트. 처분 `native-final-p2-runtime-r9/parent-disposition.json`. 리뷰어 한계 명시: 전체 pytest·실제 provider 연동은 주장하지 않음. 총괄(Claude Fable 5.1) 기술 수락; 인간 승인·핀 갱신·실제 Google 로그인 증명은 아니다. **두 FINAL 범위(Settings r6, Runtime r9) 모두 GO.** 선택 반영 후 전체 **2748 passed, 1 failed(기존 keyring 환경 의존), 5 skipped**, ruff 208·mypy 동일, projection lint·diff-check 통과.
+- **checker 핀 갱신(2026-10-09, 사용자 지시 "체커 핀 갱신하고")**: `src/uls/settings/credential_service.py` 핀을 `76537fce…`/34,900 → `ff2c8716b413d484b4bde3e1c70600df395ee0c9703fa2ee479081adeb889a8f`/48,443으로 갱신. 변경 파일: `scripts/review_evidence_checker_candidate/state_check.py`(새 SHA `82dbd77c63fe9606bc050bf5b517dce8670a16d87c579f5eb68fa765cd63f644`), `source_pins.json`(review-only inventory, SHA `f45a163eba9fe615799b97edbd2cc7096ab30e1427d45e214737a665a8995b3d`), `test_pin_delta.py`의 EXPECTED_REVIEWED_DELTA, `AGENTS.md`의 approved SHA. 나머지 16 source pin·문서 pin·root device/inode·guard/reader는 변경 없음(working tree 대조 OK). 이전 활성 SHA `a82d0a88a2a35fe53293c433210029895a0e674d15231a2d9e1ed1a8f378ef08`.
+- **실제 Google 로그인 1차 시도(2026-10-09)**: 사용자가 Desktop client를 `google_oauth:`에 추가, `chmod 600` 적용, Notion MCP integration을 읽기 전용으로 변경. Settings에서 두 Google 역할 **detach 완료**(journal `credential_detach` 2건 complete; 1차 시도는 `~/.zshrc`의 `GOOGLE_*_CREDENTIALS_FILE` export 때문에 `DETACH_INEFFECTIVE`로 실패 → 서버를 `env -u`로 재기동해 해결). Google 동의 후 카드가 "Waiting…"에 멈춤: **원인은 콜백의 정확 키 집합 검사**(`{state, code}`만 허용)로, Google이 덧붙이는 `scope`/`authuser`/`prompt` 때문에 콜백이 조용히 무시됨. `GoogleOAuthFlowService.callback`을 RFC 6749 §4.1.2대로 변경(state 필수, code/error 중 정확히 하나, 그 외 파라미터 무시; 토큰 응답 scope만 신뢰). 회귀 `test_callback_ignores_unrecognised_google_response_parameters` 추가, 기존 malformed 테스트의 `extra` 케이스를 `code+error 동시` 및 `state+scope만` 케이스로 교체. OAuth settings 5개 파일 184 passed. 이 변경은 Settings r6 GO 이후의 수정이므로 다음 리뷰 라운드에 포함해야 한다. 사용자 TODO: `~/.zshrc` 10~11행 Google export 제거.
+- **실제 Google OAuth 저장 완료(2026-10-09 20:09)**: 콜백 수정 후 두 역할 모두 `authorized_user` 관리 credential 저장(journal `credential_enrollment` 2건 complete, config는 관리 경로 `google_*_service_account.json`을 가리킴). `uls doctor --live` 전부 true(live_notion_read·live_drive_read 포함). worker 경로: `build_worker`가 `GoogleOAuthWorkerAttestor`를 설치하고 entry 진입(신선한 grant 증명) 성공. `worker.enabled`는 config에서 false라 scratchpad의 0600 사본(`worker.enabled: true`만 변경)으로 tick을 실행했다.
+- **School Notion 2025-09-03 실제 readback 불일치 수정**: 실제 API는 status group을 `To-do`/`In progress`/`Complete` 표시명 3개만 돌려주고 `current`/`future` 빈 그룹은 없다. 기존 비교는 STATUS_GROUPS의 snake_case 5키와 정확 비교라 `academic_courses.Status`에서 NOT_VERIFIED. `_canonical_group_key`(소문자, 공백/하이픈→`_`)와 `_status_groups_match`(actual 그룹 ⊆ 계약 그룹, 비어 있지 않은 그룹의 option 집합 정확 일치, 빈 그룹은 placeholder) 도입. 기존 malformed fail-closed 15케이스 유지, 실제 shape 회귀 `test_live_shaped_built_in_groups_verify_and_misplaced_option_still_fails` 추가(VERIFIED / 잘못 배치된 option NOT_VERIFIED / 알 수 없는 그룹 NOT_VERIFIED). 적용 후 실제 School workspace `VERIFIED`(data_sources 5, properties 76). 이 변경도 다음 리뷰 라운드 대상.
+- **School Drive SA 공유 해제 완료(2026-10-09, 사용자 직접)**: 등록 폴더 18개 모두 `shared=false`, 비소유자 권한 0. 레이아웃 검증 통과. `worker.enabled: true` 사본으로 `sync` 실행 → 업로드 폴더 마크다운 8개 발견, Notion File Intake 8행(Pending)·Input Request 8행(ASSIGN_COURSE, 미제출) 생성, 로컬 8건 `NEEDS_INPUT`. **OAuth worker 경로 실사용 통과.**
+- **방향 전환(2026-10-09, 사용자 결정)**: 현재 intake는 전부 사람 입력(Input Request)이며 자동 분류는 `Course Candidates` 뼈대만 있고 미구현. 사용자 기획은 자동 분류였으므로 수동 입력 검증은 건너뛰고 **intake 분류 v2**를 설계한다. Canvas 5과목 모듈·과제·공지 조사(`scripts/knu_lms_probe.py`, 사용자가 터미널에서 실행; files API는 401) 결과 `docs/plans/intake-classification-survey-20261009.md`. 계획서 `docs/plans/intake-classification-v2.md`: 2층 분류(문서 Kind 13종 + AI 소유 구간 태그), S0 출처→S1 규칙→S2 Jev(TypeSafe Choice, jev-1.13.0)→S3 Input Request 프리필, 회차 달력 매칭, Jev 어댑터 경계, Notion/state 변경, 종류별 처리, 공지 경로(기존 LMS 수집과 분담), 단계 P-A~P-F. 사용자 결정: 키는 Syllva 전용 Keychain(`Syllva LLM`/`typesafe_api_key`, `security add-generic-password`로 직접 입력), 임계값 0.80/0.70, 회차 달력 매칭 채택. 계획 리뷰 패킷 `.insane-review/intake-classification-20261009/native-plan-icv2/` 송신.
+- **분류 v2 계획 리뷰 r1(2026-10-09)**: REVISE REQUIRED 13 / OPTIONAL 3(GPT-6 Extra High, original-bound). 방향(2층 체계)은 수용, 기존 계약 연결 공백 지적: 자동 결과용 독립 plan 권한(R1), USER 필드 프리필 충돌(R2), 기존 draft 자동 종료 계약(R3), alias/주차/Session USER 소유(R4), 전사문 소유권·Jev 전송 적격(R5), 규칙 우선순위·UNSUPPORTED 터미널(R6), credential composition·전송 한도(R7), 응답 검증·캐시·예산(R8), Notion 프로필·Type 마이그레이션(R9), Kind별 처리·locator(R10), 공지/녹화 정체성·LMS 분담(R11), 과제 청크 retrieval 우회(R12), 수용 조건 모순·fixture(R13). 전부 r2에 반영: AUTO_CLASSIFICATION plan 권한, SYSTEM_DERIVED 제안 필드, `Auto Resolved` 종료 자격, `origin` 축, P0~P4 규칙 테이블, Keychain 명시 source·15s 총 상한, typed validator·snapshot 캐시·틱 예산, `legacy5-cls`/`c5-range-v2` 프로필과 Type 초기값 표, PROVIDED_CODE 검색 비노출, canvas_observations/recording_calendar 분리와 공지 쓰기 0건, authorization-first 태그 필터, 단계별 수용 조건 표. fixture `docs/plans/intake-classification-fixtures-20261009.json`(80항목) 생성. 처분 `native-plan-icv2/parent-disposition.json`. r2 패킷 송신.
+- **분류 v2 계획 리뷰 r2(2026-10-09)**: REVISE REQUIRED 12 / OPTIONAL 2. r1의 R2·R6 종결, 나머지는 반영됐으나 실행 계약 공백: Canvas 메타 항목과 Drive AUTO plan 미분리(M1), 수정된 미제출 Draft와 AUTO plan 경합(M2), 첫 외부 쓰기 이후의 freshness 검사(M3), HUMAN Kind 옵션 미확장(M4), UNKNOWN origin의 교수 권위 승격(M5), 초기값 예외·달력 이상치(M6), outbound 개인정보 최소화 범위(M7), 예산 소진 상태 모순(M8), Text Status Unavailable 옵션 부재(M9), MIME/Kind 적격성·PPTX/DOCX(M10), 태그 불완전 시 검색 노출(M11), fixture 구조화(M12). r3 반영: 메타 전용 경로(`canvas_classifications`, plan/Material 0), AUTO_PENDING→PLANNED 선행검사·SUPERSEDED·AutoResolved 터미널, mutation preflight, HUMAN Kind 확장(총괄 결정, 사용자 확인 대기), UNKNOWN 비발행, §2.5 생성 초기값 예외, 달력 단조성 이상치, 전 문자열 필드 최소화+직렬화 후 검사, DEFERRED 로컬 상태·S4 질문 묶음, Needs Review+Unavailable 조합, 적격성 매트릭스(PDF/텍스트만), 태그 불완전 fail-closed, fixture 구조화(72 CANVAS_METADATA_ONLY / 8 NEEDS_INPUT). 처분 `native-plan-icv2-r2/parent-disposition.json`. r3 송신.
+- **분류 v2 계획 리뷰 r3(2026-10-09)**: REVISE REQUIRED 9 / OPTIONAL 4(M1·M6·M9·M12 종결). 잔여: AUTO 실행 컨텍스트 미정(R1), Auto Resolved 후 `claim_request` 재진입(R2), metadata surrogate 해시로는 freshness 불충분(R3), HUMAN Material Role 범위·프로필 확인 전 제안 속성 쓰기(R4), Canvas→Drive 출처 결속 증명(R5), S4의 outbound guard(R6), DEFERRED와 `_sync_unlocked` 요청 생성(R7), 보관 경로와 extractor 적격성 충돌(R8), 태그 미완료 차단에 TRANSCRIPT 누락(R9). r4 반영: `ClassificationExecutionContext`와 authority 분기, 터미널 receipt 거부, `byte_sha256` 고정·재검증, Material Role 확장 매트릭스·로컬 `intake_suggestions`, `canvas_drive_bindings` 정확 결속, S4 동일 guard, `classification_state` 영속·요청 생성 억제, 처리 방식 4종(NORMALIZE/REGISTER_OPAQUE_NO_RETRIEVAL/METADATA_ONLY/S3), 모든 검색 가능 Kind fail-closed + capability/get_source_chunk 동일 적용, 선택 4건(확장자 단독 규칙 완화, 달력 동률 규칙, Keychain 문구, `.md.md`). 처분 `native-plan-icv2-r3/parent-disposition.json`. r4 송신.
+- **분류 v2 계획 리뷰 r4(2026-10-09)**: REVISE REQUIRED 8 / OPTIONAL 3(r3 R2·R5·R6·R7·R9 종결). 잔여: AUTO의 과목별 workspace 결속(M1), 달력 이상치 알고리즘과 fixture 불일치(M2), recording_calendar PK가 동일 날짜 중복 보존 불가(M3), Jev 캐시가 바이트·청크에 미결속(M4), FILE_KINDS_V2 정확 집합과 MATERIAL_PDF 호환(M5), Kind 표와 적격성 매트릭스 충돌·추출 실패 시점(M6), S4 COMPLETE 증명·활성화 순서(M7), ANNOUNCEMENT 정규 locator 부재(M8). r5 반영: record.course_key 권위·첫 workspace fallback 금지·삼자 일치, anchor 기반 주차 cadence 규칙(±6일, 학기 범위 출처, AMBIGUOUS), 달력 PK=Canvas 자원 identity + (course,date) 인덱스, S2 캐시 snapshot/payload/byte 해시·S4 별도 namespace, FILE_KINDS_V2 명시 집합(MATERIAL_PDF는 HUMAN 호환), 단일 권위 매트릭스(PPTX/DOCX S3, opaque Unavailable, 생성 전 probe/생성 후 보존), document_tag_manifest 완료 증명·`retrieval.v2_exposure_gate`, 공지 청크 v2 비노출, 선택 3건. 처분 `native-plan-icv2-r4/parent-disposition.json`. r5 송신.
+- **분류 v2 계획 리뷰 r5(2026-10-09)**: REVISE REQUIRED 4 / OPTIONAL 3(r4 전부 반영 확인). 잔여: 달력에서 과거 observation revision 혼입·anchor 비유일·불완전 수집(R1), 기존 Draft `Auto Resolved` 쓰기가 preflight보다 먼저·응답 손실 영속 장벽(R2), AUTO 실행 중 매 외부 쓰기 전 HUMAN 변경 재확인(R3), AI Kind NULL인 기존 Material의 검색 차단(R4). r6 반영: `recording_calendar_current` 활성 projection·완전 수집 조건·anchor 비유일 AMBIGUOUS, Draft 종료를 첫 provider mutation으로 간주한 preflight·`auto_resolve_intents` 영속 장벽·readback 복구 순서, 쓰기 지점마다 HUMAN 요청 readback(USER snapshot 해시) 검사, AI Kind NULL/legacy MATERIAL_PDF 기본 차단과 기존 Material 백필, 선택 3건(`byte_md5`, 달력 실패 우선순위·fake provider S2, URL placeholder). 처분 `native-plan-icv2-r5/parent-disposition.json`. r6 송신.
+- **분류 v2 계획 리뷰 r6(2026-10-09)**: REVISE REQUIRED 4 / OPTIONAL 2(r5 7건 전부 반영 확인). 신규: 달력·Session 판단 근거의 실행 시점 재검증 부재(R1), 중복 콘텐츠 게이트가 AUTO 경계에 미결속(R2), S4 COMPLETE가 태그 규칙 버전·필수 negative 판정에 미결속(R3), `Auto Resolved` 쓰기 중 USER 변경 시 ABORTED 복구 미정(R4). r7 반영: record에 `calendar_projection_revision_hash`·`sessions_inventory_hash` 고정과 preflight/Session 예약 직전 재조회(NEW 0개·EXISTING 정확 1개), byte_sha256 기반 중복 게이트(다른 ID 동일 콘텐츠 → S3), manifest·S4 캐시에 `tag_rule_version`/`s4_payload_policy_version` 결속과 assignment yes/no 필수 질문, intent 복구 계약 4분기(DONE/ABORTED/rollback intent/PENDING+RECONCILE), 선택 2건(intent별 assignment 정책 표, readiness 집계 필드). 처분 `native-plan-icv2-r6/parent-disposition.json`. r7 송신.
+- **분류 v2 계획 리뷰 r7(2026-10-09)**: REVISE REQUIRED 5 / OPTIONAL 2(r6 6건 전부 반영 확인). 신규: preflight 상태 조건과 Auto Resolved 순서 충돌(R1), AUTO가 만든 Session이 재시작 시 stale로 오판(R2), EXISTING Session의 기존 전사문 결속 교체 가능(R3), alias/Canvas 근거가 freshness에 미결속(R4), AutoResolved 이후 HUMAN 변경의 재진입 경로 부재(R5). r8 반영: 활성화 2단계(A: AUTO_PENDING 적격성 전부, Draft 불변 / B: Auto Resolved → PLANNED), 자체 효과 멱등 재개 예외, EXISTING 결속 보호(`SESSION_OCCUPIED`), `course_basis` 결속과 쓰기 지점 (d) 검사, AutoResolved 이후 새 HUMAN 요청 generation, 선택 2건(Textbook 백필 NULL 유지, question ID 집합 검사). 처분 `native-plan-icv2-r7/parent-disposition.json`. r8 송신.
+- **분류 v2 계획 리뷰 r8(2026-10-09)**: REVISE REQUIRED 6 / OPTIONAL 2(r7 R1~R4·O1~O2 종결, R5 실행 계약 미완). 신규: 새 HUMAN Request Key가 현행 생성 함수로 동일 키 산출(R1), SUPERSEDED AUTO job이 새 HUMAN plan 실행 가능(R2), 부분 완료 AUTO 효과의 인계 계약 부재(R3), Submitted 단독 변경 감지 snapshot 불명(R4), S4 COMPLETE 영속 증명 부족(R5), ACTIVITY 외 intent의 답안 생성 경계 부재(R6). r9 반영: `superseded_request_key`+영속 `request_generation` 키 계약, Job의 `plan_revision/plan_authority` 결속과 `VOID`, `handover_record` 채택 인계, AUTO 전용 snapshot(Submitted/Cancelled 엄격 bool 포함), `chunk_tag_decisions`·manifest에 prompt/model 포함과 정확 coverage, 전역 `NO_ANSWER_GENERATION` 규칙·메타데이터, 선택 2건(50 MiB 상한, P-D 이전 음성 테스트). 처분 `native-plan-icv2-r8/parent-disposition.json`. r9 송신.
+- **분류 v2 계획 리뷰 r9(2026-10-09)**: REVISE REQUIRED 4 / OPTIONAL 2(r8 8건 전부 반영 확인). 신규: AUTO 완료 후 터미널 요청의 사람 변경을 관측할 경로 부재(R1), receipt `AutoResolved`와 intent `DONE` 사이 crash 경계(R2), 미해결/STALE 청크가 opt-in 경로에서 답안 생성 정책 우회(R3), 새 generation의 claim-time 재검증·레거시 호환(R4). r10 반영: AutoResolved receipt 전용 bounded reconciliation scan(영속 cursor·틱 상한), receipt+intent 단일 SQLite 트랜잭션(재시작 상태 2종), `usage_policy`/`assignment_decision` EvidenceItem 호환 확장과 미해결 청크 `NO_ANSWER_GENERATION`, `_assert_request_generation_current`의 generation 레코드 기반 v2/legacy derivation 분기와 generation=1 백필, 선택 2건(Job VOID 터미널·직접 실행 검사, 합성 S2 기대값). 처분 `native-plan-icv2-r9/parent-disposition.json`. r10 송신.
+- **분류 v2 계획 리뷰 r10(2026-10-10)**: REVISE REQUIRED 4 / OPTIONAL 2(r9 6건 전부 반영 확인). 신규: 터미널 스캔의 변경 소비 기록·기준 snapshot 부재(R1), 완료된 AUTO 항목에서 ASSIGN_COURSE 재실행이 상태를 되돌림(R2), 한 Canvas resource의 복수 첨부가 binding UNIQUE와 충돌(R3), 적격성 매트릭스가 HUMAN 신규 Kind에 미적용(R4). r11 반영: `pre_close_snapshot`/`terminal_snapshot` 분리와 `terminal_change_ledger`, ASSIGN_COURSE 분기 전 handover 자격 검사, `attachment_id` 포함 binding과 UNIQUE 재정의, AUTO·HUMAN 공통 처리 방식 선택(`FORMAT_KIND_MISMATCH`), 선택 2건(ASSIGNMENT_* 정책 우선, 나머지 Kind 양성 fixture). 처분 `native-plan-icv2-r10/parent-disposition.json`. r11 송신.
+- **분류 v2 계획 리뷰 r11(2026-10-10)**: REVISE REQUIRED 2 / OPTIONAL 2(r10 6건 전부 반영 확인). 신규: opaque 자료(코드·표)의 canonical binding→이동→완료 순서 미정(R1), 청크 태그보다 넓은 Page/Time Locator·capability를 통한 과제 청크 노출(R2). r12 반영: `REGISTER_OPAQUE_NO_RETRIEVAL` 필수 순서(예약→생성+readback→`_apply_binding`→REGISTERED→이동→ORGANIZED, derivative·provenance 비발행), Locator 범위 단위 보수 판정(겹치는 청크 중 하나라도 YES/UNRESOLVED/STALE이면 범위 전체 거부, STALE 시 기존 capability 재사용 실패), 선택 2건(첨부 Kind는 Drive 파일 기준 재판정, record canvas_binding에 attachment_id). 처분 `native-plan-icv2-r11/parent-disposition.json`. r12 송신.
+- **분류 v2 계획 리뷰 r12(2026-10-10)**: REVISE REQUIRED 2 / OPTIONAL 1(r11 4건 전부 반영 확인, 지적은 §7 한정). 신규: EXAM 기본 검색에 Locator 범위 단위 차단 미적용(R1), 허용된 혼합 Locator의 `usage_policy`/`assignment_decision` 집계 규칙 미정(R2). r13 반영: 범위 단위 판정을 CONCEPT·SESSION·EXAM 공통 적용, 반환 Locator와 겹치는 모든 청크로 정책 집계(STALE>UNRESOLVED>YES>NO, 완전 집합 미확인 시 NORMAL 금지, 재조회 시 재계산), 선택 1건(opaque Needs Review를 생성 속성으로 즉시 설정). 처분 `native-plan-icv2-r12/parent-disposition.json`. r13 송신.
+- **분류 v2 계획 리뷰 r13(2026-10-10)**: REVISE REQUIRED 1 / OPTIONAL 2(r12 R2·O1 종결, R1 부분). 잔여: EXAM 기본 검색의 문서 단위 차단(ASSIGNMENT_*·legacy NULL)이 CONCEPT/SESSION에만 명시. r14 반영: 과제 제외 intent 공통 집합(CONCEPT·SESSION·EXAM)으로 문서 단위·legacy 차단 통일 + P-D 회귀 2건, 선택 2건(`semester_range_basis` 결속, Assignment 첨부 제목의 실습 규칙 모호성 → S2/S3). 추가: §3.7 실행 경로·crash 지점 표(메커니즘별 담당 함수·영속 상태·복구·사람 변경 감지). 처분 `native-plan-icv2-r13/parent-disposition.json`. r14 송신. 사용자 질문(/btw)에 13회 revision 원인 설명: 첫 초안이 기존 계약 접점을 미확인, 메커니즘 추가마다 새 경계, 리뷰어의 소스 대조 방식; 추세 13→12→9→8→4→4→5→6→4→4→2→2→1.
+- **분류 v2 계획 리뷰 GO(2026-10-10, r14)**: `GO — REQUIRED 0 / OPTIONAL 2`. GPT-6 Extra High, original-bound, 대화 `…/c/6ac911e8-b240-83ee-85ce-6068e5a7d397`. 14라운드(13/3→12/2→9/4→8/3→4/3→4/2→5/2→6/2→4/2→4/2→2/2→2/1→1/2→0/2). 선택 2건(Canvas `module_week`의 Drive S0 전달, `v2_exposure_gate=off`의 전 intent 음성 테스트) 계획서에 반영(재리뷰 불필요). 처분 `native-plan-icv2-r14/parent-disposition.json`. 총괄 기술 수락; 사람 승인·구현·Notion 옵션 변경·TypeSafe live 검증·`knu_lms_sync.py` P-E 소스 검증은 별도. **사용자 확인 대기**: (a) HUMAN Input Request `Kind` 옵션을 §2.1로 확장(FILE_KINDS_V2), (b) Materials `Type` 초기값 표(§5). 확인 후 P-A(체계·데이터 모델·Notion 프로필·마이그레이션) 구현 계획으로 진행.
+- **사용자 결정(2026-10-10)**: (a) HUMAN Kind 확장, (b) Type 초기값 표 승인("그렇게 진행하면 될 듯"). Notion 스키마 변경은 사용자 API 키 대신 **claude.ai Notion 커넥터**(세션 재시작 후 노출, 워크스페이스 "Just의 Notion")로 수행하기로 함.
+- **P-A 구현(2026-10-10, Claude Fable 5.1 단독)**: ① `src/uls/intake/classification/`(taxonomy: Kind 13·Origin 5·ChunkTag 10·FILE_KINDS_V2·MATERIAL_ROLES_V2·Type 초기값 표·처리 방식 매트릭스 `handling_mode`; rules: P0~P4 규칙 테이블 `classify_by_rules`, 전사문 파일명 regex(`.md.md` 허용), `CourseAliasIndex`(중복 alias 비활성), 주차/날짜 파서; calendar: anchor cadence ±6일, AMBIGUOUS 규칙, `revision_hash`, 실패 우선순위 `match_transcript`) — fixture 80항목 전부 기대값 일치(103 tests). ② config: `intake.classification`(enabled/schema_profile/임계값/예산/`max_source_bytes`/`max_terminal_scan`/`canvas_course_map`), `courses[].aliases`, `semester_registries[].start_date/end_date`, `retrieval.v2_exposure_gate`(기본 false) + 검증·예시(17 tests). ③ Notion 프로필 `legacy5-cls`/`c5-range-v2`(`intake_schemas`/`intake_status_groups`; legacy shape 불변, 실제 2025-09-03 shape 회귀 14 tests), worker `_wrap_notion` 프로필 override. ④ state: `classification_state.py` mixin(13 테이블: classification_records, intake_suggestions, canvas_observations/classifications/drive_bindings, recording_calendar(+current), chunk_tag_decisions, document_tag_manifests, intake_request_generations, auto_resolve_intents(receipt와 단일 트랜잭션), terminal_change_ledger, handover_records), IntakeItem 9컬럼·IntakePlan `plan_authority`/`classification_revision_hash`·Job `plan_revision`/`plan_authority`/`voided_at`(VOID) 추가, generation=1 백필 마이그레이션(7 tests). ruff 208·mypy 기준선 동일.
+- **School Notion 스키마 변경 완료(2026-10-10, 커넥터 DDL)**: Input Request `Kind`→FILE_KINDS_V2(11), `Material Role`→Type 6종, 제안 필드 6개; File Intake `AI Kind`/`Origin`/`Classification Source`/`Classification Record`; Materials `AI Kind`/`Week`. 기존 옵션 ID 보존 확인. live readback(`legacy5-cls`): `Request Status` 옵션 집합만 불일치 → **`Auto Resolved`(Complete 그룹)는 status 타입이라 사용자가 Notion UI에서 추가 필요**. 추가 후 readback VERIFIED 확인 예정.
+- **2026-10-10 사용자가 `Auto Resolved`(Complete 그룹) 추가 → live readback `legacy5-cls` VERIFIED(data_sources 5, properties 88; Request Status 옵션 9개·Complete 그룹 3개).** config.yaml 본체에는 아직 `intake.classification.schema_profile`를 켜지 않음(scratch 사본으로 검증). P-A FINAL 리뷰 패킷(18파일 113,646토큰) slot 2 송신 중(slot 1은 Replica 프로젝트 점유). 전체 suite 2894 passed / 1 기존 keyring 실패.
+- **P-A FINAL 1차 = REVISE 17/3(2026-10-10, GPT-6 Extra High, `native-final-pa/`)**. 20건 전부 반영(처분 `native-final-pa/parent-disposition.json`): R1 P1 규칙(첨부 제외·ExternalTool+실제 날짜만)·rule id를 fixture와 동일하게, R2 P4 확장자 정확 목록·tabular는 과제 첨부/제목 신호 필요, R3 달력 주차↔날짜 순서 충돌·중복 날짜 AMBIGUOUS·`SemesterRange` basis·실패 우선순위, R4 `handling_mode` MIME+시그니처 동시 요구, R5 loader 엄격 bool·실제 날짜·canvas map 과목키 검증, R6 프로필 불일치 → readiness NOT_VERIFIED(고정 사유, 묵시 대체 없음), R7 v2 MATERIAL_PDF 6 Role 허용 + HUMAN v2 Kind claim→plan→INTAKE_MATERIAL job(plan_revision/plan_authority 결속)→Materials.Type=Role 계약 테스트(opaque 소스는 P-B 경로 전까지 fail-closed), R8 `UNIQUE(request_key)` 제거·기존 테이블 재구축·다중 intake 전부 백필, R9 pending 예약 재사용(다른 supersession 기준은 충돌), R10 AUTO plan은 AUTO_PENDING 생성·같은 intake의 실제 record 결속·`promote_auto_plan`만 PLANNED, R11 DONE은 Draft→AutoResolved 조건부 UPDATE와 terminal snapshot 필수·`pre_close/terminal_snapshot_hash`·rollback intent 테이블, R12 관측 revision 불변·지연된 구 revision 비활성, R13 불완전 수집은 projection 미교체·과목별 completeness, R14 바인딩 filename/size 비교, R15 정규화 후 해시·rowid 최신, R16 결정 충돌 거부·COMPLETE는 (chunk×question) 커버리지 증명, R17 HUMAN plan 결속 항목만 `classification_source='human'`; O1 HEAD 0c1fe7f 기준 legacy5/c5-range-v1/STATUS_GROUPS 고정 해시 테스트, O2 fixture 정확 비교, O3 HEAD 0c1fe7f가 쓴 DB 덤프 `tests/fixtures/state/pre_icv2_head_0c1fe7f.sql` 업그레이드 테스트. 게이트: 전체 **2331 passed / 1 failed(기존 keyring 환경)**, ruff 208 동일, mypy 135(기준 142보다 감소). r2 패킷(18파일, 120k 이내; notion intake/models/schema/loader는 HEAD 대비 diff로 첨부) slot 1 송신.
+- **P-A FINAL r2 = REVISE 12/0(2026-10-10, GPT-6 Extra High, `native-final-pa-r2/`)**. 80/80 fixture·R1/R5/R8/R12/R14/R15·R6 readiness 수정 확인. 12건 전부 반영(처분 `native-final-pa-r2/parent-disposition.json`): #1 전사문 규칙은 text MIME 필수(미상은 S2/S3), #2 중복 날짜는 cadence와 무관하게 전 활성 관측에서 AMBIGUOUS, #3 코드 MIME 정확 집합·XLSX는 OOXML 컨테이너(`[Content_Types].xml`+`xl/workbook.xml`) 검증, #4 HUMAN v2 PDF dispatch에 §6.1 매트릭스(PROVIDED_CODE×PDF 거부), #5 generation은 supersession basis 단위로 재사용(결속 후 재시도도 동일 번호; 최신 결속 키만 supersede 가능), #6 promote는 AutoResolved receipt에 같은 record의 DONE intent+terminal snapshot 요구, #7 intent 입력 불변·요청당 활성 intent 1개·terminal snapshot write-once(DONE 전이 포함), #8 rollback 대상·handover 효과·terminal ledger 충돌 거부·DONE 재호출 멱등, #9 달력 교체는 전체 행 검증 후 단일 트랜잭션, #10 chunk decision은 detail_json 포함 불변·source rule/model·근거 필수·`unresolved` 허용, #11 manifest는 chunk/question 집합 저장·동일 버전 튜플에서 집합 변경은 STALE 경유만·COMPLETE는 `assignment` 질문 필수+yes/no 커버리지, #12 계획 §5대로 P-A에 `IntakeWorker.backfill_material_ai_kind()`(v2 프로필 VERIFIED 후, Lecture Slides→LECTURE_SLIDES만, 그 외 NULL 유지, 재실행 0건; 운영자 호출). 게이트: 전체 **2906 passed / 1 failed(기존 keyring) / 5 skipped**, ruff 208 동일, mypy 135. r3 패킷(17파일; SQL 덤프·config 테스트는 예산상 제외, SHA 명시) slot 1 송신.
+- **P-A FINAL r3 = REVISE 7/0(2026-10-10, `native-final-pa-r3/`)**. r2 12건 중 #1·#2·#4·#5·#7~#12 수정 확인, #3·#5 일부 잔여 + 영속 API 결함 7건. 전부 반영(처분 `native-final-pa-r3/parent-disposition.json`): #1 모델 decision은 confidence/top_probability/probabilities(최댓값 일치) 필수, 승인 임계값(0.80/0.70, 호출별 override) 미달 yes/no 거부(unresolved만), 초과는 unresolved 불가, 사용 임계값을 detail에 기록; #2 manifest의 chunk·question 집합은 동일 버전 튜플에서 STALE 포함 불변(새 근거는 새 버전 튜플); #3 종료된 요청(터미널 receipt·DONE intent)에 새 intent 거부, rollback은 PENDING/RECONCILE intent + 로컬 Draft receipt에서만; #4 key 결속: superseded 키·같은 intake 다른 세대 키·FILE_DETAILS 다른 intake 키·타 request type 키 거부, 동일 재결속 멱등, ASSIGN_COURSE 다중 intake 유지; #5 달력 행 엄격 검증(비어있지 않은 str id·ISO 날짜·bool 아닌 양의 week/revision·배치 내 중복 금지) + 불변 이력 충돌 시 트랜잭션 롤백; #6 코드 MIME 확장자별 호환 집합(`CODE_MIME_TYPES_BY_EXTENSION`), XLSX는 필수 part 읽기 + `testzip()` CRC 검증; #7 terminal ledger state 불변 + `transition_terminal_change(expected_state, state)` 조건부 전이. 게이트: 전체 **2907 passed / 1 failed(기존 keyring) / 5 skipped**, ruff 208, mypy 135. r4 패킷(16파일; requests.py도 diff 첨부) slot 2 송신.
+- **P-A FINAL r4 = REVISE 5/0(2026-10-10, `native-final-pa-r4/`)**. r3 7건 직접 수정 확인, 우회 경로 3건 + 신규 2건. 전부 반영(처분 `native-final-pa-r4/parent-disposition.json`): #1 모델 decision은 yes/no 정확 옵션·합 1·유일 최댓값·답변=최고확률 옵션 검증; #2 `document_tag_bases` 테이블로 (doc, 버전 튜플)별 최초 chunk·question 집합을 영속 보존(X→Y→X 왕복 우회 차단); #3 rollback은 실제 로컬 Draft receipt 필수, 살아있는 intent의 receipt가 터미널이면 재조회 거부; #4 course_key↔canvas_course_id 결속 변경 거부(projection 혼합 방지); #5 .json은 전체 JSON 파싱, .ipynb는 cells 리스트+nbformat 정수 검증. 게이트: 전체 **2908 passed / 1 failed(기존 keyring) / 5 skipped**, ruff 208, mypy 135. r5 패킷(14파일) slot 1 송신.
+- **P-A FINAL r5 = REVISE 5/0(2026-10-10, `native-final-pa-r5/`)**. r4 5건 코드 반영 확인, 우회 3건 + 신규 2건. 전부 반영(처분 `native-final-pa-r5/parent-disposition.json`): #1 임계값 호출별 override 제거(승인 상수만, 미지 인자 거부); #2 DONE→DONE 재조회는 동일 terminal snapshot + AutoResolved receipt에서만 멱등, 상충 hash는 충돌; #3 다중 intake receipt는 자동 종료 금지(HUMAN 유지), 타 intake record 거부, promote도 다중 intake AutoResolved 차단; #4 strict JSON(NaN/Infinity 거부), `nbformat`은 `type is int`, `handling_mode(payload_complete=)`로 전체 페이로드 증명 없으면 JSON/ipynb/XLSX S3; #5 XLSX 선언 크기 상한(엔트리 50 MiB·총 200 MiB·필수 part 8 MiB) 후 필수 part의 entity-free XML 루트(Types/workbook) 검증 + testzip. 게이트: 전체 **2908 passed / 1 failed(기존 keyring) / 5 skipped**, ruff 208, mypy 135. r6 패킷(13파일) slot 2 송신.
+- **P-A FINAL r6 = REVISE 3/0(2026-10-10, `native-final-pa-r6/`)**. r5 5건 반영 확인, 경계 미완 2건 + 달력 1건. 전부 반영(처분 `native-final-pa-r6/parent-disposition.json`): R1 `_require_closure_binding`을 intent 생성과 DONE 트랜잭션 양쪽에 적용(record 실재·receipt는 정확히 Draft·단일 intake·record intake 일치; Submitted/Claimed도 생성 거부; 테스트는 실제 record로 재작성); R2 XML 끝까지 파싱(잘린 태그·후행 콘텐츠 S3), ZIP 중복 member 거부; R3 projection 교체 시 동일 날짜 2건은 CALENDAR 금지, resource 중복 금지, 활성 관측/이력보다 오래되거나 활성 revision과 다른 revision 거부(트랜잭션 롤백). 게이트: 전체 **2908 passed / 1 failed(기존 keyring) / 5 skipped**, ruff 208, mypy 135. r7 패킷(17파일; fixture JSON 대신 생략됐던 테스트·SQL 덤프 전문 복귀) slot 2 송신.
+- **P-A FINAL r7 = REVISE 4/1(2026-10-10, `native-final-pa-r7/`)**. r6 3건 직접 경로 수정 확인. 전부 반영(처분 `native-final-pa-r7/parent-disposition.json`): R1 살아있는 intent 재조회에도 `_require_closure_binding` 적용(Submitted/Claimed receipt는 재진입 아님); R2 promote는 비터미널 receipt 전부를 정확 JSON으로 해석(해석 불가 결속은 차단)하고 record에 결속된 PENDING/RECONCILE intent가 있으면(receipt 부재여도) 거부; R3 projection 교체는 `CourseCalendar`(build_calendar 판정)만 수락하고 재계산 해시 일치 요구(호출자가 상태를 단정 불가), `collection_complete`는 정확한 bool, `projection_revision_hash` 저장; R4 `week_from_filename`/`date_from_text`는 서로 다른 명시 값 2개 이상이면 None; O1 반환 행 completeness를 과목 플래그와 일치. 게이트: 전체 **2908 passed / 1 failed(기존 keyring) / 5 skipped**, ruff 208, mypy 135. r8 패킷(17파일) slot 1 송신.
+- **P-A FINAL r8 = REVISE 4/0(2026-10-10, `native-final-pa-r8/`)**. r7 4+1건 수정 확인, 신규 4건. 전부 반영(처분 `native-final-pa-r8/parent-disposition.json`): R1 promote의 receipt 결속은 비어있지 않은·빈 문자열 없는·중복 없는 문자열 리스트만 유효(그 외 전부 차단, 타 intake 정상 결속은 통과); R2 (A) 새 활성 녹화 관측(ExternalTool+ISO 날짜 제목) 기록 시 과목 완료·projection 해시 즉시 무효화, (B) 완료 교체 시 모든 활성 녹화 관측이 같은 revision·날짜·주차로 포함돼야 함; R3 legacy receipt 백필은 rowid 순으로 (intake, type)별 연속 generation 부여(이미 결속된 키는 건너뜀, 직전 키를 superseded로 기록, pending v2 예약 보존); R4 `material_ai_kind_backfill` 테이블에 최초 실행 시점의 Material 집합을 write-once 스냅샷하고 그 집합만 처리(이후 생성된 HUMAN MATERIAL_PDF 행은 영원히 대상 아님). 게이트: 전체 **2908 passed / 1 failed(기존 keyring) / 5 skipped**, ruff 208, mypy 135. r9 패킷(17파일) slot 1 송신.
+- **P-A FINAL r9 = REVISE 4/0(2026-10-10, `native-final-pa-r9/`)**. r8 1건 확인·3건 부분 + 신규 1건. 전부 반영(처분 `native-final-pa-r9/parent-disposition.json`): R1 녹화→비녹화 revision 변경도 완료 무효화, 완료 교체는 활성 녹화 관측과 projection 행의 (resource, revision, 날짜, 주차) 집합이 양방향 일치해야 함(미관측 행 거부); R2 `intake_request_generations.derivation_version`(LEGACY/V2) 추가, 백필 행은 generation과 무관하게 LEGACY, v2 예약은 V2, 계획 §3.4 claim-time 문구를 derivation_version 기준으로 정합화; R3 Material 백필은 `ledger_markers` write-once 마커로 초기화 완료를 기록해 대상 0건과 미초기화를 구분; R4 `unresolved`는 결정이 아니라 `chunk_tag_attempts`에 append(질문 미해결 유지), 이후 고확신 yes/no가 결정으로 저장되어 COMPLETE 가능. 게이트: 전체 **2909 passed / 1 failed(기존 keyring) / 5 skipped**, ruff 208, mypy 135. r10 패킷(15파일) slot 2 송신.
+- **P-A FINAL r10 = REVISE 6/0(2026-10-10, `native-final-pa-r10/`)**. r9 4건 직접 수정 확인 + 경계 결함 6건. 전부 반영(처분 `native-final-pa-r10/parent-disposition.json`): R1 완료 projection은 활성 녹화 관측의 양의 정수 module_week를 요구하고 무조건 비교(주차 추측 금지); R2 `reconcile_canvas_collection()`로 완전 수집에 없는 resource를 비활성화(이력 보존·부활 없음·녹화면 완료 무효화, 불완전 수집은 무변경); R3 완료 projection은 `collection_complete=1`인 관측만 근거로 인정; R4 `derivation_version` 마이그레이션은 기본 UNKNOWN 후 출처로 분류(receipt에 있는 결속 키→LEGACY, 미결속 예약→V2, 그 외 RECONCILE; 재구축도 동일); R5 pre-v2 Material 대상 집합을 v2 프로필 readiness가 처음 VERIFIED될 때(모든 mutation 이전) 스냅샷; R6 `match_transcript`는 빈 달력이라도 ambiguous면 사유 유지(완전 수집 빈 달력만 NO_CALENDAR). 게이트: 전체 **2910 passed / 1 failed(기존 keyring) / 5 skipped**, ruff 208, mypy 135. r11 패킷(13파일) slot 1 송신.
+- **P-A FINAL r11 = REVISE 5/0(2026-10-10, `native-final-pa-r11/`)**. r10 6건 반영 확인 + 경계 4건·신규 1건. 전부 반영(처분 `native-final-pa-r11/parent-disposition.json`): R1 불완전 수집은 비활성화 없이 과목 달력 완료·해시를 원자적으로 무효화(잘못 고정했던 테스트 교정); R2 같은 revision의 완전 재관측은 completeness 증명 갱신, 완전 수집에 다시 나타난 비활성 resource는 최신 revision일 때만 재활성화(구 revision 부활 없음); R3 `record_canvas_observation`의 `collection_complete`는 정확한 bool만; R4 UNIQUE 재구축은 기존 `derivation_version` 값을 그대로 복사(RECONCILE은 receipt가 있어도 승격 안 함); R5 promote는 AutoResolved receipt를 실제로 종료한 intent(DONE+terminal snapshot, 같은 intake의 record)로 검증해 새 source version의 plan을 차단하지 않음. 게이트: 전체 **2910 passed / 1 failed(기존 keyring) / 5 skipped**, ruff 208, mypy 135. r12 패킷(13파일) slot 1 송신.
+- **P-A FINAL r12 = REVISE 7/0(2026-10-10, `native-final-pa-r12/`)**. r11 5건 반영 확인 + 경계 7건. 전부 반영(처분 `native-final-pa-r12/parent-disposition.json`): R1 promote는 같은 intake의 모든 record에 결속된 PENDING/RECONCILE intent를 차단(DONE은 비차단 유지); R2 `_looks_like_text`가 PDF/ZIP/OLE/ELF/gzip/PNG 등 바이너리 시그니처와 C0 제어 바이트를 거부; R3 녹화 판별에 `resource_kind == module_item` 필수(모든 호출부); R4 불완전 전환 시 `projection_revision_hash=NULL`(+ 조회 accessor); R5 module_item 불완전 수집은 활성 녹화 0개여도 완료 증명 철회(타 resource kind는 무영향); R6 동일 revision의 provider `updated_at`도 불변 메타데이터(observed_at·증명 갱신·재활성화는 유지); R7 UNKNOWN→LEGACY는 receipt의 키·request type·intake 결속 정확 일치 필요. 게이트: 전체 **2912 passed / 1 failed(기존 keyring) / 5 skipped**, ruff 208, mypy 135. r13 패킷(12파일; SQL 덤프는 SHA 명시 후 제외) slot 1 송신.
+- **P-A FINAL r13 = REVISE 2/1(2026-10-10, `native-final-pa-r13/`)**. r12 7건 전부 수정 확인. 반영(처분 `native-final-pa-r13/parent-disposition.json`): R1 terminal ledger는 generation·key만 불변 비교(진행된 state의 행을 그대로 반환, 전이는 `transition_terminal_change`로만); R2 `_valid_intake_binding` 단일 검증기를 마이그레이션 provenance·legacy backfill·promote에 공통 적용(중복/null/숫자/FILE_DETAILS 다중 intake는 RECONCILE·생성 없음·차단); O1 백필은 readback이 정확히 LECTURE_SLIDES면 로컬 ledger만 완료. loader의 `_KNOWN_TOP_LEVEL_KEYS`는 미참조 상수이며 `intake`를 추가 표기. 게이트: 전체 **2912 passed / 1 failed(기존 keyring) / 5 skipped**, ruff 208, mypy 135. r14 패킷(12파일) slot 1 송신.
+- **P-A FINAL r14 = REVISE 3/0(2026-10-10, `native-final-pa-r14/`)**. r13 2+1건 수정 확인. 반영(처분 `native-final-pa-r14/parent-disposition.json`): R1 promote는 같은 intake의 미결 HUMAN generation(키 미결속, 또는 결속됐지만 receipt 없음)이 있으면 거부(재시작 후 동일); R2 `date_from_text`는 구분자 역참조로 `YYYY.MM.DD`/`YYYY-MM-DD`만 인정(혼합 구분자 None); R3 P3 전사문 규칙 MIME은 정확히 `text/markdown`(text/plain은 §6.1 처리 가능이지만 S1 확정 아님). 게이트: 전체 **2912 passed / 1 failed(기존 keyring) / 5 skipped**, ruff 208, mypy 135. r15 패킷(12파일) slot 1 송신.
+- **P-A FINAL r15 = REVISE 2/0(2026-10-10, `native-final-pa-r15/`)**. r14 3건 수정 확인. 반영(처분 `native-final-pa-r15/parent-disposition.json`): R1 promote의 generation 검사는 receipt의 request type 일치·유효 결속에 이 intake 포함·터미널 상태를 요구(타 intake receipt를 가리키는 키는 상태 무관 차단); R2 P0 제목 신호를 계획의 `설치 프로그램`으로 한정(영문 installer 안내문은 P3 SETUP_GUIDE). 게이트: 전체 **2912 passed / 1 failed(기존 keyring) / 5 skipped**, ruff 208, mypy 135. r16 패킷(12파일; rules.py는 r15 첨부본 대비 delta) slot 1 송신.
+- **P-A FINAL r16 = REVISE 1/0(2026-10-10, `native-final-pa-r16/`)**. r15 2건 수정 확인, 신규 1건. 반영(처분 `native-final-pa-r16/parent-disposition.json`): R1 녹화 판별은 제목이 정확히 `YYYY-MM-DD` fullmatch일 때만(`20260917`·`2026-W38-4` 등 `date.fromisoformat` 허용 형식 배제). 게이트: 전체 **2913 passed / 1 failed(기존 keyring) / 5 skipped**, ruff 208, mypy 135. r17 패킷(12파일) slot 1 송신.
+- **P-A FINAL r17 = REVISE 1/0(2026-10-10, `native-final-pa-r17/`)**. r16 1건 수정 확인, 신규 1건. 반영(처분 `native-final-pa-r17/parent-disposition.json`): R1 자동 종료는 `ASSIGN_COURSE`/`FILE_DETAILS` receipt에만(생성·재조회·DONE 트랜잭션 공통 검사; promote도 타 request type의 AutoResolved를 미증명으로 처리). 게이트: 전체 **2913 passed / 1 failed(기존 keyring) / 5 skipped**, ruff 208, mypy 135. r18 패킷(12파일) slot 1 송신.
+- **P-A FINAL GO(2026-10-10, r18)**: `GO — REQUIRED 0 / OPTIONAL 0`. GPT-6 Extra High, original-bound, 대화 `…/c/6ac96718-6dcc-83e8-88c9-ea31e947f9e3`. 18라운드(17/3→12/0→7/0→5/0→5/0→3/0→4/1→4/0→4/0→6/0→5/0→7/0→2/1→3/0→2/0→1/0→1/0→0/0). 처분 `native-final-pa-r18/parent-disposition.json`. 리뷰어 한계: r18 패킷에는 fixture JSON·pre-v2 SQL 덤프·HEAD 원본이 없어 80/80·legacy byte-identity·마이그레이션을 이번 라운드에서 독립 재실행하지는 않음(이전 라운드와 로컬 게이트로 확인). 총괄(Claude Fable 5.1) 기술 수락; 사람 승인·운영 활성화는 아니다. **사용자 지시(2026-10-10): 의미 있는 변경은 커밋·PR·머지까지 진행.** 최종 게이트: 전체 **2913 passed / 1 failed(기존 keyring 환경) / 5 skipped**, ruff 208·mypy 135(기준선 동일). **다음**: P-B(AUTO 실행·Canvas 수집·S2 Jev 어댑터) 구현.
+- **독립 리뷰(경과)**: Native FINAL 두 패킷을 준비·송신했고 위 라운드 기록대로 종결했다. 최초 패킷은 `.insane-review/drive-oauth-20261005/native-final-p2-settings/`(18파일, 76,189토큰), `native-final-p2-runtime/`(17파일, 70,953토큰; `intake/worker.py`는 142KB라 git diff로 첨부). 회수·처분 결과는 같은 폴더의 응답과 아래 절에 이어 기록한다.
+- **남은 것**: (1) 사용자의 Google Cloud Desktop client(client_id/secret)를 `config.yaml` `google_oauth`에 넣고 `chmod 600`; (2) School의 기존 SA 연결을 OAuth로 교체(MCP·worker 모두, env/external 경로는 먼저 detach); (3) 실제 Google 통신 검증(토큰 교환·refresh·about.get·매 tick 재검증)과 필요 시 소폭 수정; (4) School 실제 전체 흐름(intake→Notion/Drive 저장→retrieval) 통과; (5) 리뷰 지적 반영, checker 핀 갱신(credential_service.py 외 변경 핀 없음), 커밋.
 
-### 2. Stage B & C: 정합성, 자원 상한 및 관측성 진단 (PR #10, commit `ad7a6fd`)
-- **B1 (`src/uls/intake/registry.py`)**: Drive 폴더 ID 캐시 히트 시에도 부모 관계(`parent_id`)를 재검증하도록 하여 루트/학기/업로드 폴더 중복 지정 우회 방지.
-- **B2 (`src/uls/retrieval/capabilities.py`)**: `CapabilityManager`의 만료 컨텍스트 누수 해결 및 동시 발급 시 `max_active_contexts` 초과를 원자적 예약 카운트(`_pending_reservations`)로 방어.
-- **B3 (`src/uls/normalization/pdf.py`)**: PDF 추출 시 페이지 수(`max_pages`), 추출 문자 수(`max_extracted_chars`) 상한 및 손상/암호화 PDF 예외 변환 보강.
-- **C1 (`src/uls/cli/main.py`)**: `uls doctor`의 자격증명 진단을 목적별(Worker vs MCP Search)로 스코핑 분리하여 최소 권한 구성 시 오탐 방지.
-- **C2 (`src/uls/cli/main.py`, `src/uls/state/reader.py`)**: `uls status`에 보수적 준비도 깔때기(`readiness_funnel`) 추가. `source_archival`과 `text_extraction` 판정 시 단순 잡 카운트가 아닌 실제 지속성 레코드(`source_files`, `source_versions`, `processing_records` 및 `parse_derivative_ref` 산출물 참조 검증)를 확인하도록 구현.
-- **C3 (`docs/reference/feature-status.md`, `.ko.md`)**: 구현된 학기 intake 슬라이스와 미래 설계 기능을 명확히 분리 표기.
+## P2 구현 완료 — 2026-10-07 (리뷰 전, 미커밋)
 
-### 3. Stage D: 자격증명 저장소 재설계 및 Windows 스케줄러 보완 (PR #11, PR #12)
-- **CredentialResolver 아키텍처 (PR #11, commit `476b284`)**:
-  - `src/uls/config/credentials.py`: `CredentialResolver`를 도입하여 자격증명별 `environment | keyring` 명시적 선언 허용. 선언된 소스 실패 시 다른 소스로 조용히 넘어가지 않는 Fail-Closed 단일 스냅샷(`ResolvedCredentials`) 계약 적용.
-  - `KEYRING_BINDINGS` 및 `ALLOWED_SOURCES`를 코드 레벨 상수로 고정하여 YAML을 통한 임의 키체인 항목 탈취 공격 차단.
-  - `diagnose()`와 `require()`/`select()`의 단일 읽기/비파괴 진단 분리로 TOCTOU 및 `doctor()` 진단 정합성 확보.
-  - `src/uls/config/_keyring_backend.py`: OS-native keyring(`keyring.backends.macOS.Keyring`, `WinVaultKeyring`) 명시적 백엔드 검증, 위조 방지 및 macOS `keychain = None` 강제.
-  - `pyproject.toml`에 `keyring>=25.0` optional extra 추가.
-  - MCP dispatch 시 worker/MCP 자격증명 분리 검증 유지 및 `credentials: null` 거부.
-- **Windows 스케줄러 로그아웃 무인 실행 보장 (PR #12, commit `6176ab7`)**:
-  - `deployment/windows/uls-task.xml`: `LogonType`을 `InteractiveToken`에서 `Password`로 변경하고 템플릿용 `UserId` 지정.
-  - `deployment/README.md`, `README.ko.md`: Event ID 4688 명령줄 평문 노출을 방지하기 위해 `/rp *` 대화형 안전 프롬프트 절차 및 LSA secret 암호화 저장 사양 명시.
-  - `tests/contract/test_worker_cli.py`: 스케줄러 XML 템플릿 내 비밀번호 미포함 및 `LogonType=Password` 계약 테스트 추가.
+사용자 지시 "P2 완료까지 진행" → "리뷰 진행하지 말고 일단 구현에 포커스" → "오케스트레이션 사용하지 말고 단독으로"에 따라 Claude(Fable 5.1)가 `docs/plans/drive-oauth-p2-r2.md`를 기준으로 P2를 직접 구현했다. 독립 Native/Gemini PLAN·FINAL 리뷰, checker 핀 갱신, 커밋/푸시는 하지 않았다. 보호핀 `src/uls/settings/credential_service.py`가 변경되어 활성 checker consistency는 핀 갱신 전까지 HOLD다.
 
-### 4. 현재 상태 및 메트릭
-- **로컬 main 브랜치**: `6176ab7` (PR #12 merge commit).
-- **전체 테스트**: **1,363 passed**, 2 skipped (경고 1건: starlette testclient anyio deprecation).
-- **정적 분석**: `ruff` 226건(기존 베이스라인 유지), `mypy` 107건(기존 베이스라인 유지, 신규 모듈 완전 클린), `compileall` 통과, `lint_behavior_projection.py` 일치.
-- **GitHub Actions**: PR #9, #10, #11, #12 모두 macOS/Windows × Python 3.11/3.14 전 환경 PASS.
+- 신규: `src/uls/config/google_oauth.py`(client 설정 all-or-none, exact 6-key authorized_user parser, canonical bytes), `src/uls/intake/attestation.py`(WorkerEntryAttestation/attestor 계약, RECONNECT_REQUIRED), `src/uls/settings/google_oauth.py`(flow 상태기계 begin/status/cancel/callback/commit, bounded token exchanger·account reader·grant verifier, fake provider), `docs/setup/google-drive-oauth.md`.
+- 변경: `config/schema.py·loader.py`(`google_oauth` 섹션), `runtime.py`(authorized_user 디스패치, `google_worker_runtime`, `GoogleOAuthWorkerAttestor`, `BoundedTokenRequest`, 설치 전 startup gate), `intake/worker.py`(sync/run_once/claim_request/process_item/create_input_request 5개 entry gate; run_once는 `{"status":"failed","code":"RECONNECT_REQUIRED"}`), `adapters/drive/worker.py`(attestation context, 모든 provider call gate), `worker.py`·`cli/main.py`(oauth_client 전달), `settings/security.py`(session epoch, callback/result exact loopback bypass와 Fetch Metadata 규칙), `settings/app.py`(google-oauth routes, callback 303, data-free result, close 시 invalidate), `settings/credential_service.py`(`save_google_oauth` admission→snapshot→fresh proof→CAS→journal, SA/OAuth 타입 디스패치 `_separate/_verify`, cards `credential_type`), `settings/provider_checks.py`(OAuth 고정 코드, Connection Test OAuth loader), `settings/composition.py`(`build_google_oauth_service`), `settings/launcher.py`(socket·prefix·session 후 단일 flow service 조립, close/replacement/idle 순서 통합), `settings/status.py`(`google_oauth_configured`), `config.example.yaml`.
+- 테스트(신규 7파일 99개): `tests/unit/test_google_oauth_config.py`, `tests/unit/test_google_oauth_runtime.py`, `tests/contract/test_intake_worker_google_oauth.py`, `tests/contract/test_settings_google_oauth.py`, `..._http.py`, `..._save.py`, `..._composition.py`(실제 launcher 서브프로세스 fake-mode 전체 흐름 포함).
+- 검사: 전체 `PYTHONPATH=. .venv/bin/pytest -q` → **2613 passed, 1 failed, 5 skipped**. 실패 1건은 기존 환경 의존 `test_keyring_dependency_missing_is_configuration_error`(HEAD에서도 동일 실패). ruff 208/mypy 135는 HEAD export와 동일(새 진단 0). `scripts/lint_behavior_projection.py` 통과, `git diff --check` 통과.
+- 설계 대비 메모: 콜백/결과 경로는 `SecurityBoundary`에서 exact GET·loopback peer·query 한도·Fetch Metadata만 검사하고 session 조회 0. fresh 계정 비교는 저장된 permission ID 없이 양쪽 refresh grant를 새로 검증해 수행(`oauth_verifier`). 기존 SA 경로·테스트 불변.
+- 다음: Native/Gemini 독립 리뷰(계획 r2 + 구현), 지적 반영, checker 핀 갱신 후보(credential_service.py) 인간 결정, 실제 Google Desktop client로 School 전체 흐름 검증, 커밋.
 
-### 5. 향후 후속 작업 안내
-- 메인 워커용 보호된 비밀 파일 + 최소 환경변수 런처 패턴 설계 (macOS `~/Library/Application Support/Syllva/secrets/` 0700/0600, Windows NTFS DACL).
-- `REMOTE_MCP_SECRET`의 장기 토큰을 OAuth/OIDC 기반 인증 흐름으로 전환.
-- 실제 운영 환경(Notion / Google Drive)에서의 라이브 엔드투엔드 연동 확인.
+## 현재 단계
 
-## Credential 저장소 아키텍처 재설계 — GPT Pro 리뷰 완료, 구현은 다음 세션 (2026-09-14)
-
-이전 항목(LMS 사이드카 Windows 크로스플랫폼 지원)에서 이어진 논의다. 사용자가 "Canvas sidecar처럼
-나머지 7개 credential(Google Drive worker/MCP, Notion worker/MCP, GitHub, LLM, Remote MCP)도
-다 OS keyring/Credential Manager로 옮기는 게 낫지 않냐"고 제안했고, 독립 웹 GPT Pro 리뷰를 거쳐
-**전면 전환은 권장하지 않는다는 결론**과 함께 구체적인 하이브리드 구조를 받았다. 이번 세션에서는
-코드를 건드리지 않았고, 결론과 실행 계획만 기록한다. 다음 세션은 여기서부터 이어간다.
-
-### 검증 경로
-- 이 대화 세션(Codex exec 샌드박스)에서는 `insane-review`(로컬 Chrome/Brave CDP 실행)와
-  `aside exec`(daemon auth) 둘 다 네트워크 차단으로 실패했다. `curl 127.0.0.1:9222` 자체가
-  `Operation not permitted`로 거부되는 것을 확인해, 이 exec 세션의 샌드박스가 루프백을 포함한
-  아웃바운드 네트워크를 전면 차단한다는 근본 원인을 진단했다 (도구 문제가 아님).
-- 사용자가 질문 텍스트를 직접 ChatGPT 웹(Pro)에 붙여넣어 답변을 받아왔다. 실제 GPT Pro 응답이며,
-  모델 자동추론 등급(Pro)에서 나온 근거 인용(Apple Developer 문서, Microsoft Learn, jaraco/keyring
-  GitHub README/이슈)이 포함되어 있다.
-
-### GPT Pro 결론 요약
-1. **전면 keyring 전환 비권장.** macOS default/login Keychain은 사용자 로그인 세션에 결합되어
-   있어(Launch Agent vs Launch Daemon 구분, Apple 공식 문서 인용), 로그아웃 상태에서도 도는 진짜
-   무인 LaunchDaemon에는 부적합하다. Keychain lock/ACL 승인 팝업이 뜨면 GUI 없는 환경에서 멈춘다.
-2. Python `keyring` 자체가 "같은 Python executable을 쓰는 스크립트는 OS 프롬프트 없이 서로의
-   secret을 읽을 수 있다"고 Security Considerations에 명시함 (jaraco/keyring README 인용).
-   즉 keyring item을 worker/MCP별로 나눠도 진짜 프로세스 격리가 생기지 않는다 — provider 측
-   read/write 권한 분리(현재 이미 잘 되어 있음)가 여전히 핵심 경계다.
-3. Windows Credential Manager는 상대적으로 낫지만(`CredRead`가 logon session에 결합, Password
-   logon Task라면 unattended에 적합), **Credential Blob이 최대 2560바이트**로 제한된다
-   (Microsoft Learn `CREDENTIALA` 문서, jaraco/keyring 이슈#540 — 긴 값 이슈가 2026-07 PR
-   제출 후에도 아직 open). Google 서비스 계정 JSON처럼 큰 데이터를 keyring에 통째로 넣는 설계는
-   피해야 한다.
-4. **실제 발견된 버그**: `deployment/windows/uls-task.xml`이 `<LogonType>InteractiveToken</LogonType>`
-   으로 되어 있는데, Microsoft 공식 정의상 이 값은 "사용자가 이미 로그인되어 있어야만 실행"을
-   의미한다. 로그아웃 상태에서도 도는 무인 worker가 실제 요구사항이라면 이 설정 자체가 그 요구와
-   맞지 않는다. **keyring 전환 여부와 독립적으로 고쳐야 할 결함이며, 이 세션에서 직접
-   `grep -n LogonType deployment/windows/uls-task.xml`로 재확인했다.**
-
-### 권장 최종 구조 (하이브리드, GPT Pro 제안 그대로 채택 방향)
-
-| 크리덴셜 | 저장 방식 | 비고 |
+| 범위 | 실제 상태 | 다음 작업 |
 |---|---|---|
-| Canvas/KNU (사람이 직접 enroll) | keyring (현행 유지) | 이미 구현·검증됨 |
-| 메인 worker (무인 스케줄) | 보호된 secret file + 최소 환경변수 launcher | `.env`를 인터랙티브 셸에서 source하는 현재 방식은 스케줄 실행과 근본적으로 안 맞음 |
-| `NOTION_MCP_TOKEN`, `GITHUB_READ_TOKEN`, `LLM_API_KEY`(사람이 직접 실행하는 경로) | keyring 전환 후보 | 짧은 문자열 토큰이라 적합, UX 개선 효과 큼 |
-| `GOOGLE_WORKER_CREDENTIALS_FILE`, `GOOGLE_MCP_CREDENTIALS_FILE` | 파일 유지 + OS ACL 제한 | JSON을 keyring에 넣지 않음 (Windows blob 제한) |
-| `REMOTE_MCP_SECRET` | keyring보다 OAuth/OIDC 전환이 우선 | 장기 secret 자체를 없애는 게 keyring 저장보다 더 나은 개선 |
+| GUI-2/3 후속 수정 | 독립 Native/Gemini FINAL과 검사, 인간 승인된 기존 checker 적용 뒤 로컬 기술 수락 완료 | 기존 수락 근거 보존 |
+| P1 Drive 개인정보 보강 | 개발·필수 지적 수정·Native 두 FINAL 범위 통합 기술 수락 완료 | 완료 소스는 위 로컬 커밋에 보존 |
+| P2 개인용 Drive OAuth | 구현 완료, 2026-10-10 커밋·PR·머지. Native FINAL Settings r6 GO·Runtime r9 GO. 체커 핀 갱신 완료. 실제 Google 로그인·live 읽기·worker sync 틱(8파일 발견) 통과 | 운영 TODO(zshrc env 제거, schema_profile 설정) |
+| Intake 분류 v2 | 계획서 r14 PLAN GO. **P-A 구현 완료·Native FINAL GO(r18)**, 2026-10-10 커밋·PR·머지 | P-B 구현 |
+| 단일 테스트 source 예외 | inactive 후보 PLAN/FINAL 기술 GO. 활성 적용은 하지 않음 | 정확 후보 SHA에 관한 별도 인간 적용 결정 |
+| P3 설정 화면 / GUI-4 | OAuth 후속·실제 흐름 수락 대기 | P2 승인·구현·FINAL 이후 진행 |
+| School 실제 전체 흐름 | 아직 통과하지 않음 | 필요한 계정·권한·데이터는 인간이 준비 |
 
-제안된 구현 형태: 앱 전체를 keyring 종속으로 만들지 않고, 크리덴셜마다 `source: environment |
-keyring | file`을 명시하는 얇은 `CredentialResolver` 추상화를 두고, **silent fallback을
-금지**(한 source가 실패하면 fail-closed, 다른 source로 자동 전환하지 않음)한다. 이러면 이후
-`notion_worker: env → keyring`처럼 credential 하나씩 안전하게 옮길 수 있다.
+제품 방향은 개인용, Python·MCP 중심·local-primary이다. 본인 Google Cloud Desktop client를 사용하고 오픈소스 공개를 지향한다. 비개발자 대상 운영·공용 OAuth 앱·Google 심사·배포 준비는 이후 확장 단계다.
 
-### 다음 세션에서 진행할 작업 (우선순위순, 아직 착수 안 함)
-1. **[버그 수정, 독립적]** `deployment/windows/uls-task.xml`의 `LogonType`을 실제 요구사항에
-   맞게 수정 (`Password` logon 또는 별도 service-account 모델 검토). `deployment/README.md`/
-   `.ko.md`에 로그아웃 상태 무인 실행이 필요하면 이 설정이 필수라는 점을 명시.
-2. `CredentialResolver` 추상화 설계 및 구현 (`src/uls/config/` 또는 신규 `src/uls/credentials/`
-   모듈 후보). config 스키마에 크리덴셜별 `source` 필드 추가, silent fallback 금지 원칙 테스트로
-   고정.
-3. `NOTION_MCP_TOKEN`, `GITHUB_READ_TOKEN`, `LLM_API_KEY`(interactive 경로)를 keyring 기반
-   source로 전환. Canvas sidecar의 `_explicit_os_keyring()` 패턴(explicit backend import +
-   `__module__` 검증)을 재사용/공유하는 방안 검토.
-4. 메인 worker용 "protected secret file + 최소 환경변수 launcher" 패턴 설계. macOS는
-   `~/Library/Application Support/Syllva/secrets/` 류 경로 + `0700`/`0600`, Windows는 NTFS DACL
-   (`icacls`)로 사용자/서비스 계정 한정. `.env`를 인터랙티브 셸에서 source하는 현재 안내를
-   스케줄러 문서에서 대체.
-5. 위 변경은 인증/자격증명 코드라 프로젝트 AGENTS.md 기준 "risky" 분류 — 구현 후 독립 웹 리뷰
-   (insane-review 또는 사용자가 직접 ChatGPT에 질문 붙여넣기) 필요. 이번 세션처럼 로컬 브라우저
-   자동화가 막힌 exec 환경이면 질문 텍스트를 사용자에게 직접 전달하는 방식으로 진행.
+## P1 완료 범위와 증거
 
-## LMS 사이드카 Windows 크로스플랫폼 지원 및 문서 정합성 수정 (2026-09-14)
+승인 계획은 `docs/plans/drive-privacy-p1-r3.md`이며 SHA-256은 `df19797c6218d9589406f00afac3e9313007e3914185c0bb1d82705ee6ffd677`, 12,563 bytes다. 연속 기술 담당은 Euler, 실제 배정 `gpt-6-luna/max`다. 선정 근거와 실제 runtime 관측은 기존 작업 기록에 보존했다.
 
-사용자가 "windows 환경에서도 사용이 될텐데, keychain으로 관리하는 건 안 맞는 거 같은데?"라고
-지적해 [scripts/knu_lms_sync.py](scripts/knu_lms_sync.py)의 토큰 저장소를 macOS 전용에서
-macOS/Windows 양쪽 지원으로 일반화했다.
+완료 소스는 `src/uls/adapters/drive/worker.py`, `src/uls/worker.py`, `src/uls/intake/worker.py`, `src/uls/ingestion/transcript_ingest.py`와 다음 네 테스트다: `test_c2_drive_marker_recovery.py`, `test_native_runtime.py`, `test_intake_registry.py`, `test_intake_worker_preview.py`.
 
-### 코드 변경
-- `_explicit_mac_keyring()` → `_explicit_os_keyring()`로 이름 변경, `sys.platform`에 따라
-  macOS는 기존 `keyring.backends.macOS.Keyring`(`.keychain = None` 강제), Windows는
-  `keyring.backends.Windows.WinVaultKeyring`(Windows Credential Manager) 분기를 명시적으로
-  구성하고 각각 구체 클래스의 `__module__`을 검증해 위조된 backend를 거부한다.
-- `KEYCHAIN_BACKEND` 고정 상수를 `_expected_backend_module()` 함수로 교체해 config/manifest
-  binding 검증이 실행 시점의 실제 플랫폼을 반영하도록 했다. 다른 플랫폼에서 저장된 자격증명은
-  `keychain_platform_unsupported`/`config_binding_mismatch`로 명확히 거부되며 자동 fallback은 없다.
-- macOS 전용이던 `backend.keychain = None` 이중 방어 로직은 `hasattr(backend, "keychain")`으로
-  감싸 Windows `WinVaultKeyring`(이 속성이 없음)에서 무해하게 건너뛰도록 했다.
-- `tests/unit/test_knu_lms_sync.py`에 Windows 분기, 플랫폼 미지원 거부, backend 신원 위조 거부,
-  Windows에서 `read_enrolled_token` 정상 동작을 검증하는 테스트 6종을 추가했다. 기존 macOS 테스트는
-  함수명만 갱신해 그대로 통과한다 (전체 44/44 통과).
-- CI 매트릭스(`.github/workflows/ci.yml`)가 이미 `macos-latest`/`windows-latest` 양쪽에서
-  실행되므로 이번 변경으로 실제 Windows 러너에서도 해당 코드 경로가 검증된다.
+Drive metadata의 driveId와 개인정보 경계, derivative 생성 후·게시 전 재검증, 모호한 write의 비재시도 오류 분류, Intake 재사용 후보와 direct claim의 layout 검증을 보강했다. Native 예외는 문자열 prefix가 아니라 `isinstance`로 분류하고 `transcript_ingest`가 실제 예외 객체를 전달한다. 두 번째·세 번째 readback 실패 회귀를 추가했다.
 
-### 문서 정합성 수정
-- `docs/operator-guide/lms-sync.md`/`.ko.md`: 실제로 존재하지 않는 `CANVAS_ACCESS_TOKEN`
-  환경변수 서술을 제거하고, 실제 `scripts/knu_lms_sync.py enroll --confirm yes`
-  대화형 등록 → OS-native credential store 저장 흐름으로 정정했다.
-- `config.example.yaml`: 어떤 코드도 읽지 않는 가공의 `lms:` YAML 블록(이전 턴에서 잘못 추가됨,
-  존재하지 않는 `uls lms probe` 명령을 언급)을 제거하고 실제 사이드카 위치를 가리키는 주석으로 교체했다.
-- `config.example.yaml`, `docs/operator-guide/configuration.md`/`.ko.md`: 위 문서 점검 중
-  `course_key` 예시(`"COURSE-001"`)가 실제 `parse_course_key` 정규식과 불일치해
-  `tests/contract/test_worker_cli.py::test_cli_init_status_jobs_and_disabled_worker_no_credentials`가
-  깨지고 있던 것을 발견해 `"COURSE001"`로 수정했다 (이전 턴의 회귀, 이번 작업과 무관하게 발견·수정).
-- `docs/plans/knu-lms-hourly-*.md`는 과거 리뷰 시점의 승인 기록(engineering record)이라 이번
-  변경으로 소급 수정하지 않았다. 필요하면 별도 plan-review 사이클로 다룬다.
+- Native FINAL-r2: GO / REQUIRED0 / OPTIONAL0. 원본 manifest와 assistant 본문·패키지·현재 소스 전문 일치 확인, 정식 회수 및 활성 Syllva consistency 통과.
+- Intake FINAL: GO / REQUIRED0 / OPTIONAL1. 추가 test oracle 선택 지적은 실제 정상 구현 대조 후 보류했고, 범위를 제한해 통합 수락했다.
+- 기존 총괄 검사 145개 통과와 동결 8파일 inventory를 재사용했다. 이번 커밋 직전 동일 다섯 테스트 파일 실행은 **145 passed in 3.32s**였다. 첫 호출은 ordering 테스트 파일명을 잘못 지정해 수집 전 종료했고, 실제 파일명으로 수정한 실행이 통과했다.
+- Ruff는 기존 14건/HEAD baseline15건, 새 진단0이다. 전체 저장소 lint clean이나 전체 플랫폼 수락을 뜻하지 않는다.
+- durable ambiguity 상태 기록 자체가 실패하면 NEEDS_REVIEW 대신 FAILED/PERMANENT로 남을 수 있다. 해당 fault 관측에서 pointer/processing record 및 다음 tick 재시도는 0이었다. 새 durable-state 설계는 범위 밖이다.
 
-### 검증
-- `pytest -q`: 1236 passed, 0 failed (수정 전 1개 실패 확인 → 수정 후 0개).
-- `ruff check scripts/knu_lms_sync.py tests/unit/test_knu_lms_sync.py`: 통과.
-- 커밋/푸시는 아직 하지 않았다. `insane-review` 독립 검토는 진행 예정이다.
+로컬 상세 원본은 `.insane-review/drive-oauth-20261005/native-final-p1-native-r2/`, `native-final-p1-intake/`, `p1-parent-r2-candidate.json`, `p1-parent-final-r2-checks.json`, `p1-euler-final-r2-completion.json`이다. `.insane-review/`는 Git 제외이므로 이 문서의 수락 요약과 기존 작업 기록을 함께 읽는다.
 
-## Phase 6–8 구현, v1.3 Intake Lane & LMS Sidecar 완료 및 main 머지 (2026-09-14)
+## P2 계획과 남은 검토
 
-PR [#5 feat: v1.3 preview intake lane, LMS sidecar, and user docs](https://github.com/Just-Simple0/Syllva/pull/5)가 승인 및 머지되었으며, 로컬 `main` 브랜치 최신화(commit `6ea0459`)가 완료되었다.
+원래 계획 `drive-oauth-p2.md`는 17,844 bytes / SHA `a30b8064c82765ed799df60047630bd7a1f08b82b87c0e775483d8af009f5757`로 보존한다. 보완 초안 `drive-oauth-p2-r2.md`는 19,509 bytes / SHA `87ba2b3ff958f828c3517af4ab476f12d3dddb7ea18f89da86b091084a3f468e`다. 초안이며 구현 GO가 아니다.
 
-### 1. 주요 구현 및 산출물
-- **Multi-course Drive Intake Lane (`src/uls/intake/`, `src/uls/adapters/`)**:
-  - Drive 단일 업로드함(`+ 업로드`) 기반 파일 감지, 다중 과목 매핑 및 대상 폴더(Recordings/Materials) 이동.
-  - Notion 5개 Native Data Sources(Academic Courses, Sessions, Materials, File Intake, Input Request) 연동 및 durable `pending_request_key` 기반 중복 방지.
-  - `RequestReceipt` 및 `HumanApprovalApplier` 연동, `Submitted`/`Cancelled` 엄격한 identity 검증.
-  - 빈 PDF 페이지 위치 보존 및 marker-free 청크 분할 개선.
-- **KNU Canvas LMS Sidecar (`scripts/knu_lms_*.py`)**:
-  - `scripts/knu_lms_probe.py`: Canvas API 토큰 기반 과목 및 과제/강의자료 탐색.
-  - `scripts/knu_lms_sync.py`: 매시간(hourly) 다중 과목 메타데이터 안전 동기화 및 snapshot 생성.
-  - `scripts/knu_lms_apply_lock.py`: 단일 활성 worker 락 기반 경합 방지.
-- **문서화 (Documentation)**:
-  - `README.md`: `pdf` extra 의존성, v1.3 preview intake 및 LMS sidecar 명시.
-  - `config.example.yaml`: `semester_registries`, `semester_workspaces`, `lms` 섹션 템플릿 추가.
-  - `docs/user-guide/`: `getting-started.md`, `daily-use.md`, `mcp-and-clients.md`, `troubleshooting.md` 초보자 가이드 완비.
-- **테스트 및 코드 품질**:
-  - 1,231개 전체 테스트 통과 (`pytest`), `ruff` 및 `mypy` clean.
-  - Web ChatGPT 및 Gemini 독립 리뷰 전 트랙 GO 판정 수용.
+Native Settings는 REQUIRED7/OPTIONAL1, Runtime은 REQUIRED3/OPTIONAL0였다. callback/result gate 분리, pair lock 안 fresh 계정 검증과 CAS, replace 양방향·외부 source 조건, credential type dispatch·recovery, committing lifecycle/drain, 실제 launcher 조립 순서를 r2에 반영했다. resolver의 JSON→Mapping 경계 때문에 raw duplicate-member runtime 거부 주장은 제거하고 canonical persisted OAuth 지원 경로로 좁혔다. fresh WORKER gate는 authorized_user에만 적용해 기존 SA 경로를 보존한다.
 
-### 2. 현재 상태 및 후속 작업 (Next Steps)
-- **로컬 main 상태**: 작업 트리 clean, 최신 커밋 `6ea0459`(PR #5 merge).
-- **라이브 환경 배포 및 운영 검증 (사용자 인증정보 필요)**:
-  - 사용자 환경의 실제 Google Drive 및 Notion API 토큰을 환경변수로 주입 (Canvas 토큰은 환경변수가 아니라 아래 LMS 사이드카 절 참고):
-    - `export GOOGLE_WORKER_CREDENTIALS_FILE=...`
-    - `export NOTION_WORKER_TOKEN=...`
-  - 진단 및 실행: `uls doctor` → `uls sync` → `uls run --max-jobs 20`.
-- **LMS 동기화 스케줄러**: 현재 `PAUSED` 상태. LMS 사이드카는 `config.yaml`과 무관한 별도 스크립트이며 아래 항목을 참고.
+Worker 전문 묶음은 기존 18파일에 두 composition 본문을 더한 20파일로 준비했지만 **미송신**이다. Runtime에 빠졌던 동적 설치·coordinator의 실제 효과 경계는 이 companion 범위와 함께 확인해야 한다. Settings 21파일, Runtime 13파일은 원본 결속 송신·정식 회수·전문 감사가 끝났다. 모든 묶음은 전문·무압축이며 실측 120,000토큰 이하로 제한한다.
 
-## Native Notion 대시보드 직접 적용 완료 (2026-09-13)
+독립 Russell `google-antigravity/gemini-3.8-flash/ultra`는 원래 P2의 9파일 전문을 새로 읽어 GO0/0를 제출했고 실제 read 범위·SHA·runtime을 총괄이 확인했다. 그 GO는 변경된 r2 흐름의 승인이 아니다. r2에 대한 새 Gemini PLAN과 추후 FINAL은 남는다. 초기 미완독 보고는 원본으로 보존하며 현재 인증 실패로 재단정하지 않는다.
 
-사용자가 실제 적용을 요청해 [2026-1 학기 페이지](https://app.notion.com/p/34154b33957f801cb86ed4435bd80253)를
-**내 과목 → 이어서 공부(최대3) → To DO → 캘린더 → 파일 확인** 순서로 구성했다.
-기존 과목7개·캘린더를 보존하고 기존 일정 원본을 To DO/캘린더에서 함께 사용한다.
-등록된 실제 수업1개 바로가기, 알고리즘 과목의 수업 연결 뷰, 새 파일 확인 페이지를 연결했다.
-현재 일정 기록0개이므로 가짜 데이터를 채우지 않았다. 최근 학습 자동 갱신·파일 자동 접수는 연결 전이다.
+P2 구현 후보 중 `src/uls/settings/credential_service.py`는 기존 보호핀과 교차한다. 해당 파일의 변경·핀 갱신은 구체 후보 검토와 별도 인간 결정 전에 적용하지 않는다.
 
-[적용·재검토 기록](docs/ux/review-20260913-native-dashboard.md)과
-[실제 native 저장 결과](docs/ux/dashboard-native-readback.md)에 검증을 남겼다.
-웹 GPT-5.6 Sol(매우 높음) 최종GO·Gemini3.8 Flash high 최종GO, 필수 미해결0건이다.
-원본 블록·뷰·질의를 재조회해 확인했으며 브라우저 화면 접근이 승인되지 않아 픽셀/모바일 검증은 하지 않았다.
-제품 코드·frozen 문서·기존 전사 수정·사용자 상태를 보존했다. 커밋·푸시는 하지 않았다.
-아래의 ‘실제 적용 전’ 기록은 이 요청 이전의 이력이다.
+## 정확 단일 source 예외 후보 — 미적용
 
-## 공통 메뉴와 Notion 구현 대상 명확화 (2026-09-13)
+활성 검사기는 SHA `a82d0a88a2a35fe53293c433210029895a0e674d15231a2d9e1ed1a8f378ef08`의 기존17 source+1문서 상태다. Runtime consistency는 아래 기존 합성 테스트가 보호명 패턴에 걸리며 compiled 예외에 없어 HOLD다. 실제 비밀 파일·Native 송신·인증 실패가 아니다.
 
-사용자 선호에 따라 공통 메뉴는 **대시보드·현재 학기의 과목별 바로가기·파일 확인**으로
-제한했다. 수업은 과목의 목록에서 열고 같은 목록으로 돌아간다. 대시보드 본문 최근 수업
-바로가기는 유지한다. 실제 사용 화면은 **Notion 기본 페이지·연결 뷰**이며 HTML은 합성
-모형이다. HTML 웹앱으로 전환한 것이 아니다. [탐색 결정](docs/ux/navigation-notion.md)과
-[재검토 기록](docs/ux/review-20260913-navigation.md)에 대응 요소와 한계를 명시했다.
-웹 GPT-5.6 Sol(매우 높음)·Gemini 3.8 Flash high 모두 GO. 기존 모형 검사34 + 탐색 확인6
-그룹 통과, JS 오류0. 이번 보완도 설계·모형 범위이며 실제 Notion 설정은 후속 구현이다.
-제품 코드·frozen 문서·운영 데이터·기존 전사 수정은 보존했고 커밋·푸시는 하지 않았다.
+추가 후보는 정확히 다음 항목 하나다.
 
-## UX 정의 수정·재리뷰 완료 — rev10 설계 수용 (2026-09-13)
+| path | SHA-256 | bytes |
+|---|---|---:|
+| tests/contract/test_doctor_credential_resolver.py | 76571c52fb7aafabe5f67f4faced89a87ff36d7beb13806c8f96a33a4906fe6a | 4845 |
 
-사용자의 ‘이에 맞춰 수정 및 재리뷰로 고도화’ 요청을 완료했다. 현재 assistant가 직접 문서와
-합성 모형을 수정하고, 독립 웹 **GPT-5.6 Sol (매우 높음)** 및 **Gemini 3.8 Flash high** 리뷰의
-필수 지적을 반영했다. Pro 한도 소진에 대한 사용자의 대체 모드 승인을 그대로 사용했다.
-최종 묶음 판정은 **설계 수용 GO**다. 넓은 검토에서 시작해 변경 영향을 좁혀 재검토했으며,
-마지막 C6 산출물 재사용 identity는 웹/Gemini 모두 GO다. 전체 저장소 구현 승인은 아니다.
+사용자 `예외 후보 지정`, `리뷰 파트부터 다시 진행`으로 inactive 후보 준비·검토를 수행했다. 후보 checker SHA는 `64d6ea9d5dfe3672f90154f6d01eebfb771c3dcc9674daefaf82191d4af57119`, 28,048 bytes다. 위 tuple 137 bytes 삽입 외 baseline 바이트가 동일하고 기존17핀·문서·root device16777230/inode22556999 및 모든 guard/reader는 보존한다.
 
-- [사용자 UX 정의](docs/ux/file-intake.md): 학기 대시보드→과목→수업, Drive 단일 `+ 업로드`,
-  선택 과목 폴더, 정확한 입력/수업 선택, 개인 일정 원본, 전체 학습 노트 목표.
-- [UX-C1 실행 계약](docs/ux/intake-execution-contract.md): durable intake/receipt, Session·Material
-  reserve/apply와 폴더 회복, 실제 차시/내부 ID 분리, Usage v2 사람 승인, 최신 노트 요청/단일
-  attempt·재사용·취소 격리, SOURCE/AI/USER·Partial·freshness, C1–C8 다음 버전 명세 개정.
-- [리뷰·판정·검증 기록](docs/ux/review-20260913-revised.md): 실제 모델/대화 링크, 반복 리뷰 지적
-  처리, 검증 범위와 한계. 34개 합성 UX 검사 통과, JS 오류 0, 320/390/736/1024px 및 다크 확인.
+- Native PLAN: 9전문 / 45,449토큰, GO REQUIRED0/OPTIONAL2. 두 선택 지적은 byte-only insertion oracle과 후보 테스트 두 파일 고정으로 채택했다.
+- Native FINAL: 11전문 / 48,954토큰, GO REQUIRED0/OPTIONAL0. 슬롯2 원본 manifest 정식 회수·body/identity/current source 감사 완료.
+- 실제 모델은 Chat/최신, Extra High·slider[0,3,3]였다. Pro 추론 단계 부재를 첨부 전후 확인한 정책상 fallback이며 Pro 실행으로 표현하지 않는다.
+- 후보 검사 33tests/113subtests, 새 테스트 Ruff 통과. 후보로 실행한 PLAN·FINAL·P2 Runtime consistency가 통과했지만 **활성 검사기 PASS가 아니다**.
+- Gemini N/A는 내부 리터럴 source 읽기 예외에만 해당한다. P2 사용자 인증 흐름의 Gemini 필수 검토는 유지한다.
 
-현재 완료 범위는 **설계·실행 계약·합성 UX 검증**이다. 제품 코드, frozen 문서, 운영
-Drive/Notion, AI 공급자는 변경하지 않았고 기존 전사 정규화/테스트 수정도 보존했다.
-커밋·푸시는 하지 않았다. 실제 구현/배포는 후속 작업이며 A01–A45와 하위 수용 사례의
-SQLite crash/restart, provider 응답 유실/권한, 실제 HAA/노트 생성 검증이 남는다.
-추가 사용자 질문은 없다. 아래 초기 리뷰/정의 기록은 당시 상태를 보존한 과거 기록이다.
+원본 대화: [PLAN](https://chatgpt.com/g/g-p-6a9fdbd2dc3081919990a6607f8fe7c4-syllva-eeb93c01/c/6ac61670-70dc-83ee-876a-2eb6a8de918f), [FINAL](https://chatgpt.com/g/g-p-6a9fdbd2dc3081919990a6607f8fe7c4-syllva-eeb93c01/c/6ac618a1-8e50-83ee-9a18-638d57d8bd41). 로컬 후보 `.insane-review/drive-oauth-20261005/one-pin-candidate/`와 원본 증거는 Git 제외이며 **완료한 로컬 커밋은 이 후보를 적용하지 않았다**. 후속은 exact 후보 SHA에 대한 인간 적용 결정부터다.
 
-## UX 정의 독립 리뷰 완료 (2026-09-13)
+## 재개 순서와 보존 조건
 
-사용자가 `insane-review`로 UX 정의 검토를 요청했다. Pro 사용량 제한으로 사용자가 명시한
-대체 모드 **웹 ChatGPT GPT-5.6 Sol (매우 높음)**을 UI 검증해 사용했으며, 독립
-Gemini 3.8 Flash high 검토도 완료했다. 두 결론은 방향 적합·구현 전 보완(REVISE)이다.
+1. 최신 인간 지시와 실제 파일을 확인한다. 예약 `syllva-oauth`는 PAUSED이며 자동으로 재활성화하지 않는다.
+2. 단일 예외 후보의 별도 정확 적용 결정을 확인한다. 승인 전 활성 검사기·inventory·AGENTS의 핀 수를 변경하지 않는다.
+3. P2 Worker 미송신 범위와 r2 Native/Gemini 검토를 수행하고 필수 지적을 닫아 총괄 PLAN을 수락한다. 이미 보낸 요청은 재전송하지 않고 같은 manifest로 회수한다.
+4. 보호파일 변경은 별도 구체 인간 결정을 거친 뒤, 같은 적합 담당에게 구현·검사·필수 FINAL까지 맡긴다.
+5. 실제 로그인·동의·권한·자료 준비는 인간이 맡는다. School ACL·owner_only·전역 설정·다른 프로젝트·실제 `.env`와 비밀은 보존한다.
 
-[최종 리뷰·의견 채택 근거](docs/ux/review-20260913.md)에 필수 4항목(미확인 범위와 전체 사용
-구분, 기존 Session 연결, 지속적인 접수 기록·확인 화면, 학습 노트 생성/쓰기/갱신 계약)과
-중요 2항목(개인 할 일·공통 일정 저장, 전사 시간 형식과 분류기 정합성)을 정리했다.
-빈 범위·분류기 동작은 합성 입력으로 확인했다. 리뷰어의 과도한 서비스 단정, 임의 큐 필드,
-이미 결정된 UX 재질문 등은 채택하지 않았다.
+명확한 전송 전 로컬 인자·파서·sandbox 오류는 근거를 확인해 제한적으로 보완한다. 새 인증/runtime/안전 훅/불확실 송신/필수 리뷰 실패는 기록 후 인간에게 알리고 반복 실행하지 않는다. 정상 생성 중·담당 작업 중·다른 작업 슬롯 점유는 오류와 구별한다.
 
-설계·명세·코드 35개를 누락 없이 전송했고, 웹 완료 응답을 회수했다. 비공개 강의 시연 보고서
-업로드는 자동 승인 심사가 거절해 제외했다. 상세 증거는 `.review/ux-definition-20260913-*`와
-위 리뷰 문서에 있다. 정의안 원문·제품 코드·frozen 명세·운영 Drive/Notion은 이번 리뷰에서
-변경하지 않았다. 후속 정의 개정/구현은 아직 수행하지 않았으며, 이번 리뷰를 GO나 구현 완료로
-취급하지 않는다. 추가 사용자 응답을 기다리는 항목은 없다.
 
-## 학습 UX 정의 — 대시보드와 파일 입력 (2026-09-12)
-
-사용자 방향은 **Notion 학기 대시보드 → 과목 → 세션**이다. 대시보드에서 과목 접근,
-과제·시험 마감, 학사 일정, 해야 할 일을 함께 본다. Drive는 학기별 **‘+ 업로드’ 하나**에
-넣으면 시스템이 정리하는 방식을 기본으로 하고, 과목별 업로드 폴더 템플릿도 선택할 수 있게 한다.
-
-[UX 정의안](docs/ux/file-intake.md)에 화면 구조, 파일 종류별 입력 규칙, 분류·날짜 확인,
-자료와 세션의 관계, 읽기·노트 준비·내 공부 상태의 구분, 예외와 수용 사례를 정리했다.
-모호한 파일은 학기 접수 공간에서 과목을 확인한 뒤 정식 수집으로 전달한다. 파일 분류만으로
-Material Usage나 시험 범위의 사람 확인을 대신하지 않는다.
-
-현재 단계는 **정의안 작성**이다. 담당은 현재 assistant이며 이번 변경 범위는 위 UX 문서와
-이 인수인계뿐이다. 추가 사용자 응답을 기다리는 항목은 없다. 자동 발견·분류·Drive 이동,
-대시보드·확인 UI와 다중 자료형 native 처리는 후속 구현 대상이다. 저장 방식과 이동 동작은
-frozen 모델·기존 Notion DB·provider 권한에 맞춰 검증해야 한다. 실제 외부 파일·페이지는
-이번 UX 정의에서 변경하지 않았다. 제품 코드·기존 시연 수정은 보존하며 커밋하지 않았다.
-문서의 로컬 링크·코드 블록·공백 검사와 `git diff --check`를 통과했다. 문서만 변경했으므로
-제품 테스트는 재실행하지 않았다. 독립 모델 리뷰를 수행한 구현 승인 문서로 취급하지 않는다.
-
-## 실제 전사문 시연 후속 — 알고리즘 1 (2026-09-10)
-
-사용자 제공 `1주차.md`와 확인된 강의일 2026-03-06으로 직접 테스트했다.
-원문 M:SS/MM:SS 113개를 놓치던 정규화기를 보완해 전체 123개 시간 구간을
-원문 보존 상태로 처리한다. Canonical locator 문법은 유지하며 전체 1,058 tests 통과.
-
-ULS core ingest + 연결된 도구로 Drive 업로드/readback, Notion 수업 생성/readback,
-SQLite 완료 provenance, 중복 입력 무쓰기까지 확인했다. 검색은 실제 readback snapshot과
-완료 기록으로 확인했다. Native worker/MCP credentials와 실제 AI client E2E 완료는 아니다.
-‘루프 불변식’은 ASR의 ‘루프 불편성’과 달라 관련 근거를 놓치는 검색 품질 한계가 남는다.
-Notion은 Courses/Sessions 두 DB의 시연 공간이며 전체 운영 DB 구성은 아니다.
-
-[실제 수업 기록](https://app.notion.com/p/3d754b33957f8121a21ef41d7b4e1ab1),
-[검증·한계·임시 증거](docs/plans/live-transcript-20260306.md).
-이 후속 수정은 현재 작업 트리에 있으며 아직 커밋하지 않았다.
-
-2026-09-11 사용자 피드백으로 같은 수업 페이지의 짧은 AI 개요를 학습 노트로 확장했다.
-9개 단원에 단계별 배열 추적, 불변식 증명, 실행 횟수/수식 유도, 오개념 표와
-연습문제 10개/접힌 해설을 넣었다. 전사 중 교수 자기 정정도 표시하고 계산을 검산했다.
-SOURCE/USER와 메타데이터를 보존했다. PDF 텍스트는 대조했으나 이미지/손글씨의
-시각 검증은 로그인 origin 자동 승인 차단으로 수행하지 않았다. 자동 enrichment나
-product code를 추가 구현한 것이 아닌 학습 결과물과 품질 기준 보완이다.
-
-## 최신 인수인계 — Phase6–8 저장소 구현·로컬 검증 완료 (2026-09-10)
-
-사용자의 최신 지시 **“오케스트레이션 무시하고 너가 phase 8까지 구현 완료”**에 따라
-현재 assistant가 단독으로 설계·구현·검증했다. 이번 작업에서는 위임과 독립 웹/Gemini
-리뷰 단계를 실행하지 않았다. 제품의 frozen 계약, 읽기 전용 MCP와 사람 승인 경계는
-유지했다. 기준은 Phase5 병합 커밋 `f4c321e`, 작업 브랜치는 `codex/phase6-8-direct`다.
-
-### 구현한 동작
-
-- **Phase6:** GitHub 저장소·정확한 commit/tag 검증, 고정 tree/blob 조회와 checksum,
-  Activity 결과의 Repository Path/Submission Ref 연결. 잘못된 ref는 명시적 오류가 되며
-  현재 branch로 대체하지 않는다. 공식 지침과 제출 코드의 출처·권한을 구분한다.
-- **Phase7:** Behavior Contract v2와 여섯 projection의 해시 검증, 11파일 client zip,
-  설치 안내·support matrix·실제 client E2E 체크리스트. ChatGPT 연결은
-  `DEPLOYMENT_DEFERRED`이며 실사용 지원 검증을 완료했다고 표시하지 않는다.
-- **Phase8:** 같은 `uls run`을 실행하는 launchd/Task Scheduler, 실제 SDK stdio/HTTP
-  MCP와 11개 읽기 전용 도구, 분리된 RO provider 조합, TLS·짧은 bearer 인증,
-  status/doctor/health, 작업 잠금·재시도·재처리와 백업·복원·offline 안내.
-- Native transcript 흐름은 등록 원본 → 정규화 업로드/readback → Notion SOURCE
-  메타데이터 → durable provenance → 읽기 전용 검색까지 연결했다. 재처리 중 과거
-  처리 기록을 보존하고 USER가 바꾼 포인터를 덮어쓰지 않는다. AI 보강 결과가 원본
-  binding이나 재처리 대상으로 섞이지 않도록 회귀 검증했다.
-
-### 검증과 전달
-
-- Python **3.14.7·3.11.16 각각 전체 1,051개 통과**. 3.11에서는 독립 환경에 설치한
-  wheel의 실제 MCP SDK 프로세스도 검증했다. 추가 회귀는 총 56개다.
-- Canonical projection/hash lint, client zip, wheel 설치·CLI·SQLite 백업, compileall,
-  diff check, macOS plist lint와 Windows XML 검증 통과.
-- Ruff **183개**, mypy **74개** 기존 지적은 남는다. Phase5 감사와 비교한 새 정규화
-  지적은 0개다. 외부 Starlette/AnyIO deprecation warning 1개가 남는다.
-- macOS/Windows × Python3.11/3.14 GitHub Actions 정의를 추가했다. 원격 CI 실행,
-  push/merge, scheduler 설치와 외부 서비스 변경은 수행하지 않았다.
-- 세부 수용·검증·한계: [Phase6–8 검증 기록](docs/plans/phase6-8-verification.md).
-  작업 기록: [직접 실행 기록](docs/plans/phase6-8-direct.md).
-  운영 시작점: [설치·운영 안내](deployment/README.md).
-
-### 여전히 필요한 live 검증
-
-이번 완료 범위는 명세 §47–49의 저장소 구현과 로컬 검증이다. **전체 v1.2 live Done
-(§56) 완료는 아니다.** 이전 §41 C0/M0/VS0/VS0-B/Goodnotes live gates, 실제
-Notion/Drive/Claude/ChatGPT 계정 E2E, Windows host 실행, 배포와 권한·TLS 경로 확인은
-미검증 상태다. Native scheduler 입력은 현재 transcript만 지원하며 다른 원본 종류는
-거부한다. 기존 provider-neutral PDF/enrichment/approval 코드를 모두 live worker에
-연결했다고 주장하지 않는다. 내장 remote는 개발용 bearer profile이며 OAuth/OIDC와
-상시 모바일 연결은 제공하지 않는다. Primary PC가 켜져 있고 online이어야 한다.
+커밋 직전 추가 확인: 현재 GUI 관련 9개 테스트 파일의 동일 수락 범위를 `PYTHONPATH=. ./.venv/bin/pytest ...`로 재실행해 **447 passed, 1 warning in 14.15s**를 확인했다. 기존 Starlette deprecation warning 1건이다. 첫 수집에서는 PYTHONPATH가 없어 tests 모듈 import가 실패했고, 기존 수락 명령과 동일한 경로 설정으로 수정한 실행이 통과했다. 제품 소스 수정 없이 현재 검토 동결 SHA를 확인한 검사다.
 
 ---
 
-**아래는 이전 인수인계다. 당시 범위·완료·승인·미구현 표현은 역사 기록이며 위 최신
-인수인계와 현재 사용자 지시가 우선한다.**
-
-## 이전 인수인계 — Phase5 구현·검증 완료 (2026-09-10)
-
-**Phase5 fix3와 테스트 보강분은 필수 웹·Gemini GO 및 Astra 최종 수용을 통과했다.** 구현 커밋은 `354a2606b2e2e60049babc257e0e883dfb09b2a5`이며, 시작 기준은 `9ba41a5`, 작업 브랜치는 `codex/phase5-8-completion`이다. 사용자 지시에 따라 이번 범위는 Phase5에서 끝난다.
-
-### 완료한 동작
-
-- Exam scope 제안은 Automation Queue로 들어가며, 현재 유효한 사람 승인·Course·의존성 검증을 통과한 `HumanApprovalApplier`만 `Scope Confirmed=true`를 적용한다. Typed Exam과 raw provider 입력을 모두 지원하고 재적용·감사 복구는 대상 쓰기를 반복하지 않는다.
-- Exam 조회는 확인된 범위 안의 근거를 제공하고 미확정 범위는 provisional로 표시한다. Activity 공식 지침은 실제 출처 identity와 정규화 포인터를 검증해 가장 높은 제공 제약으로 전달하며, 누락·Partial·예산 잘림을 명시한다.
-- 후속 청크 조회는 발급된 capability allowlist와 현재 관계·출처를 다시 검증한다. 읽기 전용 Exam/Activity callable MCP 도구, Behavior Contract v2와 여섯 클라이언트 projection을 포함한다.
-
-### 검증과 근거
-
-- Python3.11.16·3.14.7 각각 **전체995개 테스트 통과**. 현재 수정 집중69개, 테스트 보강 후 Activity37개도 두 버전에서 통과했다. 정확한 이전 소스에 새 회귀8개를 적용하면5실패·3통과, 현재 소스에서는8통과다.
-- 웹 최종 **GO**: UI 검증된 Latest / 매우 높음(허용된 Pro 쿼터 대체, Pro 아님),810초 후 정상 회수. Gemini3.8Flash high **GO**: 실제59페이지와 보강 테스트6페이지 출력을 루트가 원본 대조했다. 웹 검토 후 제품 코드는 바뀌지 않았고 테스트 단언만 별도로 강화·검증했다.
-- Projection/hash lint, compileall, diff check 통과. Ruff183개·mypy74개 기존 지적은 남아 있으며 새 정규화 지적은0개다.
-- 명세 §46 대응과 리뷰·검증의 정확한 범위는 [Phase5 검증 기록](docs/plans/phase5-verification.md), 진행 이력은 [Phase5 실행 기록](docs/plans/phase5-8-execution.md)에 있다. 승인된 [계획 rev3](docs/plans/phase5-exam-activity.md)의 과거 UNAPPROVED 헤더는 검토 당시 해시 보존을 위해 유지했다.
-
-### 다음 작업의 경계
-
-Phase6–8은 구현하지 않았으며 이번 전달 범위에 포함하지 않는다. 실제 Notion/Drive/client 연결, MCP 서버·transport·배포 및 명세 §41 live 선행 검증도 완료로 주장하지 않는다. `require_ready` helper의 더 엄격한 의미와 Due 종료일 순서/IANA 검증은 비차단 후속 항목이다.
-
-사용자는 이 인수인계 후 작업 브랜치 push, Phase5 PR 생성·merge, 로컬 main 최신화까지 명시적으로 승인했다. 이 문서는 검토된 구현 커밋의 인수인계이며, 실제 PR·merge 커밋은 GitHub 기록으로 확인한다. 현재 저장소에는 GitHub Actions workflow나 필수 상태 검사가 설정돼 있지 않아 로컬 검증을 CI 통과로 표현하지 않는다.
-
-`.review/`와 `.insane-review/`는 현재 작업 환경에만 있는 Git 제외 증거다. 다른 checkout에서는 커밋된 검증 문서와 [웹 리뷰 대화](https://chatgpt.com/g/g-p-6a9fdbd2dc3081919990a6607f8fe7c4-syllva-eeb93c01/c/6aa24073-fb9c-83ee-97e5-753edb99b85d)를 먼저 참조한다.
-
----
-
-**이하 내용은 Phase4와 당시 정책 전달의 역사 기록이다. 아래의 “현재”, “승인 범위”, “금지”, “대기”는 당시 상태이며 위 Phase5 인수인계와 최신 사용자 지시가 우선한다.**
-
-**Repo / merged main:** https://github.com/Just-Simple0/Syllva · Phase4는 PR1로 `main`에 `e55705f`로 병합됨 (2026-09-10 09:32:55 KST)
-
-**정책 후속 PR2:** `codex/syllva-project-agents` 정책 정렬 변경이 `main`에 `2b4fbe4ed368d1b1d92721f7f33bdd0ab307281d`로 병합됨 (2026-09-10 10:55:41 KST)
-
-**PR2 병합 후 확인 기록:** PR2 병합 후 로컬 `main`이 `2b4fbe4ed368d1b1d92721f7f33bdd0ab307281d`와 같은 커밋으로 동기화된 것을 확인했다. AGENTS/handoff 정책 정렬은 완료됐다.
-
-**Phase4 구현 커밋:** `3f190fc`  ·  **Phase4 완료·검증 기록:** `d9fe77e`  ·  **정책 채택 기록:** `f974c7f`
-
-**Phase4 당시 시작 기준:** `bfc592b` (Phase3 인수인계)
-
-## 이전 인수인계 — Phase4 완료 및 정책 정렬 후속
-
-**Phase4 구현 rev10은 독립 리뷰 GO와 총괄 검증·수용을 통과했고 PR1로 `main`에 병합됐다. 정책 정렬 후속도 PR2로 `main`에 병합되어 현재 기준에 반영됐다.** 아래 Phase4 완료 근거와 역사 기록은 보존한다. Phase5–8 구현과 미래 제품 push는 승인 범위 밖이다. 이 제한은 완료된 사용자 승인 PR2 delivery를 금지하는 뜻이 아니다.
-
-### 현재 지침과 경계
-
-- 모델/effort 선택, orchestration, review, safety는 적용 가능한 global Codex `AGENTS.md`와 프로젝트 `AGENTS.md`를 따른다. 이 handoff는 전역 정책을 복제하지 않는다. `CLAUDE.md`는 Claude 전용이다.
-- 제품의 `Single-active-worker`는 ULS runtime 제약이며 Codex subagent 동시성을 정하지 않는다.
-- **MCP search surface (MCP 검색 표면)**는 v1.2에서 read-only인 계약/스캐폴드 경계다. 현재 MCP 배포나 실제 클라이언트 검증 완료를 주장하지 않는다.
-- 승인·확인은 human-owned다. AI와 일반 자동화는 독립적으로 승인·승격할 수 없다. 자동 적용에서는 지정된 `HumanApprovalApplier`만 정책·freshness·identity 검사를 모두 통과한, 현재 유효하고 human attribution이 있는 승인 변경을 적용할 수 있으며 human approval 자체를 만들 수 없다.
-- 현재 승인된 제품 범위는 **Phase4까지**다. Phase5–8 구현과 미래 제품 push는 새 사용자 지시 없이 시작하지 않는다. 완료된 사용자 승인 PR2 정책 delivery는 이 미래 범위 제한과 구분한다.
-- 승인 계획은 **rev6**, 완료 구현은 **rev10**이다. 계획의 과거 UNAPPROVED 헤더는 후속 리뷰 기록으로 승인됐으므로 수정하지 않는다. 승인 계획과 두 frozen 명세의 해시는 그대로 유지했다.
-- 정책 정렬·호환성 감사와 검증 근거는 [Codex 정책 채택 기록](docs/codex-policy-adoption.md)에 보존한다. 전역 Codex 지침은 일반적으로 `~/.codex/AGENTS.md`, 프로젝트 지침은 [AGENTS.md](AGENTS.md)를 따른다.
-
-### 완료한 동작과 검증
-
-Material Usage 제안 생성, 정규화된 승인 Queue, 사람 승인에 따른 MATERIAL_USAGE/PAGE_RANGE 적용, 불확실한 쓰기 결과의 보수적 복구, 다중 자료 검색과 후속 권한 철회를 구현했다. 마지막 웹 지적 두 건도 수정했다.
-
-1. 유한 페이지 범위는 일부 페이지만 발견돼서는 승인되지 않는다. 현재 검증된 자료에 요청한 모든 페이지가 있어야 한다.
-2. `effect_observed` 표식 저장 후 대상과 전체 근거를 다시 검증한다. 그 사이 인간 복원이나 의존성 변경이 있으면 표식을 유지하고 조정을 기다리며, 대상을 다시 쓰거나 완료 감사를 남기지 않는다. 정상 처리와 유효한 감사 재시도는 성공한다.
-
-**2026-09-09 Phase4 검증 기록이며 이번 문서 변경에서 재실행하지 않음.**
-
-| 검증 | 최종 결과 |
-| --- | --- |
-| 전체 테스트, Python 3.11.16 | **866 passed** |
-| 전체 테스트, Python 3.14.7 | **866 passed** |
-| 새 rev10 회귀 테스트 | 두 환경 각각 **30 passed**; 수정 전 코드에서는 16 expected failures / 14 passes |
-| 고정 소스 복사본 및 실제 웹 첨부 복원 | 각각 **731 passed**, 126파일 누락·내용 불일치 없음 |
-| 컴파일·Behavior projection·diff check | 통과 |
-| 제안→승인→검색→재적용→철회, p39–40/p40, 두 결함 before/after | 통과 |
-| Ruff / mypy | **188 findings / 74 errors** — 정적 검사는 clean이 아님; 새 정규화 mypy 오류 없음 |
-
-리뷰한 126파일은 최종 구현과 해시가 일치한다. 세부 완료 근거와 명세 §45 대응은 [Phase4 검증 기록](docs/plans/phase4-verification.md), 범위와 과거 진행 기록은 [실행 기록](docs/plans/phase4-8-execution.md), 승인된 불변 계획은 [Phase4 계획](docs/plans/phase4-material-usage.md)에 있다.
-
-### 독립 리뷰와 근거 위치
-
-- **웹 GO:** Codex native insane-review-codex 0.6.8, UI 검증된 Latest / 매우 높음. 1,254초 후 정상 회수(exit0). 이전과 동일한 123파일의 내용 동일성을 확인한 뒤 이전 전체 읽기를 재사용했고, 변경된 어댑터 4,512줄과 새 테스트 두 파일은 전체 재검토했다. 복원한 현재 코드로 731테스트·컴파일·projection을 실행하고 두 기존 결함 및 추가 복구·sibling 조합을 독립 재현했다. 최종 보고서 `.review/phase4-rev10-insane-review-final.md`, [웹 리뷰 대화](https://chatgpt.com/c/6aa13845-5fdc-83e9-a3e9-b3e32c1e9bdb). 선택적 회귀 테스트 제안은 비차단이며 미해결 구현 결함이 아니다.
-- **Gemini GO:** Gemini 3.8 Flash high, Descartes `01a085ef-7f18-7b41-9c12-6678da68018b` 종료. 251페이지 전체 출력과 인용 5개를 총괄이 원본 대조했고, 독립 731테스트·projection 실행을 확인했다. 줄 번호, 격리 mypy 68건과 전체 74건의 구분, 재현 스크립트 import 경로 및 lint 설명의 정정은 `.review/phase4-rev10-gemini-{final.md,addendum.md,audit.json}`에 보존했다.
-- 총괄 최종 수용: `.review/phase4-rev10-final-acceptance.json`. 전체 검증 로그: `.review/phase4-root-rev10-results.json`. 고정 파일 해시: `.review/phase4-integrated-review-hashes-rev10.json`.
-- `.review/`와 `.insane-review/`는 Git에서 제외된 **이 작업 환경의 로컬 증거**다. 다른 checkout에는 자동으로 전달되지 않는다. 커밋된 검증 문서와 웹 대화 링크를 먼저 참조하고, 원본 증거가 필요하면 현재 작업 환경에서 확인한다. 구 Claude 0.6.2 임시 실행기는 `.review/legacy-review-gpt6-pro-claude062.py`에 보관했다.
-
-### 남아 있는 한계
-
-Provider-neutral/fake 테스트를 통과한 것이며 live SDK, MCP 배포 또는 실제 클라이언트 검증 완료를 의미하지 않는다. 명세 §41 선행 live 검증은 기존 deferred 상태다. Single-active-worker 전제와 최종 확인부터 Queue 감사 쓰기 사이의 non-CAS 가시성 한계도 유지한다.
-
----
-
-**아래는 과거 진행 이력이다.** “현재”, “대기”, “미완료”, “커밋 없음” 등의 표현은 당시 상태이며, 위 최신 인수인계보다 우선하지 않는다. 완료된 리뷰를 다시 시작하거나 과거 Sonnet 리뷰 호출을 반복하지 않는다.
-
-## 이전 인수인계 — Phase4 rev10 검증 완료, native 웹 + Gemini 재검토 (2026-09-09)
-
-**최신 사용자 지시: Sonnet 리뷰는 일회성이었으므로 앞으로 리뷰용 호출 금지. 이후 리뷰는 Codex native insane-review + Gemini만 사용한다. Phase4 완료/커밋은 아직 아니다.**
-
-- Luna Ampere 종료. 새 두 회귀 파일 30 tests는 두 Python 모두 통과, sealed rev9에서는 16 expected failures /14 passes. Root가 새 테스트 전체를 검토했다.
-- Root 전체 **866 passed × Python3.11.16/3.14.7**. Ruff188/mypy74 기존 부채, compile/projection/전체 흐름/부분 페이지 및 effect-marker 반례/diff check 통과.
-- rev10 고정126파일 source-copy **731 passed**, 작업 중 hash 변경 없음. `.review/phase4-rev10-pack-audit.json`, `.review/phase4-integrated-review-hashes-rev10.json`. 페이지 helper251개(0–250).
-- Native 웹 session **86490**, `.review/phase4-rev10-insane-review.log`; launcher `/tmp/syllva-phase4-rev10-native-review.py`. 같은 독립 웹 리뷰 대화 https://chatgpt.com/c/6aa13845-5fdc-83e9-a3e9-b3e32c1e9bdb 에 새 전체 첨부. Latest/매우 높음 UI 검증, 강제 답변 없음. 이전과 동일한 파일은 실제 내용 동일성 확인 후 이전 독립 읽기 재사용 가능, 변경/추가 파일은 전체 재검토. 새 응답 turn 기준을 전송 전에 수집해 이전 REVISE와 구분한다. Timeout은 같은 URL native harvest로 회수.
-- Gemini3.8Flash high Descartes **01a085ef-7f18-7b41-9c12-6678da68018b**: 독립적으로 sealed126파일/251페이지 전체 읽기, 최종 후 raw output 및 인용 감사 필요. 다른 리뷰 판정 미전달.
-- **rev10 Gemini 완료:** 전체251원본출력/5인용root대조, 독립731pytest/projection통과 확인. static/줄번호/재현 import provenance 정정과 root qualification 후GO수용. Descartes종료. `.review/phase4-rev10-gemini-{final.md,addendum.md,audit.json}`. 웹은대기중.
-- 다음: 현재 웹 최종 수집/검증 → 지적 있으면 root 재현·수정 → 해당 revision의 두 GO와 root 수용 후 완료 문서/로컬 커밋. **Phase5–8/push 금지. 승인 plan rev6/frozen 불변.**
-
-## 이전 인수인계 — Phase4 rev9 웹 REVISE2 확인, rev10 통합 수정 (2026-09-09)
-
-**최신 사용자 정정:** Sonnet 리뷰는 일회성 요청이었다. 앞으로 리뷰용으로 호출 금지. 현재 Sonnet 작업은 모두 종료했고, 이후 리뷰는 Codex native insane-review + Gemini3.8Flashhigh만 사용한다. 기존 추가리뷰 기록은 과거 사실로만 보존한다.
-
-**이 절이 아래 기록보다 우선한다. 완료/커밋 아님.** Codex native insane-review가1810초 후정상회수/exit0. 최종 `.review/phase4-rev9-insane-review-final.md`는 전체124파일/701tests검토후 REVISE2건이다. Root가둘다양operation재현했다. 이전rev9Gemini/SonnetGO는완료게이트로사용하지않는다.
-
-1. 부분만존재하는범위허용: 실제페이지1–40, graphPageCount41, desired40–41이면MATERIAL_USAGE/PAGE_RANGE 모두APPLIED였음. Root가공유 `_phase4_page_chunks`를완전한범위증명으로수정(유효단일페이지로케이터의집합크기, 거대range순회없음). 정상승인/복구모두같은helper사용.
-2. effect_observed표식외부쓰기중인간old복원 후잘못APPLIED: Root가표식검증후/최종Queue검사전에 fullstrict target/dependency audit-only재검증추가. 복원/변경/불확실이면marker보존+APPROVED조정대기, 재쓰기/감사없음. 정상적용/기존audit-only재시도/partialAPPLIED복구모두이검사통과필요.
-
-- Root증거 `.review/phase4-rev10-root-{reproduce.py,before.json,after.json}`: 부분범위는두operation모두SUPERSEDED/writes0; 효과표식중복원은APPROVED/writes1/인간값보존/audit없음/marker보존으로수정확인.
-- **현재 Luna max Ampere** `01a085e1-8469-7010-878d-84ab99433618`: 새 `tests/contract/test_phase4_rev10_pages.py`, `test_phase4_rev10_audit.py`만소유. Root가base.py통합수정, Luna가permanentregressions(부분range/valid39–40/40/복구;markerwrite중old/sibling/Course/Type/sourcebinding/fingerprint변경)병렬담당. 기존tests/docs/sourceedit금지. Focused두Python+새testRuff필요.
-- 웹프로세스36666종료. URL https://chatgpt.com/c/6aa13845-5fdc-83e9-a3e9-b3e32c1e9bdb , 원본 `.insane-review/response_Syllva_20260909_194259_74569_ddb89e.md`. nativeplugin0.6.8/Latest매우높음/완전본문/강제답변없음. 다음리뷰도native launcher를rev10으로갱신해사용.
-- 다음: Luna회귀합치고전체두Python+root반례/스모크/static/컴파일/projection → 완전한rev10첨부감사 → 현재웹+Gemini독립통합리뷰. **Phase4만, Phase5–8/push금지, 커밋없음.** 계획rev6/frozen불변.
-
-## 이전 인수인계 — Phase4 rev9 검증 완료, native 웹+Gemini 통합 리뷰 진행 (2026-09-09)
-
-**이 절이 아래 기록보다 우선한다. 최종 완료/커밋은 아직 아니다.** rev8 웹 REVISE2건을 수정하고 root 검증을 마쳤다. 승인계획rev6/두 frozen문서는 hash불변이다.
-
-- Luna Carson 수정 완료/종료. durable prepared/effect_observed 표식으로 restart 전 실제 효과 확인 여부를 구분한다. Prepared-only + 나중 desired는 APPROVED/조정대기, target/audit 없음. 실제 write+신뢰할 수 있는 desiredreadback 후 effect표식 저장/검증한 경우만 audit-only recovery 가능. phase-less/unknown marker보수적거절. 정상 승인/복구의 material validation은 전체 strictpageindex 사용.
-- Root rev3 기존 unreadable→나중desired성공 기대2건을 새 보수적계약에 맞게 APPROVED/감사없음으로 강화. divergent거절 유지. 신규37회귀, 기존 집중108tests×두Python통과. 루트전체 **836passed × Python3.11.16/3.14.7**. 두operation의 preparedcrash→humanDesired는writes0/audit없음; 실제producer→p40→승인→검색→재적용→철회 모두통과.
-- `.review/phase4-root-rev9-results.json`: compile/projection/smoke/page40/repro/diff통과. Ruff188(기준190, rev8=186; effect표식의 보수적예외처리2건증가)/mypy74(기준76), 새normalized타입오류없음. 정적검사clean은아님.
-- 고정 manifest/hash `.review/phase4-integrated-review-{files,hashes}-rev9.*`:124파일. Sourcecopy격리 **701passed**, `.review/phase4-rev9-pack-audit.json` root `/var/folders/p7/6kdby1xx3t148xw4sys5ql340000gn/T/syllva-phase4-rev9-pack-cd74doqp`. 모든파일읽기 helper `.review/phase4-rev9-read-page.py`,249pages0–248.
-- **현재 native웹**: unifiedsession36666, `.review/phase4-rev9-insane-review.log`, launcher `/tmp/syllva-phase4-rev9-native-review.py`; Codex plugin `/Users/admin/.codex/plugins/cache/gptaku-codex/insane-review-codex/0.6.8/bin/pack_and_ask.py`. 실제첨부라인/격리test감사를 업로드전 hook으로 수행한다. Latest/매우높음 visibleUI검증, forcedanswer비활성. Timeout은동일URL nativeharvest로만회수. 전송URL/최종report는로그확인.
-- **현재 Gemini3.8Flashhigh** Rawls `01a085c3-ea13-76e1-a082-9c4b0aff92ce`: 새sealed124files/249pages 전체통합독립리뷰. 다른리뷰결과미전달. 최종후 `.review/phase4-rev9-audit-agent-pages.py AGENT_ID`로 rawrollout customtooloutputs 포함 전체원본대조; 인용대조. incomplete는GO아님.
-- **rev9 Gemini 완료:** 전체249출력/5인용root일치, GO수용, Rawls종료. `.review/phase4-rev9-gemini-{final.md,audit.json}`. 테스트701passed는root실행로그를검토한것이며 독립실행아님을정정. Producer전체None, applierMaterialNone/Session8을실제코드대조. 실제첨부124파일/411858tokens/701tests와격리projection도통과. 웹 URL https://chatgpt.com/c/6aa13845-5fdc-83e9-a3e9-b3e32c1e9bdb , 계속생성중.
-- **추가 Sonnet5high 현재rev9리뷰:** 웹대기중사용자추가리뷰요청을현재수정본에도적용. Franklin `01a085cc-c462-7651-9a0b-058bd0b7238f`가동일124files/249pages전체독립검토중. 다른리뷰결과미전달. `.review/phase4-rev9-audit-agent-pages.py AGENT_ID`로읽기원본감사. 이전rev8SonnetGO와구분한다.
-- **rev9 Sonnet 완료:** Franklin GO,249페이지원본출력/5정확인용대조완료/종료. `.review/phase4-rev9-sonnet-{final.md,addendum.md,audit.json}`. Source-only검토. 계획헤더수정제안은불변조건에따라철회했고 configNone기본값은실제테스트된의도된동작으로정정. Gemini+Sonnet현재GO수용, **웹최종판정만대기**.
-- 다음: 실제첨부감사확인+두현재독립GO+root확인 후 완료문서/로컬커밋. **Phase4만, Phase5–8/push금지.** 사용자요청nativeplugin실제harvest도성공했으며 자세한증거는아래기록.
-
-## 이전 인수인계 — Phase4 rev8 웹 REVISE 회수, rev9 수정 중 (2026-09-09)
-
-**이 절이 아래 기록보다 우선한다. Phase4 완료/커밋은 아직 아니다.** 지연된 웹 최종 보고서를 회수했다. 결과는 **REVISE 2건**이며 root가 두 operation 모두에서 재현했다. 기존 Gemini/Sonnet rev8 GO는 현 완료 게이트로 사용할 수 없다. 게이트 대체 질문은 더 이상 진행의 전제가 아니며, 수정 후 웹+Gemini 독립 GO 조건을 유지한다.
-
-- 웹 보고서: `.review/phase4-rev8-insane-review-final.md`, 회수 증거 `.review/phase4-rev8-web-harvest.json`; 대화 https://chatgpt.com/c/6aa10f98-9608-83e9-bda7-b7c0352c55c3 . 전체122파일/664테스트 검토 후 최종 REVISE.
-- 결함1: prepared 표식 저장 후 target 호출 전 프로세스 종료 → 인간이 desired 상태로 변경 → 새 applier가 target_mutations0인데 APPLIED/감사를 기록한다. durable prepared/effect_observed 구분으로 보완 중이다.
-- 결함2: 정상 승인과 복구가 material32chunks로 제한되어 유효한 p40 제안을 SUPERSEDED로 거절한다. 완전한 strict 페이지 인덱스로 보완 중이다.
-- Root 재현: `.review/phase4-rev9-root-reproduce.py`, `.review/phase4-rev9-root-before.json`. MATERIAL_USAGE/PAGE_RANGE 모두 두 결함 재현.
-- Luna max Carson `01a085b0-fa8d-7ef1-a31c-3b02a84182dd` 활성: `src/uls/adapters/notion/base.py`, 새 `tests/contract/test_phase4_rev9_{recovery,pages}.py` 소유. root는 통합검증/문서/리뷰 준비 담당.
-- 사용자 지시로 다음 리뷰부터 **Codex native insane-review-codex0.6.8** 사용. Skill `/Users/admin/.codex/plugins/cache/gptaku-codex/insane-review-codex/0.6.8/skills/insane-review/SKILL.md`; engine 같은 root의 `bin/pack_and_ask.py`. ensure-env 모두 정상(CDP9222/Chrome/loginok). 기존 Claude plugin wrapper는 기본 실행 경로로 쓰지 않는다. 현 UI Pro disabled/Latest checked/매우높음 slider3 실측. Native 선택기의 hidden요소/구형메뉴 호환은 `/tmp/syllva-phase4-rev9-native-review.py`의 작은 실행 adapter로 보완했고 `.review/phase4-rev9-native-model-probe.json`에서 검증 true. native engine의 패킹·첨부·회수·harvest 유지, 설치 파일 변경 없음. 전송 후 timeout은 native `--harvest`로 회수하며 중복 전송/조기 답변 강제 금지. 실제 rev8 native harvest도 exit0로 성공: `.insane-review/response_harvest_20260909_193410_73952_a93120.md` (11,555자/REVISE), `.review/phase4-rev8-native-harvest.log`.
-- 다음: 두 수정 통합 → 전체 두Python 및 root 반례/흐름검증 → 완전한 rev9 첨부 감사 → 새 독립 통합리뷰. 승인계획rev6와 frozen2문서 불변. **Phase4만, Phase5–8/push 금지, 커밋 없음.**
-
-## 이전 인수인계 — Phase4 rev8 구현·검증 및 Gemini/Sonnet GO, 웹 게이트 결정 대기 (2026-09-09)
-
-**이 절이 아래 모든 기록보다 우선한다. Phase4 최종 완료/커밋은 아직 아니다.** 구현 rev8은 승인 계획 rev6에 따라 완료했고, 전체 테스트와 두 독립 서브리뷰는 통과했다. 필수였던 웹 리뷰는 연결 오류와 타임아웃으로 최종 판정을 내지 못했다. 사용자에게 이번 완료 조건을 Gemini+Sonnet GO로 대체할지, 웹 GO 조건을 유지할지 질문했으며 아직 답변이 없다. **명시적 답변 없이 웹 게이트를 대체하거나 완료·커밋하지 않는다.**
-
-- **Root 검증:** Python3.11.16 /3.14.7 각각 **799 passed**. 실제 웹 첨부 및 source-copy 복원 환경은 **122파일 /664 passed**, Behavior projection lint도 통과. 컴파일/전체 흐름 스모크/diff check 통과. Ruff186·mypy74는 기존 부채(기준190·76), 새 정규화 타입 오류 없음.
-- **Gemini3.8Flash high: GO.** 기존 긴 문맥의429를 새 서브에이전트로 복구해 전체205페이지를 다시 읽었다. 실제 모든 출력과 인용3개 원본 대조 완료. `.review/phase4-rev8-gemini-final.md`, `.review/phase4-rev8-gemini-fresh-audit.json`. Agent Sagan `01a08538-988a-7632-9743-c88a64afc7a9` 종료.
-- **Sonnet5 high: GO.** 사용자가 웹 대기 중 추가 독립 리뷰를 요청했다. 전체205페이지/122파일 원본 실행 로그와 인용5개를 대조했다. `.review/phase4-rev8-sonnet-final.md`, `.review/phase4-rev8-sonnet-raw-audit.json`. Lagrange `01a08542-e184-7493-938f-2c91b7eed986` 종료. 처음 누락처럼 보인188–204는 app read_thread가 묶음 functions.exec 출력을 생략한 조회 문제였고, 원본 로그에서 처음부터 읽었음을 확인했다. Sonnet의 읽기 누락이 아니며 사용자에게 정정했다. 기존 Phase3의 비차단 dead-code 지적은 범위 밖으로 유지.
-- **웹: 최종 판정 없음.** UI Latest/매우높음 검증 후 같은 첨부를 읽고664tests/compile/projection 통과를 확인했지만, 추가 시스템 검토 지연→연결 끊김으로 첫3600초 회수는exit1. 같은 대화·같은 모델에서 자연스러운 검토 재개를 요청했으나 추가1800초도timeout/exit1. 조기 답변 강제나 다른 모델 대체는 하지 않았다. 두 로컬 수집 프로세스88516/43368 모두 종료. 웹 대화 자체는 남아 있고 이후 결과는 아직 확인되지 않았다.
-- 웹 URL: https://chatgpt.com/c/6aa10f98-9608-83e9-bda7-b7c0352c55c3 . `.review/phase4-rev8-insane-review.log`, `.review/phase4-rev8-web-initial-failure.json`, `.review/phase4-rev8-web-resume.log`, `.review/phase4-rev8-web-resume-result.json`. 최종 웹 report는 생성되지 않았다. 첨부 `.insane-review/pack_Syllva_20260909_164856_67907_7072d1.md` (122파일/404,347tokens), 두 복원 검증 모두664passed.
-- **최종 무결성:** `.review/phase4-rev8-final-integrity.json`에서122파일 모두 리뷰 snapshot과 일치, 승인계획 및 두 frozen문서 hash불변, diff check0. HEAD `bfc592b4fc15df68df599bc8b0811cace521b1f7`, branch `codex/phase4-8`; 이번 작업 커밋/push 없음. 모든 구현/문서 변경은 작업 트리에 보존.
-- 다음 담당자: 먼저 사용자의 게이트 선택을 반영한다. Gemini+Sonnet 대체를 승인하면 완료 문서를 갱신하고 로컬 구현/인수인계 커밋까지 마무리(공유 스냅샷에 변경이 생겼다면 필요한 검증 갱신). 웹 조건 유지라면 같은 대화의 실제 최종 판정부터 회수/검증한다. 웹 미완료를 GO로 취급하지 않는다. **Phase4만, Phase5–8/push 금지.**
-
-## 이전 인수인계 — Phase4 rev8 검증 완료, 통합 리뷰 진행 (2026-09-09)
-
-**이 절이 아래 기록보다 우선한다.** 이전 웹 리뷰는 오류 종료가 아니라 정상 회수/exit0이었으며, 세 지적 모두 rev7–8에서 수정했다. 현재 새 rev8 웹 리뷰와 Gemini 통합 리뷰를 진행한다. 사용자 상태 질문은 작업 중단 지시가 아니다.
-
-- Luna Goodall/Kuhn 수정 완료 및 종료. rev8은 실제 시도 없는 APPLIED 오인 방지, 무관한 malformed Usage 격리를 보완했다. 기존 targetID/rawexact sibling 거절과 prior-marker 복구는 유지한다. 새40회귀, 전체 **799 passed × Python3.11/3.14**.
-- 정확한122파일 snapshot과 실제 웹첨부 복원 모두 **664 passed**. Behavior projection lint도 격리 환경 통과. `.review/phase4-rev8-{pack-audit,packed-content-audit}.json`. Ruff186/mypy74 기존부채, 새타입오류없음. 승인계획/두 frozen 문서 hash불변.
-- 웹: process88516, `.review/phase4-rev8-insane-review.log`, `.insane-review/pack_Syllva_20260909_164856_67907_7072d1.md`, Latest/매우높음 UI검증 및전송완료. 대화 https://chatgpt.com/c/6aa10f98-9608-83e9-bda7-b7c0352c55c3 . 추가시스템검토안내표시중이나검토내용이추가되고있음. 결과/실제전체커버리지 확인 필요.
-- Gemini3.8Flashhigh: 기존 Planck `01a08524-7809-7ce0-a027-04c81230181a`는0–139완료후긴문맥재개429반복으로종료. 사용자가Gemini서브에이전트재시도를요청했고 새 Sagan `01a08538-988a-7632-9743-c88a64afc7a9`는 `GEMINI_SUBAGENT_OK` 정상응답. 새agent에서 같은122files/205pages **전체를0부터다시읽기완료**, 모든실제출력감사완료/최종**GO**, 인용3개원본대조/현재rev8root수용. `.review/phase4-rev8-gemini-final.md`. 새agent종료, 이제웹최종판정대기. `.review/phase4-rev8-gemini-fresh-audit.json`. 기존부분커버리지를새GO에합산하지않음. 각fullpage출력감사, 모두읽은뒤전체판정1회. helper `.review/phase4-rev8-read-page.py` 고정archive. Sonnet대체승인은없음.
-
-- 사용자추가지시: 웹대기동안Sonnet리뷰요청. Sonnet5high Lagrange `01a08542-e184-7493-938f-2c91b7eed986` 같은122files/205pages 독립통합리뷰(기존리뷰결과미전달). **전체읽기원본로그대조완료**, 최종**GO**/인용5개원본일치/root수용/agent종료. `.review/phase4-rev8-sonnet-final.md`. `.review/phase4-rev8-sonnet-raw-audit.json`:223개출력모두실제source라인일치,205pages커버. 주의: app read_thread는 functions.exec묶음출력을누락하여188–204가안보였음. root가처음잘못누락판정/재읽기요청했지만원본rollout에서처음부터읽었음을확인하고사용자/agent에정정. Sonnet누락이아님. 원본 `/Users/admin/.codex/sessions/2026/09/09/rollout-2026-09-09T17-22-28-01a08542-e184-7493-938f-2c91b7eed986.jsonl`의response_item custom_tool_call_output까지감사할것. 기존GeminiGO/웹게이트를대체한다는지시는아니며추가리뷰다.
-
-- 웹현재: 약54분시점연결끊김안내가나타남. 같은대화reload후에도동일, stop-buttonvisible/최종본문미완성. 첫collector60분제한/exit1종료, 같은대화다시열어도최종판정없음. 사용자에게이번완료게이트를Gemini+Sonnet독립GO로대체해로컬커밋할지/웹GO조건유지할지비동기질문전달. **답변전대체완료나커밋하지않는다.** 현재두서브리뷰GO는원본출력/코드인용으로검증완료이며코드799tests×두Python통과.
-
-- 웹복구재개: 사용자완료조건선택은아직답변없어기존웹조건유지. 오류로멈춘**같은대화**에독립전체검토계속요청을전송(Latest/매우높음재검증, 새첨부/다른리뷰결과없음, 조기답변강제없음). 현재process43368, `.review/phase4-rev8-web-resume.log`, script `/tmp/syllva-phase4-rev8-resume-web.py`, 최대1800초. 성공시 `.review/phase4-rev8-insane-review-final.md`와resultJSON저장. 이전process88516은exit1종료. 첫실패 `.review/phase4-rev8-web-initial-failure.json`.
-
-- 다음: 두 current독립GO+root검증, 문서완료기록/로컬커밋. **Phase4만, Phase5–8/push금지, 아직커밋없음.** 이전GO는현코드완료게이트로사용하지않음.
-
-## 이전 인수인계 — Phase 4 구현 rev8 보완 진행 (2026-09-09)
-
-**이 절이 아래 모든 기록보다 우선한다.** rev6 웹 리뷰는 추가 시스템 검토 안내로 지연됐지만 **정상 회수/exit0 종료**했다. 현재 실행 중인 웹 리뷰는 없다. 최종 `.review/phase4-rev6-insane-review-final.md`는 REVISE3건이며, 1건은 rev7에서 해결했고 나머지2건을 Luna로 보완 중이다. 사용자가 ‘웹리뷰 오류 같음’을 물었고, 정상 회수·종료 및 현재 수정 상태를 설명했다. 중단 지시는 아니다.
-
-1. 일반예외+oldread-back만으로 복구 표식을 해제하는 문제: rev7 완료. trusted `ProviderWriteNotAppliedError` 보장 +즉시정확한old 확인만 해제 허용. wire code는기존PROVIDER_UNAVAILABLE. 새14회귀, 전체759tests×두Python 통과. Root `.review/phase4-rev7-root-unknown-old-fixed.txt`에서 인간복원보존/target_mutations1 확인. manifest112파일/624복원tests 통과.
-2. **실제 시도 없는 APPLIED 오인**: virgin/no-marker 승인 제안에서 외부인이 먼저 desired 값을 만든 경우, 또는 이번marker arm중 target writer호출전에desired로 바뀐 경우, 감사/APPLIED를기록하면안된다. 과거의유효한attemptmarker+desired audit-only복구는유지하되 이번호출이시도하지않았음을아는경로는targetdrift로거절한다. Goodall Luna max `01a084dc-b70d-77a2-aedc-644117aedafc`가 notion/base.py 및새 `test_phase4_rev8_approval.py` 담당.
-3. **무관한 잘못된Usage의전역거절**: no-ID나중복ID를가진 무관한Usage가 정상독립candidate/target까지막는다. 대상ID물리유일성은해당basis에한정하고, rawexacttuple검사는Verified/ID유효성과분리하여정확한형제는계속차단한다. Goodall이applier, Kuhn Luna max `01a084b7-9d0e-7ec2-94c6-20728eb82690`이 producer/material_usage.py 및새 `test_phase4_rev8_producer.py` 담당. 기존잘못된전역거절테스트가있으면계획을대조하여근거없이약화하지않는다.
-
-- 총괄2/3재현 `.review/phase4-rev7-root-new-findings.txt`: virginDesired가APPLIED/targetwrites0; 무관한Referencep1 no-ID행이approvalSUPERSEDED/producerSourcePartialError를일으킴.
-- rev7검증로그 `.review/phase4-root-rev7-pytest{311,314}.txt`, mypy74/Ruff186(기존부채, 새타입오류없음), 컴파일/스모크/diff통과. 아직새수정반영전체검증은전이다.
-- 이전rev6GeminiGO는전체194페이지/코드인용5개를실제대조했지만root반례때문에완료게이트로인정안함. `.review/phase4-rev6-gemini-audit.json`. reviewer종료.
-- 이전웹대화 https://chatgpt.com/c/6aa106e4-0ab8-83e8-aec2-972d78bfd701 , 원본 `.insane-review/response_Syllva_20260909_161150_65933_83322b.md`, 로그 `.review/phase4-rev6-insane-review.log`, process86031종료.
-- 준비된rev7외부리뷰는전송하지않았다. 남은두지적을통합해다음스냅샷(rev8)으로전체검증/완전패킹감사/두독립전체리뷰를실행한다. 현재두구현에이전트만활성.
-- 승인계획rev6와frozen두문서불변. **Phase4만, Phase5–8/push금지, 커밋없음.** 두현재독립GO및root확인후완료문서/로컬커밋까지마무리한다.
-
-## 이전 검증 스냅샷 — Phase4 구현 rev6 (2026-09-09)
-
-**이 절이 아래 모든 기록보다 우선한다.** rev5 웹 리뷰의 두 차단 결함(감사 실패 후 인간 수정 덮어쓰기, 초기 읽기 중 바뀐 입력의 모델 전달)을 Luna max 두 에이전트가 수정했고 모두 종료했다. Sonnet5 high의 복구 방식 자문은 총괄이 쓰기 예외/표식 보호/부분 감사 조건을 보완해 적용했다. Phase4 최종 완료는 아직 두 새 독립 판정 대기 중이다.
-
-- 구현 rev6 전체 pytest: Python3.11.16 /3.14.7 모두 **745 passed**. 컴파일, Behavior projection, Producer→승인→검색→재적용→철회 스모크, diff check 통과. `.review/phase4-root-rev6-pytest{311,314}.txt`.
-- 신규 `test_phase4_rev6_recovery.py`29건, `test_phase4_rev6_producer.py`16건. 이전700→745. 복구 수정 전6failed/4passed, Producer 수정 전9failed/3passed. 관련 집중검증99/97건씩 두Python 통과. 총괄 전체검사에서 잡은 Queue삭제시 거절 방식 차이도 기존계약대로 수정한 뒤 전체재실행했다.
-- 총괄 재현: 초기원본변경 두건은 proposer_calls0/writes0. 감사실패/부분감사/State만APPLIED기록 후 인간VerifiedFalse 복원 세건은 새applier에서도 target_mutations1 유지, 인간값보존, APPLIED미보고. `.review/phase4-rev6-root-{premodel,recovery}-fixed.txt`.
-- 승인된 계획 rev6 SHA256 `901c3e046ede6b39f9863d84bf4aeb41b4bbf3b4244ff9280e6940d01a768058`, 두 frozen 문서 불변. 구현리비전번호와 계획리비전은 별개다.
-- 정적검사 Ruff186 vs baseline190, mypy74 vs baseline76, 새normalizedtype오류없음. 복구 경로의 fail-closed 예외 처리/cleanup 후read-back 패턴을 포함해 부채가 남아 있다. clean이라고 쓰지 않는다. `.review/phase4-root-rev6-static-diff.json`.
-- sealed manifest `.review/phase4-integrated-review-files-rev6.txt`, 해시 `.review/phase4-integrated-review-hashes-rev6.json`: **111파일**. SQL/전이의존성 포함 별도복원 **610passed**. 실제첨부 행별대조 및 첨부만복원한610tests도 통과: `.review/phase4-rev6-packed-content-audit.json`.
-- 실제 전체첨부 `.insane-review/pack_Syllva_20260909_161150_65933_83322b.md`, **395,205tokens**, 주석/본문/빈줄 생략없음.
-- insane-review Latest/매우높음 UI·첨부·전송 검증. 사용자허용 일반새채팅 https://chatgpt.com/c/6aa106e4-0ab8-83e8-aec2-972d78bfd701 . 로그 `.review/phase4-rev6-insane-review.log`, unified session **86031**, 최대3600초, 현재생성중. 최종답변만회수하며 강제답변금지.
-- 독립 Gemini native `google-antigravity/gemini-3.8-flash` high, **Feynman** ID `01a08502-98bb-7a63-bfbc-ffe29636d0c0`. 전체111파일을194개의 해시고정페이지로 읽는중: `.review/phase4-rev6-review-pages.json`, `.review/phase4-rev6-read-page.py`. 현재0–59, 다음60–119, 마지막120–193. 각명령의전체END PAGE출력/잘림을총괄확인후 하나의전체통합판정을받는다. 다른reviewer결과전달안함.
-- 과거rev5웹보고서 `.review/phase4-rev5-insane-review-final.md`는REVISE2건. 해당프로세스47542종료. 과거GeminiGO는새코드에적용불가.
-- 다음: 두현재리뷰회수/필요시지적재현수정 → 해당스냅샷의두GO와총괄검증 → handoff/verification/execution 완료기록/로컬커밋. **Phase5–8과push는진행하지않는다.** 아직커밋없음.
-
-## 이전 검증 스냅샷 — Phase 4 rev5 (2026-09-09)
-
-**이 절이 아래 모든 기록보다 우선한다.** Phase 4의 이전 차단 4건을 수정한 rev4에서 두 추가 결함이 발견됐다. 총괄이 논리 Session/Material ID drift와 malformed Verified exact sibling 승인 문제를 직접 재현했고, Luna max 두 에이전트가 공통 검사·Producer·승인·검색·SessionResolver 및 회귀 테스트를 수정했다. 두 구현 에이전트는 종료했다. Phase 5–8과 push는 진행하지 않는다.
-
-- rev4 insane-review 최종 **REVISE, 차단 2건**: `.review/phase4-rev4-insane-review-final.md`. 107파일 전체 검토/복원499tests를 명시. 기존 Gemini GO만으로 완료하지 않았다.
-- rev5 총괄 전체 pytest: Python 3.11.16 / 3.14.7 모두 **700 passed**. 컴파일, Behavior projection, 통합 Producer→승인→검색→재적용→철회 스모크, diff check 통과. `.review/phase4-root-rev5-pytest{311,314}.txt`.
-- 새 회귀: `tests/contract/test_phase4_rev5_identity.py` **38**, `test_phase4_rev5_siblings.py` **28**. ID 수정 전 25 failed/6 passed, sibling 소비자 통합 전 12 failed/15 passed. 최종 두 Python에서 모두 통과. 총괄의 원래 승인 재현 세 건도 모두 SUPERSEDED/대상 쓰기0으로 확인: `.review/phase4-rev5-root-reproductions-fixed.txt`.
-- 정적 검사: Ruff **174** vs baseline190, mypy **74** vs baseline76, 새 normalized type error 없음. 기존 부채가 남아 있으므로 clean으로 표기하지 않는다. `.review/phase4-root-rev5-static-diff.json`. 총괄은 마지막 타입 narrowing과 import/string formatting만 정리한 뒤 전체700tests×2를 다시 실행했다.
-- 승인된 rev6 계획 SHA256 `901c3e046ede6b39f9863d84bf4aeb41b4bbf3b4244ff9280e6940d01a768058` 및 두 frozen 문서 유지.
-- sealed manifest/hashes: `.review/phase4-integrated-review-{files,hashes}-rev5.{txt,json}` (실제 각각 files-rev5.txt / hashes-rev5.json), **109파일**. 의존성/SQL 포함 복원본 **565 passed**. 실제 첨부 전 소스 행 대조 및 첨부 복원565passed: `.review/phase4-rev5-packed-content-audit.json`, `.review/phase4-rev5-packed-pytest311.txt`.
-- 실제 전체 첨부 `.insane-review/pack_Syllva_20260909_151218_62743_317a70.md`, **378,685 tokens**. 주석/빈 줄/본문 생략 없음.
-- insane-review 최신/매우 높음 UI 검증·첨부·전송 확인. 사용자 승인 일반 새 채팅: https://chatgpt.com/c/6aa0f8cf-3a00-83ee-b6ff-971014c9ca76 . 로그 `.review/phase4-rev5-insane-review.log`, unified process session **47542**, 최대 대기3600초. 최종 응답만 회수, 강제 답변 금지. 현재 생성 중.
-- 독립 Gemini native `google-antigravity/gemini-3.8-flash` high, ID `01a084cc-3319-74c2-8b15-dd6194691ab6` (Herschel). 같은109파일을187개 해시 고정 읽기 페이지로 전달한다: `.review/phase4-rev5-review-pages.json`, `.review/phase4-rev5-read-page.py`. 전체187페이지의 실제 명령/END PAGE 출력과 누락/잘림을 총괄이 확인했다. 최종 **통합 GO 승인**: `.review/phase4-rev5-gemini-final.md`, `.review/phase4-rev5-gemini-accepted-audit.md`. 최종 코드 인용4개도 실제 소스와 일치했다. reviewer 종료. 다른 reviewer 결과를 전달하지 않는다.
-- **최종 완료 게이트는 아직 대기 중**. 적용 가능한 두 독립 GO와 총괄 확인 후 handoff/verification/execution 문서를 일치시키고 로컬 커밋한다. 소스는 리뷰 중 고정한다. 커밋/푸시하지 않았다.
-
-## 이전 검증 스냅샷 — Phase 4 rev4 (2026-09-09)
-
-**이 절이 아래 모든 과거 기록보다 우선한다.** 새 세션에서 Phase 4를 재개했고, 이전 통합 리뷰의 차단 결함 4개 수정과 영구 회귀 테스트를 완료했다. Phase 5–8은 비활성이고 push하지 않는다.
-
-- 구현: Luna max 두 에이전트가 승인/Producer와 Retrieval을 분담했다. Sonnet 5 high가 frozen §45의 7개 완료 조건을 테스트와 대조했고, 별도 Luna가 실제 Producer → Queue → 승인 → 같은 검색 엔진 → 재적용 → 철회 흐름을 영구 테스트로 보강했다. 모든 구현 에이전트 종료.
-- 승인된 rev6 계획 SHA256 `901c3e046ede6b39f9863d84bf4aeb41b4bbf3b4244ff9280e6940d01a768058` 유지. 두 frozen 문서도 변경하지 않았다.
-- 총괄 전체 pytest: Python 3.11.16 / 3.14.7 모두 **634 passed**. 컴파일, Behavior projection, diff check, 별도 통합 스모크 통과. 로그 `.review/phase4-root-rev4-pytest{311,314}.txt`.
-- 기존 취약 소스를 별도 디렉터리에 복원한 비교 재현: 동일한 19개 테스트 중 이전 소스 **18 failed / 1 passed**, 현재 소스 **19 passed**. 실제 위조 승인 허용/쓰기/철회 미검출로 실패했으며 import/fixture 오류가 아니다. `.review/phase4-rev4-{before,after}-fix-reproduction.txt`.
-- 정적 검사: Ruff **174** vs baseline 190; mypy **74** vs baseline 76, 새 normalized type error 없음. 기존 lint/type 부채가 남아 있으므로 clean으로 표기하지 않는다. `.review/phase4-root-rev4-static-diff.json`.
-- 새 회귀 파일: `tests/contract/test_phase4_rev4_{approval,producer,retrieval}.py`. 총 168건 추가 및 guarded 통합 1건 추가(기존 465 → 634). provider read 중 실제 mutation 실행을 확인하는 spy/assertion 포함.
-- 리뷰 manifest는 Python 전이 의존성 및 `src/uls/state/migrations/001_initial.sql`을 포함한 **107파일**. 소스 복원본의 포함 테스트 **499 passed**. `.review/phase4-integrated-review-files-rev4.txt`, `.review/phase4-integrated-review-hashes-rev4.json`, `.review/phase4-rev4-pack-audit.json` 참고. 실제 첨부의 전체 내용을 대조하고 첨부만으로 복원한 실행도 **499 passed**: `.review/phase4-rev4-packed-content-audit.json`.
-- 실제 insane-review 첨부: `.insane-review/pack_Syllva_20260909_141046_59144_939a8f.md`, **366,774 tokens**, 전체 코드/주석/빈 줄 유지. 큰 첨부의 전체 커버리지 확인이 GO 필수 조건이다.
-- 최신/매우 높음 사전 UI 검증 성공. 기존 프로젝트 오류에 대한 사용자 예외로 일반 새 채팅 리뷰를 실행했다. 실행 로그 `.review/phase4-rev4-insane-review-retry1.log`, 프로세스 unified session `20541`. 모델 검증·첨부·전송 확인, 대화 https://chatgpt.com/c/6aa0ea62-8088-83e8-a59d-428b12918ef9 에서 생성 중. 아직 리뷰 결과 미회수. 첫 시도는 모델 검증에서 전송 전 종료됐고, 전송 없는 UI 재진단 성공 후 재시도했다.
-- 독립 Gemini는 native subagent `google-antigravity/gemini-3.8-flash` high, ID `01a0847f-715b-7182-b35c-97c40d1e7209`. 사전 READY는 연결 확인일 뿐 판정이 아니다. sealed 107파일 리뷰의 첫 GO는 총괄의 실제 도구 실행 대조에서 전체 커버리지 주장이 입증되지 않아 **미승인**이다. 두 번째 GO도 잘못된 파일 길이·누락 본문 때문에 미승인이다. 같은 reviewer에게 해시 고정된 전체 소스를 182개 읽기 페이지로 전달해 검토를 마치도록 했다(`.review/phase4-rev4-read-page.py`, index `.review/phase4-rev4-review-pages.json`). 페이지 0–59는 실제 명령/END PAGE 출력을 총괄이 모두 확인했다(`.review/phase4-rev4-gemini-pages-0-59.json`, 누락 0). 60–119도 실제 명령/END PAGE 출력을 모두 확인했다(`.review/phase4-rev4-gemini-pages-60-119.json`, 누락 0). 마지막 120–181도 실제 명령/END PAGE 출력을 모두 확인했다(누락 0). 전체 182페이지/107파일 검토 후 최종 통합 **GO를 승인**했다. 최종 보고서 `.review/phase4-rev4-gemini-final.md`, 승인 근거 `.review/phase4-rev4-gemini-accepted-audit.md`. reviewer는 종료했다. 이는 동일 스냅샷 전체 리뷰의 전달 과정이며 범위별 GO를 받지 않는다. `.review/phase4-rev4-gemini.md`, `.review/phase4-rev4-gemini-audit.md`, `.review/phase4-rev4-gemini-command-audit.json` 참고. 다른 리뷰 결과를 주지 않았다.
-- **Phase 4 최종 완료 게이트는 아직 열리지 않았다.** 두 적용 가능한 독립 GO와 총괄 판정 후 이 절과 verification/execution 문서를 완료 상태로 갱신한다. 소스는 리뷰 중 변경하지 않는다. 커밋/푸시하지 않았다.
-
-## 과거 인수인계 — 사용자 요청으로 중단 (2026-09-09)
-
-**이 절이 아래 모든 과거 진행 기록보다 우선한다.** 사용자는 “중단하고 handoff.md를 만들어 새 세션에서 시도”하도록 지시했다. Phase 4는 미완료이며, 새 세션에서 재개해야 한다. Phase 5–8은 진행하지 않는다.
-
-### 저장소와 작업 범위
-
-- 작업 위치: `/Users/admin/Project/Syllva`, 브랜치 `codex/phase4-8`, 기준 HEAD `bfc592b`.
-- Phase 4의 기존 구현과 이번 수정은 모두 미커밋 상태다. 사용자 변경을 포함한 작업 트리를 reset/revert하지 말 것. 커밋/푸시하지 않았다.
-- 승인된 계획: `docs/plans/phase4-material-usage.md` rev6. SHA256 `901c3e046ede6b39f9863d84bf4aeb41b4bbf3b4244ff9280e6940d01a768058`.
-- 두 frozen 문서와 계획은 변경하지 않는다. Provider-neutral / strict Fake 구현 범위이며 live SDK와 Phase 5–8 확장은 요구하지 않는다.
-- 사용자 선호: 수정들을 먼저 통합하고 전체 검증 후 넓은 Phase 4 통합 리뷰. 작게 나눠 빈번히 재리뷰하지 않는다. Sol 리뷰 사용 금지.
-- 역할: 총괄은 현재 Codex, 구현은 Luna max, 계획은 Sonnet 5 high, 독립 리뷰는 insane-review + AGY Gemini 3.8 Flash high. 실제 사용 가능한 모델/도구는 새 세션에서 확인한다.
-
-### 가장 최근 외부 리뷰 — 회수 완료
-
-- **insane-review: REVISE, 차단 지적 4개.** 전문: `.review/phase4-integrated-insane-review.md`.
-- 원본: `.insane-review/response_Syllva_20260909_122229_53260_f1e396.md`.
-- 채팅: https://chatgpt.com/c/6aa0d123-0018-83ee-9dfa-2098b3cd6f1e
-- 실제 검증 모델: `ChatGPT Latest (매우 높음 / Extended; UI version unspecified)`. 숫자 버전을 GPT-6로 임의 확정하지 않는다. Pro 사용 불가 시 매우 높음 fallback은 사용자 승인됨.
-- **Gemini 재검증: GO.** `.review/phase4-integrated-gemini.md`, 근거 대조 `.review/phase4-integrated-gemini-audit.md`. 코드 인용 277줄 일치. 실행 명령 주장은 별도로 인증되지 않았으므로 root 검증을 대체하지 않는다.
-- 처음 Gemini GO는 없는 API/틀린 소스 참조가 있어 폐기했다: `.review/phase4-integrated-gemini-unverified.md`. 이를 완료 근거로 쓰지 않는다.
-- 두 리뷰 결과가 다르고, 이후 코드 수정도 시작했으므로 **현재 코드에 적용할 최종 GO는 없다**.
-
-### 차단 지적과 이번 중단 직전 수정 — 아직 완료/전체 검증 아님
-
-1. **호출자 승인 의미 비교 누락** — `src/uls/adapters/notion/base.py`, `_assert_supplied_matches_current`.
-   - 정당한 저장 Queue가 APPROVED인 상태에서 호출자 객체의 Course, Source Ref, Review Reason, Source Hash=None을 위조해도 APPLIED 및 대상 쓰기 1회가 발생함을 root가 직접 재현했다.
-   - 이번 수정: Phase 4만 canonical semantics를 기준으로 호출자의 존재하는 의미 필드를 검사한다. domain `_field`로 중복 별칭을 거절하고, 명시적 null도 검증한다. SourceRef는 기존 canonical parser의 provider/file identity 규칙을 사용한다. 인간 lifecycle/audit의 오래된 복사본은 의미 비교에 포함하지 않는다.
-   - 수정 후 위 4개 재현은 모두 PolicyViolation, 대상 쓰기 0회였다.
-   - **아직 영구 회귀 테스트 미추가.** 부분 매핑/Proposal-ID 문자열/정확한 매핑/SourceRef navigation-only 차이/명시 null/모든 별칭/Target DB 호환성을 추가 확인해야 한다. private domain helper 의존과 `_merge_records` 상호작용도 검토할 것.
-2. **Producer 최종 body read 도중 source/graph 변경** — `src/uls/proposal/material_usage.py`, `_reread_trusted_inputs`.
-   - 기존에는 fingerprint를 얻은 뒤 body를 읽고, body read 내부에서 상태가 바뀌어도 이전 상태로 생성할 수 있었다.
-   - 이번 마지막 수정: 모든 body가 반환된 뒤 Session 및 후보 Material을 재조회하고 Course/Type/source binding/current fingerprint로 snapshot을 다시 비교한다. 다른 자료를 읽는 동안 Session이 바뀌는 경우도 검사하려는 구조다.
-   - **이 패치는 추가한 직후 중단됐다. 구문/테스트 실행도 아직 하지 않았다.** post-read fingerprint와 body, mutable graph 객체, navigation-only alias 동작을 반드시 검증한다.
-3. **초기 context 발급 도중 권한 변경** — `src/uls/retrieval/engine.py`.
-   - 이번 수정: `_retain_current_evidence`를 추가했다. Session/직접 Material context에서 외부 읽기 이후 각 evidence-binding 쌍을 `_current_fingerprint_for_binding`으로 재검사하고 함께 제외한다. 독립적인 겹침 근거를 개별로 유지하는 의도다.
-   - 직접 Material의 raw Type을 body read 이전에 캡처하도록 변경했다.
-   - **아직 신규 회귀 테스트 미추가.** evidence/bindings의 zip 1:1 가정, 예외 처리, transcript/직접 Material/Usage, Verified/Role/range/Type/Course/source rebind, 독립 겹침 및 provisional 표기 등을 확인할 것.
-4. **get_source_chunk 최종 body read 후 신선도 누락** — 같은 `engine.py`.
-   - 이번 수정: chunk 파싱 후 반환 직전 `_current_fingerprint_for_binding(binding)`을 다시 호출한다. 권한 근거 소실은 LocatorNotAllowed, issued/body와 fingerprint 불일치는 LocatorStale로 거절한다.
-   - **아직 신규 회귀 테스트 미추가.** 최종 read 내부에서 fingerprint 또는 전체 권한 근거를 변경하고 이전 body를 반환하는 사례를 검사한다.
-
-3/4와 1 패치 후 기존 `test_phase4_rev3_retrieval.py` + `test_phase4_rev3_approval.py` **45 passed**. 이는 신규 결함 회귀 테스트도 아니고 전체 검증도 아니다. 그 이후 2번 Producer 패치를 추가했으므로 현재 전체 소스가 검증됐다고 말하면 안 된다. 최종 확인 뒤의 변경은 없다는 이전 90파일 hash 맵도 이제 과거 snapshot이다.
-
-### 검증 기준과 검토 패킹 의존성 누락
-
-- **이번 부분 수정 이전** 전체 테스트: Python 3.11.16 / 3.14 모두 465 passed. 기록 `.review/phase4-root-rev3-pytest311.txt`, `phase4-root-rev3-pytest314.txt`.
-- 이전 정적 검사: Ruff 175 vs baseline 190, mypy 74 vs baseline 76. 기존 오류가 있으므로 “타입 오류 0”이 아니다. `.review/phase4-root-static-audit.md` 참고.
-- 기존 통합 패킹은 90파일 / 약 309,593 tokens였으며 두 테스트의 실제 import 의존성이 빠졌다. Reviewer는 실행 가능 subset 325 passed를 보고했고, 이 누락 때문에 향후 GO 불가라고 명시했다.
-- root가 AST 전이 import를 추적해 13파일을 추가한 **초안**: `.review/phase4-integrated-review-files-rev4.txt` (현재 103파일). state/sqlite, enrichment/writer 및 관련 orchestration 등을 포함한다.
-- 별도 복원 디렉터리 `/tmp/syllva-phase4-rev4-pack-check`에서 실행한 결과 **326 passed, 4 failed**. 원인은 `src/uls/state/migrations/*.sql` 데이터 파일 누락에 따른 `no such table`이다. **SQL 파일은 아직 manifest에 추가하지 않았다.** Python import closure만으로 부족함을 확인한 상태다.
-- 다음 담당자는 SQL 및 필요한 비-Python 리소스, 새 회귀 테스트까지 manifest에 포함하고, 패킹만으로 복원한 디렉터리에서 포함 테스트 전체를 실행해 closure를 검증해야 한다. 복원본은 현재 소스 패치보다 오래됐으므로 다시 복사할 것.
-- 패킹은 comments/blank lines/function bodies를 제거하지 않는다. 대용량 truncation 경고가 있었으므로 전체 검토 확인 없이 GO로 처리하지 않는다.
-
-### 승인/외부 실행 문제와 브라우저 상태
-
-- 자동 승인 `auto_review`에서 **검토 자체가 90초 deadline**에 걸려 CreateProcess가 실행 전에 거절된다. 위험 판정이 아니다.
-- 분석 기록: `.review/approval-timeout-diagnosis.md`, `.review/approval-timeout-evidence.json`. 누적 승인 문맥의 pre-turn compaction이 deadline을 소진한 근거가 있다. 설정으로 deadline을 늘리는 지원 항목은 찾지 못했다.
-- 사용자가 사용자 승인 모드로 바꾼 뒤 실제 외부 리뷰 실행에 성공했다. **이번 마지막 턴 환경은 다시 auto_review**였고, Luna 실행도 같은 시간 초과로 프로세스 생성 전에 실패했다. 사용자가 새 세션에서 모드를 확인해야 한다. 제한을 우회하거나 승인 정책을 임의 변경하지 말 것.
-- 실패한 Luna 명령: `codex exec -m gpt-5.6-luna -c 'model_reasoning_effort="max"' --sandbox workspace-write ...`. 프롬프트 `/tmp/syllva-phase4-rev4-implementation.txt`. **Luna는 실행되지 않았고 보고서도 없다.** root가 위 부분 패치를 수행했다.
-- 새 세션이 Luna에게 위 프롬프트를 재사용하면 이미 root 부분 패치가 있다는 사실을 반드시 추가할 것. 전체 과정을 다시 처음부터 시작하거나 다른 변경을 덮어쓰지 않도록 한다.
-- 기존 Syllva 프로젝트 URL: `https://chatgpt.com/g/g-p-6a9fdbd2dc3081919990a6607f8fe7c4-syllva-eeb93c01/project`. 로그인은 정상인데 프로젝트 화면이 ‘다시 시도하기’ 오류/정상 화면을 오가며 검증 실패했다.
-- **사용자 명시 예외 승인:** “프로젝트가 안 열리면 새로 하나 만들던지 새 채팅으로 진행”. 이 허용으로 앞 리뷰는 일반 새 채팅 `--no-project`에서 완료했다. 기존 프로젝트 강제 조건 때문에 무한 반복하지 않는다. 전송 여부를 먼저 확인해 중복 리뷰를 방지한다.
-- `scripts/review_gpt6_pro.py`는 설치된 insane-review 0.6.2를 호출하는 호환 wrapper. 최신/매우 높음 검증, 완료된 assistant 응답만 회수, 강제 답변 금지, 기존 URL 보존, pinned cached repomix를 지원한다.
-- 이번 wrapper 수정: 프로젝트 readiness를 최대 45초 기다리고, 같은 URL의 정상 composer를 이미 확인했으면 중복 navigation을 피한다. 컴파일은 통과했으나 해당 개선으로 프로젝트 실행이 성공한 것은 아니다.
-- cached repomix: `SYLLVA_REPOMIX_CLI=/Users/admin/.npm/_npx/a3bdd89f716944ac/node_modules/repomix/bin/repomix.cjs` (1.15.0, 원래 security 검사는 유지).
-- 성공했던 새 채팅 launcher `/tmp/syllva-phase4-side-new-chat-review.py`는 **과거 90파일 manifest를 사용**한다. 다음 리뷰에서 그대로 실행하지 말고 완성된 새 manifest/prompt/log로 갱신한다.
-- Gemini launcher 형태: `agy --model gemini-3.8-flash-high --effort high --mode plan --sandbox --print-timeout 30m --output-format text --print ...`. 참고 prompt `/tmp/syllva-phase4-integrated-gemini-evidence-prompt.txt`. 실제 파일 인용을 요구하고 이전 리뷰 결과는 주지 않는다.
-- 새 세션에서도 동일 working tree를 사용해야 `.review` 및 `/tmp` 자료를 바로 이용할 수 있다. `.review`는 Git에 포함되지 않는 로컬 자료이므로 새 clone에는 따라가지 않는다.
-
-### 새 세션의 실행 순서
-
-1. 이 최신 절, `CLAUDE.md`, rev6 계획과 최신 insane-review 전문을 읽는다. 현재 미커밋 소스를 보존한다.
-2. 부분 패치를 점검하고 4개 지적의 영구 회귀 테스트를 작성해 재현/수정을 완성한다. read 중 상태 변경을 직접 주입하고, CAS를 보장한다고 주장하지 않는다.
-3. Python 3.11/3.14 전체 테스트, 필요한 compile/Behavior projection/기존 baseline 대비 정적 검사를 수행한다. 오류가 나면 수정 후 필요한 검사만 재실행한다.
-4. 새 테스트·전이 import·SQL 리소스가 닫힌 review manifest를 만들고 별도 복원본에서 포함 테스트 전체를 실행한다. 새 hash/audit를 기록한다.
-5. **한 번의 넓은 통합** insane-review + 독립 Gemini 리뷰를 실행·회수한다. Pro 불가 시 최신/매우 높음 검증 유지. 결함은 먼저 일괄 수정하고 전체 검증 후 재리뷰한다.
-6. 두 리뷰의 적용 가능한 GO 및 총괄 검증이 충족돼야 Phase 4 완료로 기록한다. 이후 handoff/verification/execution 문서를 일치시킨다. Phase 5–8이나 push는 진행하지 않는다.
-
-**중단 시 실행 상태:** 완료된 두 외부 리뷰 수집 프로세스는 종료했다. 마지막 Luna는 승인 단계에서 시작되지 않았다. 별도 패킹 검증 pytest도 종료했다. 이 작업에서 새 리뷰/수정/테스트를 백그라운드로 계속 돌리지 않는다. 아래 과거 기록의 “다음 작업” 문구보다 위 순서를 따른다.
-
----
-
-## 1. 프로젝트 개요
-
-**University Learning System (ULS) v1.2** — 개인 학업 지식·검색 시스템.
-Model-agnostic · MCP-centered · Local-primary · Single-active-worker · Cross-platform (Python 3.11+).
-
-> **ULS가 어떤 컨텍스트가 허용/관련되는지 결정하고, AI 클라이언트는 ULS가 제공한 컨텍스트 위에서 추론한다.**
-
-권위 문서(코드가 충돌하면 아래가 우선):
-- `university-learning-system-v1.2-design-frozen.md` (설계, frozen)
-- `university-learning-system-v1.2-implementation-spec-frozen.md` (구현 명세, frozen)
-
-역할·경계 요약: `Drive`=원본+정규화 파생, `Notion`=학술 그래프/상태/검증, `GitHub`=정확 ref 코드,
-`Retrieval Engine`=scope/authority/freshness/provenance, `MCP`=read-only 경계, Skills=행동/데이터접근 아님.
-
----
-
-## 2. 역할 분담 & 작업 파이프라인 (반드시 준수 — CLAUDE.md와 동일)
-
-| 단계 | 담당 |
+아래는 이전 시점의 기록이다. 과거 “현재”, 진행 중, 미커밋 문구는 당시 상태이며 위 최신 인계를 우선한다.
+
+## 이전 인계 기록 — 역사 자료
+
+- **Drive OAuth 현재 gate — 2026-10-06:** 재설계 진행 중(`docs/plans/drive-oauth-redesign-proposal-20261006.md`). 사용자 결정: 저장 단계 단순화·네트워크 제한 단순화 채택, P1 먼저, 그리고 후속 "음 복잡하네. 그냥 내 개인 전용으로 scope 줄이자."로 배포 범위를 개인 전용으로 축소(본인 Cloud 프로젝트·Desktop client, Google 심사·배포 준비 gate 제외). P1 `docs/plans/drive-privacy-p1.md`(11097bytes) Native Pro 검토 중(`.insane-review/drive-oauth-20261005/p1-review-progress-checkpoint.json`). P2 OAuth 핵심 v11은 같은 Luna/max 담당이 개인 전용 범위로 작성. 구현/커밋/PR 없음, approved17pin·School ACL·owner_only·전역 유지. 후속 결정 "오픈소스로 공개하는 방향으로 하고, 내가 비개발자 대상으로 운영하는 건 이후 확장하는 단계로 보자": 저장소에 client 값 없음, 사용자별 Desktop client를 config로 설정, 비개발자 운영(공용 client·Google 검증)은 확장 단계, 공개 전환·라이선스는 별도 사람 결정.
+
+- **OAuth 이후 테스트용 SA 접근권 정리 방향 — 2026-10-05:** 인간이 두 계정은 개발 테스트용이며 OAuth 완성 이후 정리할 수 있다고 답했다. 현재 ACL·owner_only 유지, whitelist 완화는 채택하지 않는다. OAuth 완료·실제 연결 확인 뒤 정확 대상/권한을 새로 확인하고 effect 전 구체적 인간 승인을 받는다. 즉시 ACL/Cloud SA entity/키 삭제 승인은 아니다. 동결 PLANv3와 최신 리뷰·checker HOLD는 `.insane-review/drive-oauth-20261005/parent-progress.json`을 따른다. 아래 선택 대기 문구는 당시 기록이다.
+
+## 현재 재개 기준 및 문서 정합화 — 2026-10-05
+
+- **Drive OAuth PLANv2·실제 공유 계정 확인 — 2026-10-05:** 인간이 기존 School 유지·검색 drive.readonly/자료 처리 drive 분리를 선택했다. 부모가 `docs/plans/drive-oauth-nondeveloper-v2.md`의 닫힌 API/session callback/실제 grant/기존 journal CAS/UI 계약을 동결하고 4전문 packet의102260/104458/102632/90783tokens 무손실 감사를 확인했다. Native A는 원본manifest USER_BOUND 응답 대기, 나머지3은 미전송; 같은 Gemini ultra도 formalPLAN 검토 중이다. 기존 owner는 제품·테스트 미변경으로 인계했고 필수 PLAN 통합 GO 후 같은 모델로 구현한다. 사용자의 추가2권한 설명을 정상 CredentialResolver와 provider GET으로 대조한 결과 School root/PDF는 등록된 mcp·worker SA와 정확히 일치하고 public/domain 공유는 없었다. root MCP reader/PDF MCP writer, worker 둘 다 writer. 알 수 없는 principal이라는 불확실성은 이2대상에 한해 해소됐지만 현재 owner_only gate와 기존 접근권 전환은 별도 조건이며 권한 삭제/새root 생성 승인은 아니다. 실제값/이메일/토큰·원본/권한/운영상태를 변경하지 않았다. OAuth구현·FINAL·실제 전체flow·commit/push/PR은 아직이다. 최신 집계 `.insane-review/drive-oauth-20261005/parent-progress.json`.
+- **Drive OAuth 구현 결정 — 2026-10-05:** 사용자의 “일단 드라이브 쪽 부터 OAuth로 수정하고, Notion, Canvas 쪽도 비개발자 scope로 바라보자”로 앞선 서비스 계정/OAuth 선택 대기는 해소됐다. Drive 사용자 OAuth 기본 연결의 설계·필수 Native/Gemini PLAN·구현·검사·FINAL을 같은 담당자와 진행한다. Notion·Canvas는 비개발자 연결 범위와 외부 준비 조건을 평가한다. School의 추가 공유 권한, Desktop OAuth app 준비, 별도 Notion MCP credential 및 실제 SDK 호환 교정은 아직 전체 흐름 수락에 필요한 의존성이다. 기존 GUI23 수락은 해당 동결 범위에 한정하며 새 OAuth 수락·실제 provider 저장 성공·commit/push/PR을 뜻하지 않는다. 전체 실제 흐름 통과 후 게시한다는 인간 조건은 유지한다. 상세 계획 `docs/plans/drive-oauth-nondeveloper.md`, provider 평가 `docs/plans/provider-connection-nondeveloper-scope-20261005.md`.
+- **현행 실행 상태 — GUI-2/3 수정·필수 리뷰·최종 검사 완료:** 사용자의 “적용 후 최종 검사 진행”에 따라 Syllva 전용 체커 CFC `cfc8ed6ff508b5c676c87cb146f7b35a07a1db011a97f8a8424d0c5784c9ce98`와 검토된 5개 체커 파일·2개 문서 적용안의 정확한 bytes를 적용했다. 활성 체커의 현행 리뷰 기록 5범위가 모두 exit0이고 체커 45검사/113하위검사 PASS, 현재 11개 Python source pin·1개 보호 문서·root device/inode 및 제품 current5 동결 일치를 확인했다. 다른 6개 기존 source pin·보호 문서·전역 설정은 유지했다. 원래 PR13 추가3건과 후속 경합 교정의 Native/Gemini 필수 PLAN/FINAL 수락, 동일 source의 GUI97/관련447 PASS 및 실제 fake-browser 1경합/4화면 관측을 결합해 현재 로컬 GUI-2/3 수정 범위를 총괄 수락했다. 역사 DAC/9pin·미적용·대기 표현과 v7 26경합/52화면은 당시 상태로 보존한다. 다음은 승인된 School 실제 자료 흐름 검증 후 GUI-4이며 아직 수행하지 않았다. Windows 전체 지원·전체 저장소 타입 검사 통과·실제 provider 성공·원격 commit/push는 이 수락에 포함하지 않는다. 현재 집계 `.insane-review/gui23-pr13-fixes-20261004/current-verification-disposition-v8.json`; 적용·최종 검사 `.insane-review/gui23-pr13-fixes-20261004/checker-v3-postapplication-current-state-20261005.json`.
+- **School 실제 흐름 검증 — 2026-10-05, 저장 전 선행 검사 미통과:** 정상 configured-worker SDK로 실제 PDF 480,043bytes/15쪽 중14쪽/누락15쪽을 읽어 Partial로 확인했다. source 전후 metadata 불변, Notion·Drive·SQLite 저장 없음. 현재 서비스 계정의 OAuth application identity 식별 부재와 USER 단독 소유권 검사 충돌, Notion database_parent 및 배열형 status.groups 미지원이 차단 원인이다. Notion 5개 실제 부모/ID/속성 이름은 설정과 일치한다. 별도 NOTION_MCP_TOKEN도 부재한다. GUI23 기존 동결·리뷰 수락은 유지하며 전체 운영 흐름 통과로 확대하지 않는다. 서비스 계정의 정확한 등록 권한 경계 보완 또는 소유자 OAuth 경로에 대한 인간 결정 대기; 필수 리뷰·교정·재검증 후에만 사용자 조건에 따라 commit/push/새 PR을 진행한다. worker disabled/원본/공유 권한 유지. 기록 `docs/plans/school-live-flow-verification-20261005.md`, `.insane-review/gui23-pr13-fixes-20261004/school-live-flow-disposition-20261005.json`.
+- **현재 UI corrective PLAN v5 수락·구현 배정:** Native21fullfiles/110018tokens GO0/OPTIONAL0를 원본 결속 canonical/body/current source/selection으로 검증하고 active/private consistency exit0를 확인했다. Gemini ultra GO0도 실제4신규문서 전문/11SHA·size 및 unchanged12청크 재사용을 대조해 기술 수락했다(5owned files 전문,2dependencies는 bounded reads; 구현/완벽/인간 승인 의미 없음). 부모는 same Luna/max owner에 status/appjs+HTTP/UI/harness5파일 구현·의미 있는 회귀·새5source-before/after actual fake browser 증거·freeze까지 배정했다. journal/service/admission/Canvasbackend/5pin소스·reviewed후보/전역·기존GUI4/RESEARCH는 보존한다. 구현 후 current Native/Gemini FINAL 및 CanvasFINAL/변경 dependency 재사용 처분, exact 인간 checker 적용 결정·active consistency·전체 수락은 남는다. `.insane-review/gui23-pr13-fixes-20261004/ui-correction-v5-parent-implementation-go.json`이 배정 근거이고 current-verification-v5 JSON이 최신 집계다.
+- **현재 UI corrective PLAN v5 검토:** Native PLAN v4의 required3/optional1을 채택했다. 같은 owner가 accepted submission/첫 await 전 role generation·early suppression, credential GET 수락 직후 render/Canvas await 전 stale 표시 무효화 및 최종 card/notice/retry/focus 소유권, Canvas6셀 fixed notice/neutral readback 및 새 candidate sourcebefore/after actual fake UI를 FINAL gate로 명시한 v5 addendum을 6333bytes/SHA `ee005e160ff1d2dfaa8065afc76bdd70613f0a7d195ad2bbc882f6e730831833`로 동결했다. current JSON/canonical원문/parentdispo/7source bytes는 부모 대조 PASS; precanonical JSON은 역사 준비 기록만이다. Native21fullfiles/110018tokens 전송·같은 Gemini ultra refinement가 진행 중이며 source5파일의 구현/검사는 아직이다. 내부 checker 후보 FINALGO0도 적용 승인이 아니며 전체 GUI23/School/GUI4 완료는 아니다. `.insane-review/gui23-pr13-fixes-20261004/current-verification-disposition-v5.json`이 현재 집계이며 아래 checkpoint는 역사다.
+- **현재 UI corrective PLAN v4 독립 검토:** 같은 Luna/max owner가4건의 원인·최소 수정·회귀 수락 조건을 6413bytes/SHA `6682e24a4ec9dd4ff622efa931a9b75cc06247813ba98dfdc1b1de1acddab6a9`로 동결했고 문서/7source SHA·size가 실제 bytes와 일치한다. status.py/app.js 및 일반 HTTP/UI/harness5파일만 수정 대상으로 계획하며 제품/test 편집·새 검사는 아직 없다. Native18fullsource/103815tokens의 전문/무압축 감사를 통과해 PLAN을 시작했고 동일 Gemini ultra도 검토 중이다. private checker-v3 Native FINAL은 GO0/optional1로 기술 수락했지만 적용/인간 결정은 없으며 optional은 적용 후 별도 현재상태 기록에만 반영한다. Canvas FINAL과 새 UI 구현/검사/current FINAL 및 overall은 남아 있다. `.insane-review/gui23-pr13-fixes-20261004/current-verification-disposition-v4.json`이 현재 집계이고 아래 checkpoint는 역사 상태다.
+- **최신 UI FINAL v3 REVISE4 및 후속 배정:** 원본 결속 Native 20fullsource/106062tokens의 필수4건을 실제 source와 대조해 채택했다. fresh validated record만으로 fixed-safe projection/terminal race 제외, Overview 응답 supersession, credential 실패 안내·재시도의 early suppression 및 후속 fresh readback 무효화, Canvas forget action-specific 안내가 필요하다. UI 기록은 active/private consistency 모두 exit0이나 이는 지적 해결이나 전체 수락이 아니다. 같은 Luna/max owner가 `ui-correction-plan-v4.md`의 bounded PLAN을 준비하고 제품/test 편집은 독립 PLAN 수락까지 보류한다. Native queue는 UI REVISE에서 정상 stop했으며 Canvas FINAL은 새 status freeze 뒤에 진행한다. 정확한5핀 source가 불변인 private checker-v3 FINAL만 독립적으로 시작했고 적용/인간 결정은 아직이다. `.insane-review/gui23-pr13-fixes-20261004/native-final-ui-v3-disposition.json` 및 current-verification JSON이 최신 상태다.
+- **최신 FINAL checkpoint:** recovery 및 HTTP Native의 원본 결속 GO0와 Gemini ultra GO0를 현재 해시에 한해 기술 수락했다. HTTP의 29개 fullsource/118965tokens 및 canonical body/source/selection 검증, active exit2/private-v3 exit0를 확인했다. UI는 새 원본 manifest `native-final-ui-v3/manifest_Syllva_20261005_025013_90904_5d9a69.json`에 결속해 응답 대기이며 Canvas/checker FINAL은 이어서 진행한다. 새 인간 exact checker 적용 결정·적용 후 active consistency·전체 GUI23 수락은 미결이다. 아래의 단계/대기 문구는 각 checkpoint 당시 상태이며 `.insane-review/gui23-pr13-fixes-20261004/current-verification-disposition-v3.json`이 현재 집계다.
+- **Native recovery FINAL v3 회수·기술 수락:** 원본 전송의 20분 timeout 및 같은 대화 retry의 `TargetClosedError` 뒤 재전송 없이 원본 manifest로 COMPLETE 응답을 회수하고 두 번째 canonical harvest에서 같은 run/user/assistant/body 결속을 검증했다. 21개 fullsource/116635tokens, 실제 Latest/Chat/Extra High 최대 `[0,3,3]`의 **GO/REQUIRED0/OPTIONAL0**를 bounded recovery 기술 의견으로 수락했다. 활성 checker exit2 HOLD/private-v3 exit0 consistency만 확인했으며 인간 승인을 생성하지 않는다. HTTP/UI/Canvas/checker FINAL을 준비된 현재 fullsource 범위로 순차 진행 중이다. `.insane-review/gui23-pr13-fixes-20261004/native-final-recovery-v3-disposition.json`이 최신 처분이며 아래 응답 대기 표현은 이 checkpoint 이전 상태다. 제품 source 동결·검사·Gemini GO0는 그대로이며 checker 적용·전체 수락은 아직이다.
+- **Gemini FINAL v3 근거 보완 수락:** source2 전문의 실제11청크 출력이 현재1015/1675행 및 service515–555 본문과 전부 일치하고 실제 model image5 emission을 session 도구 출력에서 확인한 뒤, actual6문서/6제품/10test/5PNG의27 SHA·bytes를 대조하여 boundedGO0를 수락했다. 최초 부정확 metadata·전문/시각 확인 전 과장 보고는 역사 원본으로 보존하고 수락에 쓰지 않았다. 보고서의 잘못된 UTC 시각은 채택하지 않고 실제 session UTC 관측을 사용한다. 부모 증거는 `.insane-review/gui23-pr13-fixes-20261004/gemini-final-v3-source-visual-observation.json`이다. Native 복구 FINAL은 원본 결속 응답 대기이고 HTTP/UI/Canvas/checker FINAL 및 새 인간 exact 적용 결정·active consistency·전체 수락은 남아 있다.
+- **Pairless 구현 동결 및 FINAL v3 진행:** 같은 Luna/max owner가 admission 및 admission-test를 보완하고 service는 v2 bytes를 유지했다. 현재 admission SHA `725b8098c8653b62853a5b15b1e93a30f2817058d4d25d87ab65e47b23586ff7`, admission-test SHA `9a9676ef0d59f3b7d66fb4e80313b6fb1d3e80af98382c4019b856e7794583c3`를 부모가 실제 bytes/size와 대조했다. 최종 admission79/관련9suite415/Ruff/mypy/diff-check PASS, 부모 fake orphan→exact cleanup→fresh allabsent 및 cfg/journal/store 보존 PASS, 최신 actual UI5/recoveryUI4 총5PNG·sourcebeforeafter 일치/부모 시각 확인 PASS다. Native recovery FINAL v3은 token guard 선행 거부 후 loader 전체 파일만 동일 SHA Canvas v3에 위임해 전송을 확인했고 원본 manifest `native-final-recovery-v3/manifest_Syllva_20261005_021257_88162_6cea95.json`에 결속되어 응답 대기다. Native 준비 전송실패·일시 lock 점유는 환경 점검 후 해결했으며 guard나 모델은 바꾸지 않았다. Gemini의 부정확 문서 metadata와 새소스 전문/실제 image emission 미확인은 원본 보존·HOLD 후 같은 ultra reviewer에 근거 보완을 배정했다. private checker-v3 literal 후보 SHA `cfc8ed6ff508b5c676c87cb146f7b35a07a1db011a97f8a8424d0c5784c9ce98`는 direct source readback 뒤 수동 고정한 기존3교체/추가2 범위이며45tests/113subtests PASS; 활성 dac0 checker와 AGENTS의 승인 SHA는 그대로다. 나머지 Native scopes/checker FINAL·Gemini 근거 완료·별도 인간 exact 적용 결정·active consistency 및 전체 수락은 아직 남아 있다. `.insane-review/gui23-pr13-fixes-20261004/final-v3-checks.json` 참조.
+- **Pairless corrective PLAN v3 기술 GO 및 구현 배정 (직전 단계):** Native 21fullsource/95603tokens original-bound canonical **GO/REQUIRED0/OPTIONAL1**과 Gemini 현재 문서·동결 source 실제 해시 대조 **GO0**를 확인했다. samecontext fsync-before-arm/consume1회, own/peer/allabsent 조합, full named-journal+operation 분류 및 같은IDforeignpeerpositive 계약으로 같은 Luna/max owner에게 admission/service필요최소/admissiontest 3파일 보완을 배정했다. optional absent→present snapshot drift 회귀도 채택했다. 이전394/실제UI/GeminiFINALv2는 v2 snapshot 역사 근거이며 새동결/검사/actualUI/Native·GeminiFINAL/checker후보FINAL/인간exact적용/activeconsistency/전체수락은 계속 남아 있다. `.insane-review/gui23-pr13-fixes-20261004/pairless-plan-v3-parent-acceptance.json` 참조.
+- **직전 pairless corrective PLAN v2 REVISE2 (역사):** original-bound Native는 all-absent 경로의 directory fsync 성공 뒤 exact release flag 소비 및 실제 해당 crash/failure 회귀, foreign terminal peer positive와 같은 operation ID를 canonical journal namespace로 분류하는 계약 명확화를 요구했다. 당시 같은 owner가 별도 addendum을 준비했고 제품/test는 v2 동결을 유지했다. Gemini 첫 부정확 해시 증거는 거절·원본 보존 후 도구 readback으로 재검증했으며, 이후 Native/Gemini PLAN v3에서 필수 추가 조건을 결합 수락했고, 위 최신 단계의 구현을 배정했다. 전체 수락·checker 적용·commit/push는 아직 없다. `.insane-review/gui23-pr13-fixes-20261004/native-plan-pairless-v2-disposition.json` 참조.
+- **Native recovery FINAL v2 REVISE/REQUIRED1 (역사):** pair reservation unlink/fsync 뒤 강제종료 시 native schema2 physical만 남아 exact recovery도 거절되는 끝단 문제를 원본 canonical 및 fake 재현으로 확인했다. 기존 deferred/live/no-op 및 terminal parse/no-relock 보완은 긍정 검토됐으나 crash re-entry 한 항목이 남았다. 당시 제품 추가 편집을 보류하고 같은 owner의 corrective PLAN을 검토했다. 394 PASS/Gemini v2 GO는 정확한 v2 snapshot의 역사 근거로 보존하며 전체 수락으로 확대하지 않는다. 미전송 HTTP/UI/Canvas/checker v2 패키지도 보존하고 새 freeze에 재결속한다. `.insane-review/gui23-pr13-fixes-20261004/native-final-recovery-v2-disposition.json` 참조.
+- 사용자 최신 지시는 **GUI-2/GUI-3 수정 마무리**다. 승인된 순서는 문서 정합화 → PR13 추가 3건 보완·필수 리뷰 → School 기존 자료로 실제 흐름 검증 → GUI-4다. GUI-5 및 Windows 완전 지원 보류는 유지한다. 기존 GUI4 dirty/untracked 초안과 RESEARCH를 보존하며 새 commit/push 또는 전역 변경을 추론하지 않는다.
+- 원래 PR13 추가 3건 구현 이후 Native recovery FINAL의 R1/R2를 확인했다. 같은 Sagan `gpt-6-luna/max`가 read-only recovery admission/deferred exact maintenance와 terminal config lock 재진입 제거를 보완했고 2026-10-05 동결했다. 당시 admission/service/admission-test SHA는 `.insane-review/gui23-pr13-fixes-20261004/owner-correction-freeze-v2.json`의 실제 bytes와 일치한다. 원래 381 passed는 역사 snapshot이며 보완 후 관련 9개 계약 suite **394 passed**, admission **58 passed**, 변경 파일 Ruff 및 제품 두 모듈 mypy PASS다. 이전 full-repo mypy 135건은 correction 이전 clean HEAD와 동일한 진단 비교 기록이며 이번 전체 검사 통과로 확대하지 않는다.
+- 부모 fake 재검사는 legacy leave/mismatch에서 reservation path+bytes 불변 및 terminal 정상 완료를 확인했다. v2 snapshot의 actual UI `final-actual-ui-v4`, `final-actual-recovery-ui-v3`는 admission 포함 before/after SHA 일치·5개 실제 화면 확인·위조 leave 409 무변경·명시 fake 복원 완료다. Gemini ultra FINAL v2 **GO/REQUIRED0**를 받았으며 다중 파일 maintenance 비원자성, 이전 mypy 비교 시점, 픽셀/서버 assertion 구분 및 정확한 라인에 관한 부모 사실 처분을 별도로 남긴다. 해당 Native FINAL은 위 REVISE1로 끝났으며 아직 전체 GUI23 수락을 선언하지 않는다.
+- 역사 private checker-v2는 기존 service/admission/admission-test exact pin **3쌍 교체**, journal/HTTP test source 예외 **2개 추가**만 제안한다. **45 tests/113 subtests PASS**, 다른 Python 6핀·문서 1핀·root identity·모든 guard/reader AST는 유지한다. 활성 프로젝트 checker SHA `dac0e6f7f5b6c54ae0a7bc7b0ba5af1c4575c706d3cc9d79ba2c2c649c7b700d`는 불변이므로 current consistency HOLD를 숨기지 않는다. 후보 Native FINAL·구체 bundle/문서 preview에 대한 새 인간 exact scope/hash 결정·프로젝트만 적용·적용 후 consistency와 전체 수락이 남았다. `checker-application-proposal-v2.json`은 승인 전 후보이며 검사 통과/리뷰 GO는 인간 승인이 아니다.
+- 총괄은 실제 `gpt-6.1-sol/high`, 동일 구현 owner는 `gpt-6-luna/max`, 독립 reviewer는 `google-antigravity/gemini-3.8-flash/ultra` 유지다. Jev는 고정된 연속 배정으로 N/A이며 모델 identity 변경은 없다. harness-debug-and-verify 및 installed insane-review를 적용했고 작업/리뷰 근거는 기존 `.insane-review/gui23-pr13-fixes-20261004/`에 축적한다. Native는 검증된 Latest/Chat/Extra High 최대 `[0,3,3]`, Pro effort 부재 `pro_option_unavailable`로 확인하며 Pro 모델 실행을 주장하지 않는다. hook 호출 ledger는 미관측/완전성 미확인, 비용은 미측정이다.
+- 현재 체크아웃은 `codex/gui23-pr13-followups`, 기준 HEAD `f55ffa4f1bba3526111734f543582670ce2c695e`다. 과거 model/effort·PLAN 금지·quota-only fallback·GUI4 보류는 당시 역사이며 현행 전역 `~/.codex/AGENTS.md` 및 참조 정책과 프로젝트 AGENTS, 최신 사용자 결정으로 재개한다. CLAUDE.md·frozen 설계/구현 문서·protected launcher doc·개인 전역 checker/hooks/config는 변경하지 않는다.
+- 실제 School PDF/worker/Notion/Drive 흐름 처리는 아직 하지 않았다. provider/permissions/worker identity는 실제 검증 단계에서 새로 확인하며 과거 live 관측을 현재 증거로 승격하지 않는다. GUI4는 선행 수락/실제 흐름 검증 후 이어간다. 기존 macOS CI 통과와 Windows 각 버전 **195 failed, 2139 passed, 23 skipped**의 알려진 한계를 유지하며 이번 검사 결과로 전체 Windows 지원을 선언하지 않는다.
+
+아래 절은 각 날짜의 결정·구현·리뷰·게시 원문 기록이다. 새 작업의 현재 단계·배정·권한은 위 재개 기준과 최신 사용자 지시를 따른다.
+
+## 사용자 결정: Windows 완전 지원 보완 보류·PR 머지 — 2026-10-04
+
+- 사용자 결정: “후속 수정은 나중에. 일단 handoff.md 최신화하고 PR 두 개다 머지해. 윈도우즈는 일단 호환 정도로 하고 완벽 지원은 개발 이후에 제대로 해보자.” Windows 완전 지원을 위한 admission/journal/config/CLI(B2) 후속 수정은 개발 이후 과제로 보류한다. 현재는 검증된 호환 범위로 진행하며 완전 지원이나 전체 CI 통과를 선언하지 않는다.
+- 실제 Windows3.11·3.14의 secure-file 집중 검사는 각각 `12 passed, 6 skipped`로 검증됐지만 전체 검사에는 각각 195개 실패가 남아 있다. 사용자가 이 알려진 제한을 수용하고 기존 두 PR의 머지를 지시했다. 검사 실패를 숨기거나 CI checks를 성공으로 변경하지 않는다. 이 결정은 향후 release gate·비밀 값 접근·고정 checker source pin 확대·전역 설정 변경의 승인이 아니다.
+- **두 PR 일반 merge 완료:** [PR #14](https://github.com/Just-Simple0/Syllva/pull/14)는 `codex/gui23-settings`에 merge commit `dac79697f3434799e14c9068af1df6fd4716471f`로 2026-10-04 11:25:35 KST, 이어 [PR #13](https://github.com/Just-Simple0/Syllva/pull/13)은 `codex/gui1-reviewed-base`에 merge commit `c41d6aeb34cf789efea9b6adde20548b3abb1b73`로 11:26:24 KST 머지됐다. GitHub의 두 `MERGED` 상태와 SHA를 확인했고 로컬을 같은 최종 merge까지 fast-forward했다. 현재 최종 통합 브랜치는 `codex/gui1-reviewed-base`다. 기존 GUI PR 지적은 해결 완료로 표시하지 않고 후속 기록에 남긴다. GUI4·5는 설계부터 대기를 유지한다. 실제 head/base/SHA 및 인계 문서 게시 결과는 private CI progress의 `merge_followup`에 보존한다.
+
+## Windows 보안 파일 보완·실제 CI 판정 — 2026-10-04
+
+- 승인한 프로젝트 문서 예외 `dac0e6f7f5b6c54ae0a7bc7b0ba5af1c4575c706d3cc9d79ba2c2c649c7b700d`와 기존 Python 9핀·문서 1핀을 유지한다. 사용자가 유지 결정을 재확인했으며 개인 전역 검사기·hooks/config는 이 작업에서 변경하지 않았다.
+- 이전 실제 Windows 집중 검사의 유일한 실패는 missing-file 테스트의 준비 과정이었다. 같은 담당자 `gpt-6-luna/max`가 public writer로 synthetic sibling을 먼저 작성해 canonical Windows 디렉터리 DACL을 마련하고 missing target 부재를 확인하도록 한 테스트만 보완했다. 제품 guard·공유 helper·CI·checker는 동결했다. 로컬 targeted `1 passed`, owning Ruff/diff-check PASS다.
+- 전체 9개 관련 소스의 Native Latest/Chat/Extra High 최대 `[0,3,3]` FINAL은 **GO / REQUIRED0**다. 원본 identity-bound 회수와 active project checker exit0을 확인했다(`final-missing-fixture-ready/task-record.json`). Pro effort 부재 fallback은 `pro_option_unavailable`; 새 UI/flow 변경이 없어 Gemini N/A다. 같은 exact source hash에 실제 CI 증거를 추가해 의견을 재사용했다.
+- 한 테스트 수정 커밋 `be6f1b0cb887c448e972ff0956828424d05e84d8`을 [PR #13](https://github.com/Just-Simple0/Syllva/pull/13)에 push했고, 일반 merge `2b90815d280b2db096093a3983d85577fc0ba792`로 [PR #14](https://github.com/Just-Simple0/Syllva/pull/14)에 반영했다. 두 remote SHA·비보호 ref preflight·한 파일 변경 범위·기존 dirty 보존을 확인했다.
+- [실제 CI run 37168540862](https://github.com/Just-Simple0/Syllva/actions/runs/37168540862)의 Windows Python **3.11·3.14 집중 검사는 각각 `12 passed, 6 skipped`**다. skip 6개는 POSIX mode/symlink/FIFO 전용이고 Windows raw directory/file ACL·missing/extra mask 거부·partial SID cleanup·TokenOwner 검사는 실제 실행됐다. 두 버전의 전체 suite는 각각 **`195 failed, 2139 passed, 23 skipped, 1 warning`**이며 macOS 두 버전은 통과했다. 3.11 이전 실패 목록과 비교하면 missing-file 한 건만 해결됐고 새 실패는 없다.
+- 현재 `_secure_file.py` SHA `325e7a970e02210d12c04e1c87edf77ac7244b71b9b3ea916729303648735559`, test SHA `e3c91864fe116567922740d7cceff859af3a48a57cadeb7b6ceccd930d772e37`, CI SHA `0a21b598577d8bf72328cb562f57295e97c4cdb675e46e9fe5f4d3462d455a8f`를 검토·게시·CI snapshot과 대조했다. 원문 로그/SHA·최종 처분은 `.insane-review/gui23-20261002/ci-corrections-20261004/corrected-runtime-final-disposition.json` 및 같은 `progress.json`에 보존한다.
+- 이 보안 파일 보완은 수락했지만 **전체 Windows CI·프로젝트는 완료가 아니다**. Windows `os.getuid()` 등 admission/journal/config/CLI(B2) 범위와 이전 GUI PR 지적은 별도 미결이다. B2 구현이나 고정 source pin 확대를 이번 수락으로 승인하지 않는다. GUI4·5는 설계부터 대기를 유지한다. 모델 호출 ledger는 hash 보충 참조를 기록했으나 자동 lifecycle 관측 0·hook trust/완전성 미확인으로 기록 공백을 남겼다. 실제 선택은 runtime/Native 원본 근거이며 시간·비용을 추정하지 않는다.
+
+아래 절은 각 게시 시점의 역사 기록이며 현재 판정은 위 절과 최신 private progress를 따른다.
+
+## Windows DACL 수정·프로젝트 문서 예외 적용 완료 / CI 게시 준비 — 2026-10-04
+
+- 사용자 “세가지 모두 진행”에 따라 같은 담당자 `gpt-6-luna/max`가 Windows specific mask, directory/file 양쪽의 독립 raw ACL 검증, missing/extra 권한 거부 회귀를 구현했다. Native에서 추가로 발견한 부분 SID 변환 실패의 메모리 해제 누락도 같은 담당자가 보완했다. 현재 source SHA는 `_secure_file.py` `325e7a970e02210d12c04e1c87edf77ac7244b71b9b3ea916729303648735559`, test SHA는 `31b3461ad2a4ebd330beb3c97cd0863732a197fbb6dee32569eb2bfcf2cc666f`다. 부모 확인 `15 passed, 3 Windows-only skipped`, owning Ruff와 diff-check PASS다.
+- 현재 CI는 기존 OS/Python 4개 matrix와 전체 pytest를 유지하면서 full-suite 성공·실패 뒤 Windows secure-file 집중 검사를 실행한다. 전체 22개 관련 소스의 Native Latest/Chat/Extra High `[0,3,3]` 최대 FINAL에서 **DACL·CI SOURCE GO / REQUIRED0**, 별도 **문서 pin 후보 GO / REQUIRED0**를 받았다. Pro effort 부재 근거와 원본 결속 회수는 `.insane-review/gui23-20261002/ci-corrections-20261004/final-corrected-scopes/`에 보존한다. Gemini는 UI/flow 변경 없음으로 N/A다.
+- 기존 오탐 보완은 정확한 Python 9개 source pin에 한정됐다. 이번 정상 설계 문서 `docs/plans/credential-secret-file-launcher.md`는 기존 예외 밖이었다. 사용자 “예외 추가하고 실제 3.11, 3.14는 CI 통해서 할 거지?” 결정 후, 한 문서의 exact path/SHA/48,413 bytes만 독립 immutable map으로 추가한 검토본 `dac0e6f7f5b6c54ae0a7bc7b0ba5af1c4575c706d3cc9d79ba2c2c649c7b700d`를 프로젝트 내부에 적용하고 AGENTS·채택 문서를 정합화했다. 적용 위치에서 `36 passed, 113 subtests passed`, 신규 test Ruff PASS, 실제 active checker의 `applied-current-task-record.json` exit0을 확인했다. 기존 9핀·reader·artifact/review gates 및 전역 설정은 불변이다. 적용 전 원본 기록/정책은 보존하고 전체 22개 패키지 source와 적용된 정확 bytes의 별도 mapping을 감사했다.
+- 제품/CI 정확한 3파일은 커밋 `6b4b28cdd182add99a685c5b7a1e2ece4d6656cb`로 기존 PR #13에 push했고 원격 head를 확인했다. 실제 GitHub Actions `37166278082`(pull_request)와 `37166275847`(push)가 새 소스로 진행 중이다. Windows3.11/3.14 집중 검사의 실제 결과는 아직 없다. PR #14에는 프로젝트 검사기 예외·문서 커밋과 이 제품 커밋의 일반 merge를 반영한다. 이전 PR #14 head `2386b44b25f7296a3e7947ef6d3d4892e6c1517c`의 Windows 실패는 새 소스의 결과가 아니다. 실제 runner 판정은 같은 CI progress에 이어 기록한다. Windows admission/journal/config(B2)와 기존 GUI PR 지적은 이 DACL 소스 GO로 완료되지 않는다. GUI4·5는 설계부터 대기를 유지한다.
+
+## CI 보완 A+B1 게시·실제 재검사 — 2026-10-04
+
+- 사용자 “CI 보완 해서 재테스트 해보자”에 따라 동일 Luna/max 담당자가 7개 파일을 보완했다. CI `web` extra·Windows 한정 `tzdata`·fixture/Node UTF-8·정확한 POSIX GUI lifecycle 10개 Windows skip·portable 인증/nonce 및 거부 우선순위 검사를 유지했다. Windows owner-SID helper의 ctypes 서명 6개와 native direct 회귀 1개만 추가했다. 전체 OS/Python 4개 조합과 전체 pytest는 유지한다.
+- Native Latest/Chat/Extra High `[0,3,3]` 최대 검토: A PLAN REVISE3의 지정 수정 반영, 별도 B1 PLAN GO, 21개 전체 관련 소스의 FINAL GO/REQUIRED0 및 원본 identity-bound 회수. 변경하지 않은 프로젝트 checker에서 현재 FINAL record exit0을 확인했다. UI 동작 변경 없는 이 범위의 새 Gemini는 N/A다.
+- 로컬 A 전체 pytest는 B1 전 `2345 passed, 9 skipped, 2 warnings`; loopback 권한을 갖춘 launcher `16 passed`로 해당 6개 환경 skip을 별도 확인했다. B1 후 secure-file `14 passed, 2 skipped`이며 두 native Windows 검사는 이 macOS에서 실행되지 않았다. 변경 Python Ruff, compile, projection lint, TOML parse PASS. 이를 실제 Windows 성공으로 확대하지 않는다.
+- 보완 커밋 `950931d3d86686e5e5d42500839bf22d67713d9b`를 기존 [PR #13](https://github.com/Just-Simple0/Syllva/pull/13)에 push하고 네 조합 Actions를 재실행했다. 같은 소스를 후속 [PR #14](https://github.com/Just-Simple0/Syllva/pull/14)에 일반 merge로 반영한다. 현재 실제 CI 판정·run/job/head 및 남은 결함은 `.insane-review/gui23-20261002/ci-corrections-20261004/progress.json`에 이어 기록한다. 이 문서 커밋 시점에는 CI 전체 통과·전체 PR 수락을 선언하지 않는다.
+- 첫 실제 재검사에서 Windows 두 Python 조합은 `232 failed, 2100 passed, 23 skipped`로 같은 결과였다(이전 `267 failed, 2070 passed, 13 skipped, 4 errors`). macOS는 `2351 passed, 4 skipped`다. `-rs`의 실패 요약 누락은 `-ra`로 보완해 별도 Native FINAL GO/원본 gate PASS를 확인하고 실패 이름·원인을 포함한 재검사를 이어간다. 변경 없는 20개 소스 의견과 현재 workflow 의견을 결합해 21개 현재 source coverage를 확인했다. 전체 CI 통과는 아니다.
+- Windows 공통 credential admission/CLI(B2)는 별도 계획 상태이며 아직 구현하지 않았다. 디렉터리 durability·native 보안 동등성과 고정 3개 소스 pin의 새 인간 범위 결정이 남았다. checker 코드/컴파일된 9핀/전역 설정은 불변이다. GUI23 기존 UI 지적 3건과 GUI4·5 대기는 유지한다. 근거 원문·전체 해시·실제 검사·부모 처분은 같은 private CI 작업 기록에 보존했다. 아래 절은 이전 게시 snapshot이다.
+
+## 게시 완료 및 추가 PR 리뷰·CI 보완 대기 — 2026-10-04
+
+- 커밋·push 완료: GUI-2·3 `e464e814961963808dce28a48ab5306f7a57e20a`, 프로젝트 전용 검사기 `4bc17f44b0f9d05dcad1b3841a0d0a86a19ac1b3`. 원격 세 브랜치 SHA를 실제 확인했다. [PR #13](https://github.com/Just-Simple0/Syllva/pull/13)은 GUI-1 기준 `codex/gui1-reviewed-base`와 비교하고, [PR #14](https://github.com/Just-Simple0/Syllva/pull/14)는 GUI-2·3과 비교한다. 기존 `main` 대비 36개 누적 커밋은 이 두 PR의 변경 범위 밖이며, 기준 브랜치도 `main`에 병합되지 않았다.
+- GitHub Codex의 추가 리뷰는 두 원본 커밋에서 완료됐다. #14는 주요 지적 없음. #13은 복구 버튼과 가능한 transaction branch의 불일치, 불완전 Canvas identity/registry의 Ready 표시, 최초 등록 실패에 기존 credential 보존 문구 표시의 세 지적이다. 총괄이 실제 소스와 대조했고, 동일 Luna/max 담당자에게 읽기 전용 진단·구체 수정안을 배정했다. 동일 Gemini ultra는 해당 GUI-2·3 UX 지적을 독립 판정한다. 이 추가 GitHub 리뷰의 실제 모델·강도는 노출되지 않아 기존 Native Latest/max·Gemini 정책 gate를 대체하지 않는다.
+- CI는 문서 빌드와 다수 macOS 실행을 통과했지만, macOS/Python 3.11의 Google 동시 replacement 한 실행에서 양쪽 `OPERATION_IN_PROGRESS`가 관측됐다. Windows 실행도 인코딩·보안 파일 처리·POSIX 전용 GUI 테스트 등에서 실패했다. 같은 커밋의 다른 macOS 통과를 실패 무시 근거로 삼지 않는다. 아직 CI 전체 통과·새 지적 CLOSED·병합 가능 판정은 없다.
+- 기존 GUI-2·3 범위 수락 증거는 보존하지만 **새 PR 지적·CI 실패에 대한 통합 수락은 대기**다. 제품 코드 추가 수정이나 checker의 고정 9핀 변경은 아직 하지 않았다. GUI-4·5 대기와 실제 secrets/provider 접근 금지를 유지한다. 게시·검사·리뷰 원본과 진단 범위는 `.insane-review/gui23-20261002/publication-20261004.json`, `publication-pr13-findings.md`, `publication-ci-failure-111254320118.txt`, `publication-windows-summary-*.txt`에 기록했다.
+- 게시 결과를 이 인계와 작업 기록에 추가하는 문서 커밋은 검사기 PR에 포함한다. GUI-4 master/mock 수정, 신규 GUI-4 계획서와 `RESEARCH/`는 로컬에 보존한다. 임시 기준 게시 worktree는 recoverable archive로 정리했다. 자동 merge·기존 heartbeat 재활성화는 하지 않았다. 아래 게시 준비·수정 전 수락 문구는 해당 당시 범위다.
+
+## GUI-2·3 커밋·PR 게시 준비 — 2026-10-04
+
+- 사용자가 커밋·push·PR 생성 및 리뷰 진행을 지시했다. 누적 변경이 크다는 지적에 따라 GUI-1 커밋 `2f39f19`을 `codex/gui1-reviewed-base` 비교 기준으로 보존하고, 수락된 GUI-2·3은 `codex/gui23-settings`, 프로젝트 전용 증거 검사기는 별도 후속 브랜치/PR로 나눈다. 기존 작업을 `main`에 한 번에 합치거나 자동 merge하지 않는다.
+- GUI-2·3 제품 소스는 기존 수락 snapshot과 동일하다. interaction mock은 검토된 전체 376줄/SHA `1b0d08dd877cc38bf2de07053a5fe203dce89bac0e23e58a5ef6c1c7fd72c845`를 커밋에 담고, 현재 GUI-4 문서 변경은 로컬에 보존한다. `RESEARCH/`와 GUI-4 신규 계획서는 게시 범위에서 제외한다.
+- 이번 게시의 검사 근거는 기존 Native/Gemini 범위별 수락과 유효한 자체 검사다. CLI26/peer27 프로젝트 gate를 게시 전 재확인해 exit0을 관측했다. GitHub PR/CI 결과는 별도 확인하며 기존 리뷰를 새 실행으로 표시하지 않는다. GUI-4·5 대기는 유지한다.
+- 이 절은 게시 준비 기록이다. 실제 커밋·원격 hash·PR URL·추가 리뷰 상태는 게시 완료 후 기록한다. 아래의 commit/push 제외 문구는 이전 지시의 역사 상태다.
+
+## 사용자 지시로 GUI-4·GUI-5 대기 — 2026-10-04
+
+- 최신 지시: **“권장 방식으로 진행해. 그리고 GUI4-5 단계는 설계도 시작하지말고 대기.”** R7 권장 A를 방향 결정으로 확정했다. 설정은 Configured로 저장하고, 실행 때 동일 자격증명 snapshot과 실제 소비할 매핑으로 목적별 읽기 전용 재검증을 수행하는 방식이다. 과거 검사만으로 현재 실행 가능 상태를 표시하지 않는다. 학사 설정과 검색 범위의 독립 선택도 유지한다.
+- 이 결정은 구현 GO가 아니다. **GUI-4·GUI-5의 추가 설계·구현·검사·리뷰 제출은 모두 사용자 재개 지시까지 대기한다.** GUI-4는 이미 설계 초안이 있으므로 그대로 보존하고 추가 작업을 멈춘다. GUI-5는 시작하지 않는다. 같은 담당자와 독립 reviewer에게 대기 지시를 전달했다.
+- 중단 전 담당자 제출 계획서 실제 SHA-256은 `ba39cae589635a5b50db5cbbc63e69e0c4c85ee635567fe7c17bb25b4df2cde3`이다. 제품 구현·전체 GUI-4 계획 수락·FINAL 수락은 없으며, 기존 독립 리뷰와 필수 미결 조건은 보존한다. GUI-2/GUI-3 승인 묶음의 수락은 유지한다. 아래 진행·답변 대기 문구는 이전 상태다.
+- 총괄은 이 결정과 대기 상태만 기록한다. 자동 후속 `syllva`는 기존 PAUSED를 유지하며 전역 변경·실제 자격증명/provider 접근·commit/push는 없다.
+
+## GUI-4 최신 상태 — 2026-10-04
+
+- 인간 결정: **학사 설정과 검색 범위를 별도로 선택한다.** `academic.active_semester`는 Academic/worker용이며 `retrieval.notion_lane/semester`는 별도의 명시적 검색 선택이다. 기존 `legacy_global` 검색은 Academic 저장으로 바꾸지 않는다.
+- GUI4는 **계획 보완·독립 검토 중이며 제품 구현 전**이다. 첫 Native authority PLAN은 Latest/Chat/Extra High `[0,3,3]`에서 REVISE9. 같은 Chandrasekhar `gpt-6-luna/max`가 plan/master/mock만 보완했다. 총괄이 원문을 읽고 R1–R9를 채택했으며, 원본 리뷰·해시·기록은 역사 snapshot으로 보존했다.
+- R7에는 실제 남은 설계 문제가 있다. GUI 난수 `credential_revisions`가 CLI·직접 managed-slot 교체까지 추적하지 못하므로 durable current Verified의 근거가 될 수 없다. 과거 검사 메타데이터와 같은 credential snapshot의 실행 시점 읽기 전용 preflight를 분리하는 좁은 대안은 Native가 조건6을 전제로 적합 의견을 냈으며, 인간 선택과 전체 GUI4 계획 수락은 아직 없다. 같은 Gemini ultra는 제한 UX 자문으로 이를 추천했지만, 전체 PLAN GO·실행 증거·인간 결정은 아니다.
+- Native R7 scoped architecture 원본 COMPLETE canonical 회수 및 현재 프로젝트 gate exit0을 확인했다. Latest/Chat/max3를 첨부 전후 확인했고 기술 의견은 **해당 아키텍처에만 GO**, 조건6 및 실제 소비 소스 closure가 남는다. 인간에게 Configured 저장+실행 재검증+증거 전 Overall 확인 필요 표시와 새 학기 기능 보류의 선택을 요청했으며 답변 대기다. 다른 source scopes의 새 PLAN 리뷰·Gemini material-flow 재리뷰·전체 source closure/gate·부모 구현 GO가 남았다. 제품 테스트·새 GUI4 화면·FINAL 리뷰는 아직 없다.
+- 실제 기존77-source snapshot과 비교해 변경은 plan/master/mock 3문서이며 나머지74는 동일했다. 프로젝트 checker와 전역 원본 SHA는 불변이다. 큰 SQLite/Notion 스키마 및 관련 provider/fixture 소스도 손실 없이 분할 검토해야 한다. checker pin 갱신이나 필수 소스 누락으로 통과시키지 않는다.
+- 현행 상세 상태: `.insane-review/gui4-20261003/progress.json`; 최초 Native 처분: `parent-plan-r1-disposition.md`; R7 소스 검토: `plan-source-revision/`. 전체 프로젝트 완료·GUI4 구현 완료·commit/push를 선언하지 않는다. 아래 GUI23 수락과 이전 HOLD/진행 문구는 해당 역사 범위다.
+
+## GUI-2/3 수락 및 GUI-4 진행 — 2026-10-03
+
+- **GUI-2/GUI-3 승인된 묶음 수락 완료.** 최신 CLI26·peer27 GO/REQUIRED0의 원본 기록·manifest·canonical 응답·패키지는 불변으로 보존하고, 정책 선호와 실제 실행을 구별한 파생 기록으로 현행 프로젝트 전용 checker exit0을 확인했다. 실제 Native는 Latest/Chat/Extra High 최대3이며 Pro 실행으로 바꾸지 않았다. R2/R3 FINAL 및 corrective PLAN도 프로젝트 명령 exit0.
+- UI는 19개 변경 없는 소스의 Native/Gemini 의견만 재사용했고 역사22 패키지 전체 원본 SHA를 재구성했다. 바뀐 backend3은 최신 peer27 의견으로 대체한다. 동일 Gemini3.8Flash/ultra가 재사용 GO0 확인; 과장된 완벽/100% 및 실제 없는 CREDENTIAL_BUSY는 부모가 수락하지 않는다. 옛22 전체 current-record PASS나 새 화면·266 재실행을 주장하지 않는다. 상세 행렬·원문·선택·최종 처분: `.insane-review/gui23-20261002/reconciled-20261003/`.
+- 사용자 **진행하자**에 따라 다음은 **GUI-4 Academic/Automation 구현·검사·독립 리뷰**다. 동일 Chandrasekhar `gpt-6-luna/max`가 현재 상세 설계를 작성하고, 총괄 `gpt-6.1-sol/high`가 기획·통합·판정을 맡는다. 새 Native Latest/max 및 Gemini ultra PLAN/FINAL, 실제 합성 화면/동작 근거를 갖춘 후 별도로 수락한다. 중단으로 worker도 interrupted/notLoaded였으며 같은 기존 채팅에 모델 override 없이 후속 메시지를 보내 연속 책임을 유지했다. close/resume·새 worker 없음.
+- 승인된 checker 코드·고정9pin·root·전역 원본 불변. GUI4는 실제 서비스 startup의 적용 설정과 원하는 설정을 구별해야 한다. 실제 credentials/env/provider/Keychain, scheduler/collector 활성화, GUI5, 전역·다른OS 확장, commit/push는 제외. 전체 Syllva 프로젝트 완료가 아니며 HEAD `2f39f19193fe4abc01e61c8d3b2d9aabbd857f37` 유지. 아래 HOLD와 진행 문구는 당시 역사다.
+
+## 현재 재개 상태 — 2026-10-03
+
+- **Checker 로컬 구현·리뷰·Syllva 전용 사용 완료.** 사용자 `권장안에 맞춰서 진행하자. 구현 및 리뷰 진행해` 뒤 **“아니. 이 프로젝트 내에서만.”** 결정으로 전역 적용 제안을 거절했다. 같은 Luna/max 제출 19tests/113subtests PASS, candidate 새 Ruff 진단0/test진단0/compile PASS. 총괄이 SHA/함수 AST/pin/root/current CLI·peer source를 확인했다. Native PLAN과 FINAL 모두 Latest/max3 GO/REQUIRED0, COMPLETE 원본 canonical 회수와 무손실 source/body/package audit 및 **후보 자신의 리뷰 기록은 변경하지 않은 원본 checker exit0**이다. 검토된 코드 SHA `a1004ffae36d06378ffe44a9b242699bc2c7c2109272a0ef6f0abe5c5892b836` 그대로 `scripts/review_evidence_checker_candidate/state_check.py`를 프로젝트 AGENTS 전용 명령으로 지정했다. 현재 선택 `docs/plans/project-review-evidence-checker.md`, 실행 증거 `.insane-review/checker-path-20261003/project-activation.json`, 판정 `final-disposition.md`/단계 `progress.json`. 원본 전역 checker·ULS source·hook 미변경. 전역 적용 승인을 다시 요청하지 않는다.
+- **현행 최종 처분: 필수 기술 지적 CLOSED, 기존 리뷰 기록 정합성으로 전체 수락 HOLD.** CLI full26와 GUI peer/service/admission full27의 최신 Native 재리뷰 모두 GO/REQUIRED0다. 마지막 동시 교체 loser config/journal exact preservation 검사 지적도 닫혔다. 실제 총괄 `gpt-6.1-sol/high`, 같은 담당자 `gpt-6-luna/max`를 유지했다. 현재 gate는 사용자가 선택한 Syllva 전용 검사기이며 전역 적용 승인은 더 이상 미결이 아니다.
+- 제품 보완 당시 담당자의 동일8suite266PASS를 재사용하고, 이후 테스트 assertion만 보강해 focused3PASS/Ruff/compile을 확인했다. 현재 test SHA `1eeae0b30657492c8d67a829acf41f16398075f9527c891854b6af4dff4520e2`, scoped 제품·CLI 소스는 그대로다. 총괄은 실제 소스/해시/응답을 대조했으며 전체266 반복 실행이나 Native pytest 실행을 주장하지 않는다.
+- 원본 COMPLETE canonical 응답: CLI `final-r1-cli-266/response_harvest_20261003_173431_50138_294934.md`, peer `final-r1-peer-preservation/response_harvest_20261003_180403_50953_5b44e0.md`. Latest/Chat/Pro effort 부재/max3를 전후 검증하고 손실 없는 전체 소스·identity/body/package SHA를 확인했다. 새로운 material UI 변경 없어 새 Gemini N/A, 과거 UI 의견은 제한된 역사 근거다.
+- **현재 남은 것은 기존 CLI/peer 기록의 강도 메타데이터 정합성과 프로젝트 전용 gate 재확인이다.** 사용자 지시로 이 canonical Syllva workspace의 consistency command만 검토된 로컬 검사기를 사용하며 개인 전역 원본은 보존한다. 실제 프로젝트 명령에서 checker 자신의 PLAN/FINAL record exit0, old CLI/peer record는 source stage PASS이나 `requested_effort: extra_high`가 보존된 `requested_effort == pro` gate와 불일치해 full validate exit2다. 구형 기록·원문을 변경하지 않았으며 전체 GUI 수락은 HOLD다. 전역 적용은 거절됐으므로 미결 승인 항목이 아니다. Rename/source 누락·승인 생성 없음.
+- 자동 heartbeat `syllva`는 허용된 후속을 모두 마치고 인간 결정만 남아 도구로 PAUSED 처리, 저장 상태/target 확인. 담당자 close/resume 및 모델 변경 없음. 전체 수락·새 commit/push 없음. HEAD `2f39f19193fe4abc01e61c8d3b2d9aabbd857f37`.
+- 상세 최종 판정: `.insane-review/gui23-20261002/final-bounded-disposition.md`, 현재 단계/소유/미결: `progress.json`, 제출 snapshot: `owner-selfcheck-peer-preservation.md`/`owner-freeze-peer-preservation.json`. 아래 중간 제출/진행 문구는 역사이며 이 현행 처분을 우선한다.
+
+## 이번 단계 진행 이력 — 2026-10-03 (역사)
+
+- **peer266 최신 판정·검사만 보강 중:** 원본 COMPLETE canonical response_harvest_20261003_174349_50500_9d916f.md는 production REQUIRED0, direct acceptance-test REQUIRED1. GUI EACCES/invalidUTF8 보완과 이전나머지지적은 CLOSED; 동시 Notion/Google replace loser의 config exactbytes 및 journal filename→bytes 무변경 assertion만 실제누락이다. 같은담당자에 서비스test2함수만 보강/집중3case·Ruff·compile 배정, 제품/CLI/fixture/계획 동결. 유효266제품검사 재사용, 전체266반복 불필요. 수정본 current27 전체소스 Native재리뷰는 총괄이 진행. CLI GO0재사용, 원본checker exit2HOLD, 전체수락/commitpush 없음. 진행Chrome없음.
+- **CLI266 Native GO·peer266 재리뷰 시작:** CLI full26 원본 COMPLETE canonical harvest response_harvest_20261003_173431_50138_294934.md 판정 REQUIRED0, 이전CLI2 CLOSED. 총괄 identity/body/source/package 감사PASS, originalcheckerexit2·credential_admission.py 파일명 오탐HOLD. GUI peer/service/admission full27,461396bytes/SHA49455ad4…eb4361 단일실행17016을 시작해 응답 대기. Native는 정적검토이며 테스트실행/전체수락 아님. CLI OPTIONAL state_key cause관찰은 공급된 peer전체소스에서 독립판정하며 가설만으로source확장하지않는다.
+- **현재266 결합 제출 확인·Native 재리뷰 진행:** same Luna/max의 GUI stores.read genuine ENOENT 원인 확인과 service._separate Notion strictUTF8/원래bytes 비교 보완을 총괄이 실제 소스·3파일 SHA로 확인했다. Red3→green3 및 동일8suite266PASS/owning Ruff·mypy·compile은 담당자 실행 근거이며 총괄266 반복 실행은 없다. CLI263/admission/공유secure_file/UI/계획은 동결해 유지됐다. Immutable owner-selfcheck-266-gui-followup.md와 owner-freeze-266.json으로 결합 snapshot을 보존했다. 최신26파일 CLI Native를 final-r1-cli-266에서 단일 전송했으며 Latest/Chat/Pro effort 부재와 slider 최대[0,3,3]를 첨부 전후 확인했다. 원본 manifest_Syllva_20261003_172726_49927_c17501.json USER_BOUND; 실행65186 응답 대기. Peer27전체소스는 CLI 회수·판정 이후 순차 진행한다. 아래224/250/256/263단계는 역사이며 현재 GUI수정대기 문구를 현행상태로 해석하지 않는다. 원본 checker HOLD·전체수락/commit/push 없음.
+- 승인 범위: R1 per-user Syllva managed shared slots + 현재 workspace effective external/env peer. 다른 workspace external/env index·GUI4/5·실제 키/provider/Keychain/`.env` 접근·수집/sync 활성화·다른 OS 저장소 확장·commit/push는 제외한다. 기존 dirty/untracked·`RESEARCH/`·`CLAUDE.md`를 보존한다.
+- 역할: 총괄 실제 `gpt-6.1-sol/high`, 연속 담당 Chandrasekhar 실제 `gpt-6-luna/max`, 기존 독립 UI/error-flow Newton 실제 `google-antigravity/gemini-3.8-flash/ultra`. 총괄이 기획 겸임, 고정 배정 Jev N/A. 모델 변경·추가 verifier 없이 기존 담당 책임을 유지한다.
+- **마지막 확인 제출·263PASS:** same Luna/max가 CLI 일반read-error와positiveENOENT를 구분하고 canonicalfile strictUTF8를검증했다. 집중 red4실패/2통과→green10통과, 동일8suite263PASS와 CLI owning검사는 담당자 실행근거다. 총괄 actualCLI SHA `cada62beb0c0faacf34ed64e44eebb1cf24b6d6574380d0291943d709bc09e09`/test `a36d47e6cb0e66dd341512cd0833416e56de85cab42900e439dcfa130b6a61d1`와 unchanged service6case SHA를 확인하고 immutable `owner-selfcheck-263-cli-gui-repro.md`로 보존했다. 이전250/256/224는 각 당시snapshot. 이후GUI필수수정 진행중이며263을미래finalsnapshot으로부르지않고총괄263반복실행주장없음.
+- **Native admission 재리뷰 GO — 이전 REQUIRED1 CLOSED, 추가 REQUIRED0:** 최신28전체소스466867bytes; 요청된 Latest(`최신`)/linked slider 최대 `[0,3,3]`/`extra_high`, Chat 및 Pro effort 부재 확인. 원본 `manifest_Syllva_20261003_145129_43375_301426.json` COMPLETE identity-bound harvest `response_harvest_20261003_150153_43783_f708ed.md`. 전체 기록은 `.insane-review/gui23-20261002/final-r1-admission-rereview-full/task-record.json`. Static source/direct regression 검토이며 Native가 테스트를 실행한 것은 아니다. OPTIONAL 혼재 구버전 프로세스 rolling compatibility는 범위 밖으로 보류한다.
+- **Native peer 검사 재리뷰 REVISE — 제품 REQUIRED0, 검사 REQUIRED3:** full27 whole-source447402bytes/112386tokens 원본 `manifest_Syllva_20261003_160725_46397_7e7f1c.json` COMPLETE 및 canonical `response_harvest_20261003_162511_47011_d8b523.md` identity/body/source/package SHA를 확인했다. 기존 Google enroll 동시성·abrupt exit·v2/legacy/exact identity 검사는 CLOSED. 규범의 교차 workspace 동시 replace, configured-unreadable peer의 save 차단, enrollment leave/abandon 뒤 opposite-purpose 재판정 직접 검사가 남아 같은 담당자의 service 테스트 한 파일에만 부족분을 배정했다. 제품/CLI/testCLI/fixture/계획은 동결한다. Native는 정적 검사이며250 실행이나 첨부물만으로 suite 재구성을 주장하지 않는다. 소유 코드의 새 필수 결함 재현 시 source 수정 전에 총괄에게 보고한다.
+- **Service 필수검사3 보강 checkpoint 확인:** 같은 담당자가 동시 replace의 loser 기존값 보존, configured unsafe peer save의 무변경, enrollment abandon 후 opposite same-value 재등록을6directcase로 보강했다. 변경 service test SHA `001407cfe6e1d85fae93c55a5c13df08599bb116f6cb1a6263badddbf6423e0e`/동결 제품·fixture·plan을 총괄이 확인했고, focused6/service42/관련8suite256PASS 및 test Ruff·compile은 담당자 실행 근거다. Immutable256 보고서 보존. CLI 필수2 및 GUI 유사 경로 조사는 계속 진행 중이므로 이 checkpoint를 전체 최종 snapshot으로 부르지 않고, 안정된 결합 제출 후 필수 Native 재리뷰한다.
+- **수정 CLI 재리뷰 REVISE REQUIRED2:** whole26source417173bytes 원본 `manifest_Syllva_20261003_162711_47163_664469.json` COMPLETE, canonical `response_harvest_20261003_163535_47841_c621eb.md` identity/body/package/source 감사 확인. Latest/Chat/Pro effort 부재/max3 전후 gate 확인. Empty canonical peer 수정은 CLOSED. 일반 POSIX OSError가 *_missing으로 매핑돼 peer 부재/target확인생략으로 오인하는 경로, canonical file invalidUTF8 통과가 남아 same-owner CLI-local 최소 수정과 재현검사에 배정했다. shared _secure_file 변경과 OPTIONAL확장은 하지 않는다. GUI CredentialStores/Notion peer에도 같은 경로가 있을 수 있다는 총괄 가설은 합성 재현 보고 전 확정하지 않으며 GUI제품은 동결한다. 해당2항목은263 제출로 최소 수정됐으나 Native 수정본 판정은 아직 남았다. GUI 의심은 아래의 실제 합성 재현으로 확정됐고 기존단계의가설문구를 현재미결상태로해석하지않는다.
+- **GUI canonical peer 결함 합성 재현·최소 보완 배정:** owner의임시workspace/FakeKeyring/FakeProvider/environ{}에서 actualsecurefile os.open EACCES→stores.read None→opposite save targetwritten, canonical invalidUTF8→opposite save targetwritten을재현했다. 실제secret/provider 접근없는별도GUI결함이며CLI Nativefinding으로섞지않는다. 승인된같은bounded안전계약상필수로판정해 같은담당자에게 credential_stores.read positiveENOENT원인확인, credential_service._separate 모든presentNotionpeer strictUTF8검증/원래bytes비교, permanentdirectregression/필요stores검사를배정했다. 공유_secure_file/state_key/journal/admission/CLI/UI/plan은동결. 새실제결함은확장수정전총괄보고. source/check가안정된결합제출뒤CLI+peer를순차전체소스로재리뷰한다.
+- **Gemini 리뷰 재사용 한계:** 이전 bounded UI/error-flow GO 및 당시217PASS는 과거snapshot이며 현재263전체실행/전체source리뷰가 아니다. 현행UI/static/factory/기존fixederror흐름의 제한된근거로만 유지한다. 이번 stores/service 보완은 기존positiveabsence·invalidpeerfailclosed 계약을 기존INVALID_CREDENTIAL로 복구하는 좁은backend수정이며 새materialUI/layout/copy/code 없음으로 새Gemini N/A. 과거service해시를 이후수정서비스의current검증으로주장하지않는다.
+- **개인 원본 checker HOLD:** 새 admission GO 기록에서도 원본 state_check exit2, first filename rejection `src/uls/settings/credential_admission.py`. 정상 source path의 SECRET_PART 오탐 진단만 했으며 PASS·승인 증거가 아니다. 전역 수정/설치·rename 우회·source 누락·guard 면제 없음. 해시/metadata/0600 제안은 논의이며 적용 승인 없음. 공개 임시파일로만600의 같은UID 읽기 허용을 확인했다.
+- **자동 후속 확인:** 이 채팅에 heartbeat `syllva` ACTIVE,10분 간격, 저장 target/status 확인. 완료 원문/의미 있는 새지적/인간 결정 필요만 중복 없이 알리고 동일 상태는 조용히 기다린다. 아직 peer/CLI 독립 작업이 남아 있어 자동 후속을 종료하지 않는다. 담당자 채팅 「R1 설계와 파일 범위 확인」은 사용자 요청 맥락에 따라 앱에서 열었다.
+- **전체 수락·새commit·push 없음**, HEAD `2f39f19193fe4abc01e61c8d3b2d9aabbd857f37`. 다음은 같은담당자의확정GUIpeer 최소수정/red-green/currenthash/check제출 확인과결합snapshot 필수Native전체소스재리뷰다. 진행중Chrome없음. 원본checkerHOLD와별도인간결정은기술리뷰로대체하지않는다.
+- 전체 단계/소유/의존성/검사/판정: `.insane-review/gui23-20261002/progress.json`; 분야 현재 sourceSHA/실행: `r1-bounded-worker-selfcheck.md` (같은 private evidence root). Pre-R1 metadata22소스 GO/114PASS 및 화면은 역사 근거이며 현재전체R1 snapshot이나 신규R1 화면으로 재사용하지 않는다.
+
+## 이전 metadata 단계 기록 — 2026-10-02 (pre-R1)
+
+- 요청 범위: `handoff.md` 확인 후 GUI-2/GUI-3 독립 리뷰와 필수 보완. GUI4/5, 실제 provider·사용자 credentials·Keychain, 수집/sync 활성화, Windows/Linux 저장소 확장, push는 범위 밖이다. 기존 dirty/untracked·`RESEARCH/`·`CLAUDE.md`와 이전 인계를 보존했다.
+- 오케스트레이터 실제 `gpt-6.1-sol/high`; 연속 구현 작업자 Chandrasekhar `gpt-6-luna/max`; 독립 Newton `google-antigravity/gemini-3.8-flash/ultra` 실제 선택을 확인했다. source/store metadata·비밀 값 비노출 경계의 연속 보완에 같은 작업자를 유지했다. 기존 작업자 인스턴스 `not_found` 이후 같은 설치 profile/model을 복구한 것이며 identity 변경이 아니다. 고정 배정 Jev N/A.
+- **최신 기술 리뷰: native 웹 ChatGPT Latest(`최신`)/`extra_high` GO, REQUIRED0; Gemini ultra GO.** Chat mode·selected radio 및 linked slider `[0,3,3]` 최대를 첨부 전후 검증했다. `pro_option_unavailable`은 Latest reasoning slider의 Pro effort 부재이며 다른 모델의 Pro 선택이나 quota 소진을 뜻하지 않는다. 22개 전체 최신 소스 audit, package 447240bytes/112158tokens/SHA `2f2ae7b44138970bdb545ba395e093eef5c9b4e5affbe0b7ee9eb3c872955ffc`, 원본 schema2 identity-bound manifest에 결속한 전체 응답 회수 완료.
+- **UI와 metadata 필수 보완 동결:** 초기 UI1–6 및 focus/file 경합 보완, env/external 상태·부재 시 Provided-by 오표기·저장 위치 표시, Google config-relative/expanduser/canonical managed 분류, main/standalone 두 fake factory의 공유된 fixed-store 격리 모두 최신 native 리뷰에서 CLOSED. production raw path secure-read/nofollow 유지; fake 환경은 env/external 값을 읽지 않는다. 최신 Native OPTIONAL future smoke artifact 제안은 필수 조건이 아니므로 추가 작업하지 않았다.
+- **현재 관련 계약 테스트 부모·작업자 114 PASS**, 알려진 Starlette deprecation warning1. owning Ruff/mypy/diff 및 양쪽 fresh-interpreter import-order factory smoke PASS. 현재 전체 test/lint/type clean을 주장하지 않는다. 과거 전체2135PASS/9skip 및 기존 mypy/loader 진단은 역사 기록이다.
+- **최신 실제 UI 증거:** `.insane-review/gui23-20261002/final-ui-metadata-factories-evidence.json`, `screens/metadata-factories-current-cards.png`. 최신8소스 해시가 화면 수집 전후 일치한다. 상대 경로의 가짜 Google MCP/worker 관리 카드 표시와 clean-close를 관측했다. 실제 사용자 키·provider·Keychain은 사용하지 않았다. 화면은 카드 렌더링 근거이며 byte-read 격리는 backend tests 근거다. 중단된 oversize chooser는 NOT PASS; keyboard/races/21→20/POST ending은 harness 근거다. 임시 서버와 정상 테스트 탭은 종료했다.
+- **R3 standalone Canvas network만 최종 수락:** exact list path/unique active·term·per_page50/bounded page, bad-next dispatch 차단. checks73+service66PASS, owning Ruff/mypyPASS, native bound FINAL GO 및 당시 original state_check PASS. UI 없음으로 Gemini N/A. `canvas_checks.py` SHA `1a8551b10ad2bd273d1889f2e13959ac7d6d973928b1919fc291e4e2e3a3c9d0` 동결. 전체 Canvas service/config/store/UI 승인 아님.
+- **R2 adapter는 GO 의견·최종 수락 HOLD:** real HTTPResponse framing/rawcap, SDK 예외 비밀 값 비노출, 실패 last_check 보완 및 F1–F3 CLOSED. 당시 provider52+credentialService/HTTP21=73PASS, owning Ruff/mypyPASS. `provider_checks.py` SHA `6f001daeb292af029cf1c6732c08b7f189ceb0d9dcb8a69612d96ef90303466d` 동결.
+- **원본 증거 검사기 HOLD:** 최신 기록에 original `state_check.py` 실행 exit2, `state_check: validation failed`. 변경하지 않은 원본 함수 진단은 `_verify_sources:175 → _safe_relative:43 → _require:31`, 첫 차단 소스 `src/uls/settings/credential_roles.py`의 SECRET_PART 파일명 오탐이다. 진단은 수락 증거가 아니다. 파일명 변경·소스 누락·guard 우회·global 수정/설치 없음. 정확한 소스 path+digest 대상 보완의 설계·독립 리뷰를 추가할지 인간 질문 미답이며 실제 적용 승인은 없다. 제안 `.insane-review/gui23-20261002/state-check-path-finding.md`.
+- **R1 권장 범위 승인 — 2026-10-02:** 공유 managed store+현재 프로젝트 effective external/env peer만 대상으로 구현한다. 다른 프로젝트 external/env index 확장은 제외. 기존 native bounded PLAN은 전체11소스/패키지 hash 일치로 재사용하며 같은 Luna/max가 분야 설계·구현·자체 검사·리뷰 보완을 연속 담당한다. Gemini bounded admission/error-flow PLAN 확인 중. 자세한 결정은 `.insane-review/gui23-20261002/r1-scope-decision.md`. 실제 키 변경·재발급/사용 없음.
+- **전체 최종 승인·새 commit·push 없음.** HEAD `2f39f19193fe4abc01e61c8d3b2d9aabbd857f37`. 다음 단계는 승인된 bounded R1 보완·필수 검사/리뷰와 개인 checker 접근 방식 선택이다. 기술 GO가 이 선택이나 original checker gate를 대체하지 않는다. 이미 유효한 검사·리뷰 증거는 재사용하고 새 필수 결함 없이 추가 구현/리뷰를 만들지 않는다.
+
+## 리뷰·검사 증거
+
+- 최신 FINAL 기록: `.insane-review/gui23-20261002/final-ui-metadata-factories/task-record.json`; original manifest `manifest_Syllva_20261002_143815_83502_37f7d8.json`; 전체 bound harvest `response_harvest_20261002_144727_83910_ee8f1a.md`. 두 reviewer 의견·실제 모델/effort·전체 소스/응답 hash·원본 checker 결과·HOLD를 기록했다.
+- 최신 Gemini 전체 의견/선택 증거/부모 판정: `gemini-final-metadata-factories.md`, `gemini-final-metadata-factories-selection.json`, `gemini-final-metadata-factories-parent-disposition.md` (위 private evidence directory). 전체16 turn_context 실제 ultra 확인; 과장된 제품 전체 보장은 수락하지 않고 named source/tests/가짜 화면 근거로 한정했다.
+- corrective PLAN `.insane-review/gui23-20261002/plan-r2/task-record.json`: 원본 bound full GO/native 당시 checkerPASS, Gemini ultraGO. R1 인간 범위나 전체 승인 대체 아님. 계획 `docs/plans/local-settings-gui-23-review-corrections.md`.
+- R3 FINAL `.insane-review/gui23-20261002/final-r3/task-record.json`; R2 full GO `.insane-review/gui23-20261002/final-r2-rereview/task-record.json`. UI·metadata의 중간 REVISE/GO 원문은 각 private evidence directory에 보존했고 최신 CLOSED를 이전 의견으로 소급하지 않는다.
+- 단계/소유/질문/검사/판정: `.insane-review/gui23-20261002/progress.json`.
+
+## 이전 인계 — 2026-10-01 (역사)
+
+갱신: 2026-10-01 (Asia/Seoul)
+저장소: `/Users/admin/Project/Syllva`
+브랜치: `codex/protected-secret-file-and-credential-set`
+
+## 이번 채팅의 목표와 현재 상태
+
+사용자가 **GUI-2/GUI-3 구현과 자체 검증까지만 완료하고, 독립 리뷰는 새 채팅에서 진행**하도록
+지시했다. 최종 리뷰·출시 승인·커밋·push는 이번 채팅 범위가 아니다.
+
+| 범위 | 현재 상태 |
 |---|---|
-| 총괄/관리 | **현재 Codex 주 에이전트** — 요구 해석·계약 판단·검증·통합·머지 |
-| 계획 초안 | **Claude Sonnet 5 high** |
-| 개발/구현 | **Codex Luna max** (`gpt-5.6-luna`, reasoning=max) |
-| 리뷰 | **insane-review (GPT-6 Pro, 불가 시 사용자 승인한 최신/매우 높음)** + **AGY Gemini 3.8 Flash high** (2중 독립) |
+| GUI-1: 로컬 설정 셸·세션·설정 CAS·복구 저널 | 과거 승인 및 로컬 커밋 `2f39f19` 완료, push 없음 |
+| GUI-2: Notion/Drive 역할별 자격증명 | 구현·자체 검증 완료, 독립 리뷰 대기 |
+| GUI-3: Canvas 연결·강좌 선택·접근 lease | 서비스·네트워크·화면 통합 및 자체 검증 완료, 독립 리뷰 대기 |
+| GUI-2/3 최종 독립 리뷰 | 사용자가 새 채팅으로 연기, 아직 실행하지 않음 |
+| GUI-2/3 최종 승인·커밋 | 대기 |
 
-**2026-09-08 사용자 지정:** Phase 4부터 insane-review를 GPT-6 Pro로 실행한다(`--model pro --require-model "GPT-6"`). 실제 모델·Pro 추론 단계 검증 실패 시 중단하고 자동 대체하지 않는다. 설치/의존성·브라우저·로그인·활성 GPT-6 Pro 검증 완료(아래 실행 래퍼 사용). 아래 과거 Phase의 GPT-5.6 리뷰 기록은 당시 이력이다.
+구현 완료는 이번 합의 범위의 코드와 자체 검증 완료를 뜻한다. 독립 리뷰·최종 승인 완료를 뜻하지 않는다.
+GUI-2/3 변경은 아직 작업 디렉터리에 있으며 새 커밋이나 push는 없다.
 
-**Phase 4~8 연속 작업 착수(2026-09-08):** 사용자 승인으로 현재 Codex가 총괄하고 Sonnet 5가 계획 초안을 작성한다. 아래 파이프라인의 Opus 역할은 현재 총괄이 수행한다. 기준 테스트 238개·Behavior Contract lint·108개 Python 파일 구문 검사 통과. Sonnet 서브에이전트는 encrypted-task 전달 오류로 실행 불가하여 Claude CLI로 전환했고, 사용자 로그인 후 인증 복구를 확인했다. Gemini는 `agy` CLI로 실행 가능. ChatGPT 전용 브라우저 로그인 및 **GPT-6 Pro 활성 UI 검증 통과**. 설치된 insane-review 0.6.2의 모델 판독이 숨겨진 구모델 목록을 잘못 읽어 `scripts/review_gpt6_pro.py`에서 활성 헤더·Pro 슬라이더 검증만 보정한다. Phase 4 계획 작성 중이며 Phase 4~8 구현/리뷰 완료를 의미하지 않는다.
+## 구현 범위와 경계
 
-**최신 실행 상태:** Sonnet Phase 4 rev1 → Gemini 독립 리뷰 REVISE → Sonnet rev2 → 현재 총괄 통합 rev3를 `docs/plans/phase4-material-usage.md`에 저장했고 **Gemini 재리뷰 GO**를 받았다(`.review/phase4-plan-rev3-gemini.md`). 새 채팅의 Pro 메뉴는 사용량 한도로 비활성화되어 **“2026년 9월 13일 후에 다시 시도”** 안내를 확인했다. 앞선 `6 Pro` 선택 표시와 달리 신규 GPT-6 Pro 리뷰 실행은 현재 불가능하며, 리뷰 프롬프트는 전송되지 않았다. 사용자에게 접근 복구/리뷰 경로 변경 여부를 요청했고 답변 대기 중이다. 상세 상태·재개 지점은 `docs/plans/phase4-8-execution.md` 참조. Phase 4 구현 관문은 아직 통과하지 않았고 Phase 5~8도 미착수다. 커밋/푸시는 하지 않았다.
+GUI-2는 Notion MCP/worker 및 Google Drive MCP/worker의 네 역할에 대해 등록·교체·로컬 삭제,
+외부 파일 사용 중단, 읽기 전용 연결 확인, 저널 기반 복구와 설정 generation 갱신을 제공한다.
+브라우저는 역할만 선택하고 실제 Keychain 서비스·계정·파일 경로는 코드가 결정한다.
+역할별 값의 분리, 비밀 없는 저널, 역할·물리 저장소 단위 동시 접근 제어와 설정 CAS를 유지한다.
 
-```text
-1. 계획 수립(Opus) → 2. 계획 리뷰(2중) → 3. 구현(Codex) → 4. 검증(Opus)
-→ 5. 2중 리뷰 → 6. 커밋/푸시(둘 다 GO + 검증 일치 시에만)
-```
-리뷰어가 엇갈리면 **Opus가 직접 코드로 재현해 타이브레이크**. 지적으로 재수정 필요 시 3~5 반복.
+GUI-3는 하나의 Canvas profile, `CANVAS_PAT`, 계정 확인, 토큰 교체·삭제, 학기·강좌 조회 및
+사용자 선택 저장, 최대 30일 접근 lease 갱신을 제공한다. 모든 provider 요청은 읽기 전용이며,
+DNS 응답에 비공인 주소가 섞이면 거부한다. 검증된 주소에 연결하면서 TLS 호스트 검증을 유지한다.
+토큰 삭제는 provider 호출 없이 가능해야 한다. 토큰과 lease는 별개다.
 
-**중요 교훈:** AGY가 GO를 준 지점에서 GPT-5.6이 실 결함(fail-open, 계약 드리프트, self-approval 등)을
-Phase 1/2 내내 반복적으로 잡았다. **단일 리뷰어는 불충분** — 반드시 2중 + Opus 재현.
+- Windows는 사용자 결정으로 후순위이며 GUI 실행을 거부한다.
+- macOS는 자격증명을 저장한다. Linux 자격증명 카드는 읽기 전용이며 보안 저장소 추가는 후순위다.
+- Canvas 자료·파일·과제·성적 수집, Drive 업로드, intake 실행은 포함하지 않는다.
+- Canvas sync 활성화는 `FEATURE_DEFERRED`; 비활성화는 토큰·lease를 삭제하지 않는다.
+- GUI-4의 학사 매핑·재시작 fingerprint, GUI-5의 자동화·Remote MCP는 포함하지 않는다.
+- 개발·자동 테스트는 가짜 Keychain, 임시 비밀 디렉터리, 가짜 provider transport만 사용한다.
+  실제 Canvas/Notion/Drive 호출이나 사용자 자격증명으로 smoke test는 수행하지 않는다.
 
----
+## 담당자와 파일 소유
 
-## 3. 완료 상태
+오케스트레이터: `gpt-6.1-sol` high. 작업 기록·인계 문서·통합 증거를 담당한다.
+실제 `uls setup` 서비스 연결 누락을 보완하기 위해 `composition.py`, `launcher.py`,
+`test_settings_composition.py`도 직접 담당했다. 작업자의 fake-mode 실행 제한을 보존해 병합했다.
 
-**재개 승인(2026-09-08):** 사용자가 "Pro 안되면 매우 높음으로 진행"을 명시했다. Pro quota 복구를 기다리는 조건은 해제되었으며, insane-review 최신/매우 높음 + Gemini high로 Phase 4 계획 리뷰부터 재개한다. 실제 UI model/effort를 검증·기록하고 Phase 4~8 관문을 계속 적용한다.
+- Banach `01a0e755-d3a3-7820-9521-e41564aad48b`, `gpt-6-luna` max:
+  GUI-2 전체, 공통 config/roles/stores/journal/CLI, GUI-2/GUI-3 HTTP·status·static UI 및 통합 테스트.
+  기술 적합성: 자격증명 트랜잭션·CAS·장애 복구를 연속 담당한 기존 작업자.
+- Sartre `01a0f4e1-7d5e-70f1-873d-1cf692cdc93b`, `gpt-6-luna` high:
+  `canvas_checks.py`, `canvas_service.py` 및 두 파일의 계약 테스트.
+  기술 적합성: DNS·HTTP 경계와 Canvas 서비스에 집중하는 기존 작업자.
+- 공통 CredentialService가 작성된 뒤 Canvas 서비스 소유를 Sartre에게 추가했다.
+  이유: 공통 파일과 독립된 서비스 구현을 병렬로 진행해 통합 대기 시간을 줄이기 위해서다.
+- Gibbs `01a0f590-3f6e-79c0-94e2-ab15d11ff968` 리뷰 작업은 사용자 지시에 따라 종료했다.
 
-| 항목 | 상태 |
-|---|---|
-| 저장소 스캐폴드(§3 레이아웃), CLAUDE.md, 계약/클라이언트 프로젝션 | ✅ `5bb9d34` |
-| Phase 1 Core Hardening (state/ephemeral/orchestration/config/human-gate) | ✅ `ab3c9a1`+`63cb951` |
-| Phase 2 Transcript Vertical Slice (normalization/ingest/retrieval get_session_context) | ✅ `6572feb` |
-| Phase 3 Enrichment & Freshness (producer: LLM adapter/enrichment schemas·generators/writer) | ✅ `f4ab8b0` |
-| 테스트 | **238 passing** (모델 독립 contract/unit/integration) |
+## 설계·과거 리뷰 근거
 
-검증 도구 환경: `codex` CLI(`gpt-5.6-luna`), `agy` CLI(`gemini-3.8-flash-high`), `insane-review` 플러그인(GPT-5.6 Sol),
-pytest+pyyaml 설치됨(인터프리터: `/Library/Frameworks/.../python3.14`).
+현재 설계 문서:
 
-### 구현된 핵심 계약 (리뷰로 확정된 불변식)
-- **도메인**(`src/uls/domain/`): Locator 문법/AST/직렬화/typed containment(§6.3, 문자열 prefix 인가 금지),
-  enums/ids/source_ref/provenance/errors(§53). 표준 라이브러리만.
-- **StateStore**(`state/sqlite.py`): 반복 마이그레이션, 결정적 `job_key`(§8.1.1), source-bound idempotent
-  엔티티 할당(§8.6.1, caller 선점 불가), source_versions 일관성.
-- **EphemeralStore**(`ephemeral/memory.py`): TTL·재시작 무효화, capability fingerprint 바인딩 + fail-closed
-  `authorize_locator`(§25, current_fingerprint 미제공 시 deny, 불일치 시 LOCATOR_STALE).
-- **Human-gate**(`adapters/notion/base.py`): 방어적 쓰기(§15.1, Verified/Scope Confirmed/Decision/State),
-  create/update 분리, `ApprovalReader`/`HumanApprovalApplier`(human Decision By 필수, self-approval 차단),
-  Automation Queue 상태기계, 시스템 경로 SUPERSEDED/FAILED만.
-- **Retrieval**(`retrieval/*`): `resolve_entity`/`select_resolution` + `get_session_context(session_id,…)`,
-  per-chunk 정확 capability allowlist(초과 인가 없음), §25 6검사(+role 현행성), SESSION authority(§17/§21,
-  fetch order ≠ authority rank), freshness/stale-locator, read-only 어댑터 Protocol(§4/§13/§27).
-- **Normalization/Ingest**: transcript verbatim + sidecar 타임스탬프(code-point offset), §17 커밋 순서 +
-  Partial 3중 일관, 필수 collaborator/등록 fail-closed.
+- `docs/plans/local-settings-web-gui.md`
+- `docs/plans/local-settings-web-gui-interaction-mock.md`
+- `docs/plans/local-settings-gui-1-worker-plan.md`
+- `docs/plans/local-settings-gui-2-worker-plan.md`
+- `docs/plans/local-settings-gui-3-worker-plan.md`
 
-**공통 원칙: 모든 경계는 fail-closed.** 애매하면 거부/제외 — 절대 조용한 skip/합성/승격 금지.
+GUI-1 과거 최종 GO:
+`.insane-review/web_gui1_5c_rereview4_response_20260930.md` 및 Gemini 최종 재검토 기록.
+GUI-2 계획은 web Pro r4 GO, GUI-3 계획은 web Pro r2 GO로 당시 오케스트레이터가 승인했다.
 
----
+- `.insane-review/web_gui2_plan_rereview4_response_20261001.md`
+- `.insane-review/web_gui3_plan_rereview2_response_20261001.md`
+- `.insane-review/gemini_ultra_gui2_plan_20260930.md`
+- `.insane-review/gemini_gui3_plan_rereview2_20261001.md`
+- 상세 진행·결함 처리 기록: `docs/plans/local-settings-web-gui-task-record.md`
 
-## 4. 다음 단계 (frozen 순서)
+**과거 리뷰 provenance와 최신 정책을 구분할 것.** 과거 웹 리뷰는 Aside 수동 회수 경로이며,
+최신 사용자 지침의 native/v2 identity-bound 회수라고 주장하지 않는다.
+GUI-3 Gemini 리뷰는 ultra를 요청했지만 실제 runtime은 `gemini-3.8-flash-high` / high로 보고됐다.
+이를 ultra 실행 증거로 취급하지 않는다. 새 채팅은 최신 정책에 필요한 plan/final 증거를 확인하고
+부족한 gate를 보완한다. 이번 구현-only 요청은 리뷰 완료나 커밋 승인이 아니다.
 
-구현 순서(§41): `Spike C0 → Spike M0 → VS0 → VS0-B → Spike G`, Phase 1~8(§42~§49).
+## 자체 검증
 
-- **Phase 3 — Enrichment & Freshness (§44)** ✅ **완료 (`f4ab8b0`)**: producer 구현 — `enrichment/{schemas,_common,session,material,exam,writer}.py`,
-  `adapters/llm/{base,structured}.py`, `domain/enums.py(Explicitness)`, `NotionReader.get_material_enrichment`.
-  explicit/inferred 분리·evidence locator 재해석·stale 제외·source fingerprint 전부 fail-closed. 소비자(RetrievalEngine)는 미변경.
-  계획서 `docs/plans/phase3-enrichment.md` rev3, §7 에 **문서화된 결정론적 한계**(cross-store 가시성 창, 부정어 가드 밖 의미 판정) 명시.
-  교훈: 구현 리뷰에서 Sol(GPT-5.6)이 AGY GO 를 여러 번 뒤집으며 실 fail-open(증거 상속, empty-READY, TOCTOU, §17 순서, 부정어 위조)을 잡음 — 5라운드 재수정 후 둘 다 GO.
-- **다음 단계 → Phase 4 — Material Usage & Human Gate (§45)**: Material Usage/page-range proposal, 승인 경로, Verified 상태,
-  multi-material Session 검색, unverified 정책. (Phase 2에서 read-only 소비만 했고 mutation/proposal은 여기로 미룸.)
-- **Phase 5~8**: Exam/Activity(§46), GitHub 정확 ref 검색(§47), 클라이언트 패키징(§48), 데스크톱 자동화+remote MCP(§49).
-- **MCP 트랙(별도)**: Spike C0(ChatGPT remote 연결)/M0(로컬 MCP로 get_material_context)/VS0 — 엔진은 이미 MCP 없이
-  직접 호출 가능하므로 `mcp/` 스텁에 read-only 도구를 배선하면 됨(§19~§24). 현재 `mcp/`는 스텁.
+최신 작업자 자체 검증과 오케스트레이터의 누락된 통합 검증 결과:
 
-**착수 방법:** Phase마다 `docs/plans/<phase>.md` 계획서를 Opus가 작성 → 2중 계획 리뷰 → Codex 구현 → 검증 → 2중 리뷰 → 커밋.
-(예시 계획서: `docs/plans/phase2-transcript.md` rev2 참고.)
+- `.venv/bin/python scripts/lint_behavior_projection.py`: 통과.
+  canonical version=2,
+  hash=`sha256:987d09ec152f91e368e070c5ccbe961602a18da8b6113afd968ac965406aae1a`.
+- Canvas 계층 계약 테스트: 110개 통과(네트워크 44개, 서비스 66개), 담당 네 파일 ruff/mypy 통과.
+- 실제 launcher 서비스 조립·fake-mode 격리 계약 테스트: 5개 통과;
+  `composition.py`, `launcher.py`, `test_settings_composition.py` ruff 통과,
+  앞의 두 Python 소스에 `mypy --follow-imports=silent` 통과.
+- 전체 pytest: **2135 passed, 9 skipped**(부모의 persistent fake-store 교체 실패 회귀 포함).
+  명령: `PYTHONPATH=. .venv/bin/python -m pytest -q`.
+  deselect 없음. skip은 작업자 환경에서 loopback bind가 차단된 launcher 6개와 macOS에서
+  실행할 수 없는 Windows DACL/reparse-point/SID 3개다. 기존 keyring/env 테스트는 포함해 통과했다.
+- 누락된 launcher 검증을 부모 실행 환경에서 보완:
+  `PYTHONPATH=. .venv/bin/python -m pytest -q tests/unit/test_settings_launcher.py` → **16 passed**,
+  skip 없음. 작업자 검사에서 제외된 loopback 6개도 여기서 실행됐다.
+- 변경 파일 ruff 통과. `loader.py`의 기존 `TRY004` 18건은 잔존하며 전체 lint 통과라고 주장하지 않는다.
+- 전체 mypy 진단: 기존 138건 → 현재 135건, 새 진단 없음. 전체 타입 검사 통과 상태는 아니다.
+  현재 `.venv/bin/mypy`, baseline은 `git archive HEAD src pyproject.toml`로 임시 루트에
+  추출한 HEAD에 같은 venv의 `mypy --no-incremental`을 실행하고 줄 번호를 정규화해 비교했다.
+  로그: `/tmp/syllva-gui23-mypy-final.txt`, `/tmp/syllva-gui23-mypy-head.txt`.
+- `git diff --check`: 통과.
+- 실제 `uls setup --no-browser` fake-mode 브라우저 검증:
+  Canvas 연결 → 강의 검색 → 선택 미리보기 → 적용 → 접근 lease 갱신 → sync 비활성화 → 로컬 해제 확인.
+  재시작한 최신 demo에서 잘못된 Notion 교체 뒤 Configured·Replace/Forget 유지,
+  Canvas 해제 뒤 이전 강의 목록·선택·주소 초기화도 확인했다.
+  실제 provider/Keychain 호출은 없었다. GUI-1 과거 화면은 `/tmp/syllva-gui1-shots-r2/`에 있으나
+  GUI-2/3 화면 증거로 재사용하지 않는다.
+- 과거 환경 의존 실패 기록:
+  `tests/unit/test_credential_resolver.py::test_keyring_dependency_missing_is_configuration_error`.
+  sandbox 밖 macOS에서는 실제 keyring backend가 설치되어 있고 이 테스트는 keyring 부재를 가정한다.
+  GUI-1 때 1개 deselect했으나 이번 전체 검사는 이 항목도 포함했으며 실패하지 않았다.
 
----
+변경 파일 lint 명령(둘 다 통과):
 
-## 5. 개발/리뷰 실행 방법 (그대로 복사해 사용)
-
-구현 위임(Codex Luna max) — **프롬프트는 파일로, stdin은 `< /dev/null`로 닫을 것**(안 닫으면 hang):
 ```bash
-codex exec -m gpt-5.6-luna -c model_reasoning_effort=max --sandbox workspace-write \
-  --skip-git-repo-check -C /Users/admin/Project/Syllva \
-  "$(< /path/to/prompt.md)" < /dev/null > /path/to/codex.log 2>&1
-```
-리뷰(2중 독립):
-```bash
-# insane-review (GPT-6 Pro). 모델명과 Pro 추론 단계를 모두 검증; 접근 불가 시 중단
-python3 scripts/review_gpt6_pro.py --target /Users/admin/Project/Syllva \
-  --include "src/…,tests/**,…-implementation-spec-frozen.md" --model pro --require-model "GPT-6" \
-  --prompt-file /path/to/review.txt
-# AGY Gemini 3.8 Flash high
-agy --dangerously-skip-permissions --model gemini-3.8-flash-high --effort high \
-  --print-timeout 20m --prompt "$(< /path/to/review.txt)" < /dev/null > agy.log 2>&1
-```
-검증(Opus 직접):
-```bash
-python3 -m py_compile $(git ls-files 'src/uls/**/*.py')
-python3 -m pytest -q tests/
-python3 scripts/lint_behavior_projection.py   # Behavior Contract 드리프트
+.venv/bin/ruff check src/uls/settings src/uls/config/mutation.py src/uls/config/credentials.py src/uls/config/_keyring_backend.py src/uls/config/_secure_file.py src/uls/config/schema.py src/uls/cli/credential_set.py tests/contract/test_settings_*.py tests/unit/test_credential_set_cli.py
+.venv/bin/ruff check src/uls/config/loader.py --ignore TRY004,RUF100
 ```
 
-주의: `codex exec`에 `--full-auto` 플래그 없음(→ `--sandbox workspace-write`). heredoc과 codex를 한 명령에
-합치지 말 것(stdin 충돌로 hang). `pumasi.sh start`는 자동 승인 분류기에 차단될 수 있어 `codex exec` 직접 사용.
+loader의 기존 TRY004 18건은 검사 명령에서만 제외했다. 코드나 suppression을 추가하지 않았다.
+RUF100 제외는 TRY004를 제외한 검사에서 기존 noqa가 unused로 판정되는 것을 피하기 위해서다.
 
----
+가짜 화면을 다시 실행하려면 저장소 루트에서 `.venv/bin/python -m uls.settings.demo`를 사용한다.
+매번 `/tmp/syllva-settings-demo-*` 아래 새 설정·workspace·가짜 저장소를 생성하고 bootstrap URL을 출력한다.
+실제 비밀을 넣지 않는다. fake JSON은 검증용 값만 사용한다. `--no-browser` 경로이며,
+fake-mode launcher는 임시 루트 밖의 config/workspace/runtime이나 자동 브라우저 실행을 거부한다.
+이번 마지막 demo 루트는 `/tmp/syllva-settings-demo-8_p890kk`; 검증 서버와 임시 탭은 종료했다.
+GUI-2/3 화면은 이 채팅의 CUA 상호작용으로 확인했으나 영구 스크린샷 파일은 저장하지 않았다.
+새 UI 리뷰는 최신 소스로 다시 실행해 실제 화면·오류·복구·해제 흐름 증거를 수집한다.
 
-## 6. 알려진 제약 / 낮은 우선순위 항목
+## 핵심 구현 파일과 다음 리뷰의 확인점
 
-리뷰에서 "정상 StateStore에는 실 위험 없음(malformed/incomplete adapter 전용)"으로 **릴리스 OPEN에서 제외**된 hardening 갭 —
-Phase 3+에서 정리 권장:
-- `_require_ingest_collaborators()`가 `get_job`을 필수 목록에 넣지 않음(프로즌 Protocol엔 있음). get_job 없는 duck-typed
-  adapter가 PROCESSING 객체만 반환하면 재조회 없이 신뢰될 수 있음.
-- `_allocate_entity()`가 반환 ID의 문법(parse_entity_id)만 검사하고 course/type 일치까지는 재검증 안 함.
-- 과거 버그 버전이 이미 잘못된 `canonical_entity_id`를 영속 저장한 legacy 데이터는 §8.6.1 idempotency로 자동 교정되지 않음 → migration/scrub 필요.
+- `credential_roles.py`, `credential_stores.py`, `credential_admission.py`, `credential_service.py`:
+  코드가 정하는 역할·locator, staging/backup, 비밀 없는 상태 ID, 공통 GUI/CLI admission과 복구.
+- `provider_checks.py`, `config/{credentials,loader,schema,mutation,_secure_file,_keyring_backend}.py`:
+  provider 읽기 전용 확인과 고정 오류 코드, 역할 revision·Canvas 타입, reserved-slot 차단 및 저장 경계.
+- `canvas_checks.py`, `canvas_service.py`: 목적지 검증, account/profile 일치, bounded 조회,
+  `save_selection` 미리보기 후 `apply_selection(..., candidate_hash)`에서 재조회·CAS 적용.
+- `app.py`, `config_service.py`, `journal.py`, `security.py`, `status.py`, `static/*`:
+  HTTP 인증·body 한도, 복구 상태와 오류 흐름, write-only 입력 제거, Canvas 선택 상태 초기화.
+- `composition.py`, `launcher.py`, `fake_mode.py`, `demo.py`: 실제 실행 경로의 서비스 조립과 격리된 재현.
+- `tests/contract/test_settings_credential_*.py`, `test_settings_provider_checks.py`,
+  `test_settings_canvas_*.py`, `test_settings_composition.py`, `test_settings_{config,http,journal,ui}.py`,
+  `settings_ui_harness.cjs`, `tests/unit/test_credential_set_cli.py`: 변경에 대한 기능·장애·UI 계약 증거.
 
-기타:
-- MCP `mcp/` 및 Claude package/ChatGPT app은 스텁. 클라이언트 지원 상태는 배포 의존(§27~§30).
-- 실제 provider(Google/Notion/GitHub) SDK 연동은 미구현(어댑터 read-only Protocol + Fake로 검증 중). `adapters/*/api.py` 스텁.
-- 원격 MCP/스케줄러/Goodnotes(§33)/CONCEPT 벡터검색은 v1.2 비목표 또는 후속 Phase.
+다음 리뷰에서 저장·삭제·중단 시점별 저널 복구, 공유 저장소의 GUI/CLI·workspace 간 충돌,
+역할 분리, secret redaction, profile-bound 선택 CAS, DNS/TLS/timeout 경계와 Linux 읽기 전용 동작을 본다.
+staging 쓰기 전에 중단된 경우에는 `MANUAL_REVIEW`로 안전 차단하는 경로가 있다.
+자동 복구 가능한 단계와 수동 확인이 필요한 단계를 구분해 검토한다.
 
----
+## 새 채팅에서 리뷰 시작하는 순서
 
-## 7. 참고 파일
-- 계획서: `docs/plans/phase2-transcript.md`
-- 가이드: `CLAUDE.md`, `README.md`, `CHANGELOG.md`
-- Behavior Contract: `contracts/study-behavior.md` (+ `clients/…` 프로젝션, `scripts/lint_behavior_projection.py`)
-- 테스트: `tests/{unit,contract}/`, 픽스처 `tests/fixtures/fake_{notion,drive}.py`
+1. 이 문서, 최신 AGENTS.md, 작업 기록, 실제 `git status` 및 구현 파일을 읽는다.
+   코드 작성 완료와 자체 검증, 독립 리뷰 승인, 커밋 상태를 구분한다.
+2. 현재 설치된 insane-review 스킬·스크립트를 찾아 읽고 **native Chrome/CDP 전용 격리 프로필**의
+   설정을 따른다. 과거 Aside 경로를 기본 경로로 이어 쓰지 않는다.
+3. 환경 확인은 설치 스크립트의 `--ensure-env`, 제출은 정상 workflow,
+   회수는 원본 **v2 identity-bound manifest**를 인자로 `--harvest`한다.
+   URL-only/legacy/manual 또는 `original_run_bound=false` 응답은 참고용이다.
+4. 저장소 프로젝트 `Syllva · eeb93c01` 소속을 검증하고 새 독립 대화를 시작한다.
+   과거 프로젝트 URL은
+   `https://chatgpt.com/g/g-p-6a9fdbd2dc3081919990a6607f8fe7c4-syllva-eeb93c01/project`.
+5. 관련 전체 소스·호출자·테스트·계획을 압축 없이 패킹한다. 실제 포함 파일, 현재 소스 일치,
+   크기·SHA-256·비밀 검사·제외 범위를 감사한다. `.insane-review/gui2_final_scope_20261001.txt`와
+   `gui2_final_review_prompt_20261001.txt`는 **작성 중 준비한 참고 초안**이며 최종 scope는 재선별한다.
+6. 실제 모델·effort를 UI에서 검증한다. Pro 우선; Pro quota 소진일 때만 허용된 Very high fallback.
+   Gemini는 `google-antigravity/gemini-3.8-flash` ultra 독립 context에서 실제 화면·흐름 증거로 검토한다.
+   요청된 effort와 실제 실행을 구분한다.
+7. GUI-2와 GUI-3의 저장·복구·오류/승인/비밀값 제거 흐름을 검토한다. 필수 결함은 묶어서 수정하고
+   필요한 웹/Gemini 재검토 후 최종 승인한다. 그 전에는 커밋·push하지 않는다.
 
-## 2026-09-08 Phase 4 review recovery and revision in progress
+GUI-2/3 구현 리뷰를 전송한 대화나 회수할 미완료 final manifest는 현재 없다.
+이전 계획/GUI-1 대화를 구현 final 리뷰로 오인하거나 재전송하지 않는다.
 
-- User explicitly directed continued revision after the recovered insane-review verdict. Sonnet 5 high is preparing draft rev4 via authenticated Claude CLI; log `/tmp/syllva-phase4-sonnet-rev4.log`.
-- Current rev3: Gemini GO, insane-review REVISE. Preserve the latter report at `.review/phase4-plan-rev3-insane-review.md`; root validated all five required changes in `.review/phase4-rev3-root-response.md`. No Phase 4 source implementation gate has passed.
-- Review ran with UI-verified Latest / 매우 높음, per user-approved fallback when Pro is unavailable. Do not label this as numeric GPT-6 or Pro.
-- Repository ChatGPT project repaired and review moved: https://chatgpt.com/g/g-p-6a9fdbd2dc3081919990a6607f8fe7c4/project. Default project mode is mandatory for subsequent reviews; omit `--no-project`.
-- Next: integrate and verify Sonnet rev4 → independent Gemini and insane-review on exact same snapshot → implementation after dual GO. Continue toward Phase 8 under original authorization.
+## 보존할 다른 작업과 제품 불변조건
 
-
-### Phase4 rev6 gate passed; implementation active
-
-- Independent plan gates: insane-review Part A GO and Part B GO, plus Gemini full-plan GO. Reports `.review/phase4-plan-rev6-{a,b}-insane-review.md` and `.review/phase4-plan-rev6-gemini.md`. No blockers remain on the reviewed canonical SHA256 `901c3e046ede6b39f9863d84bf4aeb41b4bbf3b4244ff9280e6940d01a768058`.
-- Both ChatGPT reviews used the repository project and UI-verified Latest / 매우 높음. No forced answer.
-- Luna max implementation dispatched on the existing branch, prompt `/tmp/syllva-phase4-luna-implementation-request.txt`, log `/tmp/syllva-phase4-luna-implementation.log`, final report `/tmp/syllva-phase4-luna-implementation.md`. Implementation gate is not a completion/release gate. Root verification and both independent implementation reviews remain required before a local commit. No push authorized.
-- Optional review refinements for implementation QA: Queue APPLIED audit commits then raises must replay idempotently; use shared validated page index; preserve exact Course cardinality and dereference checks.
-- Phase5/6 Sonnet raw drafts remain unapproved; Phase7 planning awaits Sonnet session reset (03:40 Asia/Seoul), not login repair. Continue original Phase4–8 scope.
-
-
-### User scope update: Phase4 only
-
-User explicitly narrowed active work to Phase4 only. Finish current Luna Phase4 implementation, root verification, independent implementation review and fixes. Do not start Phase5–8 planning/implementation or retry Sonnet Phase7 quota automatically. Existing future-phase drafts are retained as inactive reference, not active work.
-
-
-### Root regression steering checkpoint
-
-- First Luna run deliberately interrupted after baseline migration (239 full-suite passes) to deliver root findings; process31313 exited, unified session71738 closed. Root temporary regression suite found17 failures/11 passes, report `.review/phase4-root-regressions-first-run.txt`. Do not mistake baseline239 for Phase4 acceptance.
-- Continuing same working tree with Luna max corrections: prompt `/tmp/syllva-phase4-luna-fixes-request.txt`, log `/tmp/syllva-phase4-luna-fixes.log`, final report `/tmp/syllva-phase4-luna-fixes.md`. The prompt explicitly includes all11 root finding groups and requires all28 temporary regressions plus permanent broader Phase4 tests. No active first-run implementer remains. Root still owns final verification and independent implementation reviews.
-- AGY actual model ID verified: `gemini-3.8-flash-high`, run CLI with escalation (read-only service/log initialization needs host access), --mode plan --sandbox --effort high; no permission-bypass flags.
-- User scope Phase4 ONLY remains in force.
-
-
-### Phase4 implementation verification and independent review (2026-09-09)
-
-- Active user scope remains Phase4 ONLY. Luna max corrections finished; root added immediate-prewrite approval revocation and Python3.11 compatibility corrections, and permanent follow-up revocation/independent-overlap tests.
-- Root full verification:296 passed on Python3.11 and3.14; compileall, Behavior projection lint and git diff check pass. Static baseline: Ruff190 ->188 diagnostics, mypy76 ->74 errors; existing debt remains and intentional fail-closed exception handling is documented in `.review/phase4-root-static-audit.md`.
-- Independent AGY Gemini3.8FlashHigh implementation review GO, zero blockers; `.review/phase4-implementation-gemini.md`. Root independently applied the same optional page-local variable naming correction.
-- insane-review implementation is in progress as four full-source partitions: A Queue/guard/applier; B producer/trusted derivative; C engine/scopes/freshness; D capability/store/resolver. Each uses the existing Syllva ChatGPT project, verified Latest/매우 높음 (numeric version unspecified), no forced answer and no code compression. Full-source manifests `.review/phase4-implementation-{a,b,c,d}-files.txt`; all relevant implementation union plus root/Gemini integration review covers cross-partition calls.
-- Completion/local commit remains gated on all web review verdicts and resolution of any concrete blockers. No push. Phase5–8 inactive.
-
-
-### Integrated smoke found additional blockers; completion gate remains closed
-
-- Root actual GuardedNotionWriter→producer→ApprovalReader→applier smoke found two defects after initial Gemini GO: new Usage branch uninitialized operation, and wrapper requiring create fields on partial updates. Root fixed both; permanent guarded workflow4cases cover create/reuse, update preserving Verifiedfalse/true, producer retry and approval replay. Full suites now300 passed each on3.11/3.14.
-- New unresolved root reproductions: global payload char budget30 emits60 across Session+Material; required Usage ID=None accepted by wrapper. Recorded in `.review/phase4-root-inflight-findings.md` items14–17.
-- Four initial web implementation reviews sent; A/B already exposing additional concrete boundary issues and C/D still checking. Retrieve final reports, reproduce/fix blockers, then re-review affected snapshots plus Gemini; initial Gemini GO is not final approval after semantic corrections. Logs `/tmp/syllva-phase4-implementation-{a,b,c,d}.log`. Do not commit or claim Phase4 complete yet.
-
-
-### Active repair ownership after web implementation REVISE
-
-- B,C,D finalreports saved `.review/phase4-implementation-{b,c,d}-insane-review.md` (allREVISE); A originalcaptureinvalid(userprompt), samechat harvestrunning. Do not treatinvalidAasverdict. Collector wrapperstrictassistantGO/REVISE+DOMcapture now avoidsdisconnectedplaceholder/sharedclipboard miscapture.
-- Luna producer run owns only `src/uls/proposal/material_usage.py` and `tests/contract/test_phase4_producer_boundaries.py`; prompt/log/final `/tmp/syllva-phase4-producer-review-fixes{,-request}.txt/.log/.md` (actualrequestfilename `...-request.txt`). Initialassignedglobalbudget/evidence/multicandidate; fullBreportarrivedlater and requires follow-up for remaining B defects after thisrun.
-- Separate Luna retrieval run owns retrieval/*,domain/page_range.py,domain/course_identity.py,config/validation.py and relevanttests exceptrootwriter/producerfiles. Prompt `/tmp/syllva-phase4-retrieval-review-fixes-request.txt`, log/final samebase `.log/.md`. ImplementsallC/D and BsharedUsageappID/strictfloat issues. Root mustintegrate helper intoNotion;producer followup uses samehelper.
-- Root owns Notionbase/guarded,FakeNotion,writerboundary+guardedworkflowtests. No concurrenteditstosameownedfiles. Fullsuite duringactiveedits may transientfail; only finalstableverificationcounts.
-- User Phase4ONLY, no commitsuntilfinaldualreviewGO, no push.
-
-
-### Repair checkpoint (producer follow-up active)
-
-- First producer runfinished; report `/tmp/syllva-phase4-producer-review-fixes.md`,6newboundarytests;87Phase4cases atthatintermediatesnapshot. SecondproducerLunamax nowactive: request `/tmp/syllva-phase4-producer-review-final-request.txt`, log `/tmp/syllva-phase4-producer-review-final.log`, final `/tmp/syllva-phase4-producer-review-final.md`; sameexclusiveproducer+producerboundarytestownership. Addresses fullBremainingconfidence/preflight/stale-suppliedMaterial/configdefaults/navigationidentity/strictappIDs/floats/rawType.
-- Retrieval/domainLuna stillactive on C/D and sharedhelpers. RootNotionintegrated usage_app_id and rawTypecomparisons. Openrootregression: flatlowercaseid fallback stillmisreadas appID; test_phase4_writer_boundary missing_app_id case currentlyfails. Fixsharedhelperafterownerfinishes; do notweaken assertion.
-- A originalreview timedout atserver; harvesterstoppedPID38797. Invalidcapturearchived, noAverdict. FreshcorrectedA reviewrequired. B/C/D REVISE reports retained.
-
-
-### Root prewrite graph/source correction
-
-- Added7callbackregressions to test_phase4_prewrite_approval.py: dependencyreadchanges UsageRole/range/Session, MaterialType, CourseKey, fingerprint, or exactsibling. All7failed beforefix; prewrite hadonlyQueuegrantrefresh.
-- Root nowruns fulltarget/dependencyreconciliation beforetargetmutation AND desiredauditrecovery, withpostbodygraph/ref/fingerprintchecks,currentpagevalidation,physicalUsageuniqueness andexactduplicates. Queuegrantremains immediatelyprewrite.52prewrite/remainingcases and9positiveguarded/lifecyclepass; latest16prewrite+guardedpass. FullsuitependingtwoactiveLunas.
-- Source ofrootfindings andtestlogs: `.review/phase4-root-inflight-findings.md`, `.review/phase4-root-prewrite-graph-before.txt`, `.review/phase4-root-preflight-after.txt`.
-
-
-### Corrected implementation is stable; rev2 reviews active
-
-- Both Luna correction runs finished. Reports `.review/phase4-{producer,retrieval}-correction-report.md`. Root finalcurrent fullpytest373passed onPython3.11 and3.14; behaviorlint,3.11compileall,diffcheckpass. No implementation writers active.
-- Static: mypy74 vsbaseline76 withno new normalizeddiagnostics; Ruff175 vsbaseline190. Two root-test I001importsortwarnings remain toclean afteractivereviews (implementationlogicunchanged);othernewlintdiagnostics intentionalvalueparsing/failclosedexceptionhandling. Details `.review/phase4-root-static-audit.md`.
-- Exactsource/testSHA256 `.review/phase4-implementation-rev2-all-hashes.json`; per-partreviewhashesandmanifests `.review/phase4-implementation-rev2-{a,b,c,d}-{hashes.json,files.txt}`. Allsnapshotfilesunchanged afterroot373tests.
-- Rev2 webreviews A,C,D,B dispatchedinexistingSyllvaproject Latest/매우높음, strictassistant-completionguard+DOMcapture, noforcedanswer. Logs `/tmp/syllva-phase4-implementation-rev2-{a,b,c,d}.log`. Rootpackaudits nofileomissions; tokensA117510 B119313 C118872 D116736.
-- IndependentGemini fullcorrectedreviewactive: `/tmp/syllva-phase4-implementation-rev2-gemini.log`, modelgemini-3.8-flash-high/read-only plan+sandbox. Keepindependence: noreviewverdictinput.
-- Gates stillclosedpendingreviews; fixes/re-reviewsifneeded, thentest-onlyformatcleanup/finalverification/handoff/localcommit. No push; Phase4ONLY.
+- `RESEARCH/`, `CLAUDE.md`, 실제 비밀 파일과 사용자 설정은 건드리지 않는다.
+- 보호 브랜치(main/master/release)에 push·merge 승인은 없다.
+- MCP 검색 표면은 read-only, SOURCE/AI/USER 구분과 인간 소유 학사 승인 규칙을 유지한다.
+- frozen design/spec가 프로젝트 구현의 권위다. `Partial`을 자동으로 `Ready`로 승격하지 않는다.
+- KNU/LMS 후보는 별도 계획이고 이번 GUI에서 활성화·자동 마이그레이션하지 않는다:
+  `docs/plans/knu-lms-api-semester.md`, `docs/plans/knu-lms-reservation-reconciliation.md`,
+  `scripts/knu_lms_*` 및 기존 sidecar 자격증명·registry.
+- 과거 기반: C5/C6 `a868039`, Remote MCP OAuth `216e996`, semester retrieval `2489fac`.
+  `syllva.dev`/`mcp.syllva.dev` 경로 및 Claude/Codex `uls.ping`은 과거 확인됐으며,
+  Antigravity/Gemini remote ping은 미검증·후순위다. 이번 채팅에서 live 상태를 재검증하지 않았다.
+- 과거 학사 데이터가 없는 `SOURCE_UNAVAILABLE` 상황에 가짜 Session/Material을 만들어 대응하지 않는다.

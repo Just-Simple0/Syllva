@@ -22,6 +22,7 @@ Syllva는 명시적 설정과 process environment credential을 사용합니다.
 | Worker | `GOOGLE_WORKER_CREDENTIALS_FILE`, `NOTION_WORKER_TOKEN` |
 | Local/remote MCP | `GOOGLE_MCP_CREDENTIALS_FILE`, `NOTION_MCP_TOKEN`; private GitHub source 사용 시 `GITHUB_READ_TOKEN` |
 | Remote development bearer | `REMOTE_MCP_SECRET`, `REMOTE_MCP_EXPIRES_AT` |
+| Remote MCP OAuth 브라우저 로그인 | `REMOTE_MCP_GOOGLE_CLIENT_SECRET` + 비밀이 아닌 `remote_mcp.oauth.google_client_id` / `authorized_email` 설정 |
 
 provider 측 least privilege를 적용하세요. provider가 지원하면 MCP credential은 read-only여야 합니다. Worker credential은 명시적으로 구성한 작업에 필요한 write 권한만 가져야 합니다.
 
@@ -72,6 +73,32 @@ notion:
 ```
 
 이 다섯 current-semester intake data source ID와 기존 legacy read-only retrieval composition의 global ID를 섞지 마세요. 두 lane 사이에 암묵적 fallback은 없습니다.
+
+## 학기 범위 read-only retrieval
+
+기본값은 기존 v1.2 global registry입니다. current-semester workspace 하나를
+직접 조회하려면 정확한 학기를 명시적으로 선택합니다.
+
+```yaml
+retrieval:
+  notion_lane: semester_workspace
+  semester: "2026-2"
+```
+
+이 모드는 선택한 workspace의 Courses, Sessions, Materials
+`data_source_id`를 직접 사용합니다. 이 ID를 legacy global `*_db_id`로
+복사하거나 legacy lane으로 fallback하지 않습니다. Course, Session,
+Material을 반환하기 전에 Course relation이 선택한 Courses source와 학기에
+속하는지 확인합니다.
+
+`material_usage_data_source_id`는 선택 사항입니다. 없으면 Session 조회는
+transcript evidence만으로 계속 동작하면서 Material Usage가 unavailable임을
+표시하며, 누락된 source를 검증된 빈 DB로 간주하지 않습니다. Exam과
+Activity는 별도 semester mapping이 생길 때까지 unavailable입니다.
+`uls doctor --live`도 이 모드에서는 선택한 학기의 Course를 probe합니다.
+
+기존 v1.2 경로로 돌아가려면 `notion_lane: legacy_global`과 빈
+`semester`를 사용합니다.
 
 ## Source registration
 

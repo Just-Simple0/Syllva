@@ -49,7 +49,9 @@ def discover_intake(
     records: list[DriveMetadata] = []
     for folder_id in sorted(folder_to_course):
         records.extend(
-            item for item in port.list_folder(folder_id) if item.mime_type != DRIVE_FOLDER_MIME
+            item for item in port.list_folder(folder_id)
+            if item.mime_type != DRIVE_FOLDER_MIME
+            and item.app_properties.get("uls_r") != "AI_STUDY_NOTE"
         )
     if len(records) > max_files:
         raise ValueError("Drive intake listing exceeds bounded limit")

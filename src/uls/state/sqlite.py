@@ -12,24 +12,27 @@ import re
 import sqlite3
 import threading
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from uls.domain.enums import JobStatus, to_processing_status
+from uls.domain.errors import ProposalConflictError
 from uls.domain.ids import parse_course_key, parse_entity_id
-
+from uls.intake.identity import canonical_json, derive_study_note_key
+from uls.orchestration.jobs import derive_job_key
 from uls.orchestration.locks import LocalWorkerLock
 from uls.orchestration.retry import (
     DEFAULT_MAX_ATTEMPTS,
     coerce_error_class,
     should_retry,
 )
-from uls.orchestration.jobs import derive_job_key
 
+from .classification_state import CLASSIFICATION_SCHEMA, ClassificationStateMixin
 from .models import (
     Checkpoint,
     EntityAllocation,
@@ -38,15 +41,22 @@ from .models import (
     IntakeObservation,
     IntakePlan,
     Job,
+    NoteArtifact,
+    NoteAttempt,
+    NoteJob,
+    NoteRequestReference,
     ProcessingRecord,
     ProviderWriteAttempt,
+    RangeIntentHead,
     RequestReceipt,
     SemesterRegistration,
     SessionSourceBinding,
     SourceFile,
     SourceVersion,
+    StudyNoteHead,
+    UsageProposalOutboxEntry,
 )
-
+from .usage_range import RANGE_REQUEST_SCHEMA, UsageRangeStateMixin
 
 _TERMINAL_STATUSES = {
     JobStatus.READY,
@@ -66,6 +76,61 @@ _ALLOWED_TRANSITIONS: dict[JobStatus, frozenset[JobStatus]] = {
     JobStatus.PARTIAL: frozenset(),
     JobStatus.NEEDS_REVIEW: frozenset(),
     JobStatus.FAILED: frozenset({JobStatus.FAILED, JobStatus.PENDING}),
+}
+
+_RESERVATION_STATES = frozenset(
+    {"PENDING", "APPLIED", "RECONCILE_REQUIRED", "RELEASED"}
+)
+
+class _Unset:
+    """Sentinel distinguishing an omitted guard argument from an explicit None."""
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid only
+        return "<unset>"
+
+
+_UNSET: Any = _Unset()
+_RESERVATION_TRANSITIONS: dict[str, frozenset[str]] = {
+    "PENDING": frozenset({"APPLIED", "RECONCILE_REQUIRED", "RELEASED"}),
+    "RECONCILE_REQUIRED": frozenset({"APPLIED", "RELEASED"}),
+    "APPLIED": frozenset(),
+    "RELEASED": frozenset(),
+}
+_RESERVATION_RECONCILED_STAGE = "RECONCILED"
+_RESERVATION_NO_MUTATION_RESPONSE = "RECONCILED_NO_MUTATION"
+
+_NOTE_ACTIVE_STATES = frozenset(
+    {"REQUESTED", "WAITING_CONTEXT", "GENERATING", "STAGED", "PUBLISHING"}
+)
+_NOTE_TERMINAL_STATES = frozenset({"READY", "PARTIAL", "FAILED", "CANCELLED", "STALE"})
+_NOTE_STATES = _NOTE_ACTIVE_STATES | _NOTE_TERMINAL_STATES
+_NOTE_TRANSITIONS: dict[str, frozenset[str]] = {
+    "REQUESTED": frozenset({"WAITING_CONTEXT", "GENERATING", "FAILED", "CANCELLED", "STALE"}),
+    "WAITING_CONTEXT": frozenset({"GENERATING", "FAILED", "CANCELLED", "STALE"}),
+    "GENERATING": frozenset({"STAGED", "FAILED", "CANCELLED", "STALE"}),
+    "STAGED": frozenset({"PUBLISHING", "FAILED", "CANCELLED", "STALE"}),
+    "PUBLISHING": frozenset({"READY", "PARTIAL", "FAILED", "CANCELLED", "STALE"}),
+    "READY": frozenset(),
+    "PARTIAL": frozenset(),
+    "FAILED": frozenset(),
+    "CANCELLED": frozenset(),
+    "STALE": frozenset(),
+}
+
+_REFERENCE_STATES = frozenset({"ACTIVE", "CANCEL_REQUESTED", "CANCELLED", "SUPERSEDED"})
+_REFERENCE_TRANSITIONS: dict[str, frozenset[str]] = {
+    "ACTIVE": frozenset({"CANCEL_REQUESTED", "CANCELLED", "SUPERSEDED"}),
+    "CANCEL_REQUESTED": frozenset({"ACTIVE", "CANCELLED", "SUPERSEDED"}),
+    "CANCELLED": frozenset(),
+    "SUPERSEDED": frozenset(),
+}
+
+_ARTIFACT_STATES = frozenset({"STAGED", "VERIFIED", "PUBLISHED", "STALE"})
+_ARTIFACT_TRANSITIONS: dict[str, frozenset[str]] = {
+    "STAGED": frozenset({"VERIFIED", "STALE"}),
+    "VERIFIED": frozenset({"PUBLISHED", "STALE"}),
+    "PUBLISHED": frozenset({"STALE"}),
+    "STALE": frozenset(),
 }
 
 _JOB_KEY_PATTERN = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
@@ -163,10 +228,13 @@ CREATE TABLE IF NOT EXISTS provider_write_attempts (
     provider TEXT NOT NULL,
     target_id TEXT,
     prewrite_committed_at TEXT NOT NULL,
+    reservation_id TEXT,
+    stage TEXT,
     dispatched_at TEXT,
     response_state TEXT NOT NULL,
     readback_json TEXT,
-    error_class TEXT
+    error_class TEXT,
+    pre_dispatch_snapshot_json TEXT
 );
 CREATE TABLE IF NOT EXISTS entity_reservations (
     reservation_id TEXT PRIMARY KEY,
@@ -175,13 +243,22 @@ CREATE TABLE IF NOT EXISTS entity_reservations (
     entity_app_id TEXT NOT NULL,
     parent_folder_id TEXT NOT NULL,
     marker_key TEXT NOT NULL,
-    state TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('PENDING','APPLIED','RECONCILE_REQUIRED','RELEASED')),
     plan_revision TEXT NOT NULL,
     source_file_id TEXT,
+    receipt_id TEXT,
+    plan_hash TEXT,
+    source_snapshot_hash TEXT,
+    target_snapshot_hash TEXT,
+    operation_key TEXT,
     created_at TEXT NOT NULL,
-    UNIQUE(intake_id, entity_kind),
+    updated_at TEXT NOT NULL DEFAULT '',
+    released_at TEXT,
     UNIQUE(entity_kind, entity_app_id)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_reservations_active_intake_kind
+    ON entity_reservations(intake_id, entity_kind)
+    WHERE state <> 'RELEASED';
 CREATE TABLE IF NOT EXISTS session_source_bindings (
     binding_id TEXT PRIMARY KEY,
     course_key TEXT NOT NULL,
@@ -203,10 +280,156 @@ CREATE TABLE IF NOT EXISTS intake_stage_events (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_intake_stage_events_intake ON intake_stage_events(intake_id, event_id);
+CREATE TABLE IF NOT EXISTS study_note_heads (
+    provider TEXT NOT NULL,
+    session_provider_page_id TEXT NOT NULL,
+    course_key TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    current_request_id TEXT NOT NULL,
+    current_receipt_id TEXT NOT NULL,
+    generation INTEGER NOT NULL CHECK(generation >= 1),
+    active INTEGER NOT NULL CHECK(active IN (0, 1)),
+    inactive_reason TEXT,
+    evidence_mode TEXT,
+    selected_materials_json TEXT NOT NULL DEFAULT '[]',
+    receipt_hash TEXT NOT NULL,
+    current_note_key TEXT,
+    current_attempt_no INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(provider, session_provider_page_id)
+);
+CREATE TABLE IF NOT EXISTS range_intent_heads (
+    usage_slot_key TEXT PRIMARY KEY,
+    session_app_id TEXT NOT NULL,
+    material_app_id TEXT NOT NULL,
+    usage_role TEXT NOT NULL,
+    current_usage_app_id TEXT,
+    current_request_id TEXT NOT NULL,
+    current_receipt_id TEXT NOT NULL,
+    receipt_hash TEXT NOT NULL,
+    current_proposal_id TEXT,
+    current_target_entity_id TEXT,
+    current_operation TEXT NOT NULL CHECK(current_operation IN ('create_usage', 'update_range')),
+    intent_generation INTEGER NOT NULL CHECK(intent_generation >= 1),
+    reservation_state TEXT NOT NULL DEFAULT 'NONE'
+        CHECK(reservation_state IN ('NONE', 'DISPATCHED', 'RECONCILE_REQUIRED')),
+    reserved_generation INTEGER,
+    reserved_target_id TEXT,
+    dispatch_attempt_no INTEGER NOT NULL DEFAULT 0,
+    apply_lease_expires_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS usage_proposal_outbox (
+    proposal_id TEXT PRIMARY KEY,
+    usage_slot_key TEXT NOT NULL REFERENCES range_intent_heads(usage_slot_key),
+    request_id TEXT NOT NULL,
+    intent_generation INTEGER NOT NULL CHECK(intent_generation >= 1),
+    action_json TEXT NOT NULL,
+    envelope_json TEXT NOT NULL,
+    publish_state TEXT NOT NULL DEFAULT 'PREPARED'
+        CHECK(publish_state IN ('PREPARED', 'PUBLISHED', 'RECONCILE_REQUIRED')),
+    queue_page_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(usage_slot_key, intent_generation)
+);
+CREATE TABLE IF NOT EXISTS range_intent_claims (
+    usage_slot_key TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    receipt_id TEXT NOT NULL,
+    intent_generation INTEGER NOT NULL,
+    identity_json TEXT NOT NULL,
+    PRIMARY KEY(usage_slot_key, request_id),
+    UNIQUE(usage_slot_key, receipt_id)
+);
+CREATE TABLE IF NOT EXISTS usage_apply_guards (
+    invocation_token TEXT PRIMARY KEY,
+    usage_slot_key TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    proposal_id TEXT NOT NULL,
+    phase TEXT NOT NULL CHECK(phase IN ('HELD','MUTATING','RESOLVED','RELEASED')),
+    baseline_json TEXT NOT NULL,
+    expected_json TEXT NOT NULL,
+    baseline_mode TEXT,
+    readback_json TEXT,
+    outcome TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS usage_apply_guard_owner
+    ON usage_apply_guards(usage_slot_key) WHERE phase != 'RELEASED';
+CREATE TABLE IF NOT EXISTS note_jobs (
+    note_key TEXT PRIMARY KEY,
+    course_key TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    evidence_manifest_hash TEXT NOT NULL,
+    learner_request_hash TEXT NOT NULL,
+    template_version TEXT NOT NULL,
+    generator_config_version TEXT NOT NULL,
+    current_attempt_no INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS note_attempts (
+    note_key TEXT NOT NULL REFERENCES note_jobs(note_key),
+    attempt_no INTEGER NOT NULL CHECK(attempt_no >= 1),
+    state TEXT NOT NULL CHECK(state IN (
+        'REQUESTED','WAITING_CONTEXT','GENERATING','STAGED','PUBLISHING',
+        'READY','PARTIAL','FAILED','CANCELLED','STALE'
+    )),
+    seed_artifact_id TEXT,
+    retry_count INTEGER NOT NULL DEFAULT 0 CHECK(retry_count >= 0),
+    next_retry_at TEXT,
+    last_successful_stage TEXT,
+    error_class TEXT,
+    error_code TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    terminal_at TEXT,
+    PRIMARY KEY(note_key, attempt_no)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_note_attempts_one_active
+    ON note_attempts(note_key)
+    WHERE state IN ('REQUESTED','WAITING_CONTEXT','GENERATING','STAGED','PUBLISHING');
+CREATE TABLE IF NOT EXISTS note_request_references (
+    reference_id TEXT PRIMARY KEY,
+    receipt_id TEXT NOT NULL UNIQUE,
+    provider_request_id TEXT NOT NULL,
+    note_key TEXT NOT NULL,
+    attempt_no INTEGER NOT NULL,
+    head_generation INTEGER NOT NULL CHECK(head_generation >= 1),
+    state TEXT NOT NULL CHECK(state IN ('ACTIVE','CANCEL_REQUESTED','CANCELLED','SUPERSEDED')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    ended_at TEXT,
+    FOREIGN KEY(note_key, attempt_no) REFERENCES note_attempts(note_key, attempt_no)
+);
+CREATE INDEX IF NOT EXISTS idx_note_request_references_attempt
+    ON note_request_references(note_key, attempt_no, state);
+CREATE TABLE IF NOT EXISTS note_artifacts (
+    artifact_id TEXT PRIMARY KEY,
+    note_key TEXT NOT NULL REFERENCES note_jobs(note_key),
+    output_identity TEXT NOT NULL,
+    output_hash TEXT NOT NULL,
+    manifest_hash TEXT NOT NULL,
+    writer_version TEXT NOT NULL,
+    ai_region_id TEXT,
+    ai_block_ids_json TEXT NOT NULL DEFAULT '[]',
+    last_publish_hash TEXT,
+    state TEXT NOT NULL CHECK(state IN ('STAGED','VERIFIED','PUBLISHED','STALE')),
+    created_at TEXT NOT NULL,
+    verified_at TEXT,
+    updated_at TEXT NOT NULL,
+    UNIQUE(note_key, output_hash, manifest_hash)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_note_artifacts_one_reusable
+    ON note_artifacts(note_key)
+    WHERE state IN ('VERIFIED','PUBLISHED');
 """
 
 
-class SQLiteStateStore:
+class SQLiteStateStore(UsageRangeStateMixin, ClassificationStateMixin):
     """Thread-safe SQLite StateStore with repeatable migrations."""
 
     def __init__(self, db_path: str | os.PathLike[str]) -> None:
@@ -239,7 +462,7 @@ class SQLiteStateStore:
             self._worker_lock.release()
             self._connection.close()
 
-    def __enter__(self) -> "SQLiteStateStore":
+    def __enter__(self) -> SQLiteStateStore:
         return self
 
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
@@ -281,6 +504,22 @@ class SQLiteStateStore:
                     (version, _utc_now()),
                 )
             self._connection.executescript(_INTAKE_SCHEMA)
+            self._connection.executescript(RANGE_REQUEST_SCHEMA)
+            self._connection.executescript(CLASSIFICATION_SCHEMA)
+            self._migrate_classification_columns()
+            head_columns = {row[1] for row in self._connection.execute("PRAGMA table_info(range_intent_heads)")}
+            for column in ("apply_lease_expires_at", "current_usage_provider", "current_usage_provider_row_id"):
+                if column not in head_columns:
+                    self._connection.execute(f"ALTER TABLE range_intent_heads ADD COLUMN {column} TEXT")
+            for column, declaration in (
+                ("slot_identity_json", "TEXT"), ("active", "INTEGER NOT NULL DEFAULT 1"),
+                ("inactive_reason", "TEXT"), ("input_mode", "TEXT"),
+            ):
+                if column not in head_columns:
+                    self._connection.execute(f"ALTER TABLE range_intent_heads ADD COLUMN {column} {declaration}")
+            guard_columns = {row[1] for row in self._connection.execute("PRAGMA table_info(usage_apply_guards)")}
+            if "baseline_mode" not in guard_columns:
+                self._connection.execute("ALTER TABLE usage_apply_guards ADD COLUMN baseline_mode TEXT")
             intake_columns = {
                 row[1]
                 for row in self._connection.execute("PRAGMA table_info(intake_items)").fetchall()
@@ -305,6 +544,346 @@ class SQLiteStateStore:
                 self._connection.execute(
                     "ALTER TABLE request_receipts ADD COLUMN intake_ids_json TEXT"
                 )
+            write_attempt_columns = {
+                row[1]
+                for row in self._connection.execute(
+                    "PRAGMA table_info(provider_write_attempts)"
+                ).fetchall()
+            }
+            if "reservation_id" not in write_attempt_columns:
+                self._connection.execute(
+                    "ALTER TABLE provider_write_attempts ADD COLUMN reservation_id TEXT"
+                )
+            if "stage" not in write_attempt_columns:
+                self._connection.execute(
+                    "ALTER TABLE provider_write_attempts ADD COLUMN stage TEXT"
+                )
+            if "pre_dispatch_snapshot_json" not in write_attempt_columns:
+                self._connection.execute(
+                    "ALTER TABLE provider_write_attempts ADD COLUMN pre_dispatch_snapshot_json TEXT"
+                )
+            self._migrate_c1_entity_reservations()
+
+    def _migrate_classification_columns(self) -> None:
+        """Additive intake classification v2 columns and the generation=1 backfill (P-A)."""
+
+        intake_columns = {row[1] for row in self._connection.execute("PRAGMA table_info(intake_items)")}
+        for column, declaration in (
+            ("origin", "TEXT NOT NULL DEFAULT 'UNKNOWN'"), ("classified_kind", "TEXT"),
+            ("classification_source", "TEXT"), ("classification_record_id", "TEXT"),
+            ("inferred_course_key", "TEXT"), ("inferred_week", "INTEGER"), ("inferred_date", "TEXT"),
+            ("calendar_match", "TEXT"), ("classification_state", "TEXT NOT NULL DEFAULT 'NONE'"),
+        ):
+            if column not in intake_columns:
+                self._connection.execute(f"ALTER TABLE intake_items ADD COLUMN {column} {declaration}")
+        plan_columns = {row[1] for row in self._connection.execute("PRAGMA table_info(intake_plans)")}
+        for column, declaration in (
+            ("plan_authority", "TEXT NOT NULL DEFAULT 'HUMAN_REQUEST'"),
+            ("classification_revision_hash", "TEXT"),
+        ):
+            if column not in plan_columns:
+                self._connection.execute(f"ALTER TABLE intake_plans ADD COLUMN {column} {declaration}")
+        course_columns = {
+            row[1] for row in self._connection.execute("PRAGMA table_info(recording_calendar_courses)")
+        }
+        if "projection_revision_hash" not in course_columns:
+            self._connection.execute(
+                "ALTER TABLE recording_calendar_courses ADD COLUMN projection_revision_hash TEXT"
+            )
+        manifest_columns = {
+            row[1] for row in self._connection.execute("PRAGMA table_info(document_tag_manifests)")
+        }
+        for column in ("chunk_ids_json", "question_ids_json"):
+            if column not in manifest_columns:
+                self._connection.execute(
+                    f"ALTER TABLE document_tag_manifests ADD COLUMN {column} TEXT NOT NULL DEFAULT '[]'"
+                )
+        job_columns = {row[1] for row in self._connection.execute("PRAGMA table_info(jobs)")}
+        for column in ("plan_revision", "plan_authority", "voided_at", "void_reason"):
+            if column not in job_columns:
+                self._connection.execute(f"ALTER TABLE jobs ADD COLUMN {column} TEXT")
+        # An earlier P-A draft declared UNIQUE(request_key) on the generations table,
+        # which silently dropped multi-intake receipts (P-A review R8); rebuild it.
+        unique_on_key = any(
+            row[2] == 1 and any(
+                col[2] == "request_key"
+                for col in self._connection.execute(f"PRAGMA index_info({row[1]})").fetchall()
+            )
+            for row in self._connection.execute(
+                "PRAGMA index_list(intake_request_generations)"
+            ).fetchall()
+        )
+        if unique_on_key:
+            old_columns = {
+                row[1] for row in self._connection.execute("PRAGMA table_info(intake_request_generations)")
+            }
+            # An already classified marker is copied as is; only a table without the
+            # column starts from UNKNOWN and goes through provenance classification (r11 R4).
+            derivation_source = "derivation_version" if "derivation_version" in old_columns else "'UNKNOWN'"
+            self._connection.executescript(
+                f"""
+                ALTER TABLE intake_request_generations RENAME TO intake_request_generations_old;
+                CREATE TABLE intake_request_generations (
+                    intake_id TEXT NOT NULL,
+                    request_type TEXT NOT NULL,
+                    generation INTEGER NOT NULL,
+                    request_key TEXT,
+                    superseded_request_key TEXT,
+                    derivation_version TEXT NOT NULL DEFAULT 'V2',
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (intake_id, request_type, generation)
+                );
+                INSERT INTO intake_request_generations(intake_id, request_type, generation,
+                    request_key, superseded_request_key, derivation_version, created_at)
+                    SELECT intake_id, request_type, generation, request_key,
+                           superseded_request_key, {derivation_source}, created_at
+                    FROM intake_request_generations_old;
+                DROP TABLE intake_request_generations_old;
+                CREATE INDEX IF NOT EXISTS idx_intake_request_generations_key
+                    ON intake_request_generations(request_key);
+                """
+            )
+        # Every pre-v2 request is generation 1 of its (intake, request type);
+        # supersession generations start at 2 (plan §3.4 r8 R1 / r9 R4).  One
+        # ASSIGN_COURSE receipt may cover several intakes: every one is backfilled.
+        generation_columns = {
+            row[1] for row in self._connection.execute("PRAGMA table_info(intake_request_generations)")
+        }
+        if "derivation_version" not in generation_columns:
+            self._connection.execute(
+                "ALTER TABLE intake_request_generations ADD COLUMN derivation_version TEXT NOT NULL DEFAULT 'UNKNOWN'"
+            )
+        # Rows that pre-date the derivation marker (an earlier P-A schema) are classified
+        # from their provenance instead of guessed (r10 R4): a key bound to a receipt that
+        # exists in request_receipts is a legacy request (no v2 request has been created
+        # before P-B), an unbound reservation is V2, anything else stays RECONCILE.
+        for row in self._connection.execute(
+            "SELECT intake_id, request_type, generation, request_key FROM intake_request_generations "
+            "WHERE derivation_version = 'UNKNOWN' AND request_key IS NOT NULL"
+        ).fetchall():
+            # LEGACY needs the receipt to prove the exact key, request type and intake
+            # binding; a key reused under another type/intake proves nothing (r12 R7).
+            proven = False
+            for receipt in self._connection.execute(
+                "SELECT request_type, intake_ids_json FROM request_receipts WHERE request_key = ?",
+                (row["request_key"],),
+            ).fetchall():
+                if receipt["request_type"] != row["request_type"]:
+                    continue
+                bound = _valid_intake_binding(receipt["request_type"], receipt["intake_ids_json"])
+                if bound is not None and row["intake_id"] in bound:
+                    proven = True
+                    break
+            if proven:
+                self._connection.execute(
+                    "UPDATE intake_request_generations SET derivation_version = 'LEGACY' "
+                    "WHERE intake_id = ? AND request_type = ? AND generation = ?",
+                    (row["intake_id"], row["request_type"], row["generation"]),
+                )
+        self._connection.execute(
+            "UPDATE intake_request_generations SET derivation_version = 'V2' "
+            "WHERE derivation_version = 'UNKNOWN' AND request_key IS NULL"
+        )
+        self._connection.execute(
+            "UPDATE intake_request_generations SET derivation_version = 'RECONCILE' "
+            "WHERE derivation_version = 'UNKNOWN'"
+        )
+        # Several legacy receipts of one (intake, type) are consecutive generations in
+        # creation order, each superseding the previous key; a receipt already bound
+        # is skipped so re-runs are idempotent and nothing is silently dropped (r8 R3).
+        receipts = self._connection.execute(
+            "SELECT request_key, request_type, intake_ids_json FROM request_receipts "
+            "WHERE request_type IS NOT NULL AND intake_ids_json IS NOT NULL ORDER BY rowid"
+        ).fetchall()
+        for receipt in receipts:
+            intake_ids = _valid_intake_binding(receipt["request_type"], receipt["intake_ids_json"])
+            if intake_ids is None:
+                continue  # a malformed binding never produces a LEGACY generation (r13 R2)
+            for intake_id in intake_ids:
+                bound = self._connection.execute(
+                    "SELECT 1 FROM intake_request_generations WHERE intake_id = ? "
+                    "AND request_type = ? AND request_key = ?",
+                    (intake_id, receipt["request_type"], receipt["request_key"]),
+                ).fetchone()
+                if bound is not None:
+                    continue
+                latest = self._connection.execute(
+                    "SELECT generation, request_key FROM intake_request_generations "
+                    "WHERE intake_id = ? AND request_type = ? ORDER BY generation DESC LIMIT 1",
+                    (intake_id, receipt["request_type"]),
+                ).fetchone()
+                if latest is not None and latest["request_key"] is None:
+                    continue  # a pending v2 reservation is never overwritten by legacy data
+                generation = 1 if latest is None else int(latest["generation"]) + 1
+                # Every backfilled receipt was derived before v2 regardless of its
+                # generation number: claim-time verification follows this marker (r9 R2).
+                self._connection.execute(
+                    "INSERT INTO intake_request_generations(intake_id, request_type, "
+                    "generation, request_key, superseded_request_key, derivation_version, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, 'LEGACY', ?)",
+                    (intake_id, receipt["request_type"], generation, receipt["request_key"],
+                     None if latest is None else latest["request_key"], _utc_now()),
+                )
+        # Items whose Kind was fixed by a HUMAN plan before v2 are human-labelled and
+        # therefore never auto-reclassified (plan §3.4 last bullet, P-A review R17).
+        # Proof = a plan revision bound to the item plus a selected Kind.
+        self._connection.execute(
+            "UPDATE intake_items SET classification_source = 'human' "
+            "WHERE classification_source IS NULL AND selected_kind IS NOT NULL "
+            "AND plan_revision IS NOT NULL "
+            "AND EXISTS (SELECT 1 FROM intake_plans p WHERE p.intake_id = intake_items.intake_id "
+            "AND p.plan_revision = intake_items.plan_revision)"
+        )
+
+    def _migrate_c1_entity_reservations(self) -> None:
+        """Upgrade the preview reservation table without losing released history."""
+
+        columns = {
+            row[1]
+            for row in self._connection.execute(
+                "PRAGMA table_info(entity_reservations)"
+            ).fetchall()
+        }
+        required_columns = {
+            "receipt_id",
+            "plan_hash",
+            "source_snapshot_hash",
+            "target_snapshot_hash",
+            "operation_key",
+            "updated_at",
+            "released_at",
+        }
+        has_legacy_active_unique = False
+        for index_row in self._connection.execute(
+            "PRAGMA index_list(entity_reservations)"
+        ).fetchall():
+            if not index_row[2] or index_row[4]:
+                continue
+            index_name = index_row[1]
+            indexed_columns = [
+                row[2]
+                for row in self._connection.execute(
+                    f"PRAGMA index_info('{index_name}')"
+                ).fetchall()
+            ]
+            if indexed_columns == ["intake_id", "entity_kind"]:
+                has_legacy_active_unique = True
+                break
+        if required_columns.issubset(columns) and not has_legacy_active_unique:
+            return
+
+        allowed_states = {"PENDING", "APPLIED", "RECONCILE_REQUIRED", "RELEASED"}
+        current_states = {
+            row[0]
+            for row in self._connection.execute(
+                "SELECT DISTINCT state FROM entity_reservations"
+            ).fetchall()
+        }
+        if current_states - allowed_states:
+            raise ValueError("entity reservation migration found an unsupported state")
+
+        # Rebuild under a temporary table name instead of renaming the legacy
+        # table.  Modern SQLite rewrites child FK targets on ALTER TABLE
+        # RENAME, which would otherwise strand session_source_bindings on the
+        # temporary legacy table after it is dropped.
+        self._connection.execute("PRAGMA foreign_keys = OFF")
+        try:
+            with self._transaction(immediate=True) as connection:
+                existing_columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(entity_reservations)"
+                    ).fetchall()
+                }
+                connection.execute(
+                    """
+                    CREATE TABLE entity_reservations_c1_new (
+                    reservation_id TEXT PRIMARY KEY,
+                    intake_id TEXT NOT NULL REFERENCES intake_items(intake_id),
+                    entity_kind TEXT NOT NULL,
+                    entity_app_id TEXT NOT NULL,
+                    parent_folder_id TEXT NOT NULL,
+                    marker_key TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK(state IN (
+                        'PENDING','APPLIED','RECONCILE_REQUIRED','RELEASED'
+                    )),
+                    plan_revision TEXT NOT NULL,
+                    source_file_id TEXT,
+                    receipt_id TEXT,
+                    plan_hash TEXT,
+                    source_snapshot_hash TEXT,
+                    target_snapshot_hash TEXT,
+                    operation_key TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL DEFAULT '',
+                    released_at TEXT,
+                    UNIQUE(entity_kind, entity_app_id)
+                )
+                """
+                )
+                target_columns = (
+                    "reservation_id",
+                    "intake_id",
+                    "entity_kind",
+                    "entity_app_id",
+                    "parent_folder_id",
+                    "marker_key",
+                    "state",
+                    "plan_revision",
+                    "source_file_id",
+                    "receipt_id",
+                    "plan_hash",
+                    "source_snapshot_hash",
+                    "target_snapshot_hash",
+                    "operation_key",
+                    "created_at",
+                    "updated_at",
+                    "released_at",
+                )
+                select_expressions: list[str] = []
+                for column in target_columns:
+                    if column in existing_columns:
+                        select_expressions.append(column)
+                    elif column == "updated_at":
+                        select_expressions.append("created_at")
+                    elif column == "released_at":
+                        select_expressions.append(
+                            "CASE WHEN state='RELEASED' THEN created_at ELSE NULL END"
+                        )
+                    else:
+                        select_expressions.append("NULL")
+                connection.execute(
+                    f"""
+                    INSERT INTO entity_reservations_c1_new({', '.join(target_columns)})
+                    SELECT {', '.join(select_expressions)}
+                    FROM entity_reservations
+                    """
+                )
+                connection.execute("DROP TABLE entity_reservations")
+                connection.execute(
+                    "ALTER TABLE entity_reservations_c1_new RENAME TO entity_reservations"
+                )
+                connection.execute(
+                    """
+                    CREATE UNIQUE INDEX idx_entity_reservations_active_intake_kind
+                    ON entity_reservations(intake_id, entity_kind)
+                    WHERE state <> 'RELEASED'
+                    """
+                )
+        finally:
+            self._connection.execute("PRAGMA foreign_keys = ON")
+
+        fk_targets = {
+            row[2]
+            for row in self._connection.execute(
+                "PRAGMA foreign_key_list(session_source_bindings)"
+            ).fetchall()
+        }
+        if fk_targets and "entity_reservations" not in fk_targets:
+            raise RuntimeError("C1 migration changed the reservation foreign-key target")
+        violation = self._connection.execute("PRAGMA foreign_key_check").fetchone()
+        if violation is not None:
+            raise RuntimeError("C1 reservation migration introduced a foreign-key violation")
 
     # ------------------------------------------------------------------
     # v1.3 intake preview ledger
@@ -591,6 +1170,9 @@ class SQLiteStateStore:
             "request_revision_hash", "plan_revision", "pending_request_key", "canonical_entity_id",
             "canonical_source_json", "content_status", "last_error_code", "last_error",
             "last_successful_stage", "last_seen_at",
+            "origin", "classified_kind", "classification_source", "classification_record_id",
+            "inferred_course_key", "inferred_week", "inferred_date", "calendar_match",
+            "classification_state",
         }
         unknown = set(patch) - allowed
         if unknown:
@@ -813,8 +1395,30 @@ class SQLiteStateStore:
     def create_intake_plan(self, plan: IntakePlan | None = None, **kwargs: Any) -> IntakePlan:
         values = dict(plan.__dict__) if plan is not None else dict(kwargs)
         values.setdefault("plan_id", _new_id("plan_"))
-        values.setdefault("status", "PLANNED")
         values.setdefault("created_at", _utc_now())
+        values.setdefault("plan_authority", "HUMAN_REQUEST")
+        values.setdefault("classification_revision_hash", None)
+        if values["plan_authority"] not in ("HUMAN_REQUEST", "AUTO_CLASSIFICATION"):
+            raise ValueError("unknown plan authority")
+        if values["plan_authority"] == "AUTO_CLASSIFICATION":
+            # An automatic plan starts AUTO_PENDING and is bound to a real
+            # classification record of the same intake (plan §3.4 stage A; P-A R10).
+            values.setdefault("status", "AUTO_PENDING")
+            if values["status"] != "AUTO_PENDING":
+                raise ValueError("an AUTO_CLASSIFICATION plan is created AUTO_PENDING only")
+            revision = values["classification_revision_hash"]
+            if not revision:
+                raise ValueError("an AUTO_CLASSIFICATION plan requires its classification revision hash")
+            with self._transaction() as connection:
+                record = connection.execute(
+                    "SELECT intake_id FROM classification_records "
+                    "WHERE classification_revision_hash = ?",
+                    (revision,),
+                ).fetchone()
+            if record is None or record["intake_id"] != values["intake_id"]:
+                raise ValueError("classification revision hash is not a record of this intake")
+        else:
+            values.setdefault("status", "PLANNED")
         for name in (
             "plan_id", "intake_id", "request_revision_hash", "plan_revision",
             "resolved_workspace_fingerprint", "plan_hash",
@@ -834,17 +1438,120 @@ class SQLiteStateStore:
                 INSERT INTO intake_plans(
                     plan_id, intake_id, request_revision_hash, plan_revision,
                     resolved_workspace_fingerprint, target_snapshot_json,
-                    plan_hash, status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    plan_hash, status, created_at, plan_authority, classification_revision_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     values["plan_id"], values["intake_id"], values["request_revision_hash"],
                     values["plan_revision"], values["resolved_workspace_fingerprint"],
                     target_json, values["plan_hash"], values["status"], values["created_at"],
+                    values["plan_authority"], values["classification_revision_hash"],
                 ),
             )
             return _intake_plan_from_row(
                 connection.execute("SELECT * FROM intake_plans WHERE plan_id=?", (values["plan_id"],)).fetchone()
+            )
+
+    def promote_auto_plan(self, plan_revision: str) -> IntakePlan:
+        """Stage B (plan §3.4): AUTO_PENDING → PLANNED only when no live HUMAN request remains.
+
+        Every receipt that names this intake must be terminal (Applied, Cancelled or
+        AutoResolved) — i.e. the Draft closure intent finished — before the plan may run.
+        """
+
+        with self._transaction(immediate=True) as connection:
+            plan = connection.execute(
+                "SELECT * FROM intake_plans WHERE plan_revision = ? ORDER BY created_at DESC LIMIT 1",
+                (plan_revision,),
+            ).fetchone()
+            if plan is None:
+                raise KeyError(plan_revision)
+            if plan["plan_authority"] != "AUTO_CLASSIFICATION":
+                raise ValueError("only AUTO_CLASSIFICATION plans are promoted")
+            if plan["status"] != "AUTO_PENDING":
+                raise ValueError("plan is not AUTO_PENDING")
+            record = connection.execute(
+                "SELECT record_id FROM classification_records WHERE classification_revision_hash = ? "
+                "AND intake_id = ?",
+                (plan["classification_revision_hash"], plan["intake_id"]),
+            ).fetchone()
+            if record is None:
+                raise ValueError("the plan's classification record no longer exists for this intake")
+            # Every non-terminal receipt is read with its exact intake binding; a receipt
+            # whose binding cannot be parsed is treated as possibly live (r7 R2).
+            for receipt in connection.execute(
+                "SELECT request_key, state, request_type, intake_ids_json FROM request_receipts "
+                "WHERE state NOT IN ('Applied', 'Cancelled')"
+            ).fetchall():
+                covered = _valid_intake_binding(receipt["request_type"], receipt["intake_ids_json"])
+                if covered is None:
+                    # NULL, broken JSON, [], [""], duplicated ids or a FILE_DETAILS receipt
+                    # over several intakes: the binding of a possibly live request cannot
+                    # be proven, so nothing activates (r8 R1, r13 R2).
+                    raise ValueError("a request receipt without a provable intake binding blocks the plan")
+                if plan["intake_id"] not in covered:
+                    continue
+                if receipt["state"] != "AutoResolved":
+                    raise ValueError("a live HUMAN request blocks the automatic plan")
+                if len(covered) != 1:
+                    raise ValueError("a multi-intake receipt never closes automatically")
+                # A locally AutoResolved receipt only counts when the closure intent
+                # bound to this very classification record finished with its terminal
+                # readback snapshot (plan §3.4 stage B / §3.5; P-A r2 #6).
+                # The receipt is terminal when the intent that actually closed it is DONE
+                # with its terminal snapshot and belongs to a classification record of this
+                # intake; it need not be the record of the plan being promoted, so a later
+                # source version is never blocked by an earlier valid closure (r11 R5).
+                closed_by = connection.execute(
+                    "SELECT i.state, i.terminal_snapshot_hash FROM auto_resolve_intents i "
+                    "JOIN classification_records c ON c.record_id = i.record_id "
+                    "WHERE i.request_key = ? AND c.intake_id = ? AND i.state = 'DONE' "
+                    "AND i.terminal_snapshot_hash IS NOT NULL AND i.terminal_snapshot_hash != ''",
+                    (receipt["request_key"], plan["intake_id"]),
+                ).fetchone()
+                if receipt["request_type"] not in ("ASSIGN_COURSE", "FILE_DETAILS") or closed_by is None:
+                    raise ValueError("AutoResolved receipt without a DONE closure intent blocks the plan")
+            # A HUMAN request generation of this intake that is still unresolved (key not
+            # bound, or bound without a receipt that proves its terminal state) means a
+            # provider create may be in flight: no activation (plan §3.4; r14 R1).
+            for generation in connection.execute(
+                "SELECT request_type, generation, request_key FROM intake_request_generations "
+                "WHERE intake_id = ?",
+                (plan["intake_id"],),
+            ).fetchall():
+                if generation["request_key"] is None:
+                    raise ValueError("a pending HUMAN request generation blocks the automatic plan")
+                receipt = connection.execute(
+                    "SELECT state, request_type, intake_ids_json FROM request_receipts WHERE request_key = ?",
+                    (generation["request_key"],),
+                ).fetchone()
+                if receipt is None:
+                    raise ValueError("a HUMAN request generation without a receipt blocks the automatic plan")
+                # The receipt must be the one this generation names: same request type and a
+                # valid binding that covers this intake; otherwise nothing is proven (r15 R1).
+                covered = _valid_intake_binding(receipt["request_type"], receipt["intake_ids_json"])
+                if receipt["request_type"] != generation["request_type"] or covered is None \
+                        or plan["intake_id"] not in covered:
+                    raise ValueError("a HUMAN request generation is bound to an unproven receipt; no activation")
+                if receipt["state"] not in ("Applied", "Cancelled", "AutoResolved"):
+                    raise ValueError("a live HUMAN request generation blocks the automatic plan")
+                # An AutoResolved receipt was already validated above against its closing intent
+                # because its binding names this intake.
+            live_intent = connection.execute(
+                "SELECT 1 FROM auto_resolve_intents i JOIN classification_records c "
+                "ON c.record_id = i.record_id WHERE c.intake_id = ? "
+                "AND i.state IN ('PENDING', 'RECONCILE')",
+                (plan["intake_id"],),
+            ).fetchone()
+            if live_intent is not None:
+                # A closure intent still in flight (its receipt may not even exist yet)
+                # is an unresolved provider request: no activation (r7 R2).
+                raise ValueError("an unresolved auto resolve intent blocks the automatic plan")
+            connection.execute(
+                "UPDATE intake_plans SET status = 'PLANNED' WHERE plan_id = ?", (plan["plan_id"],)
+            )
+            return _intake_plan_from_row(
+                connection.execute("SELECT * FROM intake_plans WHERE plan_id = ?", (plan["plan_id"],)).fetchone()
             )
 
     def get_intake_plan(self, plan_revision: str) -> IntakePlan | None:
@@ -862,15 +1569,30 @@ class SQLiteStateStore:
         values.setdefault("attempt_id", _new_id("write_"))
         values.setdefault("target_id", None)
         values.setdefault("prewrite_committed_at", _utc_now())
+        values.setdefault("reservation_id", None)
+        values.setdefault("stage", None)
         values.setdefault("dispatched_at", None)
         values.setdefault("response_state", "PREPARED")
         values.setdefault("readback_json", None)
         values.setdefault("error_class", None)
+        values.setdefault("pre_dispatch_snapshot_json", None)
+        if (
+            values.get("stage") == _RESERVATION_RECONCILED_STAGE
+            or values.get("response_state") == _RESERVATION_NO_MUTATION_RESPONSE
+        ):
+            raise ValueError(
+                "reconciliation markers require the dedicated reservation reconciliation API"
+            )
         if values["readback_json"] is not None:
             # Provider readbacks are commonly passed as mappings/dataclasses
             # by the worker.  Normalize them at the StateStore boundary so
             # the durable TEXT column never receives a Python object.
             values["readback_json"] = _json_text(values["readback_json"])
+        if values["pre_dispatch_snapshot_json"] is not None:
+            # Written once at dispatch time; normalized the same way as
+            # readback_json so the durable column never receives a Python
+            # object. Never overwritten afterward (write-once contract).
+            values["pre_dispatch_snapshot_json"] = _json_text(values["pre_dispatch_snapshot_json"])
         for name in ("attempt_id", "operation", "operation_key", "provider", "response_state"):
             _require_text(values.get(name), name)
         with self._transaction(immediate=True) as connection:
@@ -886,14 +1608,14 @@ class SQLiteStateStore:
                 """
                 INSERT INTO provider_write_attempts(
                     attempt_id, operation, operation_key, provider, target_id,
-                    prewrite_committed_at, dispatched_at, response_state,
-                    readback_json, error_class
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    prewrite_committed_at, reservation_id, stage, dispatched_at,
+                    response_state, readback_json, error_class, pre_dispatch_snapshot_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 tuple(values.get(name) for name in (
                     "attempt_id", "operation", "operation_key", "provider", "target_id",
-                    "prewrite_committed_at", "dispatched_at", "response_state",
-                    "readback_json", "error_class",
+                    "prewrite_committed_at", "reservation_id", "stage", "dispatched_at",
+                    "response_state", "readback_json", "error_class", "pre_dispatch_snapshot_json",
                 )),
             )
             return _provider_write_attempt_from_row(
@@ -910,9 +1632,24 @@ class SQLiteStateStore:
             return None if row is None else _provider_write_attempt_from_row(row)
 
     def update_provider_write_attempt(self, operation_key: str, **patch: Any) -> ProviderWriteAttempt:
-        allowed = {"target_id", "dispatched_at", "response_state", "readback_json", "error_class"}
+        allowed = {
+            "target_id",
+            "reservation_id",
+            "stage",
+            "dispatched_at",
+            "response_state",
+            "readback_json",
+            "error_class",
+        }
         if set(patch) - allowed:
             raise ValueError("unknown provider write attempt fields")
+        if (
+            patch.get("stage") == _RESERVATION_RECONCILED_STAGE
+            or patch.get("response_state") == _RESERVATION_NO_MUTATION_RESPONSE
+        ):
+            raise ValueError(
+                "reconciliation markers require the dedicated reservation reconciliation API"
+            )
         if "readback_json" in patch and patch["readback_json"] is not None:
             patch["readback_json"] = _json_text(patch["readback_json"])
         if not patch:
@@ -934,25 +1671,88 @@ class SQLiteStateStore:
                 ).fetchone()
             )
 
+    def record_reservation_no_mutation_reconciliation(
+        self,
+        reservation_id: str,
+        *,
+        operation_key: str,
+        verified_readback: Any,
+    ) -> ProviderWriteAttempt:
+        _require_text(reservation_id, "reservation_id")
+        _require_text(operation_key, "operation_key")
+        if verified_readback is None:
+            raise ValueError("verified reconciliation readback is required")
+        readback_json = _json_text(verified_readback)
+        with self._transaction(immediate=True) as connection:
+            reservation = connection.execute(
+                "SELECT * FROM entity_reservations WHERE reservation_id=?",
+                (reservation_id,),
+            ).fetchone()
+            if reservation is None:
+                raise KeyError(reservation_id)
+            if reservation["state"] != "RECONCILE_REQUIRED":
+                raise ValueError("reservation reconciliation requires RECONCILE_REQUIRED state")
+            attempt = connection.execute(
+                "SELECT * FROM provider_write_attempts WHERE operation_key=? AND reservation_id=?",
+                (operation_key, reservation_id),
+            ).fetchone()
+            if attempt is None:
+                raise ValueError("reconciliation write attempt is not linked to reservation")
+            connection.execute(
+                "UPDATE provider_write_attempts SET stage=?, response_state=?, readback_json=? WHERE attempt_id=?",
+                (
+                    _RESERVATION_RECONCILED_STAGE,
+                    _RESERVATION_NO_MUTATION_RESPONSE,
+                    readback_json,
+                    attempt["attempt_id"],
+                ),
+            )
+            return _provider_write_attempt_from_row(
+                connection.execute(
+                    "SELECT * FROM provider_write_attempts WHERE attempt_id=?",
+                    (attempt["attempt_id"],),
+                ).fetchone()
+            )
+
     def reserve_entity(
         self, reservation: EntityReservation | None = None, **kwargs: Any
     ) -> EntityReservation:
         values = dict(reservation.__dict__) if reservation is not None else dict(kwargs)
         values.setdefault("reservation_id", _new_id("reserve_"))
         values.setdefault("source_file_id", None)
+        values.setdefault("receipt_id", None)
+        values.setdefault("plan_hash", None)
+        values.setdefault("source_snapshot_hash", None)
+        values.setdefault("target_snapshot_hash", None)
+        values.setdefault("operation_key", None)
         values.setdefault("created_at", _utc_now())
+        values.setdefault("updated_at", values["created_at"])
+        values.setdefault("released_at", None)
         for name in (
             "reservation_id", "intake_id", "entity_kind", "entity_app_id",
             "parent_folder_id", "marker_key", "state", "plan_revision",
         ):
             _require_text(values.get(name), name)
+        if values["state"] not in _RESERVATION_STATES:
+            raise ValueError("unsupported entity reservation state")
         with self._transaction(immediate=True) as connection:
             existing = connection.execute(
-                "SELECT * FROM entity_reservations WHERE intake_id=? AND entity_kind=?",
+                """
+                SELECT * FROM entity_reservations
+                WHERE intake_id=? AND entity_kind=? AND state <> 'RELEASED'
+                """,
                 (values["intake_id"], values["entity_kind"]),
             ).fetchone()
             if existing is not None:
-                if any(existing[name] != values[name] for name in ("entity_app_id", "parent_folder_id", "marker_key")):
+                identity_fields = (
+                    "reservation_id",
+                    "entity_app_id",
+                    "parent_folder_id",
+                    "marker_key",
+                    "plan_revision",
+                    "source_file_id",
+                )
+                if any(existing[name] != values[name] for name in identity_fields):
                     raise ValueError("intake already has a different entity reservation")
                 return _entity_reservation_from_row(existing)
             collision = connection.execute(
@@ -966,13 +1766,17 @@ class SQLiteStateStore:
                 INSERT INTO entity_reservations(
                     reservation_id, intake_id, entity_kind, entity_app_id,
                     parent_folder_id, marker_key, state, plan_revision,
-                    source_file_id, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    source_file_id, receipt_id, plan_hash, source_snapshot_hash,
+                    target_snapshot_hash, operation_key, created_at, updated_at,
+                    released_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 tuple(values.get(name) for name in (
                     "reservation_id", "intake_id", "entity_kind", "entity_app_id",
                     "parent_folder_id", "marker_key", "state", "plan_revision",
-                    "source_file_id", "created_at",
+                    "source_file_id", "receipt_id", "plan_hash", "source_snapshot_hash",
+                    "target_snapshot_hash", "operation_key", "created_at", "updated_at",
+                    "released_at",
                 )),
             )
             return _entity_reservation_from_row(
@@ -986,10 +1790,18 @@ class SQLiteStateStore:
     ) -> EntityReservation | None:
         if reservation_id is None and (intake_id is None or entity_kind is None):
             raise TypeError("reservation ID or intake/entity kind is required")
+        query: str
+        values: tuple[Any, ...]
         if reservation_id is not None:
             query, values = "SELECT * FROM entity_reservations WHERE reservation_id=?", (reservation_id,)
         else:
-            query, values = "SELECT * FROM entity_reservations WHERE intake_id=? AND entity_kind=?", (intake_id, entity_kind)
+            query, values = (
+                """
+                SELECT * FROM entity_reservations
+                WHERE intake_id=? AND entity_kind=? AND state <> 'RELEASED'
+                """,
+                (intake_id, entity_kind),
+            )
         with self._lock:
             row = self._connection.execute(query, values).fetchone()
             return None if row is None else _entity_reservation_from_row(row)
@@ -998,16 +1810,1874 @@ class SQLiteStateStore:
         allowed = {"state"}
         if set(patch) - allowed:
             raise ValueError("entity reservation identity is immutable")
-        with self._transaction(immediate=True) as connection:
-            cursor = connection.execute(
-                "UPDATE entity_reservations SET state=? WHERE reservation_id=?",
-                (patch.get("state"), reservation_id),
-            )
-            if cursor.rowcount != 1:
+        if not patch:
+            row = self.get_entity_reservation(reservation_id)
+            if row is None:
                 raise KeyError(reservation_id)
+            return row
+        desired = patch["state"]
+        if desired not in _RESERVATION_STATES:
+            raise ValueError("unsupported entity reservation state")
+        if desired == "RELEASED":
+            raise ValueError("RELEASED requires release_pending_entity_reservation")
+        with self._transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM entity_reservations WHERE reservation_id=?",
+                (reservation_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(reservation_id)
+            current = row["state"]
+            if current == desired:
+                return _entity_reservation_from_row(row)
+            if desired not in _RESERVATION_TRANSITIONS[current]:
+                raise ValueError(f"invalid entity reservation transition: {current} -> {desired}")
+            if current == "RECONCILE_REQUIRED" and desired == "APPLIED":
+                attempts = connection.execute(
+                    """
+                    SELECT reservation_id, response_state, readback_json
+                    FROM provider_write_attempts
+                    WHERE reservation_id=? OR operation_key=?
+                    ORDER BY attempt_id
+                    """,
+                    (reservation_id, row["operation_key"]),
+                ).fetchall()
+                if not attempts or any(
+                    attempt["reservation_id"] != reservation_id
+                    or attempt["response_state"] != "READBACK_OK"
+                    or attempt["readback_json"] is None
+                    for attempt in attempts
+                ):
+                    raise ValueError(
+                        "RECONCILE_REQUIRED -> APPLIED requires verified linked readback evidence"
+                    )
+            connection.execute(
+                """
+                UPDATE entity_reservations
+                SET state=?, updated_at=?
+                WHERE reservation_id=?
+                """,
+                (desired, _utc_now(), reservation_id),
+            )
             return _entity_reservation_from_row(
                 connection.execute(
                     "SELECT * FROM entity_reservations WHERE reservation_id=?", (reservation_id,)
+                ).fetchone()
+            )
+
+    def release_pending_entity_reservation(
+        self,
+        reservation_id: str,
+        replacement: EntityReservation | None = None,
+        **kwargs: Any,
+    ) -> EntityReservation:
+        """Release one provably unmutated reservation and atomically replace it."""
+
+        values = dict(replacement.__dict__) if replacement is not None else dict(kwargs)
+        now = _utc_now()
+        values.setdefault("reservation_id", _new_id("reserve_"))
+        values.setdefault("state", "PENDING")
+        values.setdefault("receipt_id", None)
+        values.setdefault("plan_hash", None)
+        values.setdefault("source_snapshot_hash", None)
+        values.setdefault("target_snapshot_hash", None)
+        values.setdefault("operation_key", None)
+        values.setdefault("created_at", now)
+        values.setdefault("updated_at", values["created_at"])
+        values.setdefault("released_at", None)
+        for name in (
+            "reservation_id",
+            "intake_id",
+            "entity_kind",
+            "entity_app_id",
+            "parent_folder_id",
+            "marker_key",
+            "plan_revision",
+        ):
+            _require_text(values.get(name), name)
+        if values["state"] != "PENDING":
+            raise ValueError("replacement reservation must start PENDING")
+
+        with self._transaction(immediate=True) as connection:
+            current = connection.execute(
+                "SELECT * FROM entity_reservations WHERE reservation_id=?",
+                (reservation_id,),
+            ).fetchone()
+            if current is None:
+                raise KeyError(reservation_id)
+            current_state = current["state"]
+            if current_state not in {"PENDING", "RECONCILE_REQUIRED"}:
+                raise ValueError(
+                    "only a PENDING or RECONCILE_REQUIRED reservation can be safely released"
+                )
+            for field in (
+                "receipt_id",
+                "plan_hash",
+                "source_snapshot_hash",
+                "target_snapshot_hash",
+                "operation_key",
+            ):
+                _require_text(current[field], f"current reservation {field}")
+            if (
+                values["intake_id"] != current["intake_id"]
+                or values["entity_kind"] != current["entity_kind"]
+                or values.get("source_file_id") != current["source_file_id"]
+            ):
+                raise ValueError("replacement must preserve intake, entity kind, and source identity")
+            if values["reservation_id"] == current["reservation_id"]:
+                raise ValueError("replacement must use a new reservation ID")
+            attempts = connection.execute(
+                """
+                SELECT reservation_id, stage, response_state, readback_json
+                FROM provider_write_attempts
+                WHERE reservation_id=? OR operation_key=?
+                ORDER BY attempt_id
+                """,
+                (reservation_id, current["operation_key"]),
+            ).fetchall()
+            if current_state == "PENDING":
+                if attempts:
+                    raise ValueError(
+                        "provider mutation attempt exists; reservation requires reconciliation"
+                    )
+            else:
+                if not attempts:
+                    raise ValueError(
+                        "durable no-mutation reconciliation proof is required before release"
+                    )
+                if any(
+                    attempt["reservation_id"] != reservation_id
+                    or attempt["stage"] != _RESERVATION_RECONCILED_STAGE
+                    or attempt["response_state"] != _RESERVATION_NO_MUTATION_RESPONSE
+                    or attempt["readback_json"] is None
+                    for attempt in attempts
+                ):
+                    raise ValueError(
+                        "all reservation write attempts require verified no-mutation reconciliation"
+                    )
+            collision = connection.execute(
+                """
+                SELECT 1 FROM entity_reservations
+                WHERE entity_kind=? AND entity_app_id=?
+                LIMIT 1
+                """,
+                (values["entity_kind"], values["entity_app_id"]),
+            ).fetchone()
+            if collision is not None:
+                raise ValueError("entity app ID has already been consumed")
+
+            binding = connection.execute(
+                "SELECT * FROM session_source_bindings WHERE reservation_id=?",
+                (reservation_id,),
+            ).fetchone()
+            if binding is not None and binding["state"] != "PENDING":
+                raise ValueError("applied source binding prevents reservation replacement")
+
+            connection.execute(
+                """
+                UPDATE entity_reservations
+                SET state='RELEASED', updated_at=?, released_at=?
+                WHERE reservation_id=?
+                """,
+                (now, now, reservation_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO entity_reservations(
+                    reservation_id, intake_id, entity_kind, entity_app_id,
+                    parent_folder_id, marker_key, state, plan_revision,
+                    source_file_id, receipt_id, plan_hash, source_snapshot_hash,
+                    target_snapshot_hash, operation_key, created_at, updated_at,
+                    released_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                tuple(
+                    values.get(name)
+                    for name in (
+                        "reservation_id",
+                        "intake_id",
+                        "entity_kind",
+                        "entity_app_id",
+                        "parent_folder_id",
+                        "marker_key",
+                        "state",
+                        "plan_revision",
+                        "source_file_id",
+                        "receipt_id",
+                        "plan_hash",
+                        "source_snapshot_hash",
+                        "target_snapshot_hash",
+                        "operation_key",
+                        "created_at",
+                        "updated_at",
+                        "released_at",
+                    )
+                ),
+            )
+            if binding is not None:
+                connection.execute(
+                    """
+                    UPDATE session_source_bindings
+                    SET reservation_id=?
+                    WHERE binding_id=? AND reservation_id=? AND state='PENDING'
+                    """,
+                    (values["reservation_id"], binding["binding_id"], reservation_id),
+                )
+            return _entity_reservation_from_row(
+                connection.execute(
+                    "SELECT * FROM entity_reservations WHERE reservation_id=?",
+                    (values["reservation_id"],),
+                ).fetchone()
+            )
+
+    def claim_study_note_head(
+        self,
+        *,
+        provider: str,
+        session_provider_page_id: str,
+        course_key: str,
+        session_id: str,
+        request_id: str,
+        receipt_id: str,
+        receipt_hash: str,
+        evidence_mode: str | None = None,
+        selected_materials: Any = None,
+    ) -> StudyNoteHead:
+        """Claim the newest validated request for one provider Session page."""
+
+        for value, name in (
+            (provider, "provider"),
+            (session_provider_page_id, "session_provider_page_id"),
+            (course_key, "course_key"),
+            (session_id, "session_id"),
+            (request_id, "request_id"),
+            (receipt_id, "receipt_id"),
+            (receipt_hash, "receipt_hash"),
+        ):
+            _require_text(value, name)
+        selected_materials_json = _canonical_json_field(
+            [] if selected_materials is None else selected_materials,
+            "selected_materials",
+        )
+        now = _utc_now()
+        with self._transaction(immediate=True) as connection:
+            current = connection.execute(
+                """
+                SELECT * FROM study_note_heads
+                WHERE provider=? AND session_provider_page_id=?
+                """,
+                (provider, session_provider_page_id),
+            ).fetchone()
+            if current is not None and current["current_receipt_id"] == receipt_id:
+                for column, expected in (
+                    ("course_key", course_key),
+                    ("session_id", session_id),
+                    ("current_request_id", request_id),
+                    ("receipt_hash", receipt_hash),
+                    ("evidence_mode", evidence_mode),
+                    ("selected_materials_json", selected_materials_json),
+                ):
+                    if current[column] != expected:
+                        raise ValueError(
+                            f"same study-note receipt has conflicting {column}"
+                        )
+                return _study_note_head_from_row(current)
+
+            generation = 1 if current is None else int(current["generation"]) + 1
+            if current is None:
+                connection.execute(
+                    """
+                    INSERT INTO study_note_heads(
+                        provider, session_provider_page_id, course_key, session_id,
+                        current_request_id, current_receipt_id, generation, active,
+                        inactive_reason, evidence_mode, selected_materials_json,
+                        receipt_hash, current_note_key, current_attempt_no,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, NULL, ?, ?, ?, NULL, NULL, ?, ?)
+                    """,
+                    (
+                        provider,
+                        session_provider_page_id,
+                        course_key,
+                        session_id,
+                        request_id,
+                        receipt_id,
+                        generation,
+                        evidence_mode,
+                        selected_materials_json,
+                        receipt_hash,
+                        now,
+                        now,
+                    ),
+                )
+            else:
+                if (
+                    current["course_key"] != course_key
+                    or current["session_id"] != session_id
+                ):
+                    raise ValueError("study-note head Session identity is immutable")
+                connection.execute(
+                    """
+                    UPDATE study_note_heads
+                    SET current_request_id=?, current_receipt_id=?, generation=?,
+                        active=1, inactive_reason=NULL, evidence_mode=?,
+                        selected_materials_json=?, receipt_hash=?,
+                        current_note_key=NULL, current_attempt_no=NULL, updated_at=?
+                    WHERE provider=? AND session_provider_page_id=?
+                    """,
+                    (
+                        request_id,
+                        receipt_id,
+                        generation,
+                        evidence_mode,
+                        selected_materials_json,
+                        receipt_hash,
+                        now,
+                        provider,
+                        session_provider_page_id,
+                    ),
+                )
+            row = connection.execute(
+                """
+                SELECT * FROM study_note_heads
+                WHERE provider=? AND session_provider_page_id=?
+                """,
+                (provider, session_provider_page_id),
+            ).fetchone()
+            return _study_note_head_from_row(row)
+
+    def get_study_note_head(
+        self, provider: str, session_provider_page_id: str
+    ) -> StudyNoteHead | None:
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT * FROM study_note_heads
+                WHERE provider=? AND session_provider_page_id=?
+                """,
+                (provider, session_provider_page_id),
+            ).fetchone()
+            return None if row is None else _study_note_head_from_row(row)
+
+    def deactivate_study_note_head(
+        self,
+        *,
+        provider: str,
+        session_provider_page_id: str,
+        expected_generation: int,
+        expected_request_id: str,
+        expected_receipt_id: str,
+        expected_receipt_hash: str,
+        reason: str,
+        expected_note_key: str | None = _UNSET,
+        expected_attempt_no: int | None = _UNSET,
+    ) -> StudyNoteHead:
+        """Deactivate only the exact current generation; stale events are harmless.
+
+        expected_note_key and expected_attempt_no default to an unset sentinel that
+        skips the check for backward compatibility. Passing an explicit value,
+        including None, requires the head's current pointer to match exactly before
+        deactivating; this closes the TOCTOU where a snapshot taken before an
+        attach_note_request() call is still accepted after the head has since had a
+        note_key/attempt_no attached (attach does not bump generation).
+        """
+
+        _require_text(expected_request_id, "expected_request_id")
+        _require_text(expected_receipt_id, "expected_receipt_id")
+        _require_text(expected_receipt_hash, "expected_receipt_hash")
+        _require_text(reason, "reason")
+        if isinstance(expected_generation, bool) or expected_generation < 1:
+            raise ValueError("expected_generation must be a positive integer")
+        check_note_key = expected_note_key is not _UNSET
+        check_attempt_no = expected_attempt_no is not _UNSET
+        if check_note_key and expected_note_key is not None:
+            _require_text(expected_note_key, "expected_note_key")
+        if (
+            check_attempt_no
+            and expected_attempt_no is not None
+            and (isinstance(expected_attempt_no, bool) or expected_attempt_no < 1)
+        ):
+            raise ValueError("expected_attempt_no must be a positive integer")
+        with self._transaction(immediate=True) as connection:
+            current = connection.execute(
+                """
+                SELECT * FROM study_note_heads
+                WHERE provider=? AND session_provider_page_id=?
+                """,
+                (provider, session_provider_page_id),
+            ).fetchone()
+            if current is None:
+                raise KeyError((provider, session_provider_page_id))
+            if (
+                int(current["generation"]) != expected_generation
+                or current["current_request_id"] != expected_request_id
+                or current["current_receipt_id"] != expected_receipt_id
+                or current["receipt_hash"] != expected_receipt_hash
+                or (check_note_key and current["current_note_key"] != expected_note_key)
+                or (
+                    check_attempt_no
+                    and current["current_attempt_no"] != expected_attempt_no
+                )
+            ):
+                return _study_note_head_from_row(current)
+            connection.execute(
+                """
+                UPDATE study_note_heads
+                SET active=0, inactive_reason=?, updated_at=?
+                WHERE provider=? AND session_provider_page_id=?
+                  AND generation=? AND current_request_id=?
+                  AND current_receipt_id=? AND receipt_hash=?
+                  AND (? = 0 OR current_note_key IS ?)
+                  AND (? = 0 OR current_attempt_no IS ?)
+                """,
+                (
+                    reason,
+                    _utc_now(),
+                    provider,
+                    session_provider_page_id,
+                    expected_generation,
+                    expected_request_id,
+                    expected_receipt_id,
+                    expected_receipt_hash,
+                    1 if check_note_key else 0,
+                    expected_note_key if check_note_key else None,
+                    1 if check_attempt_no else 0,
+                    expected_attempt_no if check_attempt_no else None,
+                ),
+            )
+            row = connection.execute(
+                """
+                SELECT * FROM study_note_heads
+                WHERE provider=? AND session_provider_page_id=?
+                """,
+                (provider, session_provider_page_id),
+            ).fetchone()
+            return _study_note_head_from_row(row)
+
+
+    # -- range_intent_heads / usage_proposal_outbox (rev10 C5: v2 usage-proposal
+    # envelope + generation-bound identity) -------------------------------
+
+    def claim_range_intent_generation(
+        self,
+        *,
+        usage_slot_key: str,
+        session_app_id: str,
+        material_app_id: str,
+        usage_role: str,
+        request_id: str,
+        receipt_id: str,
+        receipt_hash: str,
+        operation: str,
+        target_entity_id: str,
+        adopted_usage_app_id: str | None,
+        slot_occupant_count: int,
+        adopted_usage_provider: str | None = None,
+        adopted_usage_provider_row_id: str | None = None,
+    ) -> RangeIntentHead:
+        """Claim (or idempotently re-return) the current generation for one usage slot.
+
+        This is PHASE 1 of a two-phase claim. It does NOT accept or store a
+        proposal_id -- the caller must compute the v2 proposal_id AFTER
+        seeing this call's returned intent_generation (proposal_id depends
+        on the confirmed generation), then persist it via
+        bind_range_intent_proposal(). Accepting a caller-precomputed
+        proposal_id here would create a race: two concurrent callers could
+        each predict a different "next generation" before either actually
+        wins the transaction, and the loser's precomputed ID (for a
+        generation it did not actually receive) could otherwise be written.
+
+        adopted_usage_app_id/slot_occupant_count describe the caller's OWN
+        live-graph slot-adoption read (range-agnostic (session, material, role)
+        query) and are only consulted when this slot has no existing head row
+        yet; they are not re-derived here. current_usage_app_id is the PERMANENT
+        slot binding and is never reset by this call once set.
+        """
+
+        for value, name in (
+            (usage_slot_key, "usage_slot_key"),
+            (session_app_id, "session_app_id"),
+            (material_app_id, "material_app_id"),
+            (usage_role, "usage_role"),
+            (request_id, "request_id"),
+            (receipt_id, "receipt_id"),
+            (receipt_hash, "receipt_hash"),
+            (target_entity_id, "target_entity_id"),
+        ):
+            _require_text(value, name)
+        if operation not in {"create_usage", "update_range"}:
+            raise ValueError("operation must be create_usage or update_range")
+        if type(slot_occupant_count) is not int or slot_occupant_count < 0:
+            raise ValueError("slot_occupant_count must be a non-negative integer")
+        from uls.domain.approval_identity import derive_usage_slot_key
+
+        if usage_slot_key != derive_usage_slot_key(session_app_id, material_app_id, usage_role):
+            raise ValueError("usage slot differs from derived semantic identity")
+        if slot_occupant_count > 1:
+            raise ValueError("slot has more than one live Usage; reconciliation required")
+        if adopted_usage_provider is not None or adopted_usage_provider_row_id is not None:
+            if (adopted_usage_app_id is None or adopted_usage_provider != "notion"
+                or not isinstance(adopted_usage_provider_row_id, str)
+                or re.fullmatch(r"[0-9a-f]{32}|[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}", adopted_usage_provider_row_id) is None):
+                raise ValueError("adoption requires strict physical provider identity")
+            adopted_usage_provider_row_id = adopted_usage_provider_row_id.replace("-", "")
+        now = _utc_now()
+        claim_identity = canonical_json({
+            "session_app_id": session_app_id, "material_app_id": material_app_id,
+            "usage_role": usage_role, "request_id": request_id, "receipt_id": receipt_id,
+            "receipt_hash": receipt_hash, "operation": operation,
+            "target_entity_id": target_entity_id,
+            "adopted_usage_app_id": adopted_usage_app_id,
+            "adopted_usage_provider": adopted_usage_provider,
+            "adopted_usage_provider_row_id": adopted_usage_provider_row_id,
+        })
+        with self._transaction(immediate=True) as connection:
+            current = connection.execute(
+                "SELECT * FROM range_intent_heads WHERE usage_slot_key=?",
+                (usage_slot_key,),
+            ).fetchone()
+            previous = connection.execute(
+                "SELECT * FROM range_intent_claims WHERE usage_slot_key=? "
+                "AND (request_id=? OR receipt_id=?)",
+                (usage_slot_key, request_id, receipt_id),
+            ).fetchall()
+            if previous:
+                if len(previous) != 1 or previous[0]["identity_json"] != claim_identity:
+                    raise ValueError("range-intent request/receipt identity conflicts")
+                if current is None or previous[0]["intent_generation"] != current["intent_generation"]:
+                    raise ValueError("historical range-intent claim is stale")
+                return _range_intent_head_from_row(current)
+            if current is not None and not connection.execute(
+                "SELECT 1 FROM range_intent_claims WHERE usage_slot_key=?",
+                (usage_slot_key,),
+            ).fetchone():
+                raise ValueError("legacy claim history is unavailable; explicit recovery required")
+            if current is not None and current["current_receipt_id"] == receipt_id:
+                for column, expected in (
+                    ("session_app_id", session_app_id),
+                    ("material_app_id", material_app_id),
+                    ("usage_role", usage_role),
+                    ("current_request_id", request_id),
+                    ("receipt_hash", receipt_hash),
+                    ("current_operation", operation),
+                    ("current_target_entity_id", target_entity_id),
+                ):
+                    if current[column] != expected:
+                        raise ValueError(
+                            f"same range-intent receipt has conflicting {column}"
+                        )
+                return _range_intent_head_from_row(current)
+
+            if current is None:
+                if operation == "create_usage":
+                    if adopted_usage_app_id is not None and (
+                        slot_occupant_count != 1 or adopted_usage_provider != "notion"
+                        or adopted_usage_provider_row_id is None or adopted_usage_app_id != target_entity_id
+                    ):
+                        raise ValueError("initial adoption requires one occupant and complete matching app/provider/physical target")
+                    if slot_occupant_count == 1 and adopted_usage_app_id is None:
+                        raise ValueError(
+                            "slot has an existing Usage that was not adopted"
+                        )
+                    if slot_occupant_count == 0 and adopted_usage_app_id is not None:
+                        raise ValueError(
+                            "adopted_usage_app_id supplied for an empty slot"
+                        )
+                else:
+                    if adopted_usage_app_id is None or slot_occupant_count != 1:
+                        raise ValueError(
+                            "update_range requires exactly one adopted existing Usage"
+                        )
+                    if adopted_usage_provider != "notion" or adopted_usage_provider_row_id is None:
+                        raise ValueError("initial UPDATE adoption requires complete provider/physical identity")
+                    if adopted_usage_app_id != target_entity_id:
+                        raise ValueError(
+                            "update_range target does not match the adopted Usage"
+                        )
+                connection.execute(
+                    """
+                    INSERT INTO range_intent_heads(
+                        usage_slot_key, session_app_id, material_app_id, usage_role,
+                        current_usage_app_id, current_request_id, current_receipt_id,
+                        receipt_hash, current_proposal_id, current_target_entity_id,
+                        current_operation, intent_generation, reservation_state,
+                        reserved_generation, reserved_target_id, dispatch_attempt_no,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 1, 'NONE', NULL, NULL, 0, ?, ?)
+                    """,
+                    (
+                        usage_slot_key,
+                        session_app_id,
+                        material_app_id,
+                        usage_role,
+                        adopted_usage_app_id,
+                        request_id,
+                        receipt_id,
+                        receipt_hash,
+                        target_entity_id,
+                        operation,
+                        now,
+                        now,
+                    ),
+                )
+            else:
+                if (
+                    current["session_app_id"] != session_app_id
+                    or current["material_app_id"] != material_app_id
+                    or current["usage_role"] != usage_role
+                ):
+                    raise ValueError("range-intent head slot identity is immutable")
+                bound = current["current_usage_app_id"]
+                binding = (bound, current["current_usage_provider"], current["current_usage_provider_row_id"])
+                if any(value is not None for value in binding) and (
+                    not all(binding) or current["current_usage_provider"] != "notion"
+                ):
+                    raise ValueError("permanent physical binding is incomplete; fresh generation refused")
+                if operation == "create_usage" and bound is not None:
+                    raise ValueError(
+                        "slot already has a permanently bound Usage; "
+                        "only update_range against it is allowed"
+                    )
+                if operation == "update_range" and bound != target_entity_id:
+                    raise ValueError(
+                        "update_range target does not match the slot's current binding"
+                    )
+                if current["reservation_state"] != "NONE":
+                    raise ValueError(
+                        "slot has an unresolved provider-write reservation; "
+                        "reconciliation required before a new generation may claim it"
+                    )
+                if current["apply_lease_expires_at"] is not None or connection.execute(
+                    "SELECT 1 FROM usage_apply_guards WHERE usage_slot_key=? AND phase!='RELEASED'",
+                    (usage_slot_key,),
+                ).fetchone():
+                    raise ValueError(
+                        "slot has unresolved apply ownership; explicit reconciliation required"
+                    )
+                generation = int(current["intent_generation"]) + 1
+                connection.execute(
+                    """
+                    UPDATE range_intent_heads
+                    SET current_request_id=?, current_receipt_id=?, receipt_hash=?,
+                        current_proposal_id=NULL, current_target_entity_id=?,
+                        current_operation=?, intent_generation=?, updated_at=?
+                    WHERE usage_slot_key=?
+                    """,
+                    (
+                        request_id,
+                        receipt_id,
+                        receipt_hash,
+                        target_entity_id,
+                        operation,
+                        generation,
+                        now,
+                        usage_slot_key,
+                    ),
+                )
+            if current is None and adopted_usage_provider_row_id is not None:
+                connection.execute(
+                    "UPDATE range_intent_heads SET current_usage_provider=?, current_usage_provider_row_id=? WHERE usage_slot_key=?",
+                    (adopted_usage_provider, adopted_usage_provider_row_id, usage_slot_key),
+                )
+            row = connection.execute(
+                "SELECT * FROM range_intent_heads WHERE usage_slot_key=?",
+                (usage_slot_key,),
+            ).fetchone()
+            connection.execute(
+                "INSERT INTO range_intent_claims VALUES (?, ?, ?, ?, ?)",
+                (usage_slot_key, request_id, receipt_id, row["intent_generation"], claim_identity),
+            )
+            return _range_intent_head_from_row(row)
+
+    def get_range_intent_head(self, usage_slot_key: str) -> RangeIntentHead | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM range_intent_heads WHERE usage_slot_key=?",
+                (usage_slot_key,),
+            ).fetchone()
+            return None if row is None else _range_intent_head_from_row(row)
+
+    def acquire_apply_lease(
+        self, *, usage_slot_key: str, generation: int, proposal_id: str,
+        baseline_json: str, expected_json: str,
+    ) -> str | None:
+        """Acquire a durable invocation owner; time never grants another writer ownership."""
+        from uls.domain.approval_identity import parse_c5_usage_snapshot
+
+        baseline = parse_c5_usage_snapshot(baseline_json)
+        expected = parse_c5_usage_snapshot(expected_json)
+        if len(expected) != 1:
+            raise ValueError("one expected physical row required")
+        token = _new_id("usage_apply_")
+        with self._transaction(immediate=True) as connection:
+            head = connection.execute(
+                "SELECT * FROM range_intent_heads WHERE usage_slot_key=?", (usage_slot_key,),
+            ).fetchone()
+            outbox = connection.execute(
+                "SELECT * FROM usage_proposal_outbox WHERE proposal_id=?", (proposal_id,),
+            ).fetchone()
+            if (head is None or head["intent_generation"] != generation
+                or not head["active"]
+                or head["current_proposal_id"] != proposal_id
+                or head["apply_lease_expires_at"] is not None
+                or head["reservation_state"] != "NONE"
+                or outbox is None or outbox["publish_state"] != "PUBLISHED"
+                or outbox["usage_slot_key"] != usage_slot_key
+                or outbox["intent_generation"] != generation
+                or outbox["request_id"] != head["current_request_id"]):
+                return None
+            if connection.execute(
+                "SELECT 1 FROM range_producer_attempts WHERE usage_slot_key=? AND phase!='RELEASED'",
+                (usage_slot_key,),
+            ).fetchone():
+                return None
+            if connection.execute(
+                "SELECT 1 FROM usage_apply_guards WHERE usage_slot_key=? AND phase!='RELEASED'",
+                (usage_slot_key,),
+            ).fetchone():
+                return None
+            if connection.execute(
+                "SELECT 1 FROM usage_apply_guards WHERE usage_slot_key=? AND generation=? AND proposal_id=? AND outcome='effect'",
+                (usage_slot_key, generation, proposal_id),
+            ).fetchone():
+                return None  # a resolved invocation must never authorize another target write
+            target = expected[0]
+            if head["current_operation"] == "update_range" and head["current_usage_provider_row_id"] is None:
+                raise ValueError("UPDATE requires a durably adopted physical binding")
+            semantics = _validate_usage_dispatch_identity(head, outbox)
+            if (target["start_page"] != semantics["desired_range"]["start_page"]
+                or target["end_page"] != semantics["desired_range"]["end_page"]
+                or target["verified"] != (True if head["current_operation"] == "create_usage" else semantics["old_snapshot"]["verified"])):
+                raise ValueError("expected row/ID differs from durable approved intent")
+            if head["current_usage_provider_row_id"] is not None and (
+                head["current_usage_provider_row_id"] != target["provider_row_id"]
+                or head["current_usage_provider"] != target["provider"]
+                or head["current_usage_app_id"] != target["usage_app_id"]
+            ):
+                raise ValueError("permanent physical binding cannot be replaced")
+            if (target["usage_app_id"] != head["current_target_entity_id"]
+                or target["session_app_id"] != head["session_app_id"]
+                or target["material_app_id"] != head["material_app_id"]
+                or target["usage_role"] != head["usage_role"]):
+                raise ValueError("expected physical row does not match bound intent")
+            baseline_mode = _validate_usage_baseline(head, semantics, baseline, target)
+            connection.execute(
+                "INSERT INTO usage_apply_guards (invocation_token, usage_slot_key, generation, proposal_id, "
+                "phase, baseline_json, expected_json, baseline_mode, readback_json, outcome, created_at) "
+                "VALUES (?, ?, ?, ?, 'HELD', ?, ?, ?, NULL, NULL, ?)",
+                (token, usage_slot_key, generation, proposal_id, baseline_json, expected_json, baseline_mode, _utc_now()),
+            )
+            return token
+
+    def mark_apply_mutating(self, *, invocation_token: str) -> None:
+        with self._transaction(immediate=True) as connection:
+            if connection.execute(
+                "UPDATE usage_apply_guards SET phase='MUTATING' WHERE invocation_token=? AND phase='HELD'",
+                (invocation_token,),
+            ).rowcount != 1:
+                raise ValueError("invocation no longer owns a pre-mutation guard")
+
+    def record_apply_outcome(
+        self, *, invocation_token: str, readback_json: str,
+        not_applied_error: Exception | None = None,
+    ) -> None:
+        from uls.domain.errors import ProviderWriteNotAppliedError
+
+        if not_applied_error is not None and not isinstance(not_applied_error, ProviderWriteNotAppliedError):
+            raise ValueError("trusted ProviderWriteNotAppliedError required")
+        outcome = "not_applied" if not_applied_error is not None else "effect"
+        with self._transaction(immediate=True) as connection:
+            guard = connection.execute(
+                "SELECT * FROM usage_apply_guards WHERE invocation_token=? AND phase='MUTATING'",
+                (invocation_token,),
+            ).fetchone()
+            if guard is None:
+                raise ValueError("no active mutating invocation")
+            row = _prove_usage_guard(guard, readback_json, outcome)
+            if row is not None:
+                head = connection.execute(
+                    "SELECT * FROM range_intent_heads WHERE usage_slot_key=?", (guard["usage_slot_key"],),
+                ).fetchone()
+                if head["current_usage_app_id"] is not None and head["current_usage_app_id"] != row["usage_app_id"]:
+                    raise ValueError("permanent app binding cannot be replaced")
+                if head["current_usage_provider_row_id"] is not None and (
+                    head["current_usage_provider_row_id"] != row["provider_row_id"]
+                    or head["current_usage_provider"] != row["provider"]
+                    or head["current_usage_app_id"] != row["usage_app_id"]
+                ):
+                    raise ValueError("permanent physical binding cannot be replaced")
+                connection.execute(
+                    "UPDATE range_intent_heads SET current_usage_app_id=?, current_usage_provider=?, "
+                    "current_usage_provider_row_id=? WHERE usage_slot_key=? AND intent_generation=?",
+                    (row["usage_app_id"], row["provider"], row["provider_row_id"], guard["usage_slot_key"], guard["generation"]),
+                )
+            connection.execute(
+                "UPDATE usage_apply_guards SET phase='RESOLVED', readback_json=?, outcome=? WHERE invocation_token=?",
+                (readback_json, "ProviderWriteNotAppliedError" if not_applied_error else "effect", invocation_token),
+            )
+
+    def release_apply_lease(self, *, usage_slot_key: str, generation: int, invocation_token: str) -> bool:
+        """Only pre-mutation ownership or a durably resolved exact owner can clear."""
+        with self._transaction(immediate=True) as connection:
+            guard = connection.execute(
+                "SELECT * FROM usage_apply_guards WHERE invocation_token=? AND usage_slot_key=? AND generation=?",
+                (invocation_token, usage_slot_key, generation),
+            ).fetchone()
+            if guard is not None and guard["phase"] == "RESOLVED":
+                return self._finalize_resolved_guard(connection, guard)
+            return connection.execute(
+                "UPDATE usage_apply_guards SET phase='RELEASED', "
+                "outcome=COALESCE(outcome, 'pre_mutation') "
+                "WHERE invocation_token=? AND usage_slot_key=? AND generation=? "
+                "AND phase='HELD' "
+                "AND EXISTS (SELECT 1 FROM range_intent_heads WHERE usage_slot_key=? AND intent_generation=?)",
+                (invocation_token, usage_slot_key, generation, usage_slot_key, generation),
+            ).rowcount == 1
+
+    def finalize_resolved_apply(self, *, usage_slot_key: str, generation: int, proposal_id: str) -> bool:
+        """Deterministically finalize only an exact, already-proven RESOLVED owner.
+
+        This never hands a new invocation an old token and never unlocks HELD or
+        MUTATING. The original HAA can only perform audit operations after resolution.
+        """
+        with self._transaction(immediate=True) as connection:
+            guard = connection.execute(
+                "SELECT * FROM usage_apply_guards WHERE usage_slot_key=? AND generation=? "
+                "AND proposal_id=? AND phase='RESOLVED'",
+                (usage_slot_key, generation, proposal_id),
+            ).fetchone()
+            if guard is None:
+                return False
+            return self._finalize_resolved_guard(connection, guard)
+
+    @staticmethod
+    def _finalize_resolved_guard(connection: sqlite3.Connection, guard: sqlite3.Row) -> bool:
+        """Shared proof gate for recovery and exact-token RESOLVED cleanup."""
+        usage_slot_key, generation, proposal_id = guard["usage_slot_key"], guard["generation"], guard["proposal_id"]
+        head = connection.execute(
+            "SELECT * FROM range_intent_heads WHERE usage_slot_key=?", (usage_slot_key,),
+        ).fetchone()
+        if head is None or head["intent_generation"] != generation or head["current_proposal_id"] != proposal_id:
+            return False
+        outbox = connection.execute("SELECT * FROM usage_proposal_outbox WHERE proposal_id=?", (proposal_id,)).fetchone()
+        _validate_usage_dispatch_identity(head, outbox)
+        outcome = guard["outcome"]
+        if outcome not in {"effect", "ProviderWriteNotAppliedError"} or guard["readback_json"] is None:
+            return False
+        proof = _prove_usage_guard(
+            guard, guard["readback_json"],
+            "effect" if outcome == "effect" else "not_applied",
+        )
+        if proof is not None and (
+            head["current_usage_provider"] != proof["provider"]
+            or head["current_usage_provider_row_id"] != proof["provider_row_id"]
+            or head["current_usage_app_id"] != proof["usage_app_id"]
+        ):
+            return False
+        return connection.execute(
+            "UPDATE usage_apply_guards SET phase='RELEASED' WHERE invocation_token=? AND phase='RESOLVED'",
+            (guard["invocation_token"],),
+        ).rowcount == 1
+
+    def has_apply_effect_proof(
+        self, *, usage_slot_key: str, generation: int, proposal_id: str, readback_json: str,
+    ) -> bool:
+        """Audit replay requires durable physical effect proof and matching live rows."""
+        from uls.domain.approval_identity import (
+            c5_usage_snapshot_json,
+            parse_c5_usage_snapshot,
+        )
+
+        with self._transaction(immediate=True) as connection:
+            if connection.execute(
+                "SELECT 1 FROM usage_apply_guards WHERE usage_slot_key=? AND phase IN ('HELD','MUTATING')",
+                (usage_slot_key,),
+            ).fetchone():
+                return False
+            guards = connection.execute(
+                "SELECT * FROM usage_apply_guards WHERE usage_slot_key=? AND generation=? "
+                "AND proposal_id=? AND phase IN ('RESOLVED','RELEASED') AND outcome='effect'",
+                (usage_slot_key, generation, proposal_id),
+            ).fetchall()
+            head = connection.execute("SELECT * FROM range_intent_heads WHERE usage_slot_key=?", (usage_slot_key,)).fetchone()
+            if len(guards) != 1 or head is None or head["intent_generation"] != generation or head["current_proposal_id"] != proposal_id:
+                return False
+            guard = guards[0]
+            proof = _prove_usage_guard(guard, guard["readback_json"], "effect")
+            if proof is None or (
+                head["current_usage_provider"] != proof["provider"]
+                or head["current_usage_provider_row_id"] != proof["provider_row_id"]
+                or head["current_usage_app_id"] != proof["usage_app_id"]
+            ):
+                return False
+            return c5_usage_snapshot_json(parse_c5_usage_snapshot(readback_json)) == c5_usage_snapshot_json(parse_c5_usage_snapshot(guard["readback_json"]))
+
+    def bind_range_intent_proposal(
+        self, *, usage_slot_key: str, generation: int, proposal_id: str
+    ) -> RangeIntentHead:
+        """PHASE 2 of the two-phase claim: durably bind a v2 proposal_id to
+        the EXACT generation claim_range_intent_generation() already
+        confirmed (phase 1). The CAS is conditioned on intent_generation
+        still matching -- if a DIFFERENT receipt's claim has since advanced
+        the generation, this call fails and the caller must recompute
+        proposal_id against the new generation and retry, rather than ever
+        writing an ID that was computed for a generation the head no longer
+        holds. Idempotent when the identical proposal_id is already bound to
+        this exact generation (a legitimate same-receipt retry).
+        """
+
+        _require_text(usage_slot_key, "usage_slot_key")
+        _require_text(proposal_id, "proposal_id")
+        if isinstance(generation, bool) or generation < 1:
+            raise ValueError("generation must be a positive integer")
+        now = _utc_now()
+        with self._transaction(immediate=True) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE range_intent_heads
+                SET current_proposal_id=?, updated_at=?
+                WHERE usage_slot_key=? AND intent_generation=?
+                  AND (current_proposal_id IS NULL OR current_proposal_id=?)
+                """,
+                (proposal_id, now, usage_slot_key, generation, proposal_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM range_intent_heads WHERE usage_slot_key=?",
+                (usage_slot_key,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(usage_slot_key)
+            head = _range_intent_head_from_row(row)
+            if cursor.rowcount != 1:
+                if head.current_proposal_id == proposal_id and head.intent_generation == generation:
+                    return head
+                raise ValueError(
+                    "range-intent generation has advanced since claim; "
+                    "recompute proposal_id against the current generation"
+                )
+            return head
+
+    def reserve_usage_dispatch(
+        self,
+        *,
+        usage_slot_key: str,
+        generation: int,
+        target_id: str,
+        pre_dispatch_snapshot_json: str,
+        provider: str,
+    ) -> tuple[RangeIntentHead, ProviderWriteAttempt] | None:
+        """Atomically claim exclusive ownership of one _create_usage() dispatch.
+
+        Returns None when another caller already holds (or has resolved) the
+        dispatch for this exact generation, OR when the supplied target_id/
+        operation does not match what claim_range_intent_generation already
+        durably committed for this generation -- a caller cannot substitute
+        an arbitrary target to win dispatch ownership. The NONE -> DISPATCHED
+        transition is a single CAS inside one BEGIN IMMEDIATE transaction, so
+        at most one caller can ever win it for a given
+        (usage_slot_key, generation, target_id) triple.
+        """
+
+        _require_text(usage_slot_key, "usage_slot_key")
+        _require_text(target_id, "target_id")
+        _require_text(pre_dispatch_snapshot_json, "pre_dispatch_snapshot_json")
+        _require_text(provider, "provider")
+        if isinstance(generation, bool) or generation < 1:
+            raise ValueError("generation must be a positive integer")
+        now = _utc_now()
+        with self._transaction(immediate=True) as connection:
+            dispatch_head = connection.execute(
+                "SELECT * FROM range_intent_heads WHERE usage_slot_key=?", (usage_slot_key,),
+            ).fetchone()
+            if (dispatch_head is None or dispatch_head["current_proposal_id"] is None
+                or dispatch_head["intent_generation"] != generation):
+                return None
+            dispatch_outbox = connection.execute(
+                "SELECT * FROM usage_proposal_outbox WHERE proposal_id=?", (dispatch_head["current_proposal_id"],),
+            ).fetchone()
+            if dispatch_outbox is None or dispatch_outbox["publish_state"] != "PUBLISHED":
+                return None
+            _validate_usage_dispatch_identity(dispatch_head, dispatch_outbox)
+            cursor = connection.execute(
+                """
+                UPDATE range_intent_heads
+                SET reservation_state='DISPATCHED', reserved_generation=?,
+                    reserved_target_id=?, dispatch_attempt_no=dispatch_attempt_no + 1,
+                    updated_at=?
+                WHERE usage_slot_key=? AND intent_generation=? AND reservation_state='NONE'
+                  AND current_operation='create_usage' AND current_target_entity_id=?
+                  AND current_proposal_id IS NOT NULL
+                  AND EXISTS (SELECT 1 FROM usage_proposal_outbox o
+                    WHERE o.proposal_id=range_intent_heads.current_proposal_id
+                    AND o.usage_slot_key=range_intent_heads.usage_slot_key
+                    AND o.intent_generation=range_intent_heads.intent_generation
+                    AND o.request_id=range_intent_heads.current_request_id
+                    AND o.publish_state='PUBLISHED')
+                  AND NOT EXISTS (SELECT 1 FROM usage_apply_guards g WHERE g.usage_slot_key=range_intent_heads.usage_slot_key AND g.phase!='RELEASED')
+                """,
+                (generation, target_id, now, usage_slot_key, generation, target_id),
+            )
+            if cursor.rowcount != 1:
+                return None
+            head_row = connection.execute(
+                "SELECT * FROM range_intent_heads WHERE usage_slot_key=?",
+                (usage_slot_key,),
+            ).fetchone()
+            head = _range_intent_head_from_row(head_row)
+            attempt_key = (
+                f"{usage_slot_key}:{generation}:{head.dispatch_attempt_no}:{target_id}"
+            )
+            connection.execute(
+                """
+                INSERT INTO provider_write_attempts(
+                    attempt_id, operation, operation_key, provider, target_id,
+                    prewrite_committed_at, reservation_id, stage, dispatched_at,
+                    response_state, readback_json, error_class, pre_dispatch_snapshot_json
+                ) VALUES (?, 'create_usage', ?, ?, ?, ?, NULL, NULL, NULL, 'PREPARED', NULL, NULL, ?)
+                """,
+                (
+                    _new_id("range_intent_"),
+                    attempt_key,
+                    provider,
+                    target_id,
+                    now,
+                    pre_dispatch_snapshot_json,
+                ),
+            )
+            attempt_row = connection.execute(
+                "SELECT * FROM provider_write_attempts WHERE operation_key=?",
+                (attempt_key,),
+            ).fetchone()
+            return head, _provider_write_attempt_from_row(attempt_row)
+
+    def release_usage_reservation(
+        self, *, usage_slot_key: str, generation: int, target_id: str,
+        outcome: str, bound_usage_app_id: str | None = None,
+    ) -> RangeIntentHead:
+        """Legacy dispatch can only block: it lacks owner-bound physical proof."""
+        if outcome != "reconcile":
+            raise ValueError("owner-bound structured evidence required; legacy release is unsupported")
+        with self._transaction(immediate=True) as connection:
+            if connection.execute(
+                "UPDATE range_intent_heads SET reservation_state='RECONCILE_REQUIRED', updated_at=? "
+                "WHERE usage_slot_key=? AND intent_generation=? AND reservation_state='DISPATCHED' "
+                "AND reserved_generation=? AND reserved_target_id=?",
+                (_utc_now(), usage_slot_key, generation, generation, target_id),
+            ).rowcount != 1:
+                raise ValueError("no matching dispatched reservation")
+            row = connection.execute(
+                "SELECT * FROM range_intent_heads WHERE usage_slot_key=?", (usage_slot_key,),
+            ).fetchone()
+            return _range_intent_head_from_row(row)
+
+    def resolve_range_intent_reconciliation(
+        self, *, usage_slot_key: str, generation: int, target_id: str,
+        bound_usage_app_id: str | None,
+    ) -> RangeIntentHead:
+        """No generic unlock: old attempts cannot establish owner quiescence/proof."""
+        raise ValueError("legacy reconciliation lacks owner-bound physical proof; remains blocked")
+
+    def record_usage_proposal_outbox(
+        self,
+        *,
+        proposal_id: str,
+        usage_slot_key: str,
+        request_id: str,
+        intent_generation: int,
+        action_json: str,
+        envelope_json: str,
+    ) -> UsageProposalOutboxEntry:
+        """Persist one generation's proposal bytes before publishing to Notion.
+
+        A byte-identical retry for the same (usage_slot_key, intent_generation) is
+        idempotent. Any difference in stored bytes is a producer-output conflict
+        and fails closed -- it is never silently overwritten.
+        """
+
+        for value, name in (
+            (proposal_id, "proposal_id"),
+            (usage_slot_key, "usage_slot_key"),
+            (request_id, "request_id"),
+            (action_json, "action_json"),
+            (envelope_json, "envelope_json"),
+        ):
+            _require_text(value, name)
+        if isinstance(intent_generation, bool) or intent_generation < 1:
+            raise ValueError("intent_generation must be a positive integer")
+        now = _utc_now()
+        with self._transaction(immediate=True) as connection:
+            existing = connection.execute(
+                "SELECT * FROM usage_proposal_outbox WHERE usage_slot_key=? AND intent_generation=?",
+                (usage_slot_key, intent_generation),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["proposal_id"] != proposal_id
+                    or existing["request_id"] != request_id
+                    or existing["action_json"] != action_json
+                    or existing["envelope_json"] != envelope_json
+                ):
+                    raise ProposalConflictError(
+                        "usage proposal outbox bytes conflict for this generation"
+                    )
+                return _usage_proposal_outbox_from_row(existing)
+            head = connection.execute(
+                "SELECT * FROM range_intent_heads WHERE usage_slot_key=?", (usage_slot_key,),
+            ).fetchone()
+            if (head is None or head["intent_generation"] != intent_generation
+                or head["current_request_id"] != request_id or head["current_proposal_id"] != proposal_id):
+                raise ValueError("outbox requires exact bound head/request/generation/proposal")
+            connection.execute(
+                """
+                INSERT INTO usage_proposal_outbox(
+                    proposal_id, usage_slot_key, request_id, intent_generation,
+                    action_json, envelope_json, publish_state, queue_page_id,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'PREPARED', NULL, ?, ?)
+                """,
+                (
+                    proposal_id,
+                    usage_slot_key,
+                    request_id,
+                    intent_generation,
+                    action_json,
+                    envelope_json,
+                    now,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM usage_proposal_outbox WHERE proposal_id=?",
+                (proposal_id,),
+            ).fetchone()
+            return _usage_proposal_outbox_from_row(row)
+
+    def get_usage_proposal_outbox(self, proposal_id: str) -> UsageProposalOutboxEntry | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM usage_proposal_outbox WHERE proposal_id=?",
+                (proposal_id,),
+            ).fetchone()
+            return None if row is None else _usage_proposal_outbox_from_row(row)
+
+    def mark_usage_proposal_published(
+        self, *, proposal_id: str, queue_page_id: str
+    ) -> UsageProposalOutboxEntry:
+        """Transition PREPARED -> PUBLISHED exactly once (write-once, not overwrite).
+
+        Idempotent only when the SAME queue_page_id is supplied for an
+        entry already PUBLISHED at that exact page -- never silently
+        repoints an existing PUBLISHED entry to a different page, and never
+        promotes a RECONCILE_REQUIRED entry through this generic path.
+        """
+
+        _require_text(proposal_id, "proposal_id")
+        _require_text(queue_page_id, "queue_page_id")
+        now = _utc_now()
+        with self._transaction(immediate=True) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE usage_proposal_outbox
+                SET publish_state='PUBLISHED', queue_page_id=?, updated_at=?
+                WHERE proposal_id=? AND publish_state='PREPARED'
+                """,
+                (queue_page_id, now, proposal_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM usage_proposal_outbox WHERE proposal_id=?",
+                (proposal_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(proposal_id)
+            entry = _usage_proposal_outbox_from_row(row)
+            if cursor.rowcount != 1:
+                if entry.publish_state == "PUBLISHED" and entry.queue_page_id == queue_page_id:
+                    return entry
+                raise ValueError(
+                    "usage proposal outbox is not PREPARED, or is already "
+                    "PUBLISHED at a different page"
+                )
+            return entry
+
+    def ensure_note_job(
+        self,
+        *,
+        course_key: str,
+        session_id: str,
+        evidence_manifest_hash: str,
+        learner_request_hash: str,
+        template_version: str,
+        generator_config_version: str,
+        note_key: str | None = None,
+    ) -> NoteJob:
+        expected_key = derive_study_note_key(
+            course_key=course_key,
+            session_id=session_id,
+            evidence_manifest_hash=evidence_manifest_hash,
+            learner_request_hash=learner_request_hash,
+            template_version=template_version,
+            generator_config_version=generator_config_version,
+        )
+        if note_key is not None and note_key != expected_key:
+            raise ValueError("note_key does not match the canonical study-note identity")
+        key = expected_key
+        now = _utc_now()
+        with self._transaction(immediate=True) as connection:
+            existing = connection.execute(
+                "SELECT * FROM note_jobs WHERE note_key=?",
+                (key,),
+            ).fetchone()
+            if existing is not None:
+                for column, expected in (
+                    ("course_key", course_key),
+                    ("session_id", session_id),
+                    ("evidence_manifest_hash", evidence_manifest_hash),
+                    ("learner_request_hash", learner_request_hash),
+                    ("template_version", template_version),
+                    ("generator_config_version", generator_config_version),
+                ):
+                    if existing[column] != expected:
+                        raise ValueError(f"note job identity collision on {column}")
+                return _note_job_from_row(existing)
+            connection.execute(
+                """
+                INSERT INTO note_jobs(
+                    note_key, course_key, session_id, evidence_manifest_hash,
+                    learner_request_hash, template_version, generator_config_version,
+                    current_attempt_no, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                """,
+                (
+                    key,
+                    course_key,
+                    session_id,
+                    evidence_manifest_hash,
+                    learner_request_hash,
+                    template_version,
+                    generator_config_version,
+                    now,
+                    now,
+                ),
+            )
+            return _note_job_from_row(
+                connection.execute(
+                    "SELECT * FROM note_jobs WHERE note_key=?",
+                    (key,),
+                ).fetchone()
+            )
+
+    def get_note_job(self, note_key: str) -> NoteJob | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM note_jobs WHERE note_key=?",
+                (note_key,),
+            ).fetchone()
+            return None if row is None else _note_job_from_row(row)
+
+    def attach_note_request(
+        self,
+        *,
+        provider: str,
+        session_provider_page_id: str,
+        head_generation: int,
+        receipt_id: str,
+        receipt_hash: str,
+        provider_request_id: str,
+        note_key: str,
+        course_key: str,
+        session_id: str,
+        evidence_manifest_hash: str,
+        learner_request_hash: str,
+        template_version: str,
+        generator_config_version: str,
+    ) -> tuple[NoteAttempt, NoteRequestReference, bool]:
+        """Attach one request to the shared active attempt or allocate the next attempt.
+
+        The boolean is true only when this call created a new REQUESTED attempt that
+        requires generation. Rediscovery and verified-artifact reuse return false.
+        """
+
+        for value, name in (
+            (provider, "provider"),
+            (session_provider_page_id, "session_provider_page_id"),
+            (receipt_id, "receipt_id"),
+            (receipt_hash, "receipt_hash"),
+            (provider_request_id, "provider_request_id"),
+            (note_key, "note_key"),
+            (course_key, "course_key"),
+            (session_id, "session_id"),
+            (evidence_manifest_hash, "evidence_manifest_hash"),
+            (learner_request_hash, "learner_request_hash"),
+            (template_version, "template_version"),
+            (generator_config_version, "generator_config_version"),
+        ):
+            _require_text(value, name)
+        expected_note_key = derive_study_note_key(
+            course_key=course_key,
+            session_id=session_id,
+            evidence_manifest_hash=evidence_manifest_hash,
+            learner_request_hash=learner_request_hash,
+            template_version=template_version,
+            generator_config_version=generator_config_version,
+        )
+        if note_key != expected_note_key:
+            raise ValueError("note_key does not match the canonical study-note identity")
+        if isinstance(head_generation, bool) or head_generation < 1:
+            raise ValueError("head_generation must be a positive integer")
+        now = _utc_now()
+        with self._transaction(immediate=True) as connection:
+            existing_reference = connection.execute(
+                "SELECT * FROM note_request_references WHERE receipt_id=?",
+                (receipt_id,),
+            ).fetchone()
+            head = connection.execute(
+                """
+                SELECT * FROM study_note_heads
+                WHERE provider=? AND session_provider_page_id=?
+                """,
+                (provider, session_provider_page_id),
+            ).fetchone()
+            if head is None and existing_reference is None:
+                raise KeyError((provider, session_provider_page_id))
+            if existing_reference is None and (
+                not bool(head["active"])
+                or int(head["generation"]) != head_generation
+                or head["current_receipt_id"] != receipt_id
+                or head["receipt_hash"] != receipt_hash
+                or head["current_request_id"] != provider_request_id
+            ):
+                raise ValueError("study-note request is not the exact active head")
+            job = connection.execute(
+                "SELECT * FROM note_jobs WHERE note_key=?",
+                (note_key,),
+            ).fetchone()
+            if job is None:
+                connection.execute(
+                    """
+                    INSERT INTO note_jobs(
+                        note_key, course_key, session_id, evidence_manifest_hash,
+                        learner_request_hash, template_version, generator_config_version,
+                        current_attempt_no, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                    """,
+                    (
+                        note_key,
+                        course_key,
+                        session_id,
+                        evidence_manifest_hash,
+                        learner_request_hash,
+                        template_version,
+                        generator_config_version,
+                        now,
+                        now,
+                    ),
+                )
+                job = connection.execute(
+                    "SELECT * FROM note_jobs WHERE note_key=?",
+                    (note_key,),
+                ).fetchone()
+            if job is None:
+                raise RuntimeError("note job was not created")
+            if job["course_key"] != course_key or job["session_id"] != session_id:
+                raise ValueError("note job identity collision")
+            if job["evidence_manifest_hash"] != evidence_manifest_hash:
+                raise ValueError("note job identity collision")
+            if job["learner_request_hash"] != learner_request_hash:
+                raise ValueError("note job identity collision")
+            if job["template_version"] != template_version:
+                raise ValueError("note job identity collision")
+            if job["generator_config_version"] != generator_config_version:
+                raise ValueError("note job identity collision")
+
+            if existing_reference is not None:
+                if (
+                    existing_reference["provider_request_id"] != provider_request_id
+                    or existing_reference["note_key"] != note_key
+                    or int(existing_reference["head_generation"]) != head_generation
+                ):
+                    raise ValueError("receipt is already attached to a different note execution")
+                attempt = connection.execute(
+                    """
+                    SELECT * FROM note_attempts
+                    WHERE note_key=? AND attempt_no=?
+                    """,
+                    (note_key, existing_reference["attempt_no"]),
+                ).fetchone()
+                if attempt is None:
+                    raise RuntimeError("note request reference points to a missing attempt")
+                return (
+                    _note_attempt_from_row(attempt),
+                    _note_request_reference_from_row(existing_reference),
+                    False,
+                )
+
+            active_attempt = connection.execute(
+                """
+                SELECT * FROM note_attempts
+                WHERE note_key=?
+                  AND state IN ('REQUESTED','WAITING_CONTEXT','GENERATING','STAGED','PUBLISHING')
+                """,
+                (note_key,),
+            ).fetchone()
+            generation_required = False
+            if active_attempt is None:
+                next_attempt = int(
+                    connection.execute(
+                        "SELECT COALESCE(MAX(attempt_no), 0) + 1 FROM note_attempts WHERE note_key=?",
+                        (note_key,),
+                    ).fetchone()[0]
+                )
+                reusable = connection.execute(
+                    """
+                    SELECT * FROM note_artifacts
+                    WHERE note_key=? AND state IN ('VERIFIED','PUBLISHED')
+                    ORDER BY CASE state WHEN 'PUBLISHED' THEN 0 ELSE 1 END,
+                             updated_at DESC, artifact_id
+                    LIMIT 1
+                    """,
+                    (note_key,),
+                ).fetchone()
+                attempt_state = "STAGED" if reusable is not None else "REQUESTED"
+                seed_artifact_id = None if reusable is None else reusable["artifact_id"]
+                connection.execute(
+                    """
+                    INSERT INTO note_attempts(
+                        note_key, attempt_no, state, seed_artifact_id, retry_count,
+                        next_retry_at, last_successful_stage, error_class, error_code,
+                        created_at, updated_at, terminal_at
+                    ) VALUES (?, ?, ?, ?, 0, NULL, ?, NULL, NULL, ?, ?, NULL)
+                    """,
+                    (
+                        note_key,
+                        next_attempt,
+                        attempt_state,
+                        seed_artifact_id,
+                        "STAGED" if reusable is not None else None,
+                        now,
+                        now,
+                    ),
+                )
+                active_attempt = connection.execute(
+                    """
+                    SELECT * FROM note_attempts
+                    WHERE note_key=? AND attempt_no=?
+                    """,
+                    (note_key, next_attempt),
+                ).fetchone()
+                generation_required = reusable is None
+
+            reference_id = _new_id("note_ref_")
+            connection.execute(
+                """
+                INSERT INTO note_request_references(
+                    reference_id, receipt_id, provider_request_id, note_key,
+                    attempt_no, head_generation, state, created_at, updated_at, ended_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, NULL)
+                """,
+                (
+                    reference_id,
+                    receipt_id,
+                    provider_request_id,
+                    note_key,
+                    active_attempt["attempt_no"],
+                    head_generation,
+                    now,
+                    now,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE note_jobs
+                SET current_attempt_no=?, updated_at=?
+                WHERE note_key=?
+                """,
+                (active_attempt["attempt_no"], now, note_key),
+            )
+            cursor = connection.execute(
+                """
+                UPDATE study_note_heads
+                SET current_note_key=?, current_attempt_no=?, updated_at=?
+                WHERE provider=? AND session_provider_page_id=?
+                  AND generation=? AND current_receipt_id=? AND active=1
+                """,
+                (
+                    note_key,
+                    active_attempt["attempt_no"],
+                    now,
+                    provider,
+                    session_provider_page_id,
+                    head_generation,
+                    receipt_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("study-note head changed during request attachment")
+            reference = connection.execute(
+                "SELECT * FROM note_request_references WHERE reference_id=?",
+                (reference_id,),
+            ).fetchone()
+            return (
+                _note_attempt_from_row(active_attempt),
+                _note_request_reference_from_row(reference),
+                generation_required,
+            )
+
+    def get_note_attempt(self, note_key: str, attempt_no: int) -> NoteAttempt | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM note_attempts WHERE note_key=? AND attempt_no=?",
+                (note_key, attempt_no),
+            ).fetchone()
+            return None if row is None else _note_attempt_from_row(row)
+
+    def transition_note_attempt(
+        self,
+        note_key: str,
+        attempt_no: int,
+        state: str,
+        *,
+        retry_count: int | None = None,
+        next_retry_at: str | None = None,
+        last_successful_stage: str | None = None,
+        error_class: str | None = None,
+        error_code: str | None = None,
+        require_no_active_references: bool = False,
+    ) -> NoteAttempt:
+        if state not in _NOTE_STATES:
+            raise ValueError("unsupported note attempt state")
+        if retry_count is not None and (
+            isinstance(retry_count, bool) or retry_count < 0 or retry_count > 3
+        ):
+            raise ValueError("retry_count must be an integer from 0 through 3")
+        now = _utc_now()
+        with self._transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM note_attempts WHERE note_key=? AND attempt_no=?",
+                (note_key, attempt_no),
+            ).fetchone()
+            if row is None:
+                raise KeyError((note_key, attempt_no))
+            current = row["state"]
+            has_patch = any(
+                value is not None
+                for value in (
+                    retry_count,
+                    next_retry_at,
+                    last_successful_stage,
+                    error_class,
+                    error_code,
+                )
+            )
+            if current in _NOTE_TERMINAL_STATES:
+                if current == state and not has_patch:
+                    return _note_attempt_from_row(row)
+                raise ValueError("terminal note attempts are immutable")
+            if current != state and state not in _NOTE_TRANSITIONS[current]:
+                raise ValueError(f"invalid note attempt transition: {current} -> {state}")
+            if require_no_active_references:
+                active_refs = connection.execute(
+                    """
+                    SELECT COUNT(*) FROM note_request_references
+                    WHERE note_key=? AND attempt_no=? AND state='ACTIVE'
+                    """,
+                    (note_key, attempt_no),
+                ).fetchone()[0]
+                if int(active_refs) > 0:
+                    raise ValueError(
+                        "cannot transition attempt while active note request references remain"
+                    )
+            terminal_at = now if state in _NOTE_TERMINAL_STATES else None
+            connection.execute(
+                """
+                UPDATE note_attempts
+                SET state=?,
+                    retry_count=COALESCE(?, retry_count),
+                    next_retry_at=?,
+                    last_successful_stage=COALESCE(?, last_successful_stage),
+                    error_class=?,
+                    error_code=?,
+                    updated_at=?,
+                    terminal_at=?
+                WHERE note_key=? AND attempt_no=?
+                """,
+                (
+                    state,
+                    retry_count,
+                    next_retry_at,
+                    last_successful_stage,
+                    error_class,
+                    error_code,
+                    now,
+                    terminal_at,
+                    note_key,
+                    attempt_no,
+                ),
+            )
+            return _note_attempt_from_row(
+                connection.execute(
+                    "SELECT * FROM note_attempts WHERE note_key=? AND attempt_no=?",
+                    (note_key, attempt_no),
+                ).fetchone()
+            )
+
+    def transition_note_request_reference(
+        self,
+        *,
+        receipt_id: str,
+        note_key: str,
+        attempt_no: int,
+        state: str,
+        provider: str | None = None,
+        session_provider_page_id: str | None = None,
+        expected_receipt_hash: str | None = None,
+        inactive_reason: str | None = None,
+    ) -> NoteRequestReference:
+        _require_text(receipt_id, "receipt_id")
+        _require_text(note_key, "note_key")
+        if isinstance(attempt_no, bool) or attempt_no < 1:
+            raise ValueError("attempt_no must be a positive integer")
+        if state not in _REFERENCE_STATES:
+            raise ValueError("unsupported note request reference state")
+        if (provider is None) != (session_provider_page_id is None):
+            raise ValueError(
+                "provider and session_provider_page_id must be provided together"
+            )
+        if provider is not None:
+            _require_text(provider, "provider")
+            _require_text(session_provider_page_id, "session_provider_page_id")
+        now = _utc_now()
+        with self._transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM note_request_references WHERE receipt_id=?",
+                (receipt_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(receipt_id)
+            if row["note_key"] != note_key or int(row["attempt_no"]) != attempt_no:
+                raise ValueError("note request reference does not match expected attempt identity")
+            if (
+                state in {"CANCELLED", "SUPERSEDED"}
+                and provider is not None
+                and session_provider_page_id is not None
+            ):
+                _require_text(expected_receipt_hash, "expected_receipt_hash")
+                _require_text(inactive_reason, "inactive_reason")
+            current = row["state"]
+            if current == state:
+                return _note_request_reference_from_row(row)
+            if state not in _REFERENCE_TRANSITIONS[current]:
+                raise ValueError(f"invalid note request reference transition: {current} -> {state}")
+            ended_at = now if state in {"CANCELLED", "SUPERSEDED"} else None
+            connection.execute(
+                """
+                UPDATE note_request_references
+                SET state=?, updated_at=?, ended_at=?
+                WHERE reference_id=?
+                """,
+                (state, now, ended_at, row["reference_id"]),
+            )
+            if (
+                state in {"CANCELLED", "SUPERSEDED"}
+                and provider is not None
+                and session_provider_page_id is not None
+            ):
+                _require_text(expected_receipt_hash, "expected_receipt_hash")
+                _require_text(inactive_reason, "inactive_reason")
+                connection.execute(
+                    """
+                    UPDATE study_note_heads
+                    SET active=0, inactive_reason=?, updated_at=?
+                    WHERE provider=? AND session_provider_page_id=?
+                      AND generation=? AND current_receipt_id=?
+                      AND current_request_id=? AND receipt_hash=?
+                      AND current_note_key=? AND current_attempt_no=? AND active=1
+                    """,
+                    (
+                        inactive_reason,
+                        now,
+                        provider,
+                        session_provider_page_id,
+                        row["head_generation"],
+                        row["receipt_id"],
+                        row["provider_request_id"],
+                        expected_receipt_hash,
+                        note_key,
+                        attempt_no,
+                    ),
+                )
+            updated = connection.execute(
+                "SELECT * FROM note_request_references WHERE reference_id=?",
+                (row["reference_id"],),
+            ).fetchone()
+            return _note_request_reference_from_row(updated)
+
+    def count_active_note_references(self, note_key: str, attempt_no: int) -> int:
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT COUNT(*) FROM note_request_references
+                WHERE note_key=? AND attempt_no=? AND state='ACTIVE'
+                """,
+                (note_key, attempt_no),
+            ).fetchone()
+            return int(row[0])
+
+    def record_note_artifact(
+        self,
+        artifact: NoteArtifact | None = None,
+        **kwargs: Any,
+    ) -> NoteArtifact:
+        values = dict(artifact.__dict__) if artifact is not None else dict(kwargs)
+        values.setdefault("artifact_id", _new_id("note_artifact_"))
+        values.setdefault("ai_region_id", None)
+        values.setdefault("ai_block_ids_json", "[]")
+        values.setdefault("last_publish_hash", None)
+        values.setdefault("state", "STAGED")
+        values.setdefault("created_at", _utc_now())
+        values.setdefault("verified_at", None)
+        values.setdefault("updated_at", values["created_at"])
+        for name in (
+            "artifact_id",
+            "note_key",
+            "output_identity",
+            "output_hash",
+            "manifest_hash",
+            "writer_version",
+            "state",
+        ):
+            _require_text(values.get(name), name)
+        if values["state"] not in _ARTIFACT_STATES:
+            raise ValueError("unsupported note artifact state")
+        values["ai_block_ids_json"] = _canonical_json_field(
+            values["ai_block_ids_json"], "ai_block_ids_json"
+        )
+        with self._transaction(immediate=True) as connection:
+            existing = connection.execute(
+                """
+                SELECT * FROM note_artifacts
+                WHERE note_key=? AND output_hash=? AND manifest_hash=?
+                """,
+                (values["note_key"], values["output_hash"], values["manifest_hash"]),
+            ).fetchone()
+            if existing is not None:
+                for column in (
+                    "output_identity",
+                    "writer_version",
+                    "ai_region_id",
+                    "ai_block_ids_json",
+                    "last_publish_hash",
+                ):
+                    if existing[column] != values[column]:
+                        raise ValueError(f"artifact identity collision on {column}")
+                return _note_artifact_from_row(existing)
+            connection.execute(
+                """
+                INSERT INTO note_artifacts(
+                    artifact_id, note_key, output_identity, output_hash, manifest_hash,
+                    writer_version, ai_region_id, ai_block_ids_json, last_publish_hash,
+                    state, created_at, verified_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                tuple(
+                    values.get(name)
+                    for name in (
+                        "artifact_id",
+                        "note_key",
+                        "output_identity",
+                        "output_hash",
+                        "manifest_hash",
+                        "writer_version",
+                        "ai_region_id",
+                        "ai_block_ids_json",
+                        "last_publish_hash",
+                        "state",
+                        "created_at",
+                        "verified_at",
+                        "updated_at",
+                    )
+                ),
+            )
+            return _note_artifact_from_row(
+                connection.execute(
+                    "SELECT * FROM note_artifacts WHERE artifact_id=?",
+                    (values["artifact_id"],),
+                ).fetchone()
+            )
+
+    def get_reusable_note_artifact(self, note_key: str) -> NoteArtifact | None:
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT * FROM note_artifacts
+                WHERE note_key=? AND state IN ('VERIFIED','PUBLISHED')
+                ORDER BY CASE state WHEN 'PUBLISHED' THEN 0 ELSE 1 END,
+                         updated_at DESC, artifact_id
+                LIMIT 1
+                """,
+                (note_key,),
+            ).fetchone()
+            return None if row is None else _note_artifact_from_row(row)
+
+    def transition_note_artifact(
+        self,
+        artifact_id: str,
+        state: str,
+        *,
+        ai_region_id: str | None = None,
+        ai_block_ids: Any = None,
+        last_publish_hash: str | None = None,
+    ) -> NoteArtifact:
+        if state not in _ARTIFACT_STATES:
+            raise ValueError("unsupported note artifact state")
+        with self._transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM note_artifacts WHERE artifact_id=?",
+                (artifact_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(artifact_id)
+            current = row["state"]
+            has_patch = any(
+                value is not None
+                for value in (ai_region_id, ai_block_ids, last_publish_hash)
+            )
+            if current == "STALE":
+                if current == state and not has_patch:
+                    return _note_artifact_from_row(row)
+                raise ValueError("stale note artifact history is immutable")
+            if current != state and state not in _ARTIFACT_TRANSITIONS[current]:
+                raise ValueError(f"invalid note artifact transition: {current} -> {state}")
+            blocks_json = (
+                row["ai_block_ids_json"]
+                if ai_block_ids is None
+                else _canonical_json_field(ai_block_ids, "ai_block_ids")
+            )
+            now = _utc_now()
+            verified_at = row["verified_at"]
+            if state in {"VERIFIED", "PUBLISHED"} and verified_at is None:
+                verified_at = now
+            connection.execute(
+                """
+                UPDATE note_artifacts
+                SET state=?, ai_region_id=COALESCE(?, ai_region_id),
+                    ai_block_ids_json=?, last_publish_hash=COALESCE(?, last_publish_hash),
+                    verified_at=?, updated_at=?
+                WHERE artifact_id=?
+                """,
+                (
+                    state,
+                    ai_region_id,
+                    blocks_json,
+                    last_publish_hash,
+                    verified_at,
+                    now,
+                    artifact_id,
+                ),
+            )
+            return _note_artifact_from_row(
+                connection.execute(
+                    "SELECT * FROM note_artifacts WHERE artifact_id=?",
+                    (artifact_id,),
                 ).fetchone()
             )
 
@@ -1114,6 +3784,8 @@ class SQLiteStateStore:
         completed_at: str | None = None,
         processor_version: str | None = None,
         job: Job | None = None,
+        plan_revision: str | None = None,
+        plan_authority: str | None = None,
     ) -> Job:
         """Create or return the row for a deterministic ``job_key``.
 
@@ -1143,6 +3815,8 @@ class SQLiteStateStore:
             updated_at = supplied.updated_at or updated_at
             completed_at = supplied.completed_at
             processor_version = getattr(supplied, "processor_version", processor_version)
+            plan_revision = supplied.plan_revision if plan_revision is None else plan_revision
+            plan_authority = supplied.plan_authority if plan_authority is None else plan_authority
 
         operation = _canonical_operation(operation)
         _require_text(stage, "stage")
@@ -1194,8 +3868,8 @@ class SQLiteStateStore:
                         id, job_key, operation, stage, status,
                         course_key, source_file_id, source_hash, target_entity_id,
                         attempt_count, error_class, last_error,
-                        created_at, updated_at, completed_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        created_at, updated_at, completed_at, plan_revision, plan_authority
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         identifier,
@@ -1213,6 +3887,8 @@ class SQLiteStateStore:
                         created,
                         updated,
                         completed_at,
+                        plan_revision,
+                        plan_authority,
                     ),
                 )
             except sqlite3.IntegrityError:
@@ -1344,7 +4020,7 @@ class SQLiteStateStore:
                 row = connection.execute(
                     """
                     SELECT id FROM jobs
-                    WHERE status = ?
+                    WHERE status = ? AND voided_at IS NULL
                     ORDER BY created_at ASC, id ASC
                     LIMIT 1
                     """,
@@ -1363,9 +4039,10 @@ class SQLiteStateStore:
                 return None
             selected_id = row["id"]
             selected = connection.execute(
-                "SELECT attempt_count FROM jobs WHERE id = ?", (selected_id,)
+                "SELECT attempt_count, voided_at FROM jobs WHERE id = ?", (selected_id,)
             ).fetchone()
-            if selected is None:
+            if selected is None or selected["voided_at"] is not None:
+                # A voided job (superseded plan) is terminal and never claimable.
                 return None
             if int(selected["attempt_count"]) >= DEFAULT_MAX_ATTEMPTS:
                 connection.execute(
@@ -1504,16 +4181,7 @@ class SQLiteStateStore:
                     job_id,
                 ),
             )
-            if desired is JobStatus.PROCESSING:
-                connection.execute(
-                    """
-                    UPDATE processing_records
-                    SET status = ?, finished_at = NULL
-                    WHERE job_id = ? AND finished_at IS NULL
-                    """,
-                    (desired.value, job_id),
-                )
-            elif desired is JobStatus.PENDING:
+            if desired is JobStatus.PROCESSING or desired is JobStatus.PENDING:
                 connection.execute(
                     """
                     UPDATE processing_records
@@ -2144,7 +4812,7 @@ class SQLiteStateStore:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    return datetime.now(UTC).isoformat(timespec="microseconds")
 
 
 def _new_id(prefix: str) -> str:
@@ -2194,6 +4862,18 @@ def _json_text(value: Any) -> str:
         raise TypeError("source_ref_json must be JSON serializable") from exc
 
 
+def _canonical_json_field(value: Any, name: str) -> str:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{name} must contain valid JSON") from exc
+    try:
+        return canonical_json(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be finite JSON") from exc
+
+
 def _job_from_row(row: sqlite3.Row) -> Job:
     return Job(**dict(row))
 
@@ -2234,6 +4914,31 @@ def _request_receipt_from_row(row: sqlite3.Row) -> RequestReceipt:
     return RequestReceipt(**dict(row))
 
 
+def _valid_intake_binding(request_type: Any, intake_ids_json: Any) -> list[str] | None:
+    """The receipt's intake ids when structurally valid, else None (fail closed).
+
+    A binding is a non-empty JSON list of non-empty, unique strings; FILE_DETAILS binds
+    exactly one intake, ASSIGN_COURSE one or more.  Used identically by the migration
+    provenance check, the legacy generation backfill and AUTO plan promotion (r13 R2).
+    """
+
+    if not isinstance(intake_ids_json, str):
+        return None
+    try:
+        bound = json.loads(intake_ids_json)
+    except ValueError:
+        return None
+    if (
+        not isinstance(bound, list) or not bound
+        or not all(isinstance(i, str) and i.strip() for i in bound)
+        or len(set(bound)) != len(bound)
+    ):
+        return None
+    if request_type == "FILE_DETAILS" and len(bound) != 1:
+        return None
+    return list(bound)
+
+
 def _intake_plan_from_row(row: sqlite3.Row) -> IntakePlan:
     return IntakePlan(**dict(row))
 
@@ -2244,6 +4949,141 @@ def _provider_write_attempt_from_row(row: sqlite3.Row) -> ProviderWriteAttempt:
 
 def _entity_reservation_from_row(row: sqlite3.Row) -> EntityReservation:
     return EntityReservation(**dict(row))
+
+
+def _study_note_head_from_row(row: sqlite3.Row) -> StudyNoteHead:
+    return StudyNoteHead(**dict(row))
+
+
+def _validate_usage_baseline(
+    head: sqlite3.Row, semantics: dict[str, Any], baseline: list[dict[str, Any]], target: dict[str, Any],
+) -> str:
+    """Authorize an explicit pre-state before allocating any invocation owner."""
+    slot_keys = ("session_app_id", "material_app_id", "usage_role")
+    occupants = [row for row in baseline if all(row[key] == target[key] for key in slot_keys)]
+    if not occupants and head["current_operation"] == "create_usage":
+        if head["current_usage_app_id"] is not None or any(
+            row["usage_app_id"] == target["usage_app_id"] or row["provider_row_id"] == target["provider_row_id"]
+            for row in baseline
+        ):
+            raise ValueError("empty CREATE baseline contradicts permanent/physical target binding")
+        return "CREATE_EMPTY"
+    if len(occupants) != 1:
+        raise ValueError("existing-target baseline must contain exactly one slot occupant")
+    row = occupants[0]
+    if any(row[key] != target[key] for key in ("provider", "provider_row_id", "usage_app_id")):
+        raise ValueError("baseline does not contain the exact physical/app target")
+    if head["current_operation"] == "update_range" and (
+        row["provider"] != head["current_usage_provider"]
+        or row["provider_row_id"] != head["current_usage_provider_row_id"]
+        or row["usage_app_id"] != head["current_usage_app_id"]
+    ):
+        raise ValueError("UPDATE baseline differs from permanent binding")
+    old = semantics["old_snapshot"]
+    for row_key, old_key in (
+        ("usage_app_id", "usage_id"), ("session_app_id", "session_id"),
+        ("material_app_id", "material_id"), ("usage_role", "role"),
+        ("start_page", "start_page"), ("end_page", "end_page"), ("verified", "verified"),
+    ):
+        if row[row_key] != old[old_key]:
+            raise ValueError("baseline differs from approved old snapshot")
+    if head["current_operation"] == "create_usage":
+        if row["verified"] is not False:
+            raise ValueError("existing CREATE target must be unverified")
+        return "CREATE_EXISTING"
+    return "UPDATE_EXISTING"
+
+
+def _prove_usage_guard(guard: sqlite3.Row, readback_json: str, outcome: str) -> dict[str, Any] | None:
+    """An UPDATE can never enter the generic proof's physical-addition branch."""
+    from uls.domain.approval_identity import parse_c5_usage_snapshot, prove_c5_usage_outcome
+
+    mode = guard["baseline_mode"]
+    before = parse_c5_usage_snapshot(guard["baseline_json"])
+    expected = parse_c5_usage_snapshot(guard["expected_json"])
+    if len(expected) != 1 or mode not in {"UPDATE_EXISTING", "CREATE_EXISTING", "CREATE_EMPTY"}:
+        raise ValueError("guard lacks validated operation-specific baseline")
+    target = expected[0]
+    matching = [row for row in before if row["provider_row_id"] == target["provider_row_id"]]
+    if mode == "CREATE_EMPTY":
+        if matching or any(all(row[key] == target[key] for key in (
+            "session_app_id", "material_app_id", "usage_role"
+        )) for row in before):
+            raise ValueError("CREATE_EMPTY guard has an occupied baseline")
+    elif len(matching) != 1 or matching[0]["usage_app_id"] != target["usage_app_id"]:
+        raise ValueError("existing-target guard cannot be proved as physical addition")
+    return prove_c5_usage_outcome(guard["baseline_json"], readback_json, guard["expected_json"], outcome)
+
+
+def _validate_usage_dispatch_identity(head: sqlite3.Row, outbox: sqlite3.Row | None) -> dict[str, Any]:
+    """Validate committed identity bytes before any dispatch/owner CAS."""
+    from uls.domain.approval_identity import (
+        UsageSlotIdentity,
+        canonical_action_json,
+        canonical_semantics_from_queue,
+        canonical_usage_proposal_envelope_json,
+        derive_proposal_id_for_create,
+        derive_usage_slot_key,
+        parse_usage_proposal_envelope,
+    )
+
+    if (outbox is None or outbox["publish_state"] != "PUBLISHED"
+        or outbox["proposal_id"] != head["current_proposal_id"]
+        or outbox["usage_slot_key"] != head["usage_slot_key"]
+        or outbox["request_id"] != head["current_request_id"]
+        or outbox["intent_generation"] != head["intent_generation"]):
+        raise ValueError("published outbox does not match bound head")
+    proposal_type = "MATERIAL_USAGE" if head["current_operation"] == "create_usage" else "PAGE_RANGE"
+    semantics = canonical_semantics_from_queue({
+        "Proposal Type": proposal_type, "Proposed Action": outbox["action_json"],
+        "Target Entity ID": head["current_target_entity_id"],
+    })
+    envelope = parse_usage_proposal_envelope({"Proposal Envelope": outbox["envelope_json"]})
+    slot_key = derive_usage_slot_key(semantics["session_id"], semantics["material_id"], semantics["usage_role"])
+    if head["slot_identity_json"] is not None:
+        physical = UsageSlotIdentity.from_json(head["slot_identity_json"])
+        if (physical.course_page_id.replace("-", "") != semantics["course_relation_page_id"].replace("-", "")
+            or physical.role != semantics["usage_role"] or not head["active"]):
+            raise ValueError("inactive or conflicting physical slot identity")
+        slot_key = physical.key
+    if (envelope is None or envelope["usage_slot_key"] != head["usage_slot_key"]
+        or envelope["request_id"] != head["current_request_id"]
+        or envelope["intent_generation"] != head["intent_generation"]
+        or slot_key != head["usage_slot_key"]
+        or semantics["session_id"] != head["session_app_id"]
+        or semantics["material_id"] != head["material_app_id"]
+        or semantics["usage_role"] != head["usage_role"]
+        or semantics["operation"] != head["current_operation"]
+        or semantics["target_entity_id"] != head["current_target_entity_id"]
+        or canonical_action_json(semantics) != outbox["action_json"]
+        or canonical_usage_proposal_envelope_json(envelope) != outbox["envelope_json"]
+        or derive_proposal_id_for_create(proposal_type, envelope, semantics) != head["current_proposal_id"]):
+        raise ValueError("stored action/envelope/proposal identity conflicts with bound head")
+    return dict(semantics)
+
+
+def _range_intent_head_from_row(row: sqlite3.Row) -> RangeIntentHead:
+    return RangeIntentHead(**dict(row))
+
+
+def _usage_proposal_outbox_from_row(row: sqlite3.Row) -> UsageProposalOutboxEntry:
+    return UsageProposalOutboxEntry(**dict(row))
+
+
+def _note_job_from_row(row: sqlite3.Row) -> NoteJob:
+    return NoteJob(**dict(row))
+
+
+def _note_attempt_from_row(row: sqlite3.Row) -> NoteAttempt:
+    return NoteAttempt(**dict(row))
+
+
+def _note_request_reference_from_row(row: sqlite3.Row) -> NoteRequestReference:
+    return NoteRequestReference(**dict(row))
+
+
+def _note_artifact_from_row(row: sqlite3.Row) -> NoteArtifact:
+    return NoteArtifact(**dict(row))
 
 
 def _session_source_binding_from_row(row: sqlite3.Row) -> SessionSourceBinding:

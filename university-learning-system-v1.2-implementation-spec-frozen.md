@@ -2354,6 +2354,15 @@ read-only tools
 no unauthenticated public endpoint
 ```
 
+2026-09-21 Remote OAuth extension: for the standard OAuth profile, the line
+above means no unauthenticated academic/retrieval endpoint. The following
+OAuth protocol control-plane endpoints may be reachable before an MCP access
+token exists: protected-resource metadata, authorization-server metadata,
+authorization, token, dynamic client registration/revocation when enabled,
+and the fixed upstream identity-provider callback. They must expose no
+academic data and remain behind the configured Host/Origin/edge transport
+checks. `/mcp`, `/health`, and every retrieval tool remain authenticated.
+
 Preferred:
 
 ```text

@@ -71,6 +71,12 @@ class LocalWorkerLock:
     def is_held(self) -> bool:
         return self._token is not None
 
+    @property
+    def token(self) -> str | None:
+        """The random ownership token recorded in the lock file while held."""
+
+        return self._token
+
     def acquire(self, timeout: float | None = DEFAULT_LOCK_TIMEOUT_SECONDS) -> bool:
         """Try to acquire the lock, recovering only safe local stale locks."""
 
@@ -258,6 +264,12 @@ class LocalWorkerLock:
                 os.close(fd)
 
 
+# Purpose-neutral name for local file-backed ownership locks.  Keeping the
+# original class as the implementation preserves every worker caller/API;
+# config and settings writers use the same cross-process locking behavior.
+LocalFileLock = LocalWorkerLock
+
+
 def _snapshot_from_fd(fd: int) -> _LockSnapshot | None:
     """Read one lock inode without reopening the path by name."""
 
@@ -403,5 +415,6 @@ def _pid_is_alive(pid: int) -> bool:
 
 __all__ = [
     "DEFAULT_LOCK_TIMEOUT_SECONDS",
+    "LocalFileLock",
     "LocalWorkerLock",
 ]

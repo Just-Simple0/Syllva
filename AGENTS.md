@@ -11,6 +11,23 @@ When project code conflicts with the frozen design or implementation specificati
 
 Model/effort selection, orchestration, reviews, and safety follow the applicable global Codex `AGENTS.md`, normally at `~/.codex/AGENTS.md`; this file only adds project rules.
 
+Read the current global policy files referenced by that `AGENTS.md` for the task. Project plans, `handoff.md`, and task records are evidence and scope records, not alternative model/profile, review, skill, notification, or safety policies. Historical role names, model/effort assignments, review exceptions, and delivery permissions apply only to their recorded task; they do not select the current worker or authorize a new operation. Preserve their original evidence rather than rewriting past execution as current policy.
+
+For resumption, use the latest current-state section in `handoff.md`, the current human instruction, and actual repository state. Dated historical checkpoints do not override later decisions. A paused feature resumes only within the scope of the current human instruction. The project-local checker exception below is an explicitly approved Syllva-only exception; keep its scope and pins unchanged.
+
+## Project-local review evidence checker
+
+The human decision on 2026-10-03 established the project-only adoption of the independently reviewed checker **only within this Syllva project**, without installing or changing the personal global checker. The GUI-2/GUI-3 follow-up pin update is bound to the new explicit current-task human scope/hash decision recorded in handoff.md and the GUI task record. For this canonical workspace's review-evidence consistency checks, use:
+
+```bash
+python3 -B scripts/review_evidence_checker_candidate/state_check.py \
+  --root /Users/admin/Project/Syllva --record <relative-task-record-path>
+```
+
+This project-specific command replaces the global consistency-check command for this workspace only. It does not waive any other safety, independent-review, evidence-integrity or human-approval requirement. The approved local checker SHA-256 is `82dbd77c63fe9606bc050bf5b517dce8670a16d87c579f5eb68fa765cd63f644` (2026-10-09 human decision: credential_service.py pin refreshed for P2; previous `a82d0a88a2a35fe53293c433210029895a0e674d15231a2d9e1ed1a8f378ef08`); its seventeen Python source exceptions and the single document `docs/plans/credential-secret-file-launcher.md` are independently compiled exact path/SHA/size pins bound to this root's device/inode. Do not refresh those pins from records or the review-only inventory. Changes require applicable review and a new human scope decision.
+
+Keep `/Users/admin/.codex/safety/state_check.py`, personal hooks/configuration and other projects unchanged. Checker success is consistency evidence, not human approval or product acceptance. See `docs/plans/project-review-evidence-checker.md` for the adoption decision, review evidence and remaining record consistency conditions.
+
 ## Project architecture
 
 - ULS is a personal academic knowledge and retrieval system.

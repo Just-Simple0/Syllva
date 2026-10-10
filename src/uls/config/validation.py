@@ -32,6 +32,14 @@ def validate_config(cfg: UlsConfig) -> list[str]:
     _validate_declared_bool_fields(cfg, "", problems)
 
     _validate_required_bool(cfg.mcp.read_only, "mcp.read_only", True, problems)
+    for name in ("local_caller_id", "template_version", "generator_config_version"):
+        value = getattr(cfg.study_notes, name)
+        if not isinstance(value, str) or not value.strip() or len(value) > 128:
+            problems.append(f"study_notes.{name} must be a non-empty string up to 128 characters")
+    for name, lower, upper in (("grant_ttl_seconds", 60, 86_400), ("max_draft_chars", 1000, 1_000_000)):
+        value = getattr(cfg.study_notes, name)
+        if type(value) is not int or not lower <= value <= upper:
+            problems.append(f"study_notes.{name} must be an integer from {lower} to {upper}")
     _validate_required_bool(
         cfg.remote_mcp.public_unauthenticated,
         "remote_mcp.public_unauthenticated",
@@ -89,9 +97,73 @@ def validate_config(cfg: UlsConfig) -> list[str]:
     remote_enabled = type(cfg.remote_mcp.enabled) is bool and cfg.remote_mcp.enabled
     if remote_enabled and (
         not isinstance(cfg.remote_mcp.auth_mode, str)
-        or cfg.remote_mcp.auth_mode not in {"oauth_or_bearer"}
+        or cfg.remote_mcp.auth_mode not in {"oauth_or_bearer", "oidc", "bearer", "mcp_oauth"}
     ):
         problems.append("remote_mcp.auth_mode is not allowed when remote_mcp.enabled")
+    if remote_enabled:
+        if (
+            not isinstance(cfg.remote_mcp.edge_mode, str)
+            or cfg.remote_mcp.edge_mode not in {"direct_tls", "cloudflare_tunnel"}
+        ):
+            problems.append("remote_mcp.edge_mode is not allowed when remote_mcp.enabled")
+        elif cfg.remote_mcp.edge_mode == "cloudflare_tunnel":
+            if cfg.remote_mcp.auth_mode != "mcp_oauth":
+                problems.append("remote_mcp.edge_mode cloudflare_tunnel requires auth_mode mcp_oauth")
+            if cfg.remote_mcp.host not in {"127.0.0.1", "::1"}:
+                problems.append("remote_mcp.edge_mode cloudflare_tunnel requires a loopback host")
+        oidc = cfg.remote_mcp.oidc
+        should_validate_oidc = cfg.remote_mcp.auth_mode == "oidc" or (
+            cfg.remote_mcp.auth_mode == "oauth_or_bearer" and bool(oidc.issuer)
+        )
+        if should_validate_oidc:
+            if (
+                not isinstance(oidc.issuer, str)
+                or not oidc.issuer.startswith("https://")
+                or oidc.issuer.endswith("/")
+            ):
+                # Must mirror JwksKeyManager.__init__'s trailing-slash
+                # rejection exactly: otherwise validate_config()/doctor()
+                # (without --live) can call a trailing-slash issuer
+                # "valid" while the actual mcp remote dispatch path
+                # unconditionally constructs a JwksKeyManager and fails
+                # immediately, a doctor/runtime readiness divergence.
+                problems.append("remote_mcp.oidc.issuer must be a valid HTTPS URL")
+            if not isinstance(oidc.audience, str) or not oidc.audience:
+                problems.append("remote_mcp.oidc.audience is required when OIDC is configured")
+            if not (oidc.authorized_subject or oidc.authorized_email):
+                problems.append("remote_mcp.oidc requires at least authorized_subject or authorized_email")
+            if oidc.jwks_uri and (not isinstance(oidc.jwks_uri, str) or not oidc.jwks_uri.startswith("https://")):
+                problems.append("remote_mcp.oidc.jwks_uri must be a valid HTTPS URL")
+            if isinstance(oidc.leeway_seconds, bool) or not isinstance(oidc.leeway_seconds, int) or not (0 <= oidc.leeway_seconds <= 120):
+                problems.append("remote_mcp.oidc.leeway_seconds must be an integer between 0 and 120")
+        if cfg.remote_mcp.auth_mode == "mcp_oauth":
+            oauth = cfg.remote_mcp.oauth
+            if not isinstance(oauth.google_client_id, str) or not oauth.google_client_id.strip():
+                problems.append("remote_mcp.oauth.google_client_id is required for mcp_oauth")
+            if (
+                not isinstance(oauth.authorized_email, str)
+                or not oauth.authorized_email.strip()
+                or "@" not in oauth.authorized_email
+            ):
+                problems.append("remote_mcp.oauth.authorized_email is required for mcp_oauth")
+            if (
+                isinstance(oauth.access_token_ttl_seconds, bool)
+                or not isinstance(oauth.access_token_ttl_seconds, int)
+                or not (300 <= oauth.access_token_ttl_seconds <= 3600)
+            ):
+                problems.append("remote_mcp.oauth.access_token_ttl_seconds must be 300..3600")
+            if (
+                isinstance(oauth.refresh_token_ttl_seconds, bool)
+                or not isinstance(oauth.refresh_token_ttl_seconds, int)
+                or not (3600 <= oauth.refresh_token_ttl_seconds <= 2_592_000)
+            ):
+                problems.append("remote_mcp.oauth.refresh_token_ttl_seconds must be 3600..2592000")
+            if (
+                isinstance(oauth.authorization_ttl_seconds, bool)
+                or not isinstance(oauth.authorization_ttl_seconds, int)
+                or not (60 <= oauth.authorization_ttl_seconds <= 900)
+            ):
+                problems.append("remote_mcp.oauth.authorization_ttl_seconds must be 60..900")
 
     _validate_ttl(
         cfg.retrieval.context_ttl_seconds,
@@ -150,6 +222,7 @@ def validate_config(cfg: UlsConfig) -> list[str]:
                     "retrieval.material_type_source_class values must be one of: "
                     + ", ".join(sorted(SUPPORTED_MATERIAL_SOURCE_CLASSES))
                 )
+    _validate_retrieval_lane(cfg, problems)
     if (
         isinstance(cfg.behavior_contract.version, bool)
         or not isinstance(cfg.behavior_contract.version, int)
@@ -158,6 +231,59 @@ def validate_config(cfg: UlsConfig) -> list[str]:
         problems.append("behavior_contract.version must be positive")
     _validate_intake_config(cfg, problems)
     return problems
+
+
+def _validate_retrieval_lane(cfg: UlsConfig, problems: list[str]) -> None:
+    lane = cfg.retrieval.notion_lane
+    semester = cfg.retrieval.semester
+    if not isinstance(lane, str) or lane not in {"legacy_global", "semester_workspace"}:
+        problems.append(
+            "retrieval.notion_lane must be legacy_global or semester_workspace"
+        )
+        return
+    if not isinstance(semester, str):
+        problems.append("retrieval.semester must be a string")
+        return
+    if lane == "legacy_global":
+        if semester:
+            problems.append(
+                "retrieval.semester must be empty when notion_lane is legacy_global"
+            )
+        return
+
+    if not semester:
+        problems.append(
+            "retrieval.semester is required when notion_lane is semester_workspace"
+        )
+        return
+    try:
+        parse_course_key(f"{semester}_LMS101-001")
+    except UlsError:
+        problems.append("retrieval.semester is invalid")
+        return
+
+    matching_workspaces = [
+        row
+        for row in cfg.notion.semester_workspaces
+        if isinstance(row, SemesterWorkspaceCfg) and row.semester == semester
+    ]
+    if len(matching_workspaces) != 1:
+        problems.append(
+            "retrieval semester_workspace must select exactly one notion.semester_workspaces row"
+        )
+
+    matching_courses = 0
+    for course in cfg.courses:
+        try:
+            parsed = parse_course_key(course.course_key)
+        except UlsError:
+            continue
+        if parsed.semester == semester:
+            matching_courses += 1
+    if matching_courses == 0:
+        problems.append(
+            "retrieval semester_workspace must have at least one configured Course in the selected semester"
+        )
 
 
 def _validate_intake_config(cfg: UlsConfig, problems: list[str]) -> None:
@@ -240,6 +366,13 @@ def _validate_intake_config(cfg: UlsConfig, problems: list[str]) -> None:
             "input_requests_data_source_id",
         ):
             _validate_opaque_id(getattr(row, name), f"{prefix}.{name}", problems)
+        for name in (
+            "material_usage_data_source_id", "automation_queue_data_source_id",
+            "study_requests_data_source_id",
+        ):
+            value = getattr(row, name)
+            if value != "":
+                _validate_opaque_id(value, f"{prefix}.{name}", problems)
         _validate_opaque_id_map(row.portal_page_ids, f"{prefix}.portal_page_ids", problems, allow_empty=True)
         if any(not key.startswith(f"{row.semester}_") for key in row.portal_page_ids):
             problems.append(f"{prefix} contains a portal from another semester")

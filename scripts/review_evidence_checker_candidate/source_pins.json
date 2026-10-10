@@ -1,0 +1,103 @@
+{
+  "purpose": "review-only source inventory; not runtime permission input",
+  "repository_root": "/Users/admin/Project/Syllva",
+  "provenance": {
+    "active_baseline": "checker_active_baseline.py (exact historical checker; no runtime use)",
+    "current_11_snapshot": "source_pins-current11.json and state_check-current11.py are byte-identical snapshots of the active CFC11 baseline",
+    "exact_additions": "Six exact path/SHA/size entries reviewed in checker-six-source-pin-plan-v3.json; inventory is review-only and never supplies runtime pins."
+  },
+  "sources": [
+    {
+      "path": "src/uls/cli/credential_set.py",
+      "sha256": "cada62beb0c0faacf34ed64e44eebb1cf24b6d6574380d0291943d709bc09e09",
+      "size_bytes": 22654
+    },
+    {
+      "path": "src/uls/config/credentials.py",
+      "sha256": "ecbe398f52b4edf4267b07e368ae4e1a3413e0aa577dee0eac2fc4ae8cfefa86",
+      "size_bytes": 20347
+    },
+    {
+      "path": "src/uls/settings/credential_admission.py",
+      "sha256": "725b8098c8653b62853a5b15b1e93a30f2817058d4d25d87ab65e47b23586ff7",
+      "size_bytes": 50977
+    },
+    {
+      "path": "src/uls/settings/credential_roles.py",
+      "sha256": "f9f3ea23807747cc42ad7c08a9947ac255942619660218695e0e84eb58d763c9",
+      "size_bytes": 4222
+    },
+    {
+      "path": "src/uls/settings/credential_stores.py",
+      "sha256": "6ec843bcf25ef2046d3a580180468e658f923a816760c89a55eda7c5c7b88896",
+      "size_bytes": 5608
+    },
+    {
+      "path": "src/uls/settings/credential_service.py",
+      "sha256": "ff2c8716b413d484b4bde3e1c70600df395ee0c9703fa2ee479081adeb889a8f",
+      "size_bytes": 48443
+    },
+    {
+      "path": "tests/unit/test_credential_set_cli.py",
+      "sha256": "a36d47e6cb0e66dd341512cd0833416e56de85cab42900e439dcfa130b6a61d1",
+      "size_bytes": 31404
+    },
+    {
+      "path": "tests/contract/test_settings_credential_service.py",
+      "sha256": "1eeae0b30657492c8d67a829acf41f16398075f9527c891854b6af4dff4520e2",
+      "size_bytes": 38729
+    },
+    {
+      "path": "tests/contract/test_settings_credential_admission.py",
+      "sha256": "9a9676ef0d59f3b7d66fb4e80313b6fb1d3e80af98382c4019b856e7794583c3",
+      "size_bytes": 76850
+    },
+    {
+      "path": "tests/contract/test_settings_credential_journal.py",
+      "sha256": "c18e9da27c482fd3c794472e2b32091b1a16f08963532d5abfee4ebed3b0583c",
+      "size_bytes": 41015
+    },
+    {
+      "path": "tests/contract/test_settings_credential_http.py",
+      "sha256": "c2c2608c302a30ef6be4ec66c9528ab8d9959297c4eeba4883effc61229f7327",
+      "size_bytes": 18390
+    },
+    {
+      "path": "tests/unit/test_runtime_google_credentials.py",
+      "sha256": "0f88130c489f2484ec15d9b837e9922e91c04ca04ec31726803b7734904dab14",
+      "size_bytes": 4365
+    },
+    {
+      "path": "tests/unit/test_credential_resolver.py",
+      "sha256": "b9201fa1b57fff0d40769f33e47a80d3def1c4b15d9cf01d7f664eb00854557d",
+      "size_bytes": 14712
+    },
+    {
+      "path": "tests/unit/test_credential_resolver_file_source.py",
+      "sha256": "3fbc2182a08c0049e80a80952622773d933de845a34a31c943cd9f7dd95febc8",
+      "size_bytes": 5804
+    },
+    {
+      "path": "tests/unit/test_config_loader_credentials.py",
+      "sha256": "cb9bbfc0f2be069f421fc6974f687c51e88ee97ba5ac7e00acc9309df0bd7f7b",
+      "size_bytes": 4065
+    },
+    {
+      "path": "tests/contract/test_settings_credential_roles.py",
+      "sha256": "1754e0c64bef14ac2432f27935be6d0ee4c7dd56e514e1df6d265fa67c7641cc",
+      "size_bytes": 1134
+    },
+    {
+      "path": "tests/contract/test_settings_credential_stores.py",
+      "sha256": "2eaeafc4102dc9ab7220b98150502e247e17e36dbb3703b9f69be3ea1b15cfc2",
+      "size_bytes": 1333
+    }
+  ],
+  "runtime_authority": "none; any future candidate implementation must independently hard-code and review these exact pins",
+  "root_binding": {
+    "path": "/Users/admin/Project/Syllva",
+    "device": 16777230,
+    "inode": 22556999
+  },
+  "original_checker_sha256": "f6b8df58b956919d6afcba6670f1395ef5c6e13fb31bef6ab85d1131dc4a4f97"
+}

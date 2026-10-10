@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pathlib
 import sys
+from dataclasses import replace
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
@@ -100,6 +101,34 @@ def test_valid_layout_passes_and_reads_every_folder_once() -> None:
     result = validate_registered_drive_layout(port, [_workspace()])
     assert result == {"workspaces": 1, "folders_read": 6}
     assert len([event for event in port.events if event[0] == "read"]) == 6
+
+
+def test_layout_validation_uses_a_fresh_read_cache_for_each_call() -> None:
+    port = InMemoryDriveWorker(_valid_tree())
+    validate_registered_drive_layout(port, [_workspace()])
+    validate_registered_drive_layout(port, [_workspace()])
+    assert len([event for event in port.events if event[0] == "read"]) == 12
+
+
+def test_root_failure_stops_after_one_fresh_read() -> None:
+    files = _valid_tree()
+    files[0] = replace(files[0], trashed=True)
+    port = InMemoryDriveWorker(files)
+    with pytest.raises(SourceUnavailableError):
+        validate_registered_drive_layout(port, [_workspace()])
+    assert len([event for event in port.events if event[0] == "read"]) == 1
+
+
+def test_course_folder_failure_stops_after_four_fresh_reads() -> None:
+    files = _valid_tree()
+    files = [
+        replace(item, parents=("wrong-parent",)) if item.file_id == "course-1" else item
+        for item in files
+    ]
+    port = InMemoryDriveWorker(files)
+    with pytest.raises(StaticLayoutReconcileRequired, match="unexpected parent"):
+        validate_registered_drive_layout(port, [_workspace()])
+    assert len([event for event in port.events if event[0] == "read"]) == 4
 
 
 def test_shared_school_root_across_workspaces_is_not_a_reconcile_error() -> None:

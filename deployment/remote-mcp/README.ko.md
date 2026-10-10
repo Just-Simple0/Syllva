@@ -1,10 +1,12 @@
-# 인증된 원격 개발 프로필
+# 인증된 Remote MCP 프로필
 
 [English](README.md)
 
-내장 remote profile은 production OAuth 배포가 아니라 **development validation**용입니다.
+Syllva는 표준 **MCP OAuth + Google 로그인**, 기존 **OIDC JWT Bearer** resource-server 모드, 개발용 **단기 bearer credential** 프로필을 지원합니다.
 
-direct TLS 위에서 짧게 살아 있는 bearer credential을 사용합니다. 대상 client가 OAuth/OIDC 또는 다른 gateway를 요구하면 해당 외부 auth layer와 client E2E를 별도로 구성/검증할 때까지 deployment-deferred로 유지해야 합니다.
+일반 원격 클라이언트에는 `mcp_oauth`를 사용합니다. 클라이언트가 MCP URL을 등록하면 Syllva의 OAuth discovery/PKCE 흐름을 사용하고, Google은 설정된 단일 소유자의 로그인 확인에만 사용됩니다. Google token을 MCP token으로 전달하지 않으며 Syllva가 정확한 `/mcp` resource에 결속된 자체 access/refresh token을 발급합니다.
+
+OIDC 모드에서는 신뢰할 수 있는 IdP(Google, GitHub, Auth0 등)가 서명한 표준 OIDC ID Token(또는 RFC 9068 JWT)을 검증하여 인증합니다. IdP의 JWKS 공개키 세트로 서명을 검증하고, 단일 소유자의 `authorized_subject`(또는 `email_verified=true`인 `authorized_email`)와 일치할 때만 인가됩니다. 런타임에 디스크에 정적 장기 시크릿을 저장할 필요가 전혀 없습니다.
 
 ## 설정
 
@@ -13,16 +15,22 @@ direct TLS 위에서 짧게 살아 있는 bearer credential을 사용합니다. 
 ```yaml
 remote_mcp:
   enabled: true
-  auth_mode: oauth_or_bearer
+  auth_mode: mcp_oauth  # "mcp_oauth" | "oidc" | "bearer" | "oauth_or_bearer"
+  edge_mode: cloudflare_tunnel  # 기본값은 direct_tls
   public_unauthenticated: false
   public_url: https://uls.example/mcp
   host: 127.0.0.1
   port: 8765
-  tls_certfile: /private/path/fullchain.pem
-  tls_keyfile: /private/path/privkey.pem
+  oauth:
+    google_client_id: your-google-web-client.apps.googleusercontent.com
+    authorized_email: owner@example.com
 ```
 
-target client가 신뢰하는 certificate와 명시적으로 구성한 network route를 사용하세요. 다른 bind address를 직접 구성하지 않으면 listener는 loopback에 유지됩니다. Syllva가 DNS, firewall rule, tunnel, public endpoint를 자동 생성하지 않습니다.
+Google OAuth Web client secret은 `REMOTE_MCP_GOOGLE_CLIENT_SECRET`로 environment 또는 OS keyring에 저장하고 YAML에 넣지 마세요. Google Web redirect URI는 정확히 `<public-origin>/oauth/google/callback`입니다.
+
+`direct_tls`는 기존 동작을 보존하는 기본 edge mode입니다. `cloudflare_tunnel`은 `mcp_oauth`에서만 허용되며 loopback listener가 필요합니다. 이 모드에서 local HTTP는 loopback peer에서 온 경우에만 허용되고 public URL은 계속 HTTPS입니다. forwarded header로 public identity를 복원하지 않습니다. tunnel이 origin `Host`를 바꾸면 Syllva 검사를 완화하지 말고 tunnel 쪽에서 public Host를 전달하도록 설정합니다.
+
+기존 OIDC direct-TLS 프로필도 그대로 사용할 수 있습니다.
 
 ## Bearer credential
 
@@ -36,11 +44,11 @@ uls --config /absolute/config.yaml mcp remote
 
 token 값은 config file, client instruction, command argument, log, PR/issue 본문에 나타나면 안 됩니다. 만료 후 새 credential로 restart하고 하나의 development bearer를 자동 영구 credential로 연장하지 않습니다.
 
-## HTTP/TLS 경계
+## OAuth 및 HTTP/TLS 경계
 
-저장소 profile은 direct TLS와 인증된 endpoint를 전제로 합니다. exact Host/Origin/Authorization 검사가 의도된 경계의 일부입니다. forwarded header는 명시적 trust configuration을 대신하지 않습니다.
+OAuth discovery/authorize/token/register/revoke/Google callback control-plane만 MCP access token 이전에 도달할 수 있습니다. 이 경로는 학술 데이터를 노출하지 않고 Host/Origin/edge 검사를 계속 통과해야 합니다. `/mcp`, `/health`, 11개 retrieval tool은 계속 인증이 필요합니다.
 
-TLS termination proxy가 plain HTTP로 전달한다면 trust boundary가 달라지므로 여기서는 이를 검증된 production architecture라고 표현하지 않습니다.
+OAuth 상태는 `system.workspace_dir/remote-oauth.sqlite3`에 보호된 권한으로 저장합니다. authorization code와 MCP access/refresh token은 digest만 저장합니다. 소유자, Google client ID, public issuer/resource 또는 고정 scope 정책이 바뀌면 기존 grant는 무효화됩니다.
 
 in-memory capability model을 위해 MCP app은 single process로 유지해야 합니다. state model을 재설계하지 않은 채 multiple worker를 추가하지 마세요.
 

@@ -6,6 +6,11 @@ All clients consume the same read-only MCP tools and server-enforced evidence sc
 
 Syllva 0.1.3 is beta. A checked-in client projection or config example means the integration shape exists; it does **not** automatically mean that a real end-user client has completed live domain E2E.
 
+The v1.3 [study-note submission workflow](study-note-workflow.md) is a separate
+opt-in implementation preview. It lets a connected AI submit a draft for worker
+validation/publication; it does not add writes to the search registry. Its real-client
+support must be validated separately from read-only search.
+
 ## Build a portable bundle
 
 From the repository checkout:

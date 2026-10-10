@@ -44,6 +44,8 @@ MAX_PAGES = 3
 MAX_ITEMS = 500
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_RUN_SECONDS = 45.0
+MAX_SEMESTER_COURSES = 5
+MAX_SEMESTER_RUN_SECONDS = MAX_RUN_SECONDS * MAX_SEMESTER_COURSES
 MAX_SOCKET_TIMEOUT_SECONDS = 10.0
 MAX_ANNOUNCEMENT_DAYS = 31
 READ_CHUNK_BYTES = 64 * 1024
@@ -53,6 +55,7 @@ MAX_ASIDE_OUTPUT_BYTES = 768 * 1024
 ASIDE_REAP_GRACE_SECONDS = 0.1
 SENSITIVE_QUERY_KEYS = {"access_token", "api_key", "authorization", "token"}
 HTTP_RESOURCES = frozenset({"course", "assignments", "announcements", "files", "modules"})
+CANVAS_API_TRANSPORT = "canvas-api-readonly"
 
 
 class ProbeError(Exception):
@@ -671,9 +674,12 @@ def run_probe(
     *,
     opener: Any,
     clock: Callable[[], float] = time.monotonic,
+    run_seconds: float = MAX_RUN_SECONDS,
 ) -> dict[str, Any]:
     _validate_date_range(args.start_date, args.end_date)
-    client = CanvasClient(token, opener=opener, clock=clock)
+    if not math.isfinite(run_seconds) or run_seconds <= 0:
+        raise ProbeError("invalid_deadline")
+    client = CanvasClient(token, opener=opener, clock=clock, run_seconds=run_seconds)
     course_path = f"{API_PREFIX}courses/{args.course_id}"
     try:
         course_data, _ = client.get_json(_build_url(course_path, [("include[]", "term")]))
@@ -1215,7 +1221,9 @@ def _read_registry(path: str) -> list[dict[str, Any]]:
     return result
 
 
-def _expected_registry_scope_hash(registry: list[dict[str, Any]]) -> str:
+def _expected_registry_scope_hash(
+    registry: list[dict[str, Any]], transport: str = "aside-readonly"
+) -> str:
     """Use the sync registry validator as the single scope-hash authority."""
     try:
         module_path = Path(__file__).resolve().with_name("knu_lms_sync.py")
@@ -1226,7 +1234,7 @@ def _expected_registry_scope_hash(registry: list[dict[str, Any]]) -> str:
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
         document = {"version": "knu-lms-semester-registry.v1", "semester": "2026-2", "courses": registry}
-        scope_hash = module.registry_from_document(document).scope_hash(transport="aside-readonly")
+        scope_hash = module.registry_from_document(document).scope_hash(transport=transport)
         if not isinstance(scope_hash, str):
             raise ProbeError("registry_invalid")
         return scope_hash
@@ -1236,8 +1244,8 @@ def _expected_registry_scope_hash(registry: list[dict[str, Any]]) -> str:
         raise ProbeError("registry_invalid") from exc
 
 
-def _aside_participant(owner_id: str, scope_hash: str) -> None:
-    """Delegate the pre/postflight reservation check to the root lock module."""
+def _registry_participant(owner_id: str, scope_hash: str) -> None:
+    """Delegate a registry pre/postflight reservation check to the root lock."""
     try:
         import importlib.util
         from pathlib import Path
@@ -1257,6 +1265,14 @@ def _aside_participant(owner_id: str, scope_hash: str) -> None:
         if isinstance(code, str) and re.fullmatch(r"[a-z_]+", code):
             raise ProbeError(code) from None
         raise ProbeError("reservation_binding_mismatch") from exc
+
+
+def _aside_participant(owner_id: str, scope_hash: str) -> None:
+    _registry_participant(owner_id, scope_hash)
+
+
+def _api_participant(owner_id: str, scope_hash: str) -> None:
+    _registry_participant(owner_id, scope_hash)
 
 
 def run_registry_aside(
@@ -1294,6 +1310,95 @@ def run_registry_aside(
     frame["scope_hash"] = scope_hash
     frame["registry_course_count"] = len(registry)
     return frame
+
+
+def run_registry_api(
+    registry: list[dict[str, Any]],
+    *,
+    token: str,
+    owner_id: str,
+    scope_hash: str,
+    start_date: str,
+    end_date: str,
+    opener: Any | None = None,
+    clock: Callable[[], float] = time.monotonic,
+) -> dict[str, Any]:
+    """Collect exactly five verified academic courses through Canvas GETs."""
+    if not re.fullmatch(r"[0-9a-f]{64}", scope_hash):
+        raise ProbeError("scope_hash_invalid")
+    if any(not isinstance(course, dict) for course in registry):
+        raise ProbeError("registry_invalid")
+    academic = [course for course in registry if course.get("academic_import") is True]
+    if len(academic) != MAX_SEMESTER_COURSES:
+        raise ProbeError("api_academic_course_count_invalid")
+    if any(
+        not isinstance(course.get("code"), str)
+        or not course["code"].strip()
+        or course.get("verification_state") not in {"api_code_verified", "verified"}
+        for course in academic
+    ):
+        raise ProbeError("api_course_identity_unverified")
+    if scope_hash != _expected_registry_scope_hash(registry, CANVAS_API_TRANSPORT):
+        raise ProbeError("scope_hash_mismatch")
+    _api_participant(owner_id, scope_hash)
+    if opener is None:
+        opener = build_opener(NoRedirectHandler())
+    deadline = clock() + MAX_SEMESTER_RUN_SECONDS
+    courses: dict[str, Any] = {}
+    for course in academic:
+        course_id = course["id"]
+        remaining = deadline - clock()
+        if remaining <= 0:
+            courses[str(course_id)] = {
+                "status": "partial",
+                "error": "semester_deadline",
+            }
+            continue
+        args = argparse.Namespace(
+            course_id=course_id,
+            expected_name=course["name"],
+            expected_code=course["code"],
+            expected_term=course["term"],
+            start_date=start_date,
+            end_date=end_date,
+            include_files=False,
+            include_modules=True,
+        )
+        try:
+            value = run_probe(
+                args,
+                token,
+                opener=opener,
+                clock=clock,
+                run_seconds=min(MAX_RUN_SECONDS, remaining),
+            )
+            if value.get("status") == "complete":
+                courses[str(course_id)] = value
+            else:
+                status = "partial" if value.get("status") == "incomplete" else "failed"
+                error = value.get("error")
+                courses[str(course_id)] = {
+                    "status": status,
+                    "error": error if isinstance(error, str) and re.fullmatch(r"[a-z_]+", error)
+                    else "course_collection_incomplete",
+                }
+        except ProbeError as exc:
+            status = "partial" if exc.incomplete else "failed"
+            courses[str(course_id)] = {"status": status, "error": exc.code}
+        except Exception:  # noqa: BLE001 - registry boundary must expose one fixed failure
+            courses[str(course_id)] = {
+                "status": "failed",
+                "error": "course_collection_incomplete",
+            }
+    _api_participant(owner_id, scope_hash)
+    return {
+        "status": "complete",
+        "provenance": CANVAS_API_TRANSPORT,
+        "transport": CANVAS_API_TRANSPORT,
+        "scope_hash": scope_hash,
+        "registry_course_count": len(registry),
+        "courses": courses,
+    }
 
 
 def _registry_main(
