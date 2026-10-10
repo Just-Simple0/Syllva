@@ -129,3 +129,7 @@ S2(Jev), S4 태그, retrieval 필터(P-D), 공지·첨부 intake(P-E), 새 Canva
 | R8 T5 순서 모순 | T5 재작성: 검증 후 원자 기록, 선기록 금지/UNVERIFIED 차단 |
 | R9 T8 off 시 handover | T8 재작성: 신규 생성 게이트와 기존 효과 보호 분리 |
 | H10–H12 | follow-up: A3/A5 어댑터 테스트 확장(A3·A5 테스트 열에 일부 반영), T4 중간 상태 crash 테스트, 연결 프로필 일치·TERMINAL_CHANGED_AGAIN이 USER/Status 불변 테스트를 구현 테스트에 포함 |
+
+### r7 — PLAN GO (REQUIRED 0 / HARDENING 5, GPT-6 Extra High)
+
+필수 지적 누계 r1~r6: 9·5·2·1·1·1. HARDENING(구현 테스트에 포함, GO 비차단): 관측 중 프로필/토큰 전환 주입(A2/A5), 기능 off + 미검증 Notion 프로필 + terminal USER 변경(G4/T8: V2 Draft는 만들되 제안 필드는 로컬 보관), 증가하는 receipt 집합 + 재조회 실패 + 재시작(T1), Submitted/Claimed 상태에서 새 changed_hash(T3: Error만 변경), handover 기록 이후 채택 효과 무효화(T5).
