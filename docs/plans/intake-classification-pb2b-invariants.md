@@ -56,3 +56,11 @@ provenance·eligibility·중복·item 상태), `_closure_gate`, `_judge_human_re
 - R4 E4/E5: claim한 job 식별자를 `_process_item_unlocked`로 전달해 진입 직전 재검증, `bind_job_source_identity`에 authority·revision hash 영속.
 - R5 E10: PROVIDED_CODE 등의 로컬 `exposure_block_reason` 영속·재시작 보존.
 - H1 E3 승격+job 트랜잭션/repair, H2 E1 Applied/Cancelled는 승격 허가 아님, H3 E5 테스트 문구 범위, H4 E10 테스트 확대, H5 E15 교차 조합, H6 E16 job 생성 후 비활성화 — 표에 반영.
+
+## 계획 리뷰 처분 (2차: GO, REQUIRED 0 / HARDENING 5 → 구현·테스트에 반영)
+
+- H1 E6/E7/E9: NEW Session의 0건 검사는 같은 plan의 자체 효과(동일 reservation·operation key·READBACK_OK 1건)를 재개로 인정하고 신규 ID를 다시 배정하지 않는다. 테스트: 자체 Session 생성 후 crash → 재시작 → 완료; 다른 plan/사람이 만든 같은 날짜 Session은 차단.
+- H2 E11: HUMAN non-PDF는 §6.1 매트릭스가 `REGISTER_OPAQUE_NO_RETRIEVAL`로 판정한 조합만 opaque 등록, TRANSCRIPT 텍스트는 NORMALIZE, 매트릭스 밖은 S3.
+- H3 E3: 승격+job 트랜잭션 내부 장애는 전체 rollback 검증, `PLANNED + job 없음` repair는 별도 영속 상태에서 멱등 1건 생성 검증.
+- H4 E5: 저장된 authority 또는 revision hash를 불일치시킨 재시작 fixture에서 외부 mutation 0건.
+- H5 E10/E14: opaque Material 생성 응답에서 `Text Source=Unavailable`, `Text Status=Needs Review` 즉시 확인, 신규 Material의 AI Kind·Week, 기존 USER 수정값 보존, HUMAN MATERIAL_PDF 호환 경로의 AI Kind 비소급 확정.
