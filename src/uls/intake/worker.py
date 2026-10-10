@@ -2309,7 +2309,10 @@ class IntakeWorker:
             return False
         rows = [row for row in self.notion.list_records("sessions") if row.get("ID") == entity_id]
         if not rows:
-            return True
+            # Not created yet is only true when this plan never attempted the create; a Session we made
+            # (or tried to make) that is gone now was deleted or never landed — neither is a clean start (r6 R1).
+            op_key = self._plan_operation_key(INTAKE_SESSION_OPERATION, item, plan, workspace, context, target_id=None)
+            return self.state.get_provider_write_attempt(op_key) is None
         if len(rows) != 1:
             return False
         course_id = self._course_page_map(workspace).get(context.course_key)
@@ -3578,6 +3581,13 @@ class IntakeWorker:
             raise IntakeReconcileRequired("multiple Session pages have the reserved ID")
         if matches:
             page = matches[0]
+            if isinstance(request, ClassificationExecutionContext) and (
+                prior is None or not prior.target_id or prior.target_id != _page_id(page)
+            ):
+                # The row exists, but this plan never recorded the page ID its own create call returned:
+                # a lookup result is not evidence that we made it, whatever the row looks like (r5 R1, r6 H3).
+                self.state.reconcile_intake_plan(plan.plan_revision, "FOREIGN_ROW")
+                raise IntakeReconcileRequired("an existing row carries the reserved ID but this plan did not create it")
             try:
                 self._validate_new_session_snapshot(page, properties, course_id)
             except IntakeReconcileRequired:
@@ -3586,13 +3596,6 @@ class IntakeWorker:
                 if not (isinstance(request, ClassificationExecutionContext)
                         and self._session_in_own_progress(page, properties, course_id)):
                     raise
-            if isinstance(request, ClassificationExecutionContext) and (
-                prior is None or not prior.target_id or prior.target_id != _page_id(page)
-            ):
-                # The row exists, but this plan never recorded the page ID its own create call returned:
-                # a lookup result is not evidence that we made it (r5 R1).
-                self.state.reconcile_intake_plan(plan.plan_revision, "FOREIGN_ROW")
-                raise IntakeReconcileRequired("an existing row carries the reserved ID but this plan did not create it")
             self.state.update_provider_write_attempt(op_key, target_id=_page_id(page), response_state="READBACK_OK", readback_json=page) if prior else self.state.record_provider_write_attempt(operation=INTAKE_SESSION_OPERATION, operation_key=op_key, provider=self.provider, target_id=_page_id(page), response_state="READBACK_OK", readback_json=page)
             return page
         if prior is not None:
@@ -3662,14 +3665,14 @@ class IntakeWorker:
             raise IntakeReconcileRequired("multiple Material pages have reserved ID")
         if matches:
             page = matches[0]
-            self._validate_material_snapshot(page, properties, course_id)
             if isinstance(request, ClassificationExecutionContext) and (
                 prior is None or not prior.target_id or prior.target_id != _page_id(page)
             ):
                 # The row exists, but this plan never recorded the page ID its own create call returned:
-                # a lookup result is not evidence that we made it (r5 R1).
+                # a lookup result is not evidence that we made it, whatever the row looks like (r5 R1, r6 H3).
                 self.state.reconcile_intake_plan(plan.plan_revision, "FOREIGN_ROW")
                 raise IntakeReconcileRequired("an existing row carries the reserved ID but this plan did not create it")
+            self._validate_material_snapshot(page, properties, course_id)
             if prior is None:
                 self.state.record_provider_write_attempt(operation=INTAKE_MATERIAL_OPERATION, operation_key=op_key, provider=self.provider, target_id=_page_id(page), response_state="READBACK_OK", readback_json=page)
             else:

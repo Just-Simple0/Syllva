@@ -722,3 +722,40 @@ def test_a_row_that_appears_after_the_last_check_is_never_adopted(tmp_path: Path
 def _all_attempt_keys(state) -> list[str]:
     with state._transaction() as connection:
         return [row["operation_key"] for row in connection.execute("SELECT operation_key FROM provider_write_attempts")]
+
+
+def test_a_session_deleted_after_its_creation_stops_every_further_write(tmp_path: Path) -> None:
+    # r6 R1: the Session we created is deleted before the derivative; "no row" is not a clean start.
+    with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        original = worker._stage_derivative
+        seen = {"files": None}
+
+        def stage(*args, **kwargs):
+            seen["files"] = len(system["drive"].files)
+            system["notion"].data_sources["synthetic-sessions"].clear()  # a person deletes it
+            return original(*args, **kwargs)
+        worker._stage_derivative = stage  # type: ignore[method-assign]
+        worker.run_once()
+        assert seen["files"] is not None and len(system["drive"].files) == seen["files"]
+        assert _auto_plans(system["state"])[0]["status"] == "RECONCILE_REQUIRED"
+        assert system["state"].get_job(_jobs(system)[0].id).voided_at is not None
+        assert _item(system).status != "ORGANIZED"
+
+
+def test_an_unfaithful_foreign_row_is_judged_by_ownership_first(tmp_path: Path) -> None:
+    # r6 H3: the row with the reserved ID differs from the creation snapshot; ownership decides first.
+    with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        original = worker._ensure_session_page
+
+        def ensure(item, plan, request, workspace, course_id, reservation, existing_page, receipt):
+            _seed_session(system["notion"], reservation.entity_app_id)  # no Status: not a creation snapshot
+            return original(item, plan, request, workspace, course_id, reservation, existing_page, receipt)
+        worker._ensure_session_page = ensure  # type: ignore[method-assign]
+        worker.run_once()
+        assert _auto_plans(system["state"])[0]["status"] == "RECONCILE_REQUIRED"
+        assert system["state"].get_job(_jobs(system)[0].id).voided_at is not None
+        assert not _sessions(system)[0].get("Normalized Transcript")
