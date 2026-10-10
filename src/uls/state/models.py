@@ -38,6 +38,9 @@ class Job:
     plan_authority: str | None = None
     voided_at: str | None = None
     void_reason: str | None = None
+    # P-B2b: the authority and classification revision the job's source identity was bound under.
+    bound_authority: str | None = None
+    bound_revision_hash: str | None = None
 
     def __post_init__(self) -> None:
         self.status = to_processing_status(self.status)
@@ -174,6 +177,7 @@ class IntakeItem:
     inferred_date: str | None = None
     calendar_match: str | None = None
     classification_state: str = "NONE"
+    exposure_block_reason: str | None = None
 
 
 @dataclass(frozen=True)

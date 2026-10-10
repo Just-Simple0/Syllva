@@ -45,6 +45,7 @@ from uls.ingestion.discovery import discover_intake
 from uls.intake.attestation import ReconnectRequiredError, WorkerEntryAttestation
 from uls.intake.classification import (
     AI_KIND_OPTIONS,
+    MATERIAL_TYPE_INITIAL,
     ORIGIN_OPTIONS,
     RULE_TABLE_VERSION,
     TAG_RULE_VERSION,
@@ -137,6 +138,45 @@ class IntakeReconcileRequired(UlsError):
 
 _ISO_DATE_ONLY = re.compile(r"\d{4}-\d{2}-\d{2}")
 _ISO_DATETIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})?")
+
+
+@dataclass(frozen=True)
+class ClassificationExecutionContext:
+    """Immutable inputs of an AUTO_CLASSIFICATION execution (plan §3.4).
+
+    It is derived only from the classification record and the AUTO plan.  It carries the
+    attribute names of the HUMAN ``RequestInput`` that the shared execution functions read
+    (course, date, Session mode/ID, Material Type) but never a request key, receipt or
+    Submitted state: nothing HUMAN is forged for an automatic run.
+    """
+
+    intake_id: str
+    plan_revision: str
+    classification_revision_hash: str
+    record_id: str
+    job_id: str | None
+    course_key: str
+    kind: str
+    origin: str
+    actual_date: str | None
+    week: int | None
+    session_mode: str | None
+    session_id: str | None
+    material_role: str | None
+    handling: str
+    source_file_id: str
+    byte_sha256: str | None
+    source_version: int
+    workspace_fingerprint: str
+    config_fingerprint: str
+    plan_authority: str = "AUTO_CLASSIFICATION"
+    session_no: int | None = None
+    request_key: str | None = None
+    request_type: str | None = None
+
+
+ExecRequest = RequestInput | ClassificationExecutionContext
+ExecReceipt = RequestReceipt | ClassificationExecutionContext
 
 
 class _PreflightStop(Exception):  # internal control flow, never leaves the preflight
@@ -428,6 +468,7 @@ class IntakeWorker:
             processed = failed = needs_input = 0
             run_layout_context: _LayoutValidationContext | None = None
             if process:
+                self._promote_ready_plans()
                 try:
                     run_layout_context = self._fresh_layout_context(
                         self._run_layout_workspaces()
@@ -481,6 +522,7 @@ class IntakeWorker:
                         result = self._process_item_unlocked(
                             job.target_entity_id,
                             layout_context=item_layout_context,
+                            claimed=job,
                         )
                         status = result.get("status", IntakeStatus.ORGANIZED.value)
                         content_status = result.get("content_status")
@@ -1171,6 +1213,7 @@ class IntakeWorker:
         intake_id: str,
         *,
         layout_context: _LayoutValidationContext | None = None,
+        claimed: Any = None,
     ) -> dict[str, Any]:
         """Execute a previously claimed plan, preserving the ordered gates."""
 
@@ -1180,6 +1223,9 @@ class IntakeWorker:
         plan = self.state.get_intake_plan(item.plan_revision)
         if plan is None:
             raise SourceUnavailableError("durable intake plan is missing")
+        if plan.plan_authority == "AUTO_CLASSIFICATION":
+            # Authority first (plan §3.4 R1): an AUTO plan never looks for a request receipt.
+            return self._process_auto_item(item, plan, claimed, layout_context)
         receipt = self._receipt_for_plan(plan)
         if receipt is None or not receipt.provider_page_id:
             raise SourceUnavailableError("plan has no submitted request receipt")
@@ -1214,9 +1260,13 @@ class IntakeWorker:
                     (f"Kind {request.kind} never takes a PDF source (plan §6.1 matrix)",)
                 )
             if not is_pdf:
-                raise RequestValidationError(
-                    (f"Kind {request.kind} on a non-PDF source needs the opaque registration path (not available yet)",)
-                )
+                # Only a combination the §6.1 matrix registers opaquely takes that path;
+                # everything else stays a validation failure (r2 H2).
+                if self._execution_handling(item, kind) is not HandlingMode.REGISTER_OPAQUE_NO_RETRIEVAL:
+                    raise RequestValidationError(
+                        (f"Kind {request.kind} on this source is outside the plan §6.1 matrix",)
+                    )
+                return self._process_material(item, plan, receipt, request, workspace, opaque=True)
             return self._process_material(item, plan, receipt, request, workspace)
         raise RequestValidationError(("unsupported plan kind",))
 
@@ -1240,7 +1290,13 @@ class IntakeWorker:
         auto_pending = len(self.state.list_intake_plans(plan_authority="AUTO_CLASSIFICATION", status="AUTO_PENDING")) \
             if hasattr(self.state, "list_intake_plans") else 0
         pending_intents = len(self.state.list_auto_resolve_intents()) if hasattr(self.state, "list_auto_resolve_intents") else 0
+        planned = len(self.state.list_intake_plans(plan_authority="AUTO_CLASSIFICATION", status="PLANNED")) \
+            if hasattr(self.state, "list_intake_plans") else 0
+        auto_jobs = [job for job in self.state.list_jobs(limit=1000) if job.plan_authority == "AUTO_CLASSIFICATION"]
         return {
+            "planned_auto_plans": planned,
+            "auto_jobs_pending": sum(1 for job in auto_jobs if str(job.status) == "PENDING" and job.voided_at is None),
+            "auto_jobs_failed": sum(1 for job in auto_jobs if str(job.status) in {"FAILED", "NEEDS_REVIEW", "PARTIAL"}),
             "status": status,
             "reason": reason,
             "auto_enabled": self._auto_enabled(),
@@ -1883,7 +1939,8 @@ class IntakeWorker:
         )
 
     def _auto_preflight(
-        self, item: IntakeItem, plan: IntakePlan, record: ClassificationRecord, workspace: ResolvedSemesterWorkspace
+        self, item: IntakeItem, plan: IntakePlan, record: ClassificationRecord, workspace: ResolvedSemesterWorkspace,
+        *, executing: bool = False, entry: bool = True,
     ) -> bool:
         """Plan §3.5 / §3.4 M3 preflight before the first AUTO provider mutation (r1 R3).
 
@@ -1900,8 +1957,16 @@ class IntakeWorker:
             reason = "DUPLICATE_CANDIDATE"
         elif current.status == IntakeStatus.RECONCILE_REQUIRED.value and current.last_error_code != AUTO_CLOSE_RECONCILE_CODE:
             reason = "ITEM_RECONCILE"  # an independent cause; only the closure's own mark may retry
-        elif current.status not in (IntakeStatus.NEEDS_INPUT.value, IntakeStatus.RECONCILE_REQUIRED.value):
+        elif current.status not in (
+            (IntakeStatus.PLANNED.value, IntakeStatus.REGISTERED.value, IntakeStatus.MOVING.value,
+             IntakeStatus.ORGANIZED.value)
+            if executing else (IntakeStatus.NEEDS_INPUT.value, IntakeStatus.RECONCILE_REQUIRED.value)
+        ):
             reason = "ITEM_STATUS"
+        # Once the move has started the parent legitimately changes (own effect, plan §3.4
+        # cross-authority rules); the move code validates that transition itself.
+        past_move = executing and current.status in (
+            IntakeStatus.REGISTERED.value, IntakeStatus.MOVING.value, IntakeStatus.ORGANIZED.value)
         try:
             if reason is not None:
                 raise _PreflightStop
@@ -1916,7 +1981,7 @@ class IntakeWorker:
                     decision = {}
                 if record.provider_file_id != item.provider_file_id or current.provider_file_id != record.provider_file_id:
                     reason = "SOURCE_IDENTITY"
-                elif (
+                elif not past_move and (
                     metadata.parent_id != current.observed_parent_id
                     or metadata.parent_id != decision.get("source_parent")
                 ):
@@ -1927,7 +1992,7 @@ class IntakeWorker:
                     reason = "SOURCE_VERSION"
                 elif metadata.md5_checksum and record.byte_md5 and metadata.md5_checksum != record.byte_md5:
                     reason = "SOURCE_BYTES"
-            if reason is None:
+            if reason is None and entry:
                 probe = self._source_probe(current)
                 if not probe.complete or probe.byte_sha256 != record.byte_sha256:
                     reason = "SOURCE_BYTES"
@@ -1938,10 +2003,13 @@ class IntakeWorker:
         except (SourceUnavailableError, SourcePartialError, PolicyDeniedError, ProviderUnavailableError):
             reason = "SOURCE_UNAVAILABLE"
         if reason is None:
+            sessions_open = (not executing) or (
+                entry and self.state.get_entity_reservation(intake_id=item.intake_id, entity_kind="SESSION") is None
+            )
             reason = (
                 self._provenance_mismatch(item, record, workspace)
-                or self._eligibility_mismatch(item, record, workspace)
-                or self._duplicate_mismatch(item, record)
+                or self._eligibility_mismatch(item, record, workspace, sessions=sessions_open)
+                or (self._duplicate_mismatch(item, record) if entry else None)
             )
         if reason is None:
             if (
@@ -1958,7 +2026,7 @@ class IntakeWorker:
                 reason = "PLAN_BINDING"
             else:
                 live = self.state.get_intake_plan(plan.plan_revision)
-                if live is None or live.status != "AUTO_PENDING":
+                if live is None or live.status != ("PLANNED" if executing else "AUTO_PENDING"):
                     reason = "PLAN_STATUS"
         if reason is None:
             return True
@@ -1988,7 +2056,8 @@ class IntakeWorker:
         return "DUPLICATE_CONTENT" if found["proven"] or found["unproven"] else None
 
     def _eligibility_mismatch(
-        self, item: IntakeItem, record: ClassificationRecord, workspace: ResolvedSemesterWorkspace
+        self, item: IntakeItem, record: ClassificationRecord, workspace: ResolvedSemesterWorkspace,
+        *, sessions: bool = True,
     ) -> str | None:
         """Plan §2.3: the calendar projection, the effective semester range and the Sessions
         inventory the record was decided on are still the current ones (r4 #2)."""
@@ -2002,7 +2071,7 @@ class IntakeWorker:
         stored = None if record.semester_range_basis_json is None else json.loads(record.semester_range_basis_json)
         if json.dumps(current_basis, sort_keys=True, default=str) != json.dumps(stored, sort_keys=True, default=str):
             return "SEMESTER_RANGE"
-        if record.session_mode is not None:
+        if record.session_mode is not None and sessions:
             recorded = None if record.decided_date is None else date.fromisoformat(record.decided_date)
             mode, session_id, digest, block = self._session_binding(item, record.course_key, recorded, workspace)
             if block is not None or (mode, session_id, digest) != (
@@ -2022,6 +2091,234 @@ class IntakeWorker:
                     self.state.reconcile_intake_plan(row["plan_revision"], "AUTO_PLAN_RECLASSIFIED")
                     self.state.record_intake_stage_event(
                         "auto_plan_retired", intake_id=item.intake_id, operation_key="AUTO_PLAN_RECLASSIFIED")
+
+    # ------------------------------------------------------------------
+    # Intake classification v2 (P-B2b): stage B promotion and AUTO execution
+    # ------------------------------------------------------------------
+    def _execution_handling(self, item: IntakeItem, kind: Kind) -> HandlingMode:
+        """The §6.1 matrix decision for the actual bytes; S3 when they cannot be proven."""
+
+        probe = self._source_probe(item)
+        if probe.payload is None:
+            return HandlingMode.S3
+        extension = item.original_name.rsplit(".", 1)[1].lower() if "." in item.original_name else None
+        return handling_mode(kind, mime_type=item.mime_type, extension=extension,
+                             head=probe.payload, payload_complete=probe.complete)
+
+    def _auto_context(
+        self, item: IntakeItem, plan: IntakePlan, record: ClassificationRecord, *, job_id: str | None
+    ) -> ClassificationExecutionContext:
+        kind = Kind(record.kind)
+        target = plan.target_snapshot_json
+        if isinstance(target, str):
+            target = json.loads(target)
+        return ClassificationExecutionContext(
+            intake_id=item.intake_id, plan_revision=plan.plan_revision,
+            classification_revision_hash=record.classification_revision_hash, record_id=record.record_id,
+            job_id=job_id, course_key=str(record.course_key), kind=record.kind, origin=record.origin,
+            actual_date=record.decided_date, week=record.week, session_mode=record.session_mode,
+            session_id=record.session_id,
+            material_role=None if kind is Kind.TRANSCRIPT else MATERIAL_TYPE_INITIAL.get(kind),
+            handling=str((target or {}).get("handling") or ""), source_file_id=item.provider_file_id,
+            byte_sha256=record.byte_sha256, source_version=record.source_version,
+            workspace_fingerprint=record.workspace_fingerprint, config_fingerprint=record.config_fingerprint,
+        )
+
+    def _auto_job_spec(
+        self, item: IntakeItem, plan: IntakePlan, record: ClassificationRecord, workspace: ResolvedSemesterWorkspace
+    ) -> dict[str, Any]:
+        context = self._auto_context(item, plan, record, job_id=None)
+        operation = INTAKE_SESSION_OPERATION if context.kind == Kind.TRANSCRIPT.value else INTAKE_MATERIAL_OPERATION
+        operation_key = self._plan_operation_key(operation, item, plan, workspace, context)
+        return {"job_key": "sha256:" + operation_key, "operation": operation, "stage": "intake",
+                "course_key": record.course_key}
+
+    def _promote_ready_plans(self) -> None:
+        """Stage B (plan §3.4): promote an AUTO_PENDING plan only after the HUMAN requests of the
+        intake are provably out of the way, and create its single job in the same transaction.
+        Also repairs a PLANNED plan whose job is missing (E3)."""
+
+        if self.notion is None or not self._auto_enabled():
+            return
+        for row in self.state.list_intake_plans(plan_authority="AUTO_CLASSIFICATION", status="AUTO_PENDING"):
+            try:
+                self._promote_one(row["plan_revision"])
+            except ReconnectRequiredError:
+                raise
+            except (IntakeReconcileRequired, SourceUnavailableError, PolicyDeniedError, ProviderUnavailableError):
+                continue  # not promotable now; the barrier or the next tick decides
+        for row in self.state.list_intake_plans(plan_authority="AUTO_CLASSIFICATION", status="PLANNED"):
+            item = self.state.get_intake_item(row["intake_id"])
+            record = None if item is None else self.state.get_classification_record_by_revision(
+                row["classification_revision_hash"], row["intake_id"])
+            plan = self.state.get_intake_plan(row["plan_revision"])
+            if item is None or record is None or plan is None:
+                continue
+            try:
+                workspace = self._workspace_for_record(item, record)
+                self.state.ensure_auto_plan_job(plan.plan_revision, self._auto_job_spec(item, plan, record, workspace))
+            except IntakeConfigurationError:
+                continue
+
+    def _workspace_for_record(self, item: IntakeItem, record: ClassificationRecord) -> ResolvedSemesterWorkspace:
+        matches = [w for w in self.workspaces if w.semester == item.semester and w.course_key == record.course_key]
+        if len(matches) != 1:
+            raise IntakeConfigurationError("AUTO course workspace is not currently configured")
+        return matches[0]
+
+    def _promote_one(self, plan_revision: str) -> None:
+        plan = self.state.get_intake_plan(plan_revision)
+        if plan is None or plan.status != "AUTO_PENDING":
+            return
+        item = self.state.get_intake_item(plan.intake_id)
+        if item is None or item.classification_state != "CLASSIFIED" or self._unresolved_closure(item.intake_id):
+            return
+        record = self.state.get_classification_record_by_revision(plan.classification_revision_hash or "", plan.intake_id)
+        if record is None:
+            self.state.reconcile_intake_plan(plan.plan_revision, "RECORD_MISSING")
+            return
+        workspace = self._workspace_for_record(item, record)
+        if not self._auto_preflight(item, plan, record, workspace):
+            return
+        verdict, reason, drafts = self._judge_human_requests(item, workspace)
+        if verdict != "UNTOUCHED":
+            self._apply_human_verdict(item, record, workspace, verdict, reason)
+            return
+        if drafts:
+            return  # an untouched Draft still awaits its closure; closing it is the classifier's job
+        try:
+            self.state.promote_auto_plan(plan.plan_revision, enqueue=self._auto_job_spec(item, plan, record, workspace))
+        except ValueError:
+            return  # a state-level barrier (live request, intent or generation) still holds
+        self.state.record_intake_stage_event("auto_plan_promoted", intake_id=item.intake_id, operation_key=plan.plan_revision)
+
+    def _auto_write_gate(self, context: ClassificationExecutionContext, workspace: ResolvedSemesterWorkspace,
+                         *, entry: bool = False) -> None:
+        """Plan §3.4 M3: authority, source, HUMAN requests and provenance before an AUTO write.
+
+        ``entry=True`` additionally re-proves the bytes, the duplicate gate and (while no
+        Session effect exists) the Sessions inventory.  Any failure closes the plan and raises."""
+
+        plan = self.state.get_intake_plan(context.plan_revision)
+        item = self.state.get_intake_item(context.intake_id)
+        record = self.state.get_classification_record(context.record_id)
+        if (
+            plan is None or item is None or record is None
+            or plan.plan_authority != "AUTO_CLASSIFICATION" or plan.status != "PLANNED"
+            or plan.classification_revision_hash != context.classification_revision_hash
+        ):
+            raise IntakeReconcileRequired("AUTO authority is no longer valid")
+        if context.job_id is not None:
+            job = self.state.get_job(context.job_id)
+            if job is None or job.voided_at is not None:
+                raise IntakeReconcileRequired("the AUTO job was voided")
+        if not self._auto_enabled():
+            self.state.reconcile_intake_plan(plan.plan_revision, "AUTO_UNAVAILABLE")
+            raise IntakeReconcileRequired("AUTO is no longer usable")
+        if not self._auto_preflight(item, plan, record, workspace, executing=True, entry=entry):
+            raise IntakeReconcileRequired("AUTO preflight failed")
+        verdict, reason, drafts = self._judge_human_requests(item, workspace)
+        if verdict == "UNTOUCHED" and drafts:
+            verdict, reason = "HUMAN", "HUMAN_REQUEST_ACTIVE"  # a HUMAN request exists: it wins
+        if verdict != "UNTOUCHED":
+            self._apply_human_verdict(item, record, workspace, verdict, reason)
+            raise IntakeReconcileRequired(f"HUMAN requests changed the authority: {reason}")
+
+    def _session_point_of_use(self, context: ClassificationExecutionContext, workspace: ResolvedSemesterWorkspace) -> None:
+        """E9: the Sessions inventory is re-read immediately before a Session is reserved,
+        created or given a transcript pointer.  Our own created Session is an own effect."""
+
+        item = self._require_item(context.intake_id)
+        record = self.state.get_classification_record(context.record_id)
+        reservation = self.state.get_entity_reservation(intake_id=item.intake_id, entity_kind="SESSION")
+        if record is None:
+            raise IntakeReconcileRequired("AUTO record is missing")
+        recorded = None if context.actual_date is None else date.fromisoformat(context.actual_date)
+        mode, session_id, digest, block = self._session_binding(item, context.course_key, recorded, workspace)
+        if reservation is not None and context.session_mode == SessionMode.NEW.value:
+            # Resuming our own creation: the reserved Session may already exist.
+            if block is None and (mode, session_id, digest) == (record.session_mode, record.session_id, record.sessions_inventory_hash):
+                return
+            if self._own_session_row_exists(reservation.entity_app_id, context, workspace):
+                return
+        elif block is None and (mode, session_id, digest) == (record.session_mode, record.session_id, record.sessions_inventory_hash):
+            return
+        plan = self.state.get_intake_plan(context.plan_revision)
+        if plan is not None:
+            self.state.reconcile_intake_plan(plan.plan_revision, "SESSION_INVENTORY")
+        raise IntakeReconcileRequired("the Sessions inventory changed after the decision")
+
+    def _session_pointer_gate(
+        self, context: ClassificationExecutionContext, session_page: Mapping[str, Any], derivative_file_id: str
+    ) -> None:
+        """E9: an EXISTING Session's transcript pointer is only written while no other file has
+        taken the Session — a foreign pointer or source binding appeared after the decision."""
+
+        if context.session_mode != SessionMode.EXISTING.value or self.notion is None:
+            return
+        row = self.notion.read_record("sessions", _page_id(session_page) or "")
+        pointer = None if row is None else row.get("Normalized Transcript")
+        binding = self.state.session_source_binding_for(context.course_key, context.session_id or "")
+        foreign_pointer = bool(pointer) and pointer != _drive_link(derivative_file_id)
+        foreign_binding = binding is not None and binding.get("provider_file_id") != context.source_file_id
+        if row is None or foreign_pointer or foreign_binding:
+            self.state.reconcile_intake_plan(context.plan_revision, "SESSION_TAKEN")
+            raise IntakeReconcileRequired("the existing Session was taken by another transcript")
+
+    def _own_session_row_exists(self, entity_id: str, context: ClassificationExecutionContext,
+                                workspace: ResolvedSemesterWorkspace) -> bool:
+        if self.notion is None:
+            return False
+        for row in self.notion.list_records("sessions"):
+            if row.get("ID") == entity_id:
+                date_value = row.get("Date")
+                if isinstance(date_value, Mapping):
+                    date_value = date_value.get("start")
+                return bool(str(date_value or "")[:10] == context.actual_date)
+        return False
+
+    def _process_auto_item(
+        self, item: IntakeItem, plan: IntakePlan, claimed: Any, layout_context: _LayoutValidationContext | None
+    ) -> dict[str, Any]:
+        """Execute a claimed AUTO job with an immutable context (plan §3.4 R1, O1)."""
+
+        if claimed is None:
+            raise RequestValidationError(("an AUTO plan runs only from its claimed job",))
+        job = self.state.get_job(claimed.id)
+        if (
+            job is None or job.voided_at is not None or job.plan_revision != plan.plan_revision
+            or job.plan_authority != plan.plan_authority
+            or item.plan_revision != plan.plan_revision
+        ):
+            raise IntakeReconcileRequired("job, item and plan no longer agree on the AUTO authority")
+        record = self.state.get_classification_record_by_revision(plan.classification_revision_hash or "", item.intake_id)
+        if record is None:
+            raise IntakeReconcileRequired("AUTO plan has no classification record")
+        workspace = self._workspace_for_item(item)
+        if layout_context is None:
+            layout_context = self._fresh_item_layout_context(workspace)
+        elif not self._layout_context_allows(layout_context, workspace):
+            raise IntakeReconcileRequired("item processing layout context is stale or missing")
+        context = self._auto_context(item, plan, record, job_id=job.id)
+        self._assert_job_identity(job, context)
+        self._auto_write_gate(context, workspace, entry=True)
+        if context.kind == Kind.TRANSCRIPT.value:
+            return self._process_transcript(item, plan, context, context, workspace)
+        mode = self._execution_handling(item, Kind(context.kind))
+        if mode is HandlingMode.NORMALIZE:
+            return self._process_material(item, plan, context, context, workspace)
+        if mode is HandlingMode.REGISTER_OPAQUE_NO_RETRIEVAL:
+            return self._process_material(item, plan, context, context, workspace, opaque=True)
+        self.state.reconcile_intake_plan(plan.plan_revision, "HANDLING_MODE")
+        raise IntakeReconcileRequired("the handling mode no longer allows an automatic run")
+
+    def _assert_job_identity(self, job: Any, context: ClassificationExecutionContext) -> None:
+        """A bound job may only ever be continued under the authority and revision it was bound with (E5)."""
+
+        if job.bound_authority not in (None, context.plan_authority) or job.bound_revision_hash not in (
+            None, context.classification_revision_hash
+        ):
+            raise IntakeReconcileRequired("job source identity was bound under another authority or revision")
 
     def _unresolved_closure(self, intake_id: str) -> bool:
         for intent in self.state.list_auto_resolve_intents():
@@ -2622,13 +2919,17 @@ class IntakeWorker:
         self,
         item: IntakeItem,
         plan: IntakePlan,
-        receipt: RequestReceipt,
-        request: RequestInput,
+        receipt: ExecReceipt,
+        request: ExecRequest,
         workspace: ResolvedSemesterWorkspace,
     ) -> dict[str, Any]:
         self._require_mutation_capability()
         course_id = self._course_id(request.course_key or item.selected_course_key or "", workspace)
+        if isinstance(request, ClassificationExecutionContext):
+            self._session_point_of_use(request, workspace)
         reservation, existing_page = self._reserve_session(item, plan, request, workspace, course_id)
+        if isinstance(request, ClassificationExecutionContext):
+            self._session_point_of_use(request, workspace)
         self.state.record_intake_stage_event("create_session_started", intake_id=item.intake_id)
         session_page = self._ensure_session_page(
             item,
@@ -2679,6 +2980,8 @@ class IntakeWorker:
             content=derivative_content,
             receipt=receipt,
         )
+        if isinstance(request, ClassificationExecutionContext):
+            self._session_pointer_gate(request, session_page, derivative.file_id)
         self.state.record_intake_stage_event("pointer_write_started", intake_id=item.intake_id)
         status = "Ready" if transcript.status.value == "ready" else "Partial"
         self._guarded_notion_update(
@@ -2752,21 +3055,26 @@ class IntakeWorker:
         self,
         item: IntakeItem,
         plan: IntakePlan,
-        receipt: RequestReceipt,
-        request: RequestInput,
+        receipt: ExecReceipt,
+        request: ExecRequest,
         workspace: ResolvedSemesterWorkspace,
+        opaque: bool = False,
     ) -> dict[str, Any]:
         self._require_mutation_capability()
         course_id = self._course_id(request.course_key or item.selected_course_key or "", workspace)
         reservation = self._reserve_material(item, plan, request, workspace, course_id)
         folders = self._prepare_entity_folders(item, plan, reservation, workspace, role="material", receipt=receipt)
         self.state.record_intake_stage_event("create_material_started", intake_id=item.intake_id)
-        material_page = self._ensure_material_page(item, plan, request, workspace, course_id, reservation, folders, receipt)
+        material_page = self._ensure_material_page(
+            item, plan, request, workspace, course_id, reservation, folders, receipt, opaque=opaque)
         self.state.record_intake_stage_event("create_material_readback", intake_id=item.intake_id)
         raw = self._read_source_bytes(item)
         if not _source_hash_matches(item.source_hash, raw):
             raise SourceUnavailableError("source changed after the immutable observation")
         source_hash = _sha256_source(raw)
+        if opaque:
+            return self._finish_opaque_material(
+                item, plan, receipt, request, workspace, reservation, folders, material_page, source_hash)
         normalized = extract_pdf(
             raw,
             entity_id=reservation.entity_app_id,
@@ -2875,6 +3183,47 @@ class IntakeWorker:
         )
         return {"status": IntakeStatus.ORGANIZED.value, "entity_id": reservation.entity_app_id, "file_id": item.provider_file_id, "content_status": text_status}
 
+    def _finish_opaque_material(
+        self,
+        item: IntakeItem,
+        plan: IntakePlan,
+        receipt: ExecReceipt,
+        request: ExecRequest,
+        workspace: ResolvedSemesterWorkspace,
+        reservation: EntityReservation,
+        folders: Mapping[str, DriveMetadata],
+        material_page: Mapping[str, Any],
+        source_hash: str,
+    ) -> dict[str, Any]:
+        """REGISTER_OPAQUE_NO_RETRIEVAL tail (plan §6.1 r11 R1 steps ③–⑤): binding → REGISTERED →
+        file-ID-preserving move → ORGANIZED; no extraction, derivative, pointer or provenance."""
+
+        reason = "CODE_LOCATOR_CONTRACT" if request.kind == Kind.PROVIDED_CODE.value else "OPAQUE_NO_RETRIEVAL"
+        self.state.update_intake_item(item.intake_id, exposure_block_reason=reason)
+        if isinstance(request, ClassificationExecutionContext) and request.job_id:
+            # No processing record is published for an opaque Material, so the job identity is
+            # bound here under the authority and revision that created the effects (E5).
+            self.state.bind_job_source_identity(
+                request.job_id, source_file_id=item.provider_file_id, source_hash=source_hash,
+                course_key=request.course_key, authority=request.plan_authority,
+                classification_revision_hash=request.classification_revision_hash)
+        source_ref = SourceRef(self.provider, item.provider_file_id, _drive_link(item.provider_file_id))
+        self._apply_binding(item, plan, reservation, source_ref, source_hash, "material", receipt, request, workspace)
+        self.state.record_intake_stage_event("APPLIED", intake_id=item.intake_id)
+        self.state.update_intake_item(item.intake_id, status=IntakeStatus.REGISTERED.value, last_successful_stage="APPLIED", content_status="Needs Review")
+        self._project_file_intake(
+            self._require_item(item.intake_id), workspace, self._semester_workspace_fingerprint(workspace.semester),
+            receipt=receipt)
+        self.state.record_intake_stage_event("REGISTERED", intake_id=item.intake_id)
+        moved = self._move_after_freshness(item, plan, reservation, folders["source"], receipt, request, workspace)
+        self.state.record_intake_stage_event("move_readback", intake_id=item.intake_id)
+        self.state.update_intake_item(item.intake_id, status=IntakeStatus.ORGANIZED.value, last_successful_stage="ORGANIZED", canonical_source_json={"provider": self.provider, "file_id": item.provider_file_id, "parent_id": moved.parent_id})
+        self._project_file_intake(
+            self._require_item(item.intake_id), workspace, self._semester_workspace_fingerprint(workspace.semester),
+            receipt=receipt)
+        return {"status": IntakeStatus.ORGANIZED.value, "entity_id": reservation.entity_app_id,
+                "file_id": item.provider_file_id, "content_status": "Needs Review"}
+
     # ------------------------------------------------------------------
     # Provider and state gates
     # ------------------------------------------------------------------
@@ -2898,6 +3247,9 @@ class IntakeWorker:
         """
 
         bind_job = getattr(self.state, "bind_job_source_identity", None)
+        auto_plan = self.state.get_intake_plan(item.plan_revision) if item.plan_revision else None
+        if auto_plan is not None and auto_plan.plan_authority != "AUTO_CLASSIFICATION":
+            auto_plan = None
         get_record = getattr(self.state, "get_processing_record", None)
         create_record = getattr(self.state, "create_processing_record", None)
         if not callable(bind_job) or not callable(get_record) or not callable(create_record):
@@ -2921,7 +3273,9 @@ class IntakeWorker:
             candidates[0].id,
             source_file_id=item.provider_file_id,
             source_hash=source_hash,
-            course_key=item.selected_course_key,
+            course_key=self._item_course_key(item),
+            authority=auto_plan.plan_authority if auto_plan is not None else None,
+            classification_revision_hash=auto_plan.classification_revision_hash if auto_plan is not None else None,
         )
         existing = get_record(job.id, operation=operation)
         if existing is None:
@@ -2958,7 +3312,7 @@ class IntakeWorker:
         self,
         item: IntakeItem,
         plan: IntakePlan,
-        request: RequestInput,
+        request: ExecRequest,
         workspace: ResolvedSemesterWorkspace,
         course_id: str,
     ) -> tuple[EntityReservation, dict[str, Any] | None]:
@@ -3004,7 +3358,7 @@ class IntakeWorker:
         self,
         item: IntakeItem,
         plan: IntakePlan,
-        request: RequestInput,
+        request: ExecRequest,
         workspace: ResolvedSemesterWorkspace,
         course_id: str,
     ) -> EntityReservation:
@@ -3080,12 +3434,12 @@ class IntakeWorker:
         self,
         item: IntakeItem,
         plan: IntakePlan,
-        request: RequestInput,
+        request: ExecRequest,
         workspace: ResolvedSemesterWorkspace,
         course_id: str,
         reservation: EntityReservation,
         existing_page: dict[str, Any] | None,
-        receipt: RequestReceipt,
+        receipt: ExecReceipt,
     ) -> dict[str, Any]:
         if self.notion is None:
             raise SourceUnavailableError("Notion worker port is not configured")
@@ -3141,29 +3495,39 @@ class IntakeWorker:
         self,
         item: IntakeItem,
         plan: IntakePlan,
-        request: RequestInput,
+        request: ExecRequest,
         workspace: ResolvedSemesterWorkspace,
         course_id: str,
         reservation: EntityReservation,
         folders: Mapping[str, DriveMetadata],
-        receipt: RequestReceipt,
+        receipt: ExecReceipt,
+        *,
+        opaque: bool = False,
     ) -> dict[str, Any]:
         if self.notion is None:
             raise SourceUnavailableError("Notion worker port is not configured")
         source_folder_url = _drive_folder_link(folders["source"].file_id)
-        properties = {
+        properties: dict[str, Any] = {
             "Name": item.original_name,
             "ID": reservation.entity_app_id,
             "Course": [course_id],
             "Type": request.material_role,
             "Source Folder": source_folder_url,
             "Original Filename": item.original_name,
-            "Text Status": "Pending",
+            # Opaque registration creates the page already as Unavailable / Needs Review
+            # (plan §6.1 r11 R1 step ②); the Pending default only applies to extraction.
+            "Text Status": "Needs Review" if opaque else "Pending",
             "Text Source": "Unavailable",
             "Visual Dependency": "Unknown",
             "AI Priority": "Normal",
             "Current Source Version": item.source_version,
         }
+        if isinstance(request, ClassificationExecutionContext) and self._classification_profile_active():
+            # An AUTO Material carries its classified Kind and, for a dated item, its week
+            # (plan §5).  A HUMAN-chosen Kind is never relabelled as AI (r2 H5).
+            properties["AI Kind"] = request.kind
+            if isinstance(request.week, int) and not isinstance(request.week, bool):
+                properties["Week"] = request.week
         op_key = self._plan_operation_key(INTAKE_MATERIAL_OPERATION, item, plan, workspace, request, target_id=None)
         prior = self.state.get_provider_write_attempt(op_key)
         rows = self.notion.list_records("materials")
@@ -3208,7 +3572,7 @@ class IntakeWorker:
         workspace: ResolvedSemesterWorkspace,
         *,
         role: str,
-        receipt: RequestReceipt,
+        receipt: ExecReceipt,
     ) -> dict[str, DriveMetadata]:
         parent = reservation.parent_folder_id
         entity_marker = {"uls_v": "1", "uls_t": reservation.marker_key, "uls_r": "entity"}
@@ -3227,7 +3591,7 @@ class IntakeWorker:
         parent: DriveMetadata,
         name: str,
         folder_role: str,
-        receipt: RequestReceipt,
+        receipt: ExecReceipt,
         role: str,
     ) -> DriveMetadata:
         marker_hash = folder_marker_key(
@@ -3251,7 +3615,7 @@ class IntakeWorker:
         name: str,
         marker: dict[str, str],
         folder_role: str,
-        receipt: RequestReceipt,
+        receipt: ExecReceipt,
         role: str,
     ) -> DriveMetadata:
         op_key = self._operation_key(
@@ -3314,7 +3678,7 @@ class IntakeWorker:
         parent_id: str,
         name: str,
         content: bytes,
-        receipt: RequestReceipt,
+        receipt: ExecReceipt,
     ) -> DriveMetadata:
         marker = derivative_marker(
             provider=self.provider,
@@ -3430,8 +3794,8 @@ class IntakeWorker:
         plan: IntakePlan,
         reservation: EntityReservation,
         target_folder: DriveMetadata,
-        receipt: RequestReceipt,
-        request: RequestInput,
+        receipt: ExecReceipt,
+        request: ExecRequest,
         workspace: ResolvedSemesterWorkspace,
     ) -> DriveMetadata:
         # The child source folder was read during entity preparation, but the
@@ -3506,8 +3870,8 @@ class IntakeWorker:
         source_ref: SourceRef,
         source_hash: str,
         source_kind: str,
-        receipt: RequestReceipt,
-        request: RequestInput,
+        receipt: ExecReceipt,
+        request: ExecRequest,
         workspace: ResolvedSemesterWorkspace,
     ) -> None:
         self._assert_receipt_unchanged(receipt, request, workspace)
@@ -3559,7 +3923,7 @@ class IntakeWorker:
         workspace_fingerprint: str,
         *,
         input_request_link: str | None = None,
-        receipt: RequestReceipt | None = None,
+        receipt: ExecReceipt | None = None,
     ) -> dict[str, Any] | None:
         if self.notion is None:
             return None
@@ -3568,7 +3932,10 @@ class IntakeWorker:
             source_hash=item.source_hash,
             source_version=item.source_version,
             status=item.status,
-            request_revision_hash=receipt.request_revision_hash if receipt else item.request_revision_hash,
+            request_revision_hash=(
+                receipt.classification_revision_hash if isinstance(receipt, ClassificationExecutionContext)
+                else receipt.request_revision_hash if receipt else item.request_revision_hash
+            ),
         )
         plan_revision = receipt.plan_revision if receipt else None
         # The preclaim operation revision is immutable-observation based, but
@@ -3622,6 +3989,9 @@ class IntakeWorker:
                 for key, value in update_properties.items()
             )
             if needs_update:
+                if isinstance(receipt, ClassificationExecutionContext):
+                    self._auto_write_gate(receipt, workspace)
+                    receipt = None
                 if receipt:
                     request = self._request_from_receipt(receipt, workspace)
                     page = self._guarded_notion_update(
@@ -3736,8 +4106,8 @@ class IntakeWorker:
         }
         if input_request_link:
             props["Input Request Link"] = input_request_link
-        if item.selected_course_key:
-            course_id = self._course_id(item.selected_course_key, workspace, allow_missing=True)
+        if self._item_course_key(item):
+            course_id = self._course_id(self._item_course_key(item) or "", workspace, allow_missing=True)
             if course_id:
                 props["Course"] = [course_id]
         if item.last_error:
@@ -3905,8 +4275,11 @@ class IntakeWorker:
                 return item
         raise SourceUnavailableError("request receipt is not bound to an intake item")
 
-    def _assert_receipt_unchanged(self, receipt: RequestReceipt, request: RequestInput | None, workspace: ResolvedSemesterWorkspace) -> None:
-        if request is None:
+    def _assert_receipt_unchanged(self, receipt: ExecReceipt, request: ExecRequest | None, workspace: ResolvedSemesterWorkspace) -> None:
+        if isinstance(receipt, ClassificationExecutionContext):
+            self._auto_write_gate(receipt, workspace)  # AUTO has no request page: the gate is its guard
+            return
+        if request is None or isinstance(request, ClassificationExecutionContext):
             request = self._request_from_receipt(receipt, workspace)
         if self.notion is None or not receipt.provider_page_id:
             raise SourceUnavailableError("request receipt page is unavailable")
@@ -3987,8 +4360,8 @@ class IntakeWorker:
 
     def _guarded_notion_update(
         self,
-        receipt: RequestReceipt,
-        request: RequestInput,
+        receipt: ExecReceipt,
+        request: ExecRequest,
         workspace: ResolvedSemesterWorkspace,
         logical: str,
         page_id: str,
@@ -4205,11 +4578,35 @@ class IntakeWorker:
         candidates = [workspace for workspace in self.workspaces if workspace.semester == item.semester]
         if not candidates:
             raise IntakeConfigurationError("intake item semester is not currently configured")
+        auto_record = self._auto_record_for_item(item)
+        if auto_record is not None:
+            # AUTO: the record's course is the only authority and there is no fallback to
+            # another workspace (plan §3.4 M1).
+            exact = [workspace for workspace in candidates if workspace.course_key == auto_record.course_key]
+            if len(exact) != 1:
+                raise IntakeConfigurationError("AUTO course workspace is not currently configured")
+            return exact[0]
         if item.selected_course_key:
             exact = [workspace for workspace in candidates if workspace.course_key == item.selected_course_key]
             if exact:
                 return exact[0]
         return candidates[0]
+
+    def _auto_record_for_item(self, item: IntakeItem) -> ClassificationRecord | None:
+        """The classification record behind the item's claimed AUTO plan, if that is its authority."""
+
+        if not item.plan_revision:
+            return None
+        plan = self.state.get_intake_plan(item.plan_revision)
+        if plan is None or plan.plan_authority != "AUTO_CLASSIFICATION" or not plan.classification_revision_hash:
+            return None
+        found: ClassificationRecord | None = self.state.get_classification_record_by_revision(
+            plan.classification_revision_hash, item.intake_id)
+        return found
+
+    def _item_course_key(self, item: IntakeItem) -> str | None:
+        record = self._auto_record_for_item(item)
+        return record.course_key if record is not None else item.selected_course_key
 
     def _config_fingerprint(self, workspaces: Sequence[ResolvedSemesterWorkspace]) -> str:
         return sha256_hex(
@@ -4279,7 +4676,8 @@ class IntakeWorker:
         mapping = self._course_page_map(workspace)
         return next((key for key, page_id in mapping.items() if page_id in course_ids), None)
 
-    def _plan_operation_key(self, operation: str, item: IntakeItem, plan: IntakePlan, workspace: ResolvedSemesterWorkspace, request: RequestInput, *, target_id: str | None = None) -> str:
+    def _plan_operation_key(self, operation: str, item: IntakeItem, plan: IntakePlan, workspace: ResolvedSemesterWorkspace, request: ExecRequest, *, target_id: str | None = None) -> str:
+        values: tuple[Any, ...]
         if operation == INTAKE_SESSION_OPERATION:
             values = (self.provider, item.provider_file_id, item.source_hash, item.source_version, plan.plan_revision, workspace.sessions_data_source_id, target_id, request.session_mode)
         else:
@@ -4406,7 +4804,7 @@ class IntakeWorker:
         # ASSIGN_COURSE claim.  Discovery candidates may be empty on the next
         # tick, so do not regress to a second assignment request merely
         # because the original upload is still present in + 업로드.
-        has_course = bool(item.selected_course_key)
+        has_course = bool(self._item_course_key(item))
         if isinstance(candidates, str):
             try:
                 values = json.loads(candidates)

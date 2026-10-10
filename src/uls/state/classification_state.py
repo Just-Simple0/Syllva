@@ -712,6 +712,14 @@ class ClassificationStateMixin:
             ).fetchall()
         return [AutoResolveIntent(**dict(r)) for r in rows]
 
+    def get_classification_record_by_revision(self, revision_hash: str, intake_id: str) -> ClassificationRecord | None:
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM classification_records WHERE classification_revision_hash = ? AND intake_id = ?",
+                (revision_hash, intake_id),
+            ).fetchone()
+            return None if row is None else ClassificationRecord(**dict(row))
+
     def latest_classification_record(self, intake_id: str) -> ClassificationRecord | None:
         with self._transaction() as connection:
             row = connection.execute(

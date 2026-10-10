@@ -9,6 +9,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures")
 from fake_drive import FakeDriveReader
 from fake_llm import FakeLLMAdapter, material_result, session_result
 from fake_notion import COURSE_KEY, FakeNotionReader, FakeNotionWriter
+
 from uls.adapters.drive.binding import ValidatedSourceBindingResolver
 from uls.config.schema import UlsConfig
 from uls.domain.enums import ProcessingStatus
@@ -18,7 +19,6 @@ from uls.ephemeral.memory import MemoryEphemeralStore
 from uls.normalization.transcript import normalize_transcript
 from uls.retrieval.engine import RetrievalEngine
 from uls.state.sqlite import SQLiteStateStore
-
 
 FP1 = SourceFingerprint(1, "transcript-v1")
 FP2 = SourceFingerprint(2, "transcript-v2")

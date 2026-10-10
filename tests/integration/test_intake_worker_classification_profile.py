@@ -82,7 +82,9 @@ def test_human_v2_material_kind_is_preserved_through_claim_and_dispatch(tmp_path
         assert notion.data_sources["synthetic-materials"][0].get("AI Kind") is None
 
 
-def test_human_v2_kind_on_an_opaque_source_fails_closed_until_the_opaque_path_exists(tmp_path: Path) -> None:
+def test_human_v2_kind_on_an_opaque_source_registers_without_retrieval(tmp_path: Path) -> None:
+    # P-B2b E10/E11: the §6.1 matrix registers PROVIDED_CODE x .c opaquely (no extraction, no
+    # derivative, no provenance); the HUMAN Role stays the Materials.Type.
     with _system(tmp_path, raw=b"#include <stdio.h>\n", name="tcp_server.c", mime_type="text/x-csrc") as system:
         worker = _rewire(system, "legacy5-cls")
         notion = system["notion"]
@@ -94,10 +96,15 @@ def test_human_v2_kind_on_an_opaque_source_fails_closed_until_the_opaque_path_ex
         details.update({"Course": ["synthetic-course-page-0"], "Kind": "PROVIDED_CODE",
                         "Material Role": "Reference", "Submitted": True})
         worker.run_once()
-        assert notion.data_sources["synthetic-materials"] == []
+        materials = notion.data_sources["synthetic-materials"]
+        assert len(materials) == 1
+        assert materials[0]["Type"] == "Reference" and materials[0]["Text Status"] == "Needs Review"
+        assert materials[0]["Text Source"] == "Unavailable" and not materials[0].get("Normalized Source")
+        assert materials[0].get("AI Kind") is None  # a HUMAN-chosen Kind is not relabelled as AI
         item = system["state"].get_intake_item_by_provider_file("google_drive", system["source_id"])
-        assert item.selected_kind == "PROVIDED_CODE"
-        assert "opaque registration path" in (item.last_error or "")
+        assert item.status == "ORGANIZED" and item.exposure_block_reason == "CODE_LOCATOR_CONTRACT"
+        assert item.canonical_entity_id or item.canonical_source_json
+        assert system["state"].list_processing_records() == [] if hasattr(system["state"], "list_processing_records") else True
 
 
 def test_human_v2_kind_that_never_takes_pdf_is_rejected_before_the_pdf_path(tmp_path: Path) -> None:

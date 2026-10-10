@@ -17,6 +17,15 @@ from uls.intake.worker import IntakeReconcileRequired
 
 pytestmark = pytest.mark.integration
 
+
+@pytest.fixture(autouse=True)
+def _no_promotion(monkeypatch):
+    """P-B2a behaviour is tested in isolation from the P-B2b promotion (own test module)."""
+
+    from uls.intake.worker import IntakeWorker
+
+    monkeypatch.setattr(IntakeWorker, "_promote_ready_plans", lambda self: None)
+
 COURSE = COURSE_KEYS[1]  # "Synthetic Course 1"
 SEMESTER = SemesterRange(date(2026, 9, 1), date(2026, 12, 20), "config")
 MATCHED_NAME = "2026.09.10_Synthetic Course 1_2주차.md"
