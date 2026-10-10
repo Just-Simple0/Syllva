@@ -2283,6 +2283,21 @@ class IntakeWorker:
         self.state.reconcile_intake_plan(plan.plan_revision, "SESSION_INVENTORY")
         raise IntakeReconcileRequired("the Sessions inventory changed after the decision")
 
+    @staticmethod
+    def _session_binding_is_ours(binding: Mapping[str, Any] | None, context: ClassificationExecutionContext,
+                                 reservation: EntityReservation | None) -> bool:
+        """A canonical Session source binding is ours only when it names OUR file AND this plan's
+        reservation (its ID derives from the intake and the plan revision, i.e. the source
+        generation) — the file ID alone also matches another generation or plan (r7 R1)."""
+
+        if binding is None:
+            return True
+        return (
+            reservation is not None
+            and binding.get("provider_file_id") == context.source_file_id
+            and binding.get("reservation_id") == reservation.reservation_id
+        )
+
     def _existing_session_intact(
         self, item: IntakeItem, context: ClassificationExecutionContext, workspace: ResolvedSemesterWorkspace
     ) -> bool:
@@ -2297,7 +2312,8 @@ class IntakeWorker:
                 or _parse_session_day(rows[0].get("Date")) != context.actual_date:
             return False
         binding = self.state.session_source_binding_for(context.course_key, context.session_id or "")
-        return binding is None or binding.get("provider_file_id") == context.source_file_id
+        reservation = self.state.get_entity_reservation(intake_id=item.intake_id, entity_kind="SESSION")
+        return self._session_binding_is_ours(binding, context, reservation)
 
     def _own_session_effect_ok(
         self, item: IntakeItem, plan: IntakePlan, context: ClassificationExecutionContext, entity_id: str,
@@ -2319,6 +2335,11 @@ class IntakeWorker:
         if _parse_session_day(rows[0].get("Date")) != context.actual_date or course_id is None \
                 or _relation_ids(rows[0].get("Course")) != [course_id]:
             return False
+        reservation = self.state.get_entity_reservation(intake_id=item.intake_id, entity_kind="SESSION")
+        if not self._session_binding_is_ours(
+            self.state.session_source_binding_for(context.course_key, entity_id), context, reservation
+        ):
+            return False  # a foreign source binding on the Session we created
         op_key = self._plan_operation_key(INTAKE_SESSION_OPERATION, item, plan, workspace, context, target_id=None)
         attempt = self.state.get_provider_write_attempt(op_key)
         if attempt is None or not attempt.target_id or attempt.target_id != _page_id(rows[0]):
@@ -2356,9 +2377,9 @@ class IntakeWorker:
             # Both modes: a pointer must be empty or exactly this plan's derivative (r3 H1).
             pointer = row.get("Normalized Transcript")
             bad = bool(pointer) and pointer != _drive_link(derivative_file_id)
-            if not bad and context.session_mode == SessionMode.EXISTING.value:
-                binding = self.state.session_source_binding_for(context.course_key, context.session_id or "")
-                bad = binding is not None and binding.get("provider_file_id") != context.source_file_id
+            if not bad:
+                binding = self.state.session_source_binding_for(context.course_key, expected_id or "")
+                bad = not self._session_binding_is_ours(binding, context, reservation)
         if bad:
             self.state.reconcile_intake_plan(context.plan_revision, "SESSION_CHANGED")
             raise IntakeReconcileRequired("the Session no longer matches the decision")

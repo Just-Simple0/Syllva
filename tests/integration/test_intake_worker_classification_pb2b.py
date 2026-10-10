@@ -759,3 +759,27 @@ def test_an_unfaithful_foreign_row_is_judged_by_ownership_first(tmp_path: Path) 
         assert _auto_plans(system["state"])[0]["status"] == "RECONCILE_REQUIRED"
         assert system["state"].get_job(_jobs(system)[0].id).voided_at is not None
         assert not _sessions(system)[0].get("Normalized Transcript")
+
+
+def test_a_session_binding_of_another_plan_or_file_is_never_ours(tmp_path: Path) -> None:
+    # r7 R1: same file ID but another plan/generation (reservation), and another file on our own Session.
+    for label, seeded in (("existing-same-file", True), ("new-other-file", False)):
+        with _system(tmp_path / label, name=MATCHED_NAME, raw=RAW) as system:
+            worker = _enable(system)
+            _complete_calendar(system["state"])
+            if seeded:
+                _seed_session(system["notion"], "TEST102-S01")
+            original = worker._session_pointer_gate
+
+            def gate(context, page, derivative_file_id, _o=original, _sy=system, _l=label):
+                reservation = _sy["state"].get_entity_reservation(intake_id=context.intake_id, entity_kind="SESSION")
+                _sy["state"].record_session_source_binding(
+                    binding_id="b-" + _l, course_key=COURSE, session_id=reservation.entity_app_id, provider="google_drive",
+                    provider_file_id=_sy["source_id"] if _l == "existing-same-file" else "someone-elses-file",
+                    reservation_id="reservation-of-another-plan", state="ACTIVE")
+                return _o(context, page, derivative_file_id)
+            worker._session_pointer_gate = gate  # type: ignore[method-assign]
+            worker.run_once()
+            assert not system["notion"].data_sources["synthetic-sessions"][0].get("Normalized Transcript"), label
+            assert _auto_plans(system["state"])[0]["status"] == "RECONCILE_REQUIRED", label
+            assert system["state"].get_job(_jobs(system)[0].id).voided_at is not None, label
