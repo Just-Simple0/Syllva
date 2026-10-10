@@ -527,8 +527,7 @@ def test_crash_after_the_rollback_write_completes_on_the_next_tick(tmp_path: Pat
                 raise RuntimeError("crash before the rollback commit")
             return original_complete(intent_id)
         state.complete_auto_resolve_rollback = complete  # type: ignore[method-assign]
-        with pytest.raises(RuntimeError):
-            worker.run_once()
+        worker.run_once()  # the injected crash is absorbed per intent; the rollback stays PENDING
         receipt = next(r for r in state.list_request_receipts())
         intent = state.get_auto_resolve_intent(receipt.request_key)
         assert intent.state == "PENDING" and state.get_auto_resolve_rollback(intent.intent_id)["state"] == "PENDING"
@@ -760,8 +759,7 @@ def test_rollback_never_overwrites_a_status_the_human_moved_on(tmp_path: Path) -
                 raise RuntimeError("crash before the rollback commit")
             return original_complete(intent_id)
         state.complete_auto_resolve_rollback = complete  # type: ignore[method-assign]
-        with pytest.raises(RuntimeError):
-            worker.run_once()
+        worker.run_once()  # the injected crash is absorbed per intent; the rollback stays PENDING
         item = _item(system)
         draft = _assign_request(notion)
         draft.update({"Request Status": "Submitted", "Submitted": True, "Result Reference": item.classification_record_id})
@@ -892,8 +890,7 @@ def _rollback_pending(tmp_path: Path):
             raise RuntimeError("crash before the rollback commit")
         return original_complete(intent_id)
     state.complete_auto_resolve_rollback = complete  # type: ignore[method-assign]
-    with pytest.raises(RuntimeError):
-        worker.run_once()
+    worker.run_once()  # the injected crash is absorbed per intent; the rollback stays PENDING
     return system_cm, system, worker
 
 
@@ -1086,8 +1083,8 @@ def test_preflight_rechecks_alias_and_canvas_provenance(tmp_path: Path) -> None:
 # P-B2a FINAL r4 findings
 # ---------------------------------------------------------------------------
 def test_session_occupancy_needs_pointer_and_binding_proof(tmp_path: Path) -> None:
-    # r4 #1: a Pending Session with a Normalized Transcript pointer, or bound to another
-    # file, is occupied; a Session bound to this very file is an idempotent re-entry.
+    # r4 #1 / r5 R1: a Pending Session with a Normalized Transcript pointer or any canonical
+    # source binding (another file's or this very file's) is occupied.
     for name in ("pointer", "foreign-binding", "own-binding"):
         with _system(tmp_path / name, name=MATCHED_NAME, raw=RAW) as system:
             worker = _enable(system)
@@ -1398,5 +1395,144 @@ def test_without_full_intake_capability_nothing_automatic_happens(tmp_path: Path
         assert _request_writes(notion, since) == [] and _auto_plans(state) == []
         assert _assign_request(notion)["Request Status"] == "Draft"
         assert all(r.state == "Draft" for r in state.list_request_receipts())
+    finally:
+        system_cm.__exit__(None, None, None)
+
+
+# ---------------------------------------------------------------------------
+# P-B2a FINAL r6 findings
+# ---------------------------------------------------------------------------
+def test_a_rejected_direct_claim_leaves_the_auto_plan_alone(tmp_path: Path) -> None:
+    # r6 #1: an unsubmitted (blank) or tampered request does not take the authority.
+    with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        worker.run_once()
+        state, notion = system["state"], system["notion"]
+        plan = _auto_plans(state)[0]
+        state.create_job(job_key="sha256:" + "4" * 64, operation="intake.test", stage="intake",
+                         target_entity_id=plan["intake_id"], plan_revision=plan["plan_revision"],
+                         plan_authority="AUTO_CLASSIFICATION")
+        item = _item(system)
+        receipt = worker._create_input_request_with_context(
+            item, worker._workspace_for_item(item), request_type="ASSIGN_COURSE", target_snapshot=None,
+            layout_context=worker._fresh_layout_context(worker._run_layout_workspaces()))
+        with contextlib.suppress(Exception):
+            worker.claim_request(receipt.request_key)  # blank Draft: not submitted
+        assert _auto_plans(state)[0]["status"] == "AUTO_PENDING" and _item(system).classification_state == "CLASSIFIED"
+        assert state.get_job(job_key="sha256:" + "4" * 64).voided_at is None
+        _assign_request(notion).update({"Course": ["synthetic-course-page-1"], "Submitted": True, "Request Key": "tampered"})
+        with contextlib.suppress(Exception):
+            worker.claim_request(receipt.request_key)  # identity mismatch
+        assert _auto_plans(state)[0]["status"] == "AUTO_PENDING"
+        _assign_request(notion)["Request Key"] = receipt.request_key
+        with contextlib.suppress(Exception):
+            worker.claim_request(receipt.request_key)  # genuine submission
+        assert _auto_plans(state)[0]["status"] == "SUPERSEDED"
+        assert state.get_job(job_key="sha256:" + "4" * 64).voided_at is not None
+
+
+def test_provider_exceptions_converge_to_the_unknown_outcome_contract(tmp_path: Path) -> None:
+    from uls.adapters.notion.intake import ProviderUnavailableError
+
+    # (a) the write landed, then the readback raises.
+    system_cm, system = _pre_v2_draft(tmp_path / "readback")
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        notion, state = system["notion"], system["state"]
+        original_read = notion.read_record
+        broken = {"on": False}
+
+        def read_record(data_source_id: str, page_id: str):
+            if broken["on"] and data_source_id == "synthetic-requests":
+                raise ProviderUnavailableError("timeout")
+            return original_read(data_source_id, page_id)
+        notion.read_record = read_record  # type: ignore[method-assign]
+        _landing_hook(notion, lambda page_id: broken.__setitem__("on", True))
+        worker.run_once()  # must not raise
+        receipt = next(r for r in state.list_request_receipts())
+        assert state.get_auto_resolve_intent(receipt.request_key).state == "PENDING"
+        assert state.get_request_receipt(receipt.request_key).state == "Draft"
+        item = _item(system)
+        assert item.status == "RECONCILE_REQUIRED" and item.last_error_code == "AUTO_RESOLVE_RECONCILE"
+        with pytest.raises(IntakeReconcileRequired):
+            worker.claim_request(receipt.request_key)
+        worker.run_once()  # still broken: recovery is absorbed, the barrier stays
+        assert state.get_auto_resolve_intent(receipt.request_key).state == "PENDING"
+        broken["on"] = False
+        since = len(notion.events)
+        worker.run_once()
+        assert state.get_auto_resolve_intent(receipt.request_key).state == "DONE"
+        assert state.get_request_receipt(receipt.request_key).state == "AutoResolved"
+        assert _request_writes(notion, since) == []  # no second provider mutation
+        assert _item(system).last_error_code is None
+    finally:
+        system_cm.__exit__(None, None, None)
+    # (b) the update response is lost although the server applied it.
+    system_cm, system = _pre_v2_draft(tmp_path / "update")
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        notion, state = system["notion"], system["state"]
+        original_update = notion.update_record
+        flaky = {"on": True}
+
+        def update_record(data_source_id: str, page_id: str, properties):
+            row = original_update(data_source_id, page_id, properties)
+            status = ((properties.get("Request Status") or {}).get("status") or {}).get("name")
+            if flaky["on"] and data_source_id == "synthetic-requests" and status == "Auto Resolved":
+                flaky["on"] = False
+                raise ProviderUnavailableError("response lost")
+            return row
+        notion.update_record = update_record  # type: ignore[method-assign]
+        worker.run_once()  # must not raise
+        receipt = next(r for r in state.list_request_receipts())
+        assert state.get_auto_resolve_intent(receipt.request_key).state == "PENDING"
+        since = len(notion.events)
+        worker.run_once()
+        assert state.get_auto_resolve_intent(receipt.request_key).state == "DONE"
+        assert _request_writes(notion, since) == []  # recovery (i): no duplicate mutation
+    finally:
+        system_cm.__exit__(None, None, None)
+    # (c) the rollback write landed, then the confirming readback raises once.
+    system_cm, system = _pre_v2_draft(tmp_path / "rollback")
+    try:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        notion, state = system["notion"], system["state"]
+
+        def edit(page_id: str) -> None:
+            for page in notion.data_sources["synthetic-requests"]:
+                if page["id"] == page_id:
+                    page["Course"] = ["synthetic-course-page-0"]
+        _landing_hook(notion, edit)
+        original_update = notion.update_record
+        original_read = notion.read_record
+        arm = {"on": False}
+
+        def update_record(data_source_id: str, page_id: str, properties):
+            row = original_update(data_source_id, page_id, properties)
+            status = ((properties.get("Request Status") or {}).get("status") or {}).get("name")
+            if data_source_id == "synthetic-requests" and status == "Draft" and "Result Reference" in properties:
+                arm["on"] = True
+            return row
+
+        def read_record(data_source_id: str, page_id: str):
+            if arm["on"] and data_source_id == "synthetic-requests":
+                arm["on"] = False
+                raise ProviderUnavailableError("timeout")
+            return original_read(data_source_id, page_id)
+        notion.update_record = update_record  # type: ignore[method-assign]
+        notion.read_record = read_record  # type: ignore[method-assign]
+        worker.run_once()
+        receipt = next(r for r in state.list_request_receipts())
+        intent = state.get_auto_resolve_intent(receipt.request_key)
+        assert intent.state == "PENDING" and state.get_auto_resolve_rollback(intent.intent_id)["state"] == "PENDING"
+        since = len(notion.events)
+        worker.run_once()
+        assert state.get_auto_resolve_rollback(intent.intent_id)["state"] == "DONE"
+        assert state.get_auto_resolve_intent(receipt.request_key).state == "ABORTED"
+        assert _request_writes(notion, since) == []
     finally:
         system_cm.__exit__(None, None, None)

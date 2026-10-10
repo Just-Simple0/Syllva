@@ -980,7 +980,6 @@ class IntakeWorker:
         if pending_intent is not None and pending_intent.state in {"PENDING", "RECONCILE"}:
             raise IntakeReconcileRequired("an automatic closure of this request is still unresolved")
         item_hint = self._item_for_receipt(receipt)
-        self._yield_auto_plans_to_human(item_hint, "HUMAN_REQUEST_CLAIMED")
         workspace = self._workspace_for_item(item_hint)
         if receipt.input_requests_data_source_id != workspace.input_requests_data_source_id:
             raise IntakeReconcileRequired("request belongs to a different current workspace")
@@ -995,6 +994,10 @@ class IntakeWorker:
         if request.request_key != receipt.request_key:
             raise IntakeReconcileRequired("Request Key was tampered or changed")
         self._assert_request_generation_current(receipt, request, workspace)
+        if page.get("Submitted") is True and page.get("Cancelled") is False:
+            # Only a genuinely submitted HUMAN request (identity, key and generation already
+            # verified above) takes the authority from an AUTO plan (r6 #1).
+            self._yield_auto_plans_to_human(item_hint, "HUMAN_REQUEST_CLAIMED")
         errors = validate_request_input(
             request,
             intake_exists=lambda value: self.state.get_intake_item(value) is not None,
@@ -2036,11 +2039,17 @@ class IntakeWorker:
                 self.notion.update_system_record("input_request", page_id, patch)
             except ReconnectRequiredError:
                 raise
-            except Exception:
+            except Exception:  # noqa: BLE001 - a lost response is an unknown outcome, never a failure to retry blindly
                 self.state.update_provider_write_attempt(op_key, response_state="UNKNOWN", error_class="PROVIDER_UNAVAILABLE")
-                raise
+                self._mark_auto_close_reconcile(item, "Auto Resolved write outcome is unknown")
+                return False
             self.state.update_provider_write_attempt(op_key, response_state="DISPATCHED", dispatched_at=_utc_now())
-        readback = self.notion.read_record("input_request", page_id)
+        try:
+            readback = self.notion.read_record("input_request", page_id)
+        except ReconnectRequiredError:
+            raise
+        except Exception:  # noqa: BLE001
+            readback = None
         if readback is None or not _properties_match(readback, patch):
             self.state.update_provider_write_attempt(op_key, response_state="UNKNOWN")
             self._mark_auto_close_reconcile(item, "Auto Resolved readback is missing or mismatched")
@@ -2097,75 +2106,93 @@ class IntakeWorker:
         if self.notion is None:
             return
         for intent in self.state.list_auto_resolve_intents():
-            receipt = self.state.get_request_receipt(intent.request_key)
-            record = self.state.get_classification_record(intent.record_id)
-            if receipt is None or receipt.provider_page_id is None or record is None:
-                continue  # reconciliation stays explicit; the barrier remains
-            item = self.state.get_intake_item(record.intake_id)
-            if item is None:
-                continue
-            if receipt.state != "Draft":
-                # receipt AutoResolved + intent PENDING cannot exist (atomic commit); any
-                # other state means the binding broke: invariant violation, barrier kept.
-                self._mark_reconcile(item, f"auto resolve intent bound to a {receipt.state} receipt")
-                continue
-            workspace = self._workspace_for_item(item)
-            page = self.notion.read_record("input_request", receipt.provider_page_id)
-            if page is None:
-                self._mark_auto_close_reconcile(item, "Auto Resolved readback is unavailable")
-                continue  # (iv) stays PENDING
-            if not self._closure_bound(page, receipt, workspace):
-                self._mark_reconcile(item, "closure page identity or Intake Items binding changed")
-                continue  # never DONE, never overwritten: barrier until a human reconciles
-            rollback = self.state.get_auto_resolve_rollback(intent.intent_id)
-            if rollback is not None:
-                self._settle_rollback(item, record, receipt, intent, rollback, page)
-                continue
-            status = page.get("Request Status")
-            pre_close = intent.pre_close_snapshot_hash
-            untouched = pre_close is not None and self._snapshot_as_draft(page, receipt, item.intake_id) == pre_close
-            if status == AUTO_RESOLVED_STATUS:
-                if untouched and page.get("Result Reference") == record.record_id:
-                    terminal = self._auto_request_snapshot(page, receipt, item.intake_id)  # (i)
-                    self.state.transition_auto_resolve_intent(intent.intent_id, "DONE", terminal_snapshot_hash=terminal)
-                    self._clear_auto_close_reconcile(item)
-                    continue
-                # (iii): the write landed and the human changed the page meanwhile.
-                self._supersede_auto_plans_for_record(item, record, "HUMAN_DRAFT_CHANGED")
-                target = "Submitted" if page.get("Submitted") is True else "Draft"
-                rollback = self.state.create_auto_resolve_rollback(intent.intent_id, target)
-                self._settle_rollback(item, record, receipt, intent, rollback, page)
-                continue
-            if page.get("Result Reference") == record.record_id:
-                # Our reference landed but the status moved on (human or partial write):
-                # clear only our reference through the rollback intent (r2 R5).
-                self._supersede_auto_plans_for_record(item, record, "HUMAN_DRAFT_CHANGED")
-                if status not in ("Draft", "Submitted"):
-                    self._mark_reconcile(item, f"Auto Resolved reference left on a {status!r} request")
-                    continue
-                rollback = self.state.create_auto_resolve_rollback(intent.intent_id, str(status))
-                self._settle_rollback(item, record, receipt, intent, rollback, page)
-                continue
-            if status == "Draft" and untouched:
-                # The write never landed.  Retry under the same intent and operation key
-                # only when AUTO may still write and every HUMAN request of the intake is
-                # still untouched; otherwise release the human path (r1 R5, r2 R3).
-                plan = self._live_auto_plan_for_record(record)
-                fresh = (
-                    self._closure_gate(item, plan, record, workspace, receipt, retrying=receipt.request_key)
-                    if self._auto_enabled() and plan is not None else None
-                )
-                if fresh is not None and self._auto_request_snapshot(fresh, receipt, item.intake_id) == pre_close:
-                    self._write_auto_resolved(item, receipt, record, intent, workspace, pre_close or "")
-                    continue
-                self.state.transition_auto_resolve_intent(intent.intent_id, "ABORTED")
-                self._supersede_auto_plans_for_record(item, record, "AUTO_CLOSURE_ABORTED")
+            try:
+                self._recover_one_intent(intent)
+            except ReconnectRequiredError:
+                raise
+            except Exception:  # noqa: BLE001 - one unreadable intent never blocks another (r6 #2)
+                self._note_recovery_unknown(intent)
+
+    def _note_recovery_unknown(self, intent: AutoResolveIntent) -> None:
+        """Plan §3.5 (iv): a provider failure while settling keeps the intent and its
+        barrier untouched and reports RECONCILE_REQUIRED for the closure."""
+
+        record = self.state.get_classification_record(intent.record_id)
+        item = None if record is None else self.state.get_intake_item(record.intake_id)
+        if item is not None:
+            self._mark_auto_close_reconcile(item, "Auto Resolved recovery could not read the provider state")
+
+    def _recover_one_intent(self, intent: AutoResolveIntent) -> None:
+        assert self.notion is not None
+        receipt = self.state.get_request_receipt(intent.request_key)
+        record = self.state.get_classification_record(intent.record_id)
+        if receipt is None or receipt.provider_page_id is None or record is None:
+            return  # reconciliation stays explicit; the barrier remains
+        item = self.state.get_intake_item(record.intake_id)
+        if item is None:
+            return
+        if receipt.state != "Draft":
+            # receipt AutoResolved + intent PENDING cannot exist (atomic commit); any
+            # other state means the binding broke: invariant violation, barrier kept.
+            self._mark_reconcile(item, f"auto resolve intent bound to a {receipt.state} receipt")
+            return
+        workspace = self._workspace_for_item(item)
+        page = self.notion.read_record("input_request", receipt.provider_page_id)
+        if page is None:
+            self._mark_auto_close_reconcile(item, "Auto Resolved readback is unavailable")
+            return  # (iv) stays PENDING
+        if not self._closure_bound(page, receipt, workspace):
+            self._mark_reconcile(item, "closure page identity or Intake Items binding changed")
+            return  # never DONE, never overwritten: barrier until a human reconciles
+        rollback = self.state.get_auto_resolve_rollback(intent.intent_id)
+        if rollback is not None:
+            self._settle_rollback(item, record, receipt, intent, rollback, page)
+            return
+        status = page.get("Request Status")
+        pre_close = intent.pre_close_snapshot_hash
+        untouched = pre_close is not None and self._snapshot_as_draft(page, receipt, item.intake_id) == pre_close
+        if status == AUTO_RESOLVED_STATUS:
+            if untouched and page.get("Result Reference") == record.record_id:
+                terminal = self._auto_request_snapshot(page, receipt, item.intake_id)  # (i)
+                self.state.transition_auto_resolve_intent(intent.intent_id, "DONE", terminal_snapshot_hash=terminal)
                 self._clear_auto_close_reconcile(item)
-                continue
-            # (ii): the human changed the Draft (or moved it on) before any write landed.
-            self.state.transition_auto_resolve_intent(intent.intent_id, "ABORTED")
+                return
+            # (iii): the write landed and the human changed the page meanwhile.
             self._supersede_auto_plans_for_record(item, record, "HUMAN_DRAFT_CHANGED")
+            target = "Submitted" if page.get("Submitted") is True else "Draft"
+            rollback = self.state.create_auto_resolve_rollback(intent.intent_id, target)
+            self._settle_rollback(item, record, receipt, intent, rollback, page)
+            return
+        if page.get("Result Reference") == record.record_id:
+            # Our reference landed but the status moved on (human or partial write):
+            # clear only our reference through the rollback intent (r2 R5).
+            self._supersede_auto_plans_for_record(item, record, "HUMAN_DRAFT_CHANGED")
+            if status not in ("Draft", "Submitted"):
+                self._mark_reconcile(item, f"Auto Resolved reference left on a {status!r} request")
+                return
+            rollback = self.state.create_auto_resolve_rollback(intent.intent_id, str(status))
+            self._settle_rollback(item, record, receipt, intent, rollback, page)
+            return
+        if status == "Draft" and untouched:
+            # The write never landed.  Retry under the same intent and operation key
+            # only when AUTO may still write and every HUMAN request of the intake is
+            # still untouched; otherwise release the human path (r1 R5, r2 R3).
+            plan = self._live_auto_plan_for_record(record)
+            fresh = (
+                self._closure_gate(item, plan, record, workspace, receipt, retrying=receipt.request_key)
+                if self._auto_enabled() and plan is not None else None
+            )
+            if fresh is not None and self._auto_request_snapshot(fresh, receipt, item.intake_id) == pre_close:
+                self._write_auto_resolved(item, receipt, record, intent, workspace, pre_close or "")
+                return
+            self.state.transition_auto_resolve_intent(intent.intent_id, "ABORTED")
+            self._supersede_auto_plans_for_record(item, record, "AUTO_CLOSURE_ABORTED")
             self._clear_auto_close_reconcile(item)
+            return
+        # (ii): the human changed the Draft (or moved it on) before any write landed.
+        self.state.transition_auto_resolve_intent(intent.intent_id, "ABORTED")
+        self._supersede_auto_plans_for_record(item, record, "HUMAN_DRAFT_CHANGED")
+        self._clear_auto_close_reconcile(item)
 
     def _live_auto_plan_for_record(self, record: ClassificationRecord) -> IntakePlan | None:
         for plan_row in self.state.list_intake_plans(plan_authority="AUTO_CLASSIFICATION", status="AUTO_PENDING"):
