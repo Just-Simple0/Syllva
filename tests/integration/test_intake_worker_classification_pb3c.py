@@ -307,3 +307,54 @@ def test_an_interrupted_automatic_run_is_continued_by_the_human_plan_without_dup
         assert len(notion.data_sources["synthetic-sessions"]) == 1 and _item(system).status == "ORGANIZED"
         reservations = [r for r in (state.get_entity_reservation(intake_id=_item(system).intake_id, entity_kind="SESSION"),) if r]
         assert len(reservations) == 1 and reservations[0].plan_revision == receipt.plan_revision
+
+
+def test_a_lost_create_response_during_the_scan_recovers_on_a_later_cycle_without_a_duplicate(tmp_path: Path) -> None:
+    with _closed_request(tmp_path) as (system, worker):
+        state = system["state"]
+        old = _closed_page(system)
+        old["Course"] = ["synthetic-course-page-0"]
+        system["notion"].drop_next_create_response = True
+        worker.run_once()                                   # the create reached the provider, the response was lost
+        assert len(_pages(system)) == 2
+        for _ in range(3):
+            worker.run_once()                               # later cycles recover the same page and settle the ledger
+        assert len(_pages(system)) == 2
+        new = next(p for p in _pages(system) if p["Request Key"] != old["Request Key"])
+        receipt = state.get_request_receipt(new["Request Key"])
+        assert receipt.provider_page_id == new["id"]
+        assert state.terminal_change_counts() == {"CREATED": 1}
+
+
+def test_an_empty_lookup_after_a_create_attempt_never_creates_a_second_draft(tmp_path: Path) -> None:
+    from uls.intake.worker import IntakeReconcileRequired
+
+    with _closed_request(tmp_path) as (system, worker):
+        old = _closed_page(system)
+        old["Course"] = ["synthetic-course-page-0"]
+        system["notion"].drop_next_create_response = True
+        worker.run_once()
+        item = _item(system)
+        hidden = [p for p in _pages(system) if p["Request Key"] != old["Request Key"]]
+        for page in hidden:                                 # the provider briefly shows nothing
+            system["notion"].data_sources["synthetic-requests"].remove(page)
+        with pytest.raises(IntakeReconcileRequired):
+            worker.create_input_request(item.intake_id, request_type="ASSIGN_COURSE",
+                                        superseded_request_key=old["Request Key"])
+        assert len(_pages(system)) == 1                     # no second create was issued
+
+
+def test_a_change_after_the_new_generation_was_submitted_only_marks_its_error(tmp_path: Path) -> None:
+    with _closed_request(tmp_path) as (system, worker):
+        old = _closed_page(system)
+        old["Course"] = ["synthetic-course-page-0"]
+        worker.run_once()
+        new = next(p for p in _pages(system) if p["Request Key"] != old["Request Key"])
+        new.update({"Course": [AUTO_COURSE_PAGE], "Submitted": True})
+        before = {k: new.get(k) for k in ("Course", "Submitted", "Cancelled", "Kind")}   # USER fields stay
+        old["Kind"] = "TRANSCRIPT"
+        worker.run_once()
+        worker.run_once()
+        assert new["Error"] == "TERMINAL_CHANGED_AGAIN" and len(_pages(system)) == 2
+        assert {k: new.get(k) for k in before} == before
+        assert system["state"].terminal_change_counts() == {"CREATED": 1, "CHANGED_AGAIN": 1}

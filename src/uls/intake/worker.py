@@ -697,12 +697,20 @@ class IntakeWorker:
         if self.state.get_terminal_change(receipt.receipt_id, changed) is not None:
             return  # this exact human change was already handled (idempotent re-observation)
         later = self.state.get_generation_superseding(item.intake_id, receipt.request_type, receipt.request_key)
+        # A generation that was reserved and bound but whose create never settled is resumed,
+        # not mistaken for a processed one (response loss; plan §3.4, G2/T2).
+        pending_key = None
+        if later is not None and later.get("request_key"):
+            later_receipt = self.state.get_request_receipt(later["request_key"])
+            if later_receipt is None or later_receipt.provider_page_id is None:
+                pending_key = later["request_key"]
         open_requests = [
             other for other, _shape in self._human_receipts_for_intake(item.intake_id)
-            if other.request_key != receipt.request_key and other.state not in self._TERMINAL_RECEIPT_STATES
+            if other.request_key not in (receipt.request_key, pending_key)
+            and other.state not in self._TERMINAL_RECEIPT_STATES
             and other.request_type == receipt.request_type
         ]
-        if later is not None or open_requests:
+        if (later is not None and pending_key is None) or open_requests:
             for other in open_requests:
                 if other.provider_page_id and (self.notion.read_record("input_request", other.provider_page_id) or {}).get("Error") != "TERMINAL_CHANGED_AGAIN":
                     self.notion.update_system_record("input_request", other.provider_page_id, {"Error": "TERMINAL_CHANGED_AGAIN"})
