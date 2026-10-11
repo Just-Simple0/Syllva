@@ -233,6 +233,9 @@ class ClassificationCfg:
     # match it before anything is read or a recorded calendar is used.
     canvas_observation_enabled: bool = False
     canvas_origin: str = ""
+    # The Canvas principal (opaque account id) the course map was verified for; observation and
+    # calendar use require the active connection to be this principal.
+    canvas_principal: str = ""
     max_canvas_courses_per_tick: int = 5
 
 

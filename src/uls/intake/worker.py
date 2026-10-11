@@ -26,7 +26,12 @@ from uls.adapters.drive.worker import (
     ensure_marked_folder,
     require_private_ownership,
 )
-from uls.adapters.notion.intake import AUTO_RESOLVED_STATUS, NotionIntakeWriter, NotionWorkerPort
+from uls.adapters.notion.intake import (
+    AUTO_RESOLVED_STATUS,
+    CONTENT_STATUSES,
+    NotionIntakeWriter,
+    NotionWorkerPort,
+)
 from uls.config.intake import (
     IntakeConfigurationError,
     ResolvedSemesterWorkspace,
@@ -496,8 +501,17 @@ class IntakeWorker:
     # --- AUTO -> HUMAN hand-over (plan §3.4, P-B3c) --------------------------------
 
     def _auto_effects(self, item: IntakeItem) -> tuple[list[dict[str, Any]], list[EntityReservation]]:
+        """The AUTO plans of the intake and the live reservations that came from them, including
+        those a HUMAN plan adopted in an earlier hand-over (the lineage is kept through the
+        recorded hand-overs, so an adopted effect never drops out of the verification)."""
+
         plans = self.state.list_intake_plans(plan_authority="AUTO_CLASSIFICATION", intake_id=item.intake_id)
         revisions = {plan["plan_revision"] for plan in plans}
+        frontier = set(revisions)
+        while frontier:
+            reached = {h["to_plan_revision"] for rev in frontier for h in self.state.list_handovers_from(rev)}
+            frontier = reached - revisions
+            revisions |= reached
         reservations = [
             held for kind in ("SESSION", "MATERIAL")
             if (held := self.state.get_entity_reservation(intake_id=item.intake_id, entity_kind=kind)) is not None
@@ -572,6 +586,13 @@ class IntakeWorker:
             if len(rows) != 1 or _relation_ids(rows[0].get("Course")) != [course_id]:
                 raise IntakeReconcileRequired(f"the automatic {held.entity_kind} is missing or in another Course")
             row = rows[0]
+            operation = INTAKE_SESSION_OPERATION if held.entity_kind == "SESSION" else INTAKE_MATERIAL_OPERATION
+            created_by_us = self.state.has_write_attempt_for_page(operation, str(_page_id(row)))
+            existing_session = held.entity_kind == "SESSION" and target.get("session_mode") == SessionMode.EXISTING.value
+            if not created_by_us and not existing_session:
+                # The page that carries the reserved ID must be the one this worker created (a durable
+                # create attempt names its provider page id); a look-alike is not the effect.
+                raise IntakeReconcileRequired(f"the {held.entity_kind} page is not the page the automatic run created")
             binding = None
             if held.entity_kind == "SESSION":
                 if not target_is_transcript or row.get("Date") != target.get("actual_date"):
@@ -611,6 +632,12 @@ class IntakeWorker:
             adopted[held.entity_kind] = effect
         if target_is_transcript and "SESSION" not in adopted and advanced:
             raise IntakeReconcileRequired("the automatic Session effect cannot be proven")
+        if not target_is_transcript and "MATERIAL" not in adopted and advanced:
+            raise IntakeReconcileRequired("the automatic Material effect cannot be proven")
+        record = self.state.get_classification_record_by_revision(
+            latest.get("classification_revision_hash") or "", item.intake_id)
+        if record is None or record.source_version != item.source_version:
+            raise IntakeReconcileRequired("the source version differs from the automatic classification's")
         if complete:
             self._verify_organized_source(item)
         elif reservations:
@@ -1679,9 +1706,12 @@ class IntakeWorker:
                 if handover.mode == "COMPLETE":
                     reference = ",".join(
                         str(effect["entity_app_id"]) for effect in handover.adopted.values()) or (request.course_key or "")
+                    content_state = self._require_item(intake_id).content_status
+                    if content_state not in CONTENT_STATUSES:
+                        raise IntakeReconcileRequired("the verified content state cannot be mapped")
                     self._guarded_notion_update(
                         receipt, request, workspace, "input_request", receipt.provider_page_id,
-                        {"Request Status": "Applied", "Result Status": "Ready", "Result Reference": reference},
+                        {"Request Status": "Applied", "Result Status": content_state, "Result Reference": reference},
                         operation_key=self._operation_key(
                             INTAKE_REQUEST_SYNC_OPERATION, self.provider, receipt.request_key,
                             receipt.request_revision_hash, "handover"),

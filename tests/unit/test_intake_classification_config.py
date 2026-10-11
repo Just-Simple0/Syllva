@@ -94,13 +94,16 @@ intake:
   classification:
     canvas_observation_enabled: true
     canvas_origin: "https://LMS.example.edu/"
+    canvas_principal: " 12345 "
     max_canvas_courses_per_tick: 3
 """).intake.classification
     assert ok.canvas_origin == "https://lms.example.edu" and ok.max_canvas_courses_per_tick == 3
+    assert ok.canvas_principal == "12345"
 
 
 @pytest.mark.parametrize("body", [
-    "canvas_observation_enabled: true",                       # enabled needs an origin
+    "canvas_observation_enabled: true",                       # enabled needs an origin and a principal
+    "canvas_observation_enabled: true\n    canvas_origin: 'https://lms.example.edu'",
     "canvas_origin: 'http://lms.example.edu'",                 # https only
     "canvas_origin: 'https://127.0.0.1'",                      # no IP literal
     "canvas_observation_enabled: 'yes'",

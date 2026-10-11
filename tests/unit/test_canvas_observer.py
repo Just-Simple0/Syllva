@@ -91,6 +91,7 @@ class Harness:
             course_map={COURSE_ID: KEY} if course_map is None else course_map,
             reader_factory=factory, semester_for=lambda _key: semester,
             profile_provider=lambda: ORIGIN, principal_provider=lambda: "user-1",
+            verified_principal="user-1",
         )
 
     def run(self) -> ObservationResult:
@@ -417,8 +418,8 @@ def test_the_proof_follows_origin_principal_and_mapping(tmp_path) -> None:
         first = h.observer.current_proof(KEY)
         assert first and h.run().status == "COMPLETE"
         assert h.state.get_classification_cursor(f"calendar_proof:{KEY}") == first
-        principal["value"] = "user-2"
-        assert h.observer.current_proof(KEY) not in (None, first)
+        principal["value"] = "user-2"                         # not the verified principal: no proof
+        assert h.observer.current_proof(KEY) is None
         principal["value"] = None
         assert h.observer.current_proof(KEY) is None
         h.observer._principal_provider = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
@@ -442,5 +443,34 @@ def test_no_proof_without_the_active_profile_and_the_principal(tmp_path) -> None
         h.observer._verified_origin = "https://other.example.edu"  # we read from A, the map was verified for B
         assert not h.observer.profile_matches()
         assert h.run().reason == "PROFILE_MISMATCH"
+    finally:
+        h.close()
+
+
+def test_a_principal_that_is_not_the_verified_one_blocks_every_read_and_write(tmp_path) -> None:
+    for provider in (None, lambda: "someone-else", lambda: ""):
+        h = Harness(tmp_path / str(id(provider)))
+        try:
+            h.observer._principal_provider = provider
+            result = h.run()
+            assert (result.status, result.reason) == ("INELIGIBLE", "PROFILE_MISMATCH")
+            assert h.entered == 0 and h.reader.urls == []
+            assert _rows(h.state, "canvas_observations") == 0 and _rows(h.state, "canvas_classifications") == 0
+        finally:
+            h.close()
+
+
+def test_a_remapped_canvas_course_replaces_its_stale_binding_to_another_key(tmp_path) -> None:
+    h = Harness(tmp_path)
+    try:
+        assert h.run().status == "COMPLETE"                       # COURSE_ID -> KEY observed and bound
+        other_key = "2026-2_LMS99999-001"
+        h.observer._map_source.clear()
+        h.observer._map_source[COURSE_ID] = other_key             # the verified map moved the course to another key
+        result = h.run()
+        assert result.status == "COMPLETE"
+        assert h.state.recording_calendar_course(other_key)["canvas_course_id"] == COURSE_ID
+        assert h.state.recording_calendar_course(KEY) is None     # the old binding and projection are withdrawn
+        assert h.state.get_classification_cursor(f"calendar_proof:{KEY}") is None
     finally:
         h.close()

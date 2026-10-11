@@ -2127,9 +2127,14 @@ class ClassificationStateMixin:
                 "SELECT * FROM terminal_change_ledger WHERE original_receipt_id = ? ORDER BY created_at, "
                 "changed_user_snapshot_hash", (original_receipt_id,)).fetchall()]
 
-    def rebind_recording_calendar(self, course_key: str, canvas_course_id: int) -> None:
+    def rebind_recording_calendar(self, course_key: str, canvas_course_id: int, *, release_other: bool = False) -> None:
         """The verified mapping moved a course key to another Canvas course: drop the old
-        projection and close the calendar until the new course is observed completely."""
+        projection and close the calendar until the new course is observed completely.
+
+        ``release_other`` (the caller proved from the CURRENT verified mapping that the Canvas
+        course now belongs to this course key) also withdraws an earlier binding of that
+        Canvas course to another key: its projection, proof and binding are removed in the
+        same transaction, so the stale binding cannot block the re-mapping."""
 
         with self._transaction(immediate=True) as connection:
             other = connection.execute(
@@ -2137,13 +2142,40 @@ class ClassificationStateMixin:
                 (int(canvas_course_id), course_key),
             ).fetchone()
             if other is not None:
-                raise ValueError("the Canvas course is bound to another course key")
+                if not release_other:
+                    raise ValueError("the Canvas course is bound to another course key")
+                released = other["course_key"]
+                connection.execute("DELETE FROM recording_calendar_current WHERE course_key = ?", (released,))
+                connection.execute("DELETE FROM recording_calendar_courses WHERE course_key = ?", (released,))
+                connection.execute("DELETE FROM classification_cursors WHERE name = ?", (f"calendar_proof:{released}",))
             connection.execute("DELETE FROM recording_calendar_current WHERE course_key = ?", (course_key,))
+            connection.execute("DELETE FROM classification_cursors WHERE name = ?", (f"calendar_proof:{course_key}",))
             connection.execute(
                 "UPDATE recording_calendar_courses SET canvas_course_id = ?, collection_complete = 0, "
                 "projection_revision_hash = NULL, updated_at = ? WHERE course_key = ?",
                 (int(canvas_course_id), _now(), course_key),
             )
+
+    def recording_calendar_key_for_canvas(self, canvas_course_id: int) -> str | None:
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT course_key FROM recording_calendar_courses WHERE canvas_course_id = ?",
+                (int(canvas_course_id),)).fetchone()
+            return None if row is None else str(row["course_key"])
+
+    def has_write_attempt_for_page(self, operation: str, page_id: str) -> bool:
+        """Whether this worker's own create of ``page_id`` is recorded (durable effect evidence)."""
+
+        with self._transaction() as connection:
+            return connection.execute(
+                "SELECT 1 FROM provider_write_attempts WHERE operation = ? AND target_id = ? "
+                "AND response_state = 'READBACK_OK' LIMIT 1", (operation, page_id)).fetchone() is not None
+
+    def list_handovers_from(self, from_plan_revision: str) -> list[dict[str, Any]]:
+        with self._transaction() as connection:
+            return [dict(r) for r in connection.execute(
+                "SELECT * FROM handover_records WHERE from_plan_revision = ? ORDER BY created_at",
+                (from_plan_revision,)).fetchall()]
 
     def get_handover(self, from_plan_revision: str, to_plan_revision: str) -> dict[str, Any] | None:
         with self._transaction() as connection:

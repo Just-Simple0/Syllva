@@ -161,10 +161,12 @@ class CanvasObserver:
         max_run_seconds: float = MAX_RUN_SECONDS,
         profile_provider: Callable[[], str | None] | None = None,
         principal_provider: Callable[[], str | None] | None = None,
+        verified_principal: str = "",
     ) -> None:
         self._state = state
         self._profile_provider = profile_provider
         self._principal_provider = principal_provider
+        self._verified_principal = verified_principal
         self._origin = origin
         self._verified_origin = verified_origin
         self._map_source = course_map
@@ -190,17 +192,23 @@ class CanvasObserver:
         ids = sorted(cid for cid, key in mapping.items() if key == course_key)
         if len(ids) != 1 or not self.profile_matches():
             return None
-        if self._principal_provider is None:
+        principal = self._active_principal()
+        if principal is None:
+            return None
+        return hashlib.sha256(json.dumps(
+            ["canvas-calendar-proof.v1", self._origin, principal, ids[0], course_key],
+            ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+
+    def _active_principal(self) -> str | None:
+        """The active connection's principal, only when it is the one the registry verified."""
+
+        if self._principal_provider is None or not self._verified_principal:
             return None
         try:
             principal = self._principal_provider()
         except Exception:  # noqa: BLE001 - an unreadable principal is no proof
             return None
-        if not principal:
-            return None
-        return hashlib.sha256(json.dumps(
-            ["canvas-calendar-proof.v1", self._origin, principal, ids[0], course_key],
-            ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+        return principal if principal and principal == self._verified_principal else None
 
     def profile_matches(self) -> bool:
         """The *active* Canvas profile origin (read from the injected provider on every call; no
@@ -226,7 +234,7 @@ class CanvasObserver:
         course_key = mapping.get(int(canvas_course_id))
         if course_key is None:
             return ObservationResult("INELIGIBLE", "COURSE_NOT_MAPPED", "", int(canvas_course_id))
-        if not self.profile_matches():
+        if not self.profile_matches() or self._active_principal() is None:
             self._close(course_key)
             return ObservationResult("INELIGIBLE", "PROFILE_MISMATCH", course_key, int(canvas_course_id))
         if sum(1 for key in mapping.values() if key == course_key) != 1:
@@ -239,14 +247,20 @@ class CanvasObserver:
         if row is not None:
             self._state.close_recording_calendar(course_key, int(row["canvas_course_id"]))
 
-    def _barrier(self, course_key: str, canvas_course_id: int) -> None:
-        """Close the calendar before anything can fail (one transaction); a moved mapping
-        drops the old Canvas course's projection first."""
+    def _barrier(self, course_key: str, canvas_course_id: int) -> bool:
+        """Close the calendar before anything can fail (one transaction).  Returns True when a
+        binding was changed by the CURRENT verified mapping (the key moved to another Canvas
+        course, or the Canvas course moved from another key): the old projection is withdrawn
+        and the observation history is renumbered by the caller."""
 
         row = self._state.recording_calendar_course(course_key)
-        if row is not None and int(row["canvas_course_id"]) != canvas_course_id:
-            self._state.rebind_recording_calendar(course_key, canvas_course_id)
+        bound_key = self._state.recording_calendar_key_for_canvas(canvas_course_id)
+        moved = (row is not None and int(row["canvas_course_id"]) != canvas_course_id) or (
+            bound_key is not None and bound_key != course_key)
+        if moved or row is None:
+            self._state.rebind_recording_calendar(course_key, canvas_course_id, release_other=True)
         self._state.close_recording_calendar(course_key, canvas_course_id)
+        return moved
 
     # --- one course --------------------------------------------------------------
 
@@ -261,7 +275,7 @@ class CanvasObserver:
         course_key = self._course_map[canvas_course_id]
         # Barrier first (before the connection can fail): a crash or error anywhere below
         # keeps the calendar closed.
-        self._barrier(course_key, canvas_course_id)
+        rebound = self._barrier(course_key, canvas_course_id)
         try:
             with self._factory() as reader:
                 if reader is None:
@@ -275,7 +289,7 @@ class CanvasObserver:
             # Whatever the connection layer raised, the calendar is already closed; the
             # caller sees a fixed failure, never provider text.
             return self._incomplete(course_key, canvas_course_id, "OBSERVATION_FAILED")
-        return self._record(course_key, canvas_course_id, collected)
+        return self._record(course_key, canvas_course_id, collected, rebound)
 
     def _incomplete(self, course_key: str, canvas_course_id: int, reason: str) -> ObservationResult:
         self._state.reconcile_canvas_collection(
@@ -359,22 +373,25 @@ class CanvasObserver:
 
     # --- recording ---------------------------------------------------------------
 
-    def _revision(self, kind: str, row: dict[str, Any], course_id: int) -> int:
+    def _revision(self, kind: str, row: dict[str, Any], course_id: int, bump: bool = False) -> int:
         latest = self._state.latest_canvas_observation(self._origin, course_id, kind, row["resource_id"])
         if latest is None:
             return 1
         stored = (latest["title"], latest["module_name"], latest["module_week"],
                   latest["item_type"], latest["updated_at"])
         payload = (row["title"], row["module_name"], row["module_week"], row["item_type"], row["updated_at"])
-        # The whole stored payload is compared, not only updated_at (P-B3 A3).
-        return int(latest["observation_revision"]) + (0 if stored == payload else 1)
+        # The whole stored payload is compared, not only updated_at (P-B3 A3); after a re-mapping
+        # every observation is a new revision (the calendar history is immutable per key).
+        return int(latest["observation_revision"]) + (0 if stored == payload and not bump else 1)
 
-    def _record(self, course_key: str, course_id: int, collected: dict[str, list[dict[str, Any]]]) -> ObservationResult:
+    def _record(
+        self, course_key: str, course_id: int, collected: dict[str, list[dict[str, Any]]], bump: bool = False,
+    ) -> ObservationResult:
         observed = classified = 0
         self._state.deactivate_foreign_origin_observations(course_id, self._origin)
         for kind, rows in collected.items():
             for row in rows:
-                revision = self._revision(kind, row, course_id)
+                revision = self._revision(kind, row, course_id, bump)
                 self._state.record_canvas_observation(
                     origin=self._origin, canvas_course_id=course_id, resource_kind=kind,
                     resource_id=row["resource_id"], observation_revision=revision, title=row["title"],

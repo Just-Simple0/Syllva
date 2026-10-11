@@ -603,3 +603,54 @@ def test_an_adopted_effect_must_still_have_the_exact_type_and_binding_it_had(tmp
         worker._reverify_adopted(item, plan_view, held, effect, AUTO_COURSE_PAGE)          # as verified: fine
         with pytest.raises(IntakeReconcileRequired):                                      # a binding that was verified is gone
             worker._reverify_adopted(item, plan_view, held, {**effect, "binding_id": "binding-1"}, AUTO_COURSE_PAGE)
+
+
+# --- review round 4 -----------------------------------------------------------------------
+
+def test_a_look_alike_page_is_not_the_automatic_effect(tmp_path: Path) -> None:
+    from copy import deepcopy
+
+    from uls.intake.worker import IntakeReconcileRequired
+
+    with _closed_request(tmp_path) as (system, worker):
+        details = _fill_details(system, worker)
+        sessions = system["notion"].data_sources["synthetic-sessions"]
+        twin = deepcopy(sessions[0])
+        twin["id"] = "look-alike-page"
+        sessions[:] = [twin]                               # the created page is gone; a twin carries the same ID
+        before = _state_snapshot(system)
+        with pytest.raises(IntakeReconcileRequired):
+            worker.claim_request(details["Request Key"])
+        assert _state_snapshot(system) == before
+
+
+def test_an_adopted_effect_stays_in_the_verified_lineage(tmp_path: Path) -> None:
+    from tests.integration.test_intake_worker_classification_pb2a import MATCHED_NAME, RAW
+    from tests.integration.test_intake_worker_preview import _system
+
+    with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        _interrupted_auto_run(system, worker)
+        notion = system["notion"]
+        assign = _assign_request(notion)
+        assign.update({"Course": [AUTO_COURSE_PAGE], "Submitted": True})
+        worker.claim_request(assign["Request Key"])
+        details = _details_pages(system)[0]
+        details.update({"Course": [AUTO_COURSE_PAGE], "Kind": "TRANSCRIPT", "Actual Date": {"start": "2026-09-10", "end": None},
+                        "Session Mode": "NEW", "Submitted": True})
+        worker.claim_request(details["Request Key"])
+        worker.run_once()                                    # the human plan adopted and finished the Session
+        held = system["state"].get_entity_reservation(intake_id=_item(system).intake_id, entity_kind="SESSION")
+        auto_plan_revisions = {p["plan_revision"] for p in system["state"].list_intake_plans(plan_authority="AUTO_CLASSIFICATION")}
+        assert held.plan_revision not in auto_plan_revisions            # now owned by the human plan
+        _plans, reservations = worker._auto_effects(_item(system))
+        assert [r.entity_kind for r in reservations] == ["SESSION"]      # ... and still verified as an automatic effect
+
+
+def test_the_result_status_is_the_verified_content_state_not_a_blanket_ready(tmp_path: Path) -> None:
+    with _closed_request(tmp_path) as (system, worker):
+        details = _fill_details(system, worker)
+        system["state"].update_intake_item(_item(system).intake_id, content_status="Partial")
+        worker.claim_request(details["Request Key"])
+        assert details["Request Status"] == "Applied" and details["Result Status"] == "Partial"

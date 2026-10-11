@@ -134,7 +134,7 @@ def test_an_observed_calendar_drives_the_match_end_to_end(tmp_path: Path) -> Non
         worker.canvas_observer = CanvasObserver(
             system["state"], origin=origin, verified_origin=origin, course_map={67535: COURSE},
             reader_factory=factory, semester_for=lambda _key: semester,
-            profile_provider=lambda: origin, principal_provider=lambda: "user-1")
+            profile_provider=lambda: origin, principal_provider=lambda: "user-1", verified_principal="user-1")
         cfg.canvas_observation_enabled, cfg.canvas_origin = True, origin
         worker.run_once()
         assert system["state"].recording_calendar_complete(COURSE)
