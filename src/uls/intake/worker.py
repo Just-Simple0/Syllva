@@ -587,7 +587,7 @@ class IntakeWorker:
                 raise IntakeReconcileRequired(f"the automatic {held.entity_kind} is missing or in another Course")
             row = rows[0]
             operation = INTAKE_SESSION_OPERATION if held.entity_kind == "SESSION" else INTAKE_MATERIAL_OPERATION
-            created_by_us = self.state.has_write_attempt_for_page(operation, str(_page_id(row)))
+            created_by_us = self.state.has_write_attempt_for_page(operation, str(_page_id(row)), held.entity_app_id)
             existing_session = held.entity_kind == "SESSION" and target.get("session_mode") == SessionMode.EXISTING.value
             if not created_by_us and not existing_session:
                 # The page that carries the reserved ID must be the one this worker created (a durable
@@ -608,7 +608,9 @@ class IntakeWorker:
                     or binding.get("session_id") != held.entity_app_id
                 )):
                     raise IntakeReconcileRequired("the Session's canonical source binding is not this file's")
-                if complete and (row.get("Recording Status") not in {"Ready", "Partial"} or not row.get("Normalized Transcript")):
+                if complete and (row.get("Recording Status") not in {"Ready", "Partial"} or not row.get("Normalized Transcript")
+                                 or not self.state.page_value_was_written(
+                                     str(_page_id(row)), "Normalized Transcript", row.get("Normalized Transcript"))):
                     raise IntakeReconcileRequired("the automatic Session is not in its finished state")
             else:
                 if target_is_transcript:
@@ -618,7 +620,10 @@ class IntakeWorker:
                     raise IntakeReconcileRequired("the Material's Type changed after the automatic run")
                 if complete:
                     opaque = item.exposure_block_reason == "OPAQUE_NO_RETRIEVAL" and row.get("Text Status") == "Needs Review"
-                    finished = row.get("Text Status") in {"Ready", "Partial"} and bool(row.get("Normalized Source"))
+                    finished = (
+                        row.get("Text Status") in {"Ready", "Partial"} and bool(row.get("Normalized Source"))
+                        and self.state.page_value_was_written(
+                            str(_page_id(row)), "Normalized Source", row.get("Normalized Source")))
                     if not (opaque or finished):
                         raise IntakeReconcileRequired("the automatic Material is not in its finished state")
                 if not is_assign and request.material_role not in (None, row.get("Type")):
@@ -642,9 +647,13 @@ class IntakeWorker:
             self._verify_organized_source(item)
         elif reservations:
             self._verify_organized_source(item, moved=False)
+        owners = {held.plan_revision for held in reservations}
+        if len(owners) > 1:
+            raise IntakeReconcileRequired("the verified effects belong to different plans; resolve it manually")
+        from_plan = next(iter(owners)) if owners else latest["plan_revision"]
         if is_assign:
-            return _Handover("ASSIGN_MATCH", latest["plan_revision"], adopted)
-        return _Handover("COMPLETE" if complete else "CONTINUE", latest["plan_revision"], adopted)
+            return _Handover("ASSIGN_MATCH", from_plan, adopted)
+        return _Handover("COMPLETE" if complete else "CONTINUE", from_plan, adopted)
 
     def _reverify_adopted(
         self, item: IntakeItem, plan: IntakePlan, held: EntityReservation, effect: Mapping[str, Any], course_id: str
@@ -842,7 +851,7 @@ class IntakeWorker:
         open_requests = [
             other for other, _shape in self._human_receipts_for_intake(item.intake_id)
             if other.request_key != receipt.request_key and other.provider_page_id is not None
-            and other.state not in self._TERMINAL_RECEIPT_STATES and other.request_type == receipt.request_type
+            and other.state not in self._TERMINAL_RECEIPT_STATES
         ]
         if later_open or open_requests:
             # A confirmed human change ends any still-live automatic plan, whether or not a new
@@ -1924,7 +1933,10 @@ class IntakeWorker:
             and mapping.get(int(course["canvas_course_id"])) == course_key
             and sum(1 for key in mapping.values() if key == course_key) == 1
         ):
-            proof = observer.current_proof(course_key)
+            try:
+                proof = observer.current_proof(course_key)
+            except Exception:  # noqa: BLE001 - an unreadable proof source is no proof
+                proof = None
             eligible = bool(proof) and proof == self.state.get_classification_cursor(f"calendar_proof:{course_key}")
         if not eligible and course["collection_complete"]:
             self.state.close_recording_calendar(course_key, int(course["canvas_course_id"]))

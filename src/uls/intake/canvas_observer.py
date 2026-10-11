@@ -94,17 +94,77 @@ class ConnectionReader:
         return body, _next_url(link, url, self._connection.target.origin)
 
 
+def _link_values(header: str) -> list[tuple[str, dict[str, str]]]:
+    """RFC 8288 link-values: ``<target>; name=value; name="quoted, value"``, comma separated.
+
+    Commas inside ``<...>`` or quoted strings do not separate values; anything that does not
+    parse completely raises, so a pagination header is never half-understood."""
+
+    values: list[tuple[str, dict[str, str]]] = []
+    i, n = 0, len(header)
+    while i < n:
+        while i < n and header[i] in " \t,":
+            i += 1
+        if i >= n:
+            break
+        if header[i] != "<":
+            raise _Incomplete("MALFORMED_LINK")
+        end = header.find(">", i)
+        if end < 0:
+            raise _Incomplete("MALFORMED_LINK")
+        target = header[i + 1:end]
+        i = end + 1
+        params: dict[str, str] = {}
+        while True:
+            while i < n and header[i] in " \t":
+                i += 1
+            if i >= n or header[i] == ",":
+                break
+            if header[i] != ";":
+                raise _Incomplete("MALFORMED_LINK")
+            i += 1
+            while i < n and header[i] in " \t":
+                i += 1
+            start = i
+            while i < n and header[i] not in "=;, \t":
+                i += 1
+            name = header[start:i].lower()
+            if not name:
+                raise _Incomplete("MALFORMED_LINK")
+            value = ""
+            if i < n and header[i] == "=":
+                i += 1
+                if i < n and header[i] == '"':
+                    i += 1
+                    chunk = []
+                    while i < n and header[i] != '"':
+                        if header[i] == "\\" and i + 1 < n:
+                            i += 1
+                        chunk.append(header[i])
+                        i += 1
+                    if i >= n:
+                        raise _Incomplete("MALFORMED_LINK")
+                    i += 1
+                    value = "".join(chunk)
+                else:
+                    start = i
+                    while i < n and header[i] not in ";, \t":
+                        i += 1
+                    value = header[start:i]
+            params.setdefault(name, value)
+        values.append((target, params))
+    return values
+
+
 def _next_url(link: str, current: str, origin: str = "https://canvas.invalid") -> str | None:
     if not link:
         return None
-    entries = re.findall(r'<([^<>]+)>\s*((?:;[^,]*)*)', link)
     here = urljoin(origin + "/", current)
     found: list[str] = []
-    for target, attributes in entries:
-        relation = re.search(r';\s*rel\s*=\s*(?:"([^"]*)"|([^;\s,]+))', attributes)
-        if relation and "next" in (relation.group(1) or relation.group(2)).split():
+    for target, params in _link_values(link):
+        if "next" in params.get("rel", "").lower().split():
             found.append(urljoin(here, target))
-    if len(found) > 1 or (not entries and "next" in link):
+    if len(found) > 1:
         raise _Incomplete("MALFORMED_LINK")
     if not found:
         return None
@@ -113,6 +173,7 @@ def _next_url(link: str, current: str, origin: str = "https://canvas.invalid") -
     a, b = urlsplit(here), urlsplit(found[0])
     if (a.scheme, a.netloc, a.path) != (b.scheme, b.netloc, b.path):
         raise _Incomplete("PAGINATION_SCOPE")
+
     def keep(query: str) -> list[tuple[str, str]]:
         return sorted(p for p in parse_qsl(query, keep_blank_values=True) if p[0] != "page")
     if keep(a.query) != keep(b.query):
@@ -188,7 +249,10 @@ class CanvasObserver:
         and the ACTIVE profile origin are one, and the connection principal is readable.  Any
         missing evidence (no provider, unreadable principal, ambiguous mapping) is no proof."""
 
-        mapping = self._course_map
+        try:
+            mapping = self._course_map
+        except Exception:  # noqa: BLE001 - an unreadable mapping is no proof
+            return None
         ids = sorted(cid for cid, key in mapping.items() if key == course_key)
         if len(ids) != 1 or not self.profile_matches():
             return None

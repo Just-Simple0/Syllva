@@ -654,3 +654,78 @@ def test_the_result_status_is_the_verified_content_state_not_a_blanket_ready(tmp
         system["state"].update_intake_item(_item(system).intake_id, content_status="Partial")
         worker.claim_request(details["Request Key"])
         assert details["Request Status"] == "Applied" and details["Result Status"] == "Partial"
+
+
+# --- review round 5 -----------------------------------------------------------------------
+
+def test_a_replaced_normalized_pointer_is_not_the_automatic_result(tmp_path: Path) -> None:
+    from uls.intake.worker import IntakeReconcileRequired
+
+    with _closed_request(tmp_path) as (system, worker):
+        details = _fill_details(system, worker)
+        (session,) = system["notion"].data_sources["synthetic-sessions"]
+        session["Normalized Transcript"] = "https://drive.google.com/file/d/another-valid-file/view"
+        before = _state_snapshot(system)
+        with pytest.raises(IntakeReconcileRequired):
+            worker.claim_request(details["Request Key"])
+        assert _state_snapshot(system) == before
+
+
+def test_a_replaced_material_source_pointer_is_not_the_automatic_result(tmp_path: Path) -> None:
+    from tests.integration.test_intake_worker_classification_pb2b import _material_system
+    from tests.integration.test_intake_worker_preview import _pdf_bytes, _system
+
+    from uls.intake.requests import RequestInput
+    from uls.intake.worker import IntakeReconcileRequired
+
+    raw = _pdf_bytes()
+    with _system(tmp_path, name="Lec.3_networks.pdf", mime_type="application/pdf", raw=raw) as system:
+        _enable(system)
+        worker = _material_system(system, "Lec.3_networks.pdf", raw)
+        worker.run_once()
+        item = _item(system)
+        workspace = worker._workspace_for_item(item)
+        request = RequestInput("k", "FILE_DETAILS", intake_ids=(item.intake_id,), course_key=item.inferred_course_key,
+                               kind="LECTURE_SLIDES", material_role="Lecture Slides")
+        assert worker._handover_gate(item, request, workspace).mode == "COMPLETE"
+        (material,) = system["notion"].data_sources["synthetic-materials"]
+        material["Normalized Source"] = "https://drive.google.com/file/d/a-different-but-valid-file/view"
+        with pytest.raises(IntakeReconcileRequired):
+            worker._handover_gate(item, request, workspace)
+
+
+def test_a_second_hand_over_names_the_current_owner_of_the_reservation(tmp_path: Path) -> None:
+    from tests.integration.test_intake_worker_classification_pb2a import MATCHED_NAME, RAW
+    from tests.integration.test_intake_worker_preview import _system
+
+    from uls.intake.requests import RequestInput
+
+    with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        _interrupted_auto_run(system, worker)
+        state, item = system["state"], _item(system)
+        held = state.get_entity_reservation(intake_id=item.intake_id, entity_kind="SESSION")
+        auto_revision = held.plan_revision
+        state.record_handover(auto_revision, "human-plan-1", {"SESSION": {"reservation_id": held.reservation_id}})
+        state.adopt_entity_reservation(held.reservation_id, from_plan_revision=auto_revision, to_plan_revision="human-plan-1")
+        workspace = worker._workspace_for_item(item)
+        request = RequestInput("k", "FILE_DETAILS", intake_ids=(item.intake_id,), course_key=item.inferred_course_key,
+                               kind="TRANSCRIPT", actual_date="2026-09-10", session_mode="NEW")
+        handover = worker._handover_gate(item, request, workspace)
+        assert handover.from_plan_revision == "human-plan-1"        # the actual owner, not the first AUTO plan
+
+
+def test_a_second_change_marks_an_open_request_of_another_type_too(tmp_path: Path) -> None:
+    with _closed_request(tmp_path) as (system, worker):
+        old = _closed_page(system)
+        old["Course"] = ["synthetic-course-page-0"]
+        worker.run_once()
+        new = next(p for p in _pages(system) if p["Request Key"] != old["Request Key"])
+        new.update({"Course": [AUTO_COURSE_PAGE], "Submitted": True})
+        worker.claim_request(new["Request Key"])               # the ASSIGN_COURSE generation is applied; FILE_DETAILS opens
+        (details,) = _details_pages(system)
+        old["Kind"] = "TRANSCRIPT"
+        worker.run_once()
+        assert details["Error"] == "TERMINAL_CHANGED_AGAIN" and old["Request Status"] == "Auto Resolved"
+        assert len(_pages(system)) == 2 and len(_details_pages(system)) == 1

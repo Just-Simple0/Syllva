@@ -474,3 +474,54 @@ def test_a_remapped_canvas_course_replaces_its_stale_binding_to_another_key(tmp_
         assert h.state.get_classification_cursor(f"calendar_proof:{KEY}") is None
     finally:
         h.close()
+
+
+@pytest.mark.parametrize("header", [
+    '</api/v1/courses/1/modules?include[]=items&per_page=50&page=2>; title="Page, two"; rel="next"',
+    '</api/v1/courses/1/modules?include[]=items&per_page=50&page=2>; REL="NEXT"',
+    ('</api/v1/courses/1/modules?include[]=items&per_page=50&page=1>; rel="first", '
+     '</api/v1/courses/1/modules?include[]=items&per_page=50&page=2>; rel="current next"'),
+])
+def test_the_link_header_is_parsed_per_rfc_8288(header) -> None:
+    from uls.intake.canvas_observer import _next_url
+
+    here = "/api/v1/courses/1/modules?include[]=items&per_page=50"
+    assert _next_url(header, here, ORIGIN).endswith("page=2")
+
+
+@pytest.mark.parametrize("header", [
+    "</api/v1/courses/1/modules?page=2; rel=next", 'page=2; rel="next"', '</x>; rel="next', "</x> rel=next",
+])
+def test_an_unparsable_link_header_is_incomplete_never_a_silent_end(header) -> None:
+    from uls.intake.canvas_observer import _next_url
+
+    with pytest.raises(_Incomplete):
+        _next_url(header, "/api/v1/courses/1/modules?per_page=50", ORIGIN)
+
+
+def test_a_real_two_page_collection_with_a_quoted_comma_link_is_read_to_the_end() -> None:
+    from uls.intake.canvas_observer import ConnectionReader
+    from uls.settings.canvas_checks import open_canvas_connection
+
+    first = "/api/v1/courses/1/modules?include[]=items&per_page=50"
+    second = "/api/v1/courses/1/modules?include[]=items&per_page=50&page=2"
+    transport = _Transport({
+        first: (b'[{"id":1}]', {"Link": f'<{ORIGIN}{second}>; title="Page, two"; rel="next"'}),
+        second: (b'[{"id":2}]', {}),
+    })
+    with open_canvas_connection(ORIGIN, resolver=lambda _h, _p: ["93.184.216.34"],
+                                connector=lambda *_a: transport) as connection:
+        reader = ConnectionReader(connection, "t0k")
+        page, nxt = reader.get_page(first, 1e12)
+        assert page == [{"id": 1}] and nxt is not None
+        page, nxt = reader.get_page(nxt, 1e12)
+        assert page == [{"id": 2}] and nxt is None
+
+
+def test_an_unreadable_mapping_source_is_no_proof(tmp_path) -> None:
+    h = Harness(tmp_path)
+    try:
+        h.observer._map_source = lambda: (_ for _ in ()).throw(RuntimeError("settings unavailable"))
+        assert h.observer.current_proof(KEY) is None
+    finally:
+        h.close()

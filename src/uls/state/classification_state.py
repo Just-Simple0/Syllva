@@ -2163,13 +2163,39 @@ class ClassificationStateMixin:
                 (int(canvas_course_id),)).fetchone()
             return None if row is None else str(row["course_key"])
 
-    def has_write_attempt_for_page(self, operation: str, page_id: str) -> bool:
-        """Whether this worker's own create of ``page_id`` is recorded (durable effect evidence)."""
+    def has_write_attempt_for_page(self, operation: str, page_id: str, entity_id: str | None = None) -> bool:
+        """Whether this worker's own create of ``page_id`` is recorded and read back (durable
+        effect evidence); with ``entity_id`` the read-back row must carry that entity ID."""
 
         with self._transaction() as connection:
-            return connection.execute(
-                "SELECT 1 FROM provider_write_attempts WHERE operation = ? AND target_id = ? "
-                "AND response_state = 'READBACK_OK' LIMIT 1", (operation, page_id)).fetchone() is not None
+            rows = connection.execute(
+                "SELECT readback_json FROM provider_write_attempts WHERE operation = ? AND target_id = ? "
+                "AND response_state = 'READBACK_OK'", (operation, page_id)).fetchall()
+        if entity_id is None:
+            return bool(rows)
+        for row in rows:
+            try:
+                if (json.loads(row["readback_json"] or "null") or {}).get("ID") == entity_id:
+                    return True
+            except (TypeError, ValueError, AttributeError):
+                continue
+        return False
+
+    def page_value_was_written(self, page_id: str, field: str, value: Any) -> bool:
+        """Whether a read-back of ``page_id`` recorded by this worker carries exactly ``value``
+        in ``field`` - i.e. the current value is one the worker wrote and verified."""
+
+        with self._transaction() as connection:
+            rows = connection.execute(
+                "SELECT readback_json FROM provider_write_attempts WHERE target_id = ? "
+                "AND response_state = 'READBACK_OK'", (page_id,)).fetchall()
+        for row in rows:
+            try:
+                if (json.loads(row["readback_json"] or "null") or {}).get(field) == value:
+                    return True
+            except (TypeError, ValueError, AttributeError):
+                continue
+        return False
 
     def list_handovers_from(self, from_plan_revision: str) -> list[dict[str, Any]]:
         with self._transaction() as connection:
