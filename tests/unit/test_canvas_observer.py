@@ -654,10 +654,10 @@ def test_a_present_but_blank_link_field_is_not_the_end_of_the_collection(value) 
 
     first = "/api/v1/courses/1/modules?include[]=items&per_page=50"
     transport = _Transport({first: (b'[{"id":1}]', {"Link": value})})
-    with open_canvas_connection(ORIGIN, resolver=lambda _h, _p: ["93.184.216.34"],
-                                connector=lambda *_a: transport) as connection:
-        with pytest.raises(_Incomplete):
-            ConnectionReader(connection, "t0k").get_page(first, 1e12)
+    with (open_canvas_connection(ORIGIN, resolver=lambda _h, _p: ["93.184.216.34"],
+                                 connector=lambda *_a: transport) as connection,
+          pytest.raises(_Incomplete)):
+        ConnectionReader(connection, "t0k").get_page(first, 1e12)
 
 
 @pytest.mark.parametrize("header", ["</x>; rel=ne\u212at", '</x>; rel="n\u0435xt"', "</x>; rel=next\x00", "</x>;\r\n rel=next"])
