@@ -626,7 +626,7 @@ def test_mutated_link_headers_never_conclude_the_end_of_a_collection_by_mistake(
             '</api/v1/courses/1/modules?include[]=items&per_page=50&page=9>; rel="last"')
     here = "/api/v1/courses/1/modules?include[]=items&per_page=50"
     rng = random.Random(8288)
-    alphabet = '<>;,="\\ @}{ ()[]nextrel\u212a\u0131\x00\r\n'
+    alphabet = '<>;,="\\ @}{ ()[]nextrel\u212a\u0131\x00\r\n\x7f'
     for _ in range(4000):
         chars = list(base)
         for _ in range(rng.randint(1, 3)):
@@ -666,3 +666,27 @@ def test_non_ascii_and_control_characters_are_malformed(header) -> None:
 
     with pytest.raises(_Incomplete):
         _next_url(header, "/api/v1/courses/1/modules?per_page=50", ORIGIN)
+
+
+@pytest.mark.parametrize("header", [
+    '</api/v1/courses/1/modules?page=2>; rel="ne\x7fxt"',
+    '</api/v1/courses/1/modules?page=2>; rel="next"\x7f',
+    "<bad target>; rel=last",
+    "<>; rel=last",
+    "</a<b>; rel=last",
+    '</a"b>; rel=last',
+    "</a\\b>; rel=last",
+    "</a{b}>; rel=last",
+])
+def test_every_link_target_and_every_character_is_validated(header) -> None:
+    from uls.intake.canvas_observer import _next_url
+
+    with pytest.raises(_Incomplete):
+        _next_url(header, "/api/v1/courses/1/modules?per_page=50", ORIGIN)
+
+
+def test_a_valid_target_with_encoded_characters_still_parses() -> None:
+    from uls.intake.canvas_observer import _next_url
+
+    here = "/api/v1/courses/1/modules?include[]=items&per_page=50"
+    assert _next_url('</api/v1/courses/1/modules?include[]=items&per_page=50&page=2>; rel="next"', here, ORIGIN).endswith("page=2")

@@ -47,6 +47,7 @@ MAX_ITEMS = 500
 MAX_RUN_SECONDS = 45.0
 _WEEK_MODULE = re.compile(r"^(\d+)주차$")
 _CANVAS_METADATA_ONLY = "CANVAS_METADATA_ONLY"
+_URI_REFERENCE = re.compile(r"[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+")
 _TOKEN = re.compile(r"[a-z0-9!#$%&'*+.^_`|~-]+")
 
 
@@ -102,8 +103,8 @@ def _link_values(header: str) -> list[tuple[str, dict[str, str]]]:
     Commas inside ``<...>`` or quoted strings do not separate values; anything that does not
     parse completely raises, so a pagination header is never half-understood."""
 
-    if not header.isascii() or any(ord(c) < 32 and c != "\t" for c in header):
-        raise _Incomplete("MALFORMED_LINK")          # ASCII only: no case-folding surprises, no control characters
+    if any(not (32 <= ord(c) <= 126 or c == "\t") for c in header):
+        raise _Incomplete("MALFORMED_LINK")          # printable ASCII (and HTAB) only: no controls, DEL or case-folding surprises
     values: list[tuple[str, dict[str, str]]] = []
     i, n = 0, len(header)
     while i < n:
@@ -117,6 +118,8 @@ def _link_values(header: str) -> list[tuple[str, dict[str, str]]]:
         if end < 0:
             raise _Incomplete("MALFORMED_LINK")
         target = header[i + 1:end]
+        if _URI_REFERENCE.fullmatch(target) is None:        # every target, not only rel=next
+            raise _Incomplete("MALFORMED_LINK")
         i = end + 1
         params: dict[str, str] = {}
         while True:
