@@ -566,3 +566,30 @@ def test_a_malformed_link_closes_a_complete_calendar(harness) -> None:
     result = harness.run()
     assert (result.status, result.reason) == ("INCOMPLETE", "MALFORMED_LINK")
     assert not harness.state.recording_calendar_complete(KEY)
+
+
+@pytest.mark.parametrize("params", ["rel=", "rel", "rel=; rel=next", 'rel=""', 'rel="next"; rel="last"', "title; rel=next", "=x; rel=next"])
+def test_uninterpretable_link_parameters_are_malformed(params) -> None:
+    from uls.intake.canvas_observer import _next_url
+
+    with pytest.raises(_Incomplete):
+        _next_url(f"</api/v1/courses/1/modules?include[]=items&per_page=50&page=2>; {params}",
+                  "/api/v1/courses/1/modules?include[]=items&per_page=50", ORIGIN)
+
+
+def test_a_bad_rel_on_page_one_closes_a_complete_calendar_and_opens_nothing(harness) -> None:
+    assert harness.run().status == "COMPLETE" and harness.state.recording_calendar_complete(KEY)
+    sessions_before = _rows(harness.state, "entity_reservations")
+
+    class BadRel(FakeReader):
+        def get_page(self, url, deadline):
+            from uls.intake.canvas_observer import _next_url
+
+            rows, _ = super().get_page(url, deadline)
+            return rows, _next_url(f"<{url}&page=2>; rel=", url, ORIGIN)
+
+    harness.reader = BadRel()
+    result = harness.run()
+    assert (result.status, result.reason) == ("INCOMPLETE", "MALFORMED_LINK")
+    assert not harness.state.recording_calendar_complete(KEY)
+    assert _rows(harness.state, "entity_reservations") == sessions_before == 0

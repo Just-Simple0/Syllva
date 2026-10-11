@@ -47,6 +47,7 @@ MAX_ITEMS = 500
 MAX_RUN_SECONDS = 45.0
 _WEEK_MODULE = re.compile(r"^(\d+)주차$")
 _CANVAS_METADATA_ONLY = "CANVAS_METADATA_ONLY"
+_TOKEN = re.compile(r"[a-z0-9!#$%&'*+.^_`|~-]+")
 
 
 class _Incomplete(Exception):
@@ -127,9 +128,11 @@ def _link_values(header: str) -> list[tuple[str, dict[str, str]]]:
             while i < n and header[i] not in "=;, \t":
                 i += 1
             name = header[start:i].lower()
-            if not name:
+            if not name or _TOKEN.fullmatch(name) is None:
                 raise _Incomplete("MALFORMED_LINK")
             value = ""
+            if i >= n or header[i] != "=":
+                raise _Incomplete("MALFORMED_LINK")      # every parameter carries a value
             if i < n and header[i] == "=":
                 i += 1
                 if i < n and header[i] == '"':
@@ -149,6 +152,8 @@ def _link_values(header: str) -> list[tuple[str, dict[str, str]]]:
                     while i < n and header[i] not in ";, \t":
                         i += 1
                     value = header[start:i]
+            if not value.strip() or name in params and name == "rel":
+                raise _Incomplete("MALFORMED_LINK")      # an empty value or a repeated rel is uninterpretable
             params.setdefault(name, value)
         values.append((target, params))
         if i < n:                                   # header[i] == ","
