@@ -415,8 +415,9 @@ def test_the_proof_follows_origin_principal_and_mapping(tmp_path) -> None:
     try:
         principal = {"value": "user-1"}
         h.observer._principal_provider = lambda: principal["value"]
+        assert h.run().status == "COMPLETE"
         first = h.observer.current_proof(KEY)
-        assert first and h.run().status == "COMPLETE"
+        assert first
         assert h.state.get_classification_cursor(f"calendar_proof:{KEY}") == first
         principal["value"] = "user-2"                         # not the verified principal: no proof
         assert h.observer.current_proof(KEY) is None
@@ -433,7 +434,7 @@ def test_the_proof_follows_origin_principal_and_mapping(tmp_path) -> None:
 def test_no_proof_without_the_active_profile_and_the_principal(tmp_path) -> None:
     h = Harness(tmp_path)
     try:
-        assert h.observer.current_proof(KEY)
+        assert h.run().status == "COMPLETE" and h.observer.current_proof(KEY)
         h.observer._principal_provider = None
         assert h.observer.current_proof(KEY) is None             # principal unknown: no proof
         h.observer._principal_provider = lambda: "user-1"
@@ -824,3 +825,36 @@ def test_a_gate_that_fails_while_closing_denies_the_calendar_until_a_complete_ob
     assert harness.observer.current_proof(KEY) is None           # ... but it cannot be used
     assert harness.run().status == "COMPLETE"                    # only a new complete observation lifts the denial
     assert harness.observer.current_proof(KEY)
+
+
+def test_a_restarted_observer_does_not_vouch_for_a_persisted_proof_until_it_completes_an_observation(harness, tmp_path) -> None:
+    assert harness.run().status == "COMPLETE" and harness.observer.current_proof(KEY)
+    from uls.intake.canvas_observer import CanvasObserver
+
+    reborn = CanvasObserver(
+        harness.state, origin=ORIGIN, verified_origin=ORIGIN, course_map={COURSE_ID: KEY},
+        reader_factory=harness.observer._factory, semester_for=lambda _k: SEMESTER,
+        profile_provider=lambda: ORIGIN, principal_provider=lambda: "user-1", verified_principal="user-1")
+    assert harness.state.recording_calendar_complete(KEY)         # the persisted flag and proof are still there ...
+    assert reborn.current_proof(KEY) is None                      # ... but a new process cannot vouch for them
+    assert reborn.observe_course(COURSE_ID).status == "COMPLETE"
+    assert reborn.current_proof(KEY)
+
+
+def test_an_unreadable_mapping_at_the_gate_leaves_no_calendar_vouched_for(harness) -> None:
+    assert harness.run().status == "COMPLETE" and harness.observer.current_proof(KEY)
+    good = harness.observer._map_source
+
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] <= 3:
+            raise RuntimeError("settings unavailable")
+        return good
+
+    harness.observer._map_source = flaky
+    assert harness.run().reason == "GATE_FAILED"
+    harness.observer._map_source = good                           # the provider recovers
+    assert harness.observer.current_proof(KEY) is None            # nothing is vouched for without a new complete observation
+    assert harness.run().status == "COMPLETE" and harness.observer.current_proof(KEY)

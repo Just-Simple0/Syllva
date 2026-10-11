@@ -41,6 +41,9 @@ class _Observer:
     def profile_matches(self) -> bool:
         return self.matches
 
+    def principal_matches(self) -> bool:
+        return self.matches
+
     def current_proof(self, _course_key: str) -> str | None:
         return "test-proof" if self.matches else None
 

@@ -942,6 +942,8 @@ class IntakeWorker:
             else:
                 if course_key and getattr(result, "status", None) == "COMPLETE":
                     self._canvas_denied.discard(course_key)
+                elif course_key:
+                    self._canvas_denied.add(course_key)      # every non-COMPLETE result keeps the calendar unusable
 
     def _run_once_attested(self, *, sync: bool, process: bool, max_jobs: int) -> dict[str, Any]:
         if not self.state.acquire_local_worker_lock():
@@ -1849,7 +1851,7 @@ class IntakeWorker:
         observer = self.canvas_observer
         if observer is None or not self._auto_enabled():
             return "DISABLED"
-        return "ENABLED" if bool(observer.profile_matches()) else "NO_PROFILE_PROOF"
+        return "ENABLED" if bool(observer.profile_matches()) and bool(observer.principal_matches()) else "NO_PROFILE_PROOF"
 
     def _classification_readiness(self) -> dict[str, Any]:
         """Plan §4 O2 readiness block; P-C adds the model counters."""
@@ -1884,6 +1886,7 @@ class IntakeWorker:
             "canvas_observation": (
                 "ENABLED" if getattr(classification_cfg, "canvas_observation_enabled", False)
                 and self.canvas_observer is not None and self._auto_enabled() and bool(self.canvas_observer.profile_matches())
+                and bool(self.canvas_observer.principal_matches())
                 else "DISABLED"),
             "rule_table_version": RULE_TABLE_VERSION,
             "tag_rule_version": TAG_RULE_VERSION,

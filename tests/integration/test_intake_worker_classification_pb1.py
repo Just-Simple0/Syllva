@@ -28,6 +28,9 @@ class _TrustedCanvas:
     def profile_matches(self) -> bool:
         return True
 
+    def principal_matches(self) -> bool:
+        return True
+
     def current_proof(self, _course_key: str) -> str:
         return "test-proof"
 

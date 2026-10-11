@@ -281,6 +281,7 @@ class CanvasObserver:
     ) -> None:
         self._state = state
         self._profile_provider = profile_provider
+        self._fresh: set[str] = set()    # calendars proven by a COMPLETE observation of THIS process
         self._denied: set[str] = set()   # calendars whose closing could not be persisted: unusable until it is
         self._principal_provider = principal_provider
         self._verified_principal = verified_principal
@@ -305,8 +306,16 @@ class CanvasObserver:
         and the ACTIVE profile origin are one, and the connection principal is readable.  Any
         missing evidence (no provider, unreadable principal, ambiguous mapping) is no proof."""
 
-        if course_key in self._denied:
+        if course_key in self._denied or course_key not in self._fresh:
+            # A persisted proof is not enough: after a restart, or after any failed or incomplete
+            # observation, the calendar is unusable until THIS process completes an observation of
+            # it (a closing write that failed to persist cannot leave an old proof alive).
             return None
+        return self._proof(course_key)
+
+    def _proof(self, course_key: str) -> str | None:
+        """The proof value itself (origin, principal, Canvas course, key) - no freshness rule."""
+
         try:
             mapping = self._course_map
         except Exception:  # noqa: BLE001 - an unreadable mapping is no proof
@@ -331,6 +340,9 @@ class CanvasObserver:
         except Exception:  # noqa: BLE001 - an unreadable principal is no proof
             return None
         return principal if principal and principal == self._verified_principal else None
+
+    def principal_matches(self) -> bool:
+        return self._active_principal() is not None
 
     def profile_matches(self) -> bool:
         """The *active* Canvas profile origin (read from the injected provider on every call; no
@@ -389,6 +401,10 @@ class CanvasObserver:
     def observe_course(self, canvas_course_id: int) -> ObservationResult:
         canvas_course_id = int(canvas_course_id)
         try:
+            self._fresh.discard(self._course_map.get(canvas_course_id, ""))
+        except Exception:  # noqa: BLE001 - the mapping is unreadable: nothing can be vouched for
+            self._fresh.clear()
+        try:
             blocked = self._gate(canvas_course_id)
         except Exception:  # noqa: BLE001 - fixed failure; nothing was read
             # The gate may have failed while closing the calendar: the course is unusable until a
@@ -399,6 +415,8 @@ class CanvasObserver:
                 key = None
             if key:
                 self._denied.add(key)
+            else:
+                self._fresh.clear()                      # the key is unknown: no calendar is vouched for
             return ObservationResult("INELIGIBLE", "GATE_FAILED", key or "", canvas_course_id)
         if blocked is not None:
             return blocked
@@ -424,7 +442,10 @@ class CanvasObserver:
             # Whatever the connection layer raised, the calendar is already closed; the
             # caller sees a fixed failure, never provider text.
             return self._incomplete(course_key, canvas_course_id, "OBSERVATION_FAILED")
-        return self._record(course_key, canvas_course_id, collected, rebound)
+        result = self._record(course_key, canvas_course_id, collected, rebound)
+        if result.status == "COMPLETE":
+            self._fresh.add(course_key)
+        return result
 
     def _incomplete(self, course_key: str, canvas_course_id: int, reason: str) -> ObservationResult:
         self._state.reconcile_canvas_collection(
@@ -597,7 +618,7 @@ class CanvasObserver:
                 date.fromisoformat(str(obs["title"]).strip()),
             ))
         # The eligibility is proven again immediately before the projection is made.
-        proof = self.current_proof(course_key)
+        proof = self._proof(course_key)
         if proof is None or self._gate(course_id) is not None:
             return "ELIGIBILITY_LOST"
         calendar = build_calendar(
