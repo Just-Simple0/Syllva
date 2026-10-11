@@ -619,7 +619,9 @@ class IntakeWorker:
                 if wanted and row.get("Type") != wanted:
                     raise IntakeReconcileRequired("the Material's Type changed after the automatic run")
                 if complete:
-                    opaque = item.exposure_block_reason == "OPAQUE_NO_RETRIEVAL" and row.get("Text Status") == "Needs Review"
+                    opaque = (
+                        item.exposure_block_reason == "OPAQUE_NO_RETRIEVAL" and row.get("Text Status") == "Needs Review"
+                        and row.get("Text Source") == "Unavailable" and not row.get("Normalized Source"))
                     finished = (
                         row.get("Text Status") in {"Ready", "Partial"} and bool(row.get("Normalized Source"))
                         and self.state.page_value_was_written(

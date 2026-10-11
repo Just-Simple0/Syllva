@@ -87,10 +87,8 @@ class ConnectionReader:
             raise _Incomplete("MALFORMED_RESPONSE") from None
         if not isinstance(body, list):
             raise _Incomplete("MALFORMED_RESPONSE")
-        link = ""
-        for key, value in response.headers.items():
-            if key.lower() == "link":
-                link = value
+        # Every Link field counts (HTTP allows several, in any letter case).
+        link = ", ".join(value for key, value in response.headers.items() if key.lower() == "link" and value.strip())
         return body, _next_url(link, url, self._connection.target.origin)
 
 
@@ -103,7 +101,7 @@ def _link_values(header: str) -> list[tuple[str, dict[str, str]]]:
     values: list[tuple[str, dict[str, str]]] = []
     i, n = 0, len(header)
     while i < n:
-        while i < n and header[i] in " \t,":
+        while i < n and header[i] in " \t":
             i += 1
         if i >= n:
             break
@@ -153,6 +151,14 @@ def _link_values(header: str) -> list[tuple[str, dict[str, str]]]:
                     value = header[start:i]
             params.setdefault(name, value)
         values.append((target, params))
+        if i < n:                                   # header[i] == ","
+            i += 1
+            while i < n and header[i] in " \t":
+                i += 1
+            if i >= n or header[i] != "<":          # a trailing or doubled separator is malformed
+                raise _Incomplete("MALFORMED_LINK")
+    if header.strip() and not values:
+        raise _Incomplete("MALFORMED_LINK")
     return values
 
 

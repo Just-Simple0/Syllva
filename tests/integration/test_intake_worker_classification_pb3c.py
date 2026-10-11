@@ -729,3 +729,29 @@ def test_a_second_change_marks_an_open_request_of_another_type_too(tmp_path: Pat
         worker.run_once()
         assert details["Error"] == "TERMINAL_CHANGED_AGAIN" and old["Request Status"] == "Auto Resolved"
         assert len(_pages(system)) == 2 and len(_details_pages(system)) == 1
+
+
+def test_an_opaque_material_must_still_be_unavailable_text_without_a_normalized_source(tmp_path: Path) -> None:
+    from tests.integration.test_intake_worker_classification_pb2b import _material_system
+    from tests.integration.test_intake_worker_preview import _system
+
+    from uls.intake.requests import RequestInput
+    from uls.intake.worker import IntakeReconcileRequired
+
+    csv = b"name,score\nA,1\n"
+    with _system(tmp_path, name="dataset.csv", mime_type="text/csv", raw=csv) as system:
+        _enable(system)
+        worker = _material_system(system, "dataset.csv", csv, resource_kind="assignment")
+        worker.run_once()
+        item = _item(system)
+        workspace = worker._workspace_for_item(item)
+        request = RequestInput("k", "FILE_DETAILS", intake_ids=(item.intake_id,), course_key=item.inferred_course_key,
+                               kind="ASSIGNMENT_RESOURCE", material_role="Reference")
+        assert worker._handover_gate(item, request, workspace).mode == "COMPLETE"
+        (material,) = system["notion"].data_sources["synthetic-materials"]
+        for field, value in (("Text Source", "Manual"), ("Text Source", None), ("Normalized Source", "https://x/y")):
+            saved = material.get(field)
+            material[field] = value
+            with pytest.raises(IntakeReconcileRequired):
+                worker._handover_gate(item, request, workspace)
+            material[field] = saved

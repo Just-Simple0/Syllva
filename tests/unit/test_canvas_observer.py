@@ -525,3 +525,44 @@ def test_an_unreadable_mapping_source_is_no_proof(tmp_path) -> None:
         assert h.observer.current_proof(KEY) is None
     finally:
         h.close()
+
+
+@pytest.mark.parametrize("header", [",,,", ", </x>; rel=next", "</x>; rel=next,", "</x>; rel=next,, </y>; rel=last", ",", " , "])
+def test_stray_separators_and_empty_link_values_are_malformed(header) -> None:
+    from uls.intake.canvas_observer import _next_url
+
+    with pytest.raises(_Incomplete):
+        _next_url(header, "/api/v1/courses/1/modules?per_page=50", ORIGIN)
+
+
+def test_several_link_fields_are_all_read(harness) -> None:
+    from uls.intake.canvas_observer import ConnectionReader
+    from uls.settings.canvas_checks import open_canvas_connection
+
+    first = "/api/v1/courses/1/modules?include[]=items&per_page=50"
+    second = "/api/v1/courses/1/modules?include[]=items&per_page=50&page=2"
+    transport = _Transport({
+        first: (b'[{"id":1}]', {"Link": f'<{ORIGIN}{second}>; rel="next"', "link": f'<{ORIGIN}{second}&per_page=50>; rel="last"'}),
+        second: (b'[{"id":2}]', {}),
+    })
+    with open_canvas_connection(ORIGIN, resolver=lambda _h, _p: ["93.184.216.34"],
+                                connector=lambda *_a: transport) as connection:
+        reader = ConnectionReader(connection, "t0k")
+        _page, nxt = reader.get_page(first, 1e12)
+        assert nxt is not None and nxt.endswith("page=2")
+
+
+def test_a_malformed_link_closes_a_complete_calendar(harness) -> None:
+    assert harness.run().status == "COMPLETE" and harness.state.recording_calendar_complete(KEY)
+
+    class BadLink(FakeReader):
+        def get_page(self, url, deadline):
+            from uls.intake.canvas_observer import _next_url
+
+            rows, _ = super().get_page(url, deadline)
+            return rows, _next_url(",,,", url, ORIGIN)
+
+    harness.reader = BadLink()
+    result = harness.run()
+    assert (result.status, result.reason) == ("INCOMPLETE", "MALFORMED_LINK")
+    assert not harness.state.recording_calendar_complete(KEY)
