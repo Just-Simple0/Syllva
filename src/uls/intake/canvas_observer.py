@@ -215,6 +215,11 @@ def _page_number(url: str) -> int:
     return 1
 
 
+def _explicit_page_number(url: str) -> int | None:
+    numbers = [v for k, v in parse_qsl(urlsplit(url).query, keep_blank_values=True) if k == "page"]
+    return int(numbers[0]) if len(numbers) == 1 and numbers[0].isdecimal() else None
+
+
 def _with_page(url: str, number: int) -> str:
     parts = urlsplit(url)
     query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != "page"]
@@ -421,9 +426,14 @@ class CanvasObserver:
             items.extend(page)
             if len(items) > MAX_ITEMS:
                 raise _Incomplete("ITEM_LIMIT")
+            number = _page_number(url)
+            if nxt is not None and _explicit_page_number(nxt) != number + 1:
+                # A next link that skips, repeats or omits the page number proves nothing about the
+                # pages in between: the collection is not complete.
+                raise _Incomplete("PAGE_SEQUENCE")
             if nxt is None and len(page) >= PER_PAGE:
-                nxt = _with_page(url, _page_number(url) + 1)
-            url = nxt
+                nxt = _with_page(url, number + 1)
+            url = None if nxt is None else _with_page(url, number + 1)
         if url is not None:
             raise _Incomplete("PAGE_LIMIT")
         return items

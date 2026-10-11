@@ -190,7 +190,7 @@ def test_an_incomplete_collection_closes_a_previously_complete_calendar(harness)
     assert harness.run().status == "COMPLETE" and harness.state.recording_calendar_complete(KEY)
     harness.reader.extra_next = True  # a next page that never ends: the page limit is reached
     result = harness.run()
-    assert (result.status, result.reason) == ("INCOMPLETE", "PAGE_LIMIT")
+    assert (result.status, result.reason) == ("INCOMPLETE", "PAGE_SEQUENCE")
     assert not harness.state.recording_calendar_complete(KEY)
     assert harness.state.latest_canvas_observation(ORIGIN, COURSE_ID, "module_item", "1001")["active"] == 1
 
@@ -732,3 +732,45 @@ def test_a_server_that_never_stops_serving_full_pages_is_incomplete(harness) -> 
 
     with pytest.raises(_Incomplete):
         harness.observer._pages(Endless(0), "/api/v1/courses/1/modules?per_page=50", 1e12)
+
+
+class _Sequenced:
+    def __init__(self, total: int, links: dict[int, str | None]) -> None:
+        self.total, self.links, self.urls = total, links, []
+
+    def get_page(self, url, deadline):
+        from uls.intake.canvas_observer import _page_number
+
+        self.urls.append(url)
+        number = _page_number(url)
+        start = (number - 1) * 50
+        rows = [{"id": i} for i in range(start, min(start + 50, self.total))]
+        nxt = self.links.get(number)
+        return rows, (None if nxt is None else f"/api/v1/courses/1/modules?include[]=items&per_page=50&page={nxt}")
+
+
+@pytest.mark.parametrize("links", [
+    {1: "3"},            # skips page 2
+    {1: "1"},            # repeats the page
+    {1: "2", 2: "2"},    # repeats the next page
+    {1: "0"},            # backwards
+])
+def test_a_next_link_that_skips_or_repeats_a_page_is_incomplete(harness, links) -> None:
+    with pytest.raises(_Incomplete):
+        harness.observer._pages(_Sequenced(120, links), "/api/v1/courses/1/modules?include[]=items&per_page=50", 1e12)
+
+
+def test_a_next_link_without_a_page_number_is_incomplete(harness) -> None:
+    class NoNumber(_Sequenced):
+        def get_page(self, url, deadline):
+            rows, _ = super().get_page(url, deadline)
+            return rows, "/api/v1/courses/1/modules?include[]=items&per_page=50"
+
+    with pytest.raises(_Incomplete):
+        harness.observer._pages(NoNumber(120, {}), "/api/v1/courses/1/modules?include[]=items&per_page=50", 1e12)
+
+
+def test_consecutive_next_links_read_every_page_once(harness) -> None:
+    reader = _Sequenced(120, {1: "2", 2: "3"})
+    items = harness.observer._pages(reader, "/api/v1/courses/1/modules?include[]=items&per_page=50", 1e12)
+    assert [i["id"] for i in items] == list(range(120)) and len(reader.urls) == 3
