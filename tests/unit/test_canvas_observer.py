@@ -690,3 +690,45 @@ def test_a_valid_target_with_encoded_characters_still_parses() -> None:
 
     here = "/api/v1/courses/1/modules?include[]=items&per_page=50"
     assert _next_url('</api/v1/courses/1/modules?include[]=items&per_page=50&page=2>; rel="next"', here, ORIGIN).endswith("page=2")
+
+
+@pytest.mark.parametrize("header", ['</%GG>; rel="last"', "</?q=%>; rel=last", "</a%2>; rel=last", "</a%>; rel=last"])
+def test_invalid_percent_escapes_are_malformed(header) -> None:
+    from uls.intake.canvas_observer import _next_url
+
+    with pytest.raises(_Incomplete):
+        _next_url(header, "/api/v1/courses/1/modules?per_page=50", ORIGIN)
+
+
+class _Paged:
+    """A reader whose Link headers are useless: only the page numbers tell the truth."""
+
+    def __init__(self, total: int, per_page: int = 50) -> None:
+        self.total, self.per_page, self.urls = total, per_page, []
+
+    def get_page(self, url, deadline):
+        from uls.intake.canvas_observer import _page_number
+
+        self.urls.append(url)
+        number = _page_number(url)
+        start = (number - 1) * self.per_page
+        return [{"id": i} for i in range(start, min(start + self.per_page, self.total))], None
+
+
+@pytest.mark.parametrize("total", [0, 3, 49, 50, 51, 100, 120])
+def test_a_collection_is_read_to_its_true_end_whatever_the_link_headers_say(harness, total) -> None:
+    reader = _Paged(total)
+    items = harness.observer._pages(reader, "/api/v1/courses/1/modules?include[]=items&per_page=50", 1e12)
+    assert [i["id"] for i in items] == list(range(total))
+    full_pages = total // 50 + (1 if total % 50 else 0)
+    assert len(reader.urls) == max(1, full_pages if total % 50 else full_pages + 1)
+
+
+def test_a_server_that_never_stops_serving_full_pages_is_incomplete(harness) -> None:
+    class Endless(_Paged):
+        def get_page(self, url, deadline):
+            self.urls.append(url)
+            return [{"id": 1}] * 50, None
+
+    with pytest.raises(_Incomplete):
+        harness.observer._pages(Endless(0), "/api/v1/courses/1/modules?per_page=50", 1e12)

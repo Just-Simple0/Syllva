@@ -22,7 +22,7 @@ from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Protocol
-from urllib.parse import parse_qsl, urljoin, urlsplit
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 from ..settings.canvas_checks import (
     CanvasCheckError,
@@ -47,7 +47,7 @@ MAX_ITEMS = 500
 MAX_RUN_SECONDS = 45.0
 _WEEK_MODULE = re.compile(r"^(\d+)주차$")
 _CANVAS_METADATA_ONLY = "CANVAS_METADATA_ONLY"
-_URI_REFERENCE = re.compile(r"[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+")
+_URI_REFERENCE = re.compile(r"(?:[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=]|%[0-9A-Fa-f]{2})+")
 _TOKEN = re.compile(r"[a-z0-9!#$%&'*+.^_`|~-]+")
 
 
@@ -206,6 +206,20 @@ def _next_url(link: str, current: str, origin: str = "https://canvas.invalid") -
     if keep(a.query) != keep(b.query):
         raise _Incomplete("PAGINATION_SCOPE")
     return found[0]
+
+
+def _page_number(url: str) -> int:
+    for key, value in parse_qsl(urlsplit(url).query, keep_blank_values=True):
+        if key == "page" and value.isdecimal():
+            return max(1, int(value))
+    return 1
+
+
+def _with_page(url: str, number: int) -> str:
+    parts = urlsplit(url)
+    query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != "page"]
+    query.append(("page", str(number)))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query, safe="[]"), ""))
 
 
 def connection_reader_factory(
@@ -392,6 +406,10 @@ class CanvasObserver:
     # --- reading -----------------------------------------------------------------
 
     def _pages(self, reader: CanvasReader, first: str, deadline: float) -> list[Any]:
+        """Read a listing to its end.  The end is never concluded from a Link header alone: a
+        full page without a ``next`` link is followed by an explicit probe of the next page
+        number, so a header the parser did not understand cannot truncate the collection."""
+
         items: list[Any] = []
         url: str | None = first
         for _ in range(MAX_PAGES):
@@ -399,10 +417,13 @@ class CanvasObserver:
                 return items
             if self._monotonic() >= deadline:
                 raise _Incomplete("TIME_LIMIT")
-            page, url = reader.get_page(url, deadline)
+            page, nxt = reader.get_page(url, deadline)
             items.extend(page)
             if len(items) > MAX_ITEMS:
                 raise _Incomplete("ITEM_LIMIT")
+            if nxt is None and len(page) >= PER_PAGE:
+                nxt = _with_page(url, _page_number(url) + 1)
+            url = nxt
         if url is not None:
             raise _Incomplete("PAGE_LIMIT")
         return items
