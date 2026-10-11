@@ -152,6 +152,8 @@ def _link_values(header: str) -> list[tuple[str, dict[str, str]]]:
                     while i < n and header[i] not in ";, \t":
                         i += 1
                     value = header[start:i]
+                    if _TOKEN.fullmatch(value.lower()) is None:      # an unquoted value is a complete token
+                        raise _Incomplete("MALFORMED_LINK")
             if not value.strip() or name in params and name == "rel":
                 raise _Incomplete("MALFORMED_LINK")      # an empty value or a repeated rel is uninterpretable
             params.setdefault(name, value)
@@ -178,6 +180,10 @@ def _next_url(link: str, current: str, origin: str = "https://canvas.invalid") -
     if len(found) > 1:
         raise _Incomplete("MALFORMED_LINK")
     if not found:
+        if "next" in link.lower():
+            # Anything that mentions a next page without being a plain rel=next link is not
+            # understood: the end of the collection is never concluded from it (fail closed).
+            raise _Incomplete("MALFORMED_LINK")
         return None
     # The next page keeps the first request's collection: same origin, same path and the
     # same query apart from the page number (no other course or listing; plan §6.3).

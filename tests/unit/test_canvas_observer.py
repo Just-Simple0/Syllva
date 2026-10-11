@@ -568,7 +568,7 @@ def test_a_malformed_link_closes_a_complete_calendar(harness) -> None:
     assert not harness.state.recording_calendar_complete(KEY)
 
 
-@pytest.mark.parametrize("params", ["rel=", "rel", "rel=; rel=next", 'rel=""', 'rel="next"; rel="last"', "title; rel=next", "=x; rel=next"])
+@pytest.mark.parametrize("params", ["rel=next@", 'rel=next="junk"', "rel=nex t", "title=a@b; rel=next", "rel=next}", "rel=;next", 'rel=""', 'rel="next"; rel="last"', "title; rel=next", "=x; rel=next"])
 def test_uninterpretable_link_parameters_are_malformed(params) -> None:
     from uls.intake.canvas_observer import _next_url
 
@@ -593,3 +593,55 @@ def test_a_bad_rel_on_page_one_closes_a_complete_calendar_and_opens_nothing(harn
     assert (result.status, result.reason) == ("INCOMPLETE", "MALFORMED_LINK")
     assert not harness.state.recording_calendar_complete(KEY)
     assert _rows(harness.state, "entity_reservations") == sessions_before == 0
+
+
+@pytest.mark.parametrize("header", [
+    '<https://canvas.example.edu/api/v1/courses/1/modules?per_page=50&page=2>; rel=next@',
+    '</api/v1/courses/1/modules?page=2>; rel="nextt"',
+    '</api/v1/courses/1/modules?page=2>; rel="prev,next"x',
+])
+def test_a_header_that_mentions_a_next_page_but_is_not_one_never_ends_the_collection(header) -> None:
+    from uls.intake.canvas_observer import _next_url
+
+    with pytest.raises(_Incomplete):
+        _next_url(header, "/api/v1/courses/1/modules?per_page=50", ORIGIN)
+
+
+def test_a_header_without_any_next_is_the_end_of_the_collection() -> None:
+    from uls.intake.canvas_observer import _next_url
+
+    here = "/api/v1/courses/1/modules?per_page=50&page=2"
+    assert _next_url('</api/v1/courses/1/modules?per_page=50&page=1>; rel="prev", '
+                     '</api/v1/courses/1/modules?per_page=50&page=2>; rel="last"', here, ORIGIN) is None
+
+
+def test_mutated_link_headers_never_conclude_the_end_of_a_collection_by_mistake() -> None:
+    """Fuzz: any header that mentions a next page either yields it or is rejected - never silently None."""
+
+    import random
+
+    from uls.intake.canvas_observer import _next_url
+
+    base = ('</api/v1/courses/1/modules?include[]=items&per_page=50&page=2>; title="Page, two"; rel="next", '
+            '</api/v1/courses/1/modules?include[]=items&per_page=50&page=9>; rel="last"')
+    here = "/api/v1/courses/1/modules?include[]=items&per_page=50"
+    rng = random.Random(8288)
+    alphabet = '<>;,="\\ @}{ ()[]nextrel'
+    for _ in range(4000):
+        chars = list(base)
+        for _ in range(rng.randint(1, 3)):
+            action = rng.choice(("insert", "delete", "replace"))
+            at = rng.randrange(len(chars) + 1)
+            if action == "insert":
+                chars.insert(at, rng.choice(alphabet))
+            elif chars and action == "delete":
+                del chars[min(at, len(chars) - 1)]
+            elif chars:
+                chars[min(at, len(chars) - 1)] = rng.choice(alphabet)
+        header = "".join(chars)
+        try:
+            result = _next_url(header, here, ORIGIN)
+        except _Incomplete:
+            continue
+        if result is None:
+            assert "next" not in header.lower(), header
