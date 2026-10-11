@@ -1853,7 +1853,8 @@ class IntakeWorker:
             "terminal_scan_cursor": self.state.get_classification_cursor("auto_resolved_scan_cursor") or "",
             "terminal_changes": self.state.terminal_change_counts(),
             "canvas_observation": (
-                "ENABLED" if getattr(classification_cfg, "canvas_observation_enabled", False) and self.canvas_observer is not None
+                "ENABLED" if getattr(classification_cfg, "canvas_observation_enabled", False)
+                and self.canvas_observer is not None and self._auto_enabled() and bool(self.canvas_observer.profile_matches())
                 else "DISABLED"),
             "rule_table_version": RULE_TABLE_VERSION,
             "tag_rule_version": TAG_RULE_VERSION,
