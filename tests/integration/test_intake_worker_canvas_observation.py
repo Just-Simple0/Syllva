@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from tests.integration.test_intake_worker_classification_pb1 import _enable
@@ -35,6 +36,7 @@ class _Observer:
         self.calls.append(course_id)
         if course_id in self.fail_on:
             raise RuntimeError("provider down")
+        return SimpleNamespace(status="COMPLETE")
 
     def profile_matches(self) -> bool:
         return self.matches

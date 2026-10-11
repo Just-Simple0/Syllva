@@ -805,3 +805,22 @@ def test_a_failed_closing_barrier_makes_the_calendar_unusable_and_the_collection
     harness.state.close_recording_calendar = original
     assert harness.run().status == "COMPLETE"                          # the next successful observation lifts it
     assert harness.observer.current_proof(KEY) is not None
+
+
+def test_a_gate_that_fails_while_closing_denies_the_calendar_until_a_complete_observation(harness) -> None:
+    assert harness.run().status == "COMPLETE" and harness.observer.current_proof(KEY)
+    original = harness.state.close_recording_calendar
+    harness.observer._map_source[99999] = KEY                    # a second Canvas course: the gate must close the calendar ...
+
+    def failing(*_a, **_k):
+        raise RuntimeError("database is locked")
+
+    harness.state.close_recording_calendar = failing            # ... and cannot persist it
+    result = harness.run()
+    assert (result.status, result.reason) == ("INELIGIBLE", "GATE_FAILED")
+    del harness.observer._map_source[99999]                      # the mapping is restored
+    harness.state.close_recording_calendar = original
+    assert harness.state.recording_calendar_complete(KEY)        # the old flag is still set ...
+    assert harness.observer.current_proof(KEY) is None           # ... but it cannot be used
+    assert harness.run().status == "COMPLETE"                    # only a new complete observation lifts the denial
+    assert harness.observer.current_proof(KEY)

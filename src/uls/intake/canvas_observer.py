@@ -391,7 +391,15 @@ class CanvasObserver:
         try:
             blocked = self._gate(canvas_course_id)
         except Exception:  # noqa: BLE001 - fixed failure; nothing was read
-            return ObservationResult("INELIGIBLE", "GATE_FAILED", "", canvas_course_id)
+            # The gate may have failed while closing the calendar: the course is unusable until a
+            # complete observation re-verifies it.
+            try:
+                key = self._course_map.get(canvas_course_id)
+            except Exception:  # noqa: BLE001 - an unreadable mapping denies by id below
+                key = None
+            if key:
+                self._denied.add(key)
+            return ObservationResult("INELIGIBLE", "GATE_FAILED", key or "", canvas_course_id)
         if blocked is not None:
             return blocked
         course_key = self._course_map[canvas_course_id]

@@ -933,14 +933,14 @@ class IntakeWorker:
         for course_id in chosen:
             course_key = mapping.get(course_id)
             try:
-                observer.observe_course(course_id)
+                result = observer.observe_course(course_id)
             except Exception:  # noqa: BLE001 - one course never blocks the tick ...
-                # ... but its calendar is not used this process lifetime until an observation succeeds,
+                # ... but its calendar is not used until a complete observation re-verifies it,
                 # because the closing barrier may not have been persisted.
                 if course_key:
                     self._canvas_denied.add(course_key)
             else:
-                if course_key:
+                if course_key and getattr(result, "status", None) == "COMPLETE":
                     self._canvas_denied.discard(course_key)
 
     def _run_once_attested(self, *, sync: bool, process: bool, max_jobs: int) -> dict[str, Any]:
@@ -1843,6 +1843,14 @@ class IntakeWorker:
         configured = getattr(getattr(self.config, "intake", None), "classification", None)
         return bool(getattr(configured, "enabled", False))
 
+    def _canvas_observation_status(self, classification_cfg: Any) -> str:
+        if not getattr(classification_cfg, "canvas_observation_enabled", False):
+            return "DISABLED"
+        observer = self.canvas_observer
+        if observer is None or not self._auto_enabled():
+            return "DISABLED"
+        return "ENABLED" if bool(observer.profile_matches()) else "NO_PROFILE_PROOF"
+
     def _classification_readiness(self) -> dict[str, Any]:
         """Plan §4 O2 readiness block; P-C adds the model counters."""
 
@@ -1871,6 +1879,8 @@ class IntakeWorker:
             "pending_auto_resolve_intents": pending_intents,
             "terminal_scan_cursor": self.state.get_classification_cursor("auto_resolved_scan_cursor") or "",
             "terminal_changes": self.state.terminal_change_counts(),
+            "terminal_changes_open": self.state.terminal_change_counts().get("PENDING", 0),
+            "canvas_observation_status": self._canvas_observation_status(classification_cfg),
             "canvas_observation": (
                 "ENABLED" if getattr(classification_cfg, "canvas_observation_enabled", False)
                 and self.canvas_observer is not None and self._auto_enabled() and bool(self.canvas_observer.profile_matches())
