@@ -192,3 +192,20 @@ def test_the_observation_rotation_survives_a_rebuilt_worker(tmp_path: Path) -> N
         rebuilt.canvas_observer = second
         rebuilt.run_once()
         assert first.calls == [10] and second.calls == [20]
+
+
+def test_an_observation_that_raised_makes_that_calendar_unusable_until_one_succeeds(tmp_path: Path) -> None:
+    with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
+        worker = _enable(system)
+        _complete_calendar(system["state"])
+        cfg = system["config"].intake.classification
+        cfg.canvas_observation_enabled, cfg.max_canvas_courses_per_tick = True, 5
+        cfg.canvas_course_map = {67535: COURSE}
+        observer = _Observer(fail_on={67535})
+        worker.canvas_observer = observer
+        worker.run_once()
+        assert _item(system).calendar_match == "AMBIGUOUS" and _auto_plans(system["state"]) == []
+        observer.fail_on = set()
+        _complete_calendar(system["state"])                    # the calendar is observed again completely
+        worker.run_once()
+        assert _item(system).calendar_match == "MATCHED"

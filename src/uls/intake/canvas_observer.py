@@ -184,11 +184,20 @@ def _next_url(link: str, current: str, origin: str = "https://canvas.invalid") -
     found: list[str] = []
     if not link.isascii():
         raise _Incomplete("MALFORMED_LINK")
+    last_pages: list[int] = []
     for target, params in _link_values(link):
-        if "next" in params.get("rel", "").lower().split():
+        relations = params.get("rel", "").lower().split()
+        if "next" in relations:
             found.append(urljoin(here, target))
+        if "last" in relations:
+            number = _explicit_page_number(urljoin(here, target))
+            if number is not None:
+                last_pages.append(number)
     if len(found) > 1:
         raise _Incomplete("MALFORMED_LINK")
+    if not found and any(number > _page_number(here) for number in last_pages):
+        # rel=last proves later pages exist; without a next link the collection is not complete.
+        raise _Incomplete("PAGE_SEQUENCE")
     if not found:
         if "next" in link.lower():
             # Anything that mentions a next page without being a plain rel=next link is not
@@ -272,6 +281,7 @@ class CanvasObserver:
     ) -> None:
         self._state = state
         self._profile_provider = profile_provider
+        self._denied: set[str] = set()   # calendars whose closing could not be persisted: unusable until it is
         self._principal_provider = principal_provider
         self._verified_principal = verified_principal
         self._origin = origin
@@ -295,6 +305,8 @@ class CanvasObserver:
         and the ACTIVE profile origin are one, and the connection principal is readable.  Any
         missing evidence (no provider, unreadable principal, ambiguous mapping) is no proof."""
 
+        if course_key in self._denied:
+            return None
         try:
             mapping = self._course_map
         except Exception:  # noqa: BLE001 - an unreadable mapping is no proof
@@ -385,7 +397,12 @@ class CanvasObserver:
         course_key = self._course_map[canvas_course_id]
         # Barrier first (before the connection can fail): a crash or error anywhere below
         # keeps the calendar closed.
-        rebound = self._barrier(course_key, canvas_course_id)
+        try:
+            rebound = self._barrier(course_key, canvas_course_id)
+        except Exception:  # noqa: BLE001 - the closing could not be persisted: deny this calendar now
+            self._denied.add(course_key)
+            return ObservationResult("INCOMPLETE", "BARRIER_FAILED", course_key, canvas_course_id)
+        self._denied.discard(course_key)
         try:
             with self._factory() as reader:
                 if reader is None:

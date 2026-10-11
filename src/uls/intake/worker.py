@@ -268,6 +268,7 @@ class IntakeWorker:
         self._classification_profile_mismatch: str | None = None
         # Metadata-only Canvas observer (plan §6.3); None keeps the worker Canvas-free.
         self.canvas_observer: Any | None = None
+        self._canvas_denied: set[str] = set()
         self._canvas_cursor = 0
         # OAuth compositions hold this for a whole public entry so no other
         # entry can refresh the shared credential while provider work runs.
@@ -930,10 +931,17 @@ class IntakeWorker:
         chosen = [course_ids[(start + offset) % len(course_ids)] for offset in range(min(limit, len(course_ids)))]
         self.state.set_classification_cursor("canvas_observation_cursor", str((start + len(chosen)) % len(course_ids)))
         for course_id in chosen:
+            course_key = mapping.get(course_id)
             try:
                 observer.observe_course(course_id)
-            except Exception:  # noqa: BLE001, S112 - one course never blocks the tick; the calendar is already closed
-                continue
+            except Exception:  # noqa: BLE001 - one course never blocks the tick ...
+                # ... but its calendar is not used this process lifetime until an observation succeeds,
+                # because the closing barrier may not have been persisted.
+                if course_key:
+                    self._canvas_denied.add(course_key)
+            else:
+                if course_key:
+                    self._canvas_denied.discard(course_key)
 
     def _run_once_attested(self, *, sync: bool, process: bool, max_jobs: int) -> dict[str, Any]:
         if not self.state.acquire_local_worker_lock():
@@ -1931,7 +1939,8 @@ class IntakeWorker:
         observer = getattr(self, "canvas_observer", None)
         eligible = False
         if (
-            observer is not None
+            course_key not in self._canvas_denied
+            and observer is not None
             and mapping.get(int(course["canvas_course_id"])) == course_key
             and sum(1 for key in mapping.values() if key == course_key) == 1
         ):

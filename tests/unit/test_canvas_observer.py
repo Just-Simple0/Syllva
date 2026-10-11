@@ -774,3 +774,34 @@ def test_consecutive_next_links_read_every_page_once(harness) -> None:
     reader = _Sequenced(120, {1: "2", 2: "3"})
     items = harness.observer._pages(reader, "/api/v1/courses/1/modules?include[]=items&per_page=50", 1e12)
     assert [i["id"] for i in items] == list(range(120)) and len(reader.urls) == 3
+
+
+def test_a_last_link_beyond_the_current_page_without_a_next_link_is_incomplete() -> None:
+    from uls.intake.canvas_observer import _next_url
+
+    here = "/api/v1/courses/1/modules?include[]=items&per_page=50"
+    header = '</api/v1/courses/1/modules?include[]=items&per_page=50&page=3>; rel="last"'
+    with pytest.raises(_Incomplete):
+        _next_url(header, here, ORIGIN)
+    # on the last page itself (or without a page number) there is nothing missing
+    assert _next_url('</api/v1/courses/1/modules?include[]=items&per_page=50&page=1>; rel="last"', here, ORIGIN) is None
+    assert _next_url('</api/v1/courses/1/modules?include[]=items&per_page=50&page=3>; rel="last"',
+                     "/api/v1/courses/1/modules?include[]=items&per_page=50&page=3", ORIGIN) is None
+
+
+def test_a_failed_closing_barrier_makes_the_calendar_unusable_and_the_collection_incomplete(harness) -> None:
+    assert harness.run().status == "COMPLETE"
+    assert harness.observer.current_proof(KEY) is not None
+    original = harness.state.close_recording_calendar
+
+    def failing(*_a, **_k):
+        raise RuntimeError("database is locked")
+
+    harness.state.close_recording_calendar = failing
+    result = harness.run()
+    assert (result.status, result.reason) == ("INCOMPLETE", "BARRIER_FAILED")
+    assert harness.entered == 1                                        # no connection was opened after the failure
+    assert harness.observer.current_proof(KEY) is None                 # denied although the old flag still says complete
+    harness.state.close_recording_calendar = original
+    assert harness.run().status == "COMPLETE"                          # the next successful observation lifts it
+    assert harness.observer.current_proof(KEY) is not None
