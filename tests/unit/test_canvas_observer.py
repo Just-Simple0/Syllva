@@ -858,3 +858,27 @@ def test_an_unreadable_mapping_at_the_gate_leaves_no_calendar_vouched_for(harnes
     harness.observer._map_source = good                           # the provider recovers
     assert harness.observer.current_proof(KEY) is None            # nothing is vouched for without a new complete observation
     assert harness.run().status == "COMPLETE" and harness.observer.current_proof(KEY)
+
+
+def test_a_transient_many_to_one_mapping_does_not_leave_the_old_key_vouched_for(harness) -> None:
+    assert harness.run().status == "COMPLETE" and harness.observer.current_proof(KEY)
+    other = "2026-2_LMS88888-001"
+    harness.observer._map_source.clear()
+    harness.observer._map_source.update({COURSE_ID: other, 99999: other})
+    assert harness.run().reason == "MANY_TO_ONE_MAPPING"
+    harness.observer._map_source.clear()
+    harness.observer._map_source[COURSE_ID] = KEY                 # the mapping is restored ...
+    assert harness.observer.current_proof(KEY) is None            # ... but nothing is vouched for without a new observation
+    assert not harness.state.recording_calendar_complete(KEY)     # and the old key's calendar was closed in the state
+    assert harness.run().status == "COMPLETE" and harness.observer.current_proof(KEY)
+
+
+@pytest.mark.parametrize("module_id", ["../../99999/modules/1", "1/../2", "12a", "١٢"])
+def test_a_module_id_that_is_not_plain_digits_never_becomes_a_path(harness, module_id) -> None:
+    modules = _modules()
+    modules[0]["id"] = module_id
+    modules[0]["items"] = []
+    harness.reader.modules = modules
+    result = harness.run()
+    assert (result.status, result.reason) == ("INCOMPLETE", "MALFORMED_ID")
+    assert not [u for u in harness.reader.urls if "/items" in u]

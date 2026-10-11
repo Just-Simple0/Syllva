@@ -400,10 +400,17 @@ class CanvasObserver:
 
     def observe_course(self, canvas_course_id: int) -> ObservationResult:
         canvas_course_id = int(canvas_course_id)
+        bound: str | None = None
+        try:
+            bound = self._state.recording_calendar_key_for_canvas(canvas_course_id)
+        except Exception:  # noqa: BLE001 - the binding is unreadable: nothing can be vouched for
+            self._fresh.clear()
         try:
             self._fresh.discard(self._course_map.get(canvas_course_id, ""))
         except Exception:  # noqa: BLE001 - the mapping is unreadable: nothing can be vouched for
             self._fresh.clear()
+        if bound:
+            self._fresh.discard(bound)       # the key this Canvas course was bound to before, whatever the map says now
         try:
             blocked = self._gate(canvas_course_id)
         except Exception:  # noqa: BLE001 - fixed failure; nothing was read
@@ -418,6 +425,13 @@ class CanvasObserver:
             else:
                 self._fresh.clear()                      # the key is unknown: no calendar is vouched for
             return ObservationResult("INELIGIBLE", "GATE_FAILED", key or "", canvas_course_id)
+        if blocked is not None and bound and bound != blocked.course_key:
+            # The mapping moved this Canvas course away from the key it was bound to: that key's
+            # calendar is closed too (and denied if the closing cannot be persisted).
+            try:
+                self._close(bound)
+            except Exception:  # noqa: BLE001 - denied until a complete observation
+                self._denied.add(bound)
         if blocked is not None:
             return blocked
         course_key = self._course_map[canvas_course_id]
@@ -503,6 +517,8 @@ class CanvasObserver:
             if not isinstance(module, dict):
                 raise _Incomplete("MALFORMED_MODULE")
             module_id = _identifier(module.get("id"))
+            if not module_id.isascii() or not module_id.isdecimal():
+                raise _Incomplete("MALFORMED_ID")        # it becomes a URL path segment: digits only
             name = _text(module.get("name"))
             items = module.get("items")
             count = module.get("items_count")
