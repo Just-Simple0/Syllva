@@ -626,7 +626,7 @@ def test_mutated_link_headers_never_conclude_the_end_of_a_collection_by_mistake(
             '</api/v1/courses/1/modules?include[]=items&per_page=50&page=9>; rel="last"')
     here = "/api/v1/courses/1/modules?include[]=items&per_page=50"
     rng = random.Random(8288)
-    alphabet = '<>;,="\\ @}{ ()[]nextrel'
+    alphabet = '<>;,="\\ @}{ ()[]nextrel\u212a\u0131\x00\r\n'
     for _ in range(4000):
         chars = list(base)
         for _ in range(rng.randint(1, 3)):
@@ -645,3 +645,24 @@ def test_mutated_link_headers_never_conclude_the_end_of_a_collection_by_mistake(
             continue
         if result is None:
             assert "next" not in header.lower(), header
+
+
+@pytest.mark.parametrize("value", [" ", "", "\t"])
+def test_a_present_but_blank_link_field_is_not_the_end_of_the_collection(value) -> None:
+    from uls.intake.canvas_observer import ConnectionReader
+    from uls.settings.canvas_checks import open_canvas_connection
+
+    first = "/api/v1/courses/1/modules?include[]=items&per_page=50"
+    transport = _Transport({first: (b'[{"id":1}]', {"Link": value})})
+    with open_canvas_connection(ORIGIN, resolver=lambda _h, _p: ["93.184.216.34"],
+                                connector=lambda *_a: transport) as connection:
+        with pytest.raises(_Incomplete):
+            ConnectionReader(connection, "t0k").get_page(first, 1e12)
+
+
+@pytest.mark.parametrize("header", ["</x>; rel=ne\u212at", '</x>; rel="n\u0435xt"', "</x>; rel=next\x00", "</x>;\r\n rel=next"])
+def test_non_ascii_and_control_characters_are_malformed(header) -> None:
+    from uls.intake.canvas_observer import _next_url
+
+    with pytest.raises(_Incomplete):
+        _next_url(header, "/api/v1/courses/1/modules?per_page=50", ORIGIN)

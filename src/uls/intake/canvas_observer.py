@@ -89,7 +89,10 @@ class ConnectionReader:
         if not isinstance(body, list):
             raise _Incomplete("MALFORMED_RESPONSE")
         # Every Link field counts (HTTP allows several, in any letter case).
-        link = ", ".join(value for key, value in response.headers.items() if key.lower() == "link" and value.strip())
+        fields = [value for key, value in response.headers.items() if key.lower() == "link"]
+        if any(not value.strip() for value in fields):
+            raise _Incomplete("MALFORMED_LINK")      # a present but blank Link field is not "no next page"
+        link = ", ".join(fields)
         return body, _next_url(link, url, self._connection.target.origin)
 
 
@@ -99,6 +102,8 @@ def _link_values(header: str) -> list[tuple[str, dict[str, str]]]:
     Commas inside ``<...>`` or quoted strings do not separate values; anything that does not
     parse completely raises, so a pagination header is never half-understood."""
 
+    if not header.isascii() or any(ord(c) < 32 and c != "\t" for c in header):
+        raise _Incomplete("MALFORMED_LINK")          # ASCII only: no case-folding surprises, no control characters
     values: list[tuple[str, dict[str, str]]] = []
     i, n = 0, len(header)
     while i < n:
@@ -174,6 +179,8 @@ def _next_url(link: str, current: str, origin: str = "https://canvas.invalid") -
         return None
     here = urljoin(origin + "/", current)
     found: list[str] = []
+    if not link.isascii():
+        raise _Incomplete("MALFORMED_LINK")
     for target, params in _link_values(link):
         if "next" in params.get("rel", "").lower().split():
             found.append(urljoin(here, target))
