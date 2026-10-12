@@ -1,4 +1,54 @@
-# Syllva 인수인계 — 현재 상태 (2026-10-07)
+# Syllva 인수인계 — 현재 상태 (2026-10-13 갱신)
+
+> **먼저 읽을 것.** 아래 "현재 상태와 로드맵"이 최신이다. 그 뒤의 본문(2026-10-07 기준 헤더부터)은 시간순 이력이며 일부는 역사 기록이다.
+
+## 현재 상태와 로드맵 (intake 분류 v2, 2026-10-13)
+
+권위 문서: `docs/plans/intake-classification-v2.md`(r14 PLAN GO). 슬라이스 계획: `intake-classification-pb-slices.md`, 행별 불변식 표: `intake-classification-pb2b|pb3|pc2|pd-invariants.md`.
+
+| 단계 | 상태 | PR |
+|---|---|---|
+| P-A 체계·데이터 모델·Notion 프로필 | 머지 | #15 |
+| P-B1 S0/S1 규칙 분류·S3 제안 | 머지 | #16 |
+| P-B2a 단계 A·AUTO_PENDING·Draft 자동 종료 | 머지 | #17 |
+| P-B2b 단계 B·AUTO 실행·opaque 등록 | 머지 | #18 |
+| P-B3 Canvas 메타 관측·V2 요청 generation·AutoResolved 스캔·AUTO→HUMAN 인계 | 머지 | #19 |
+| Canvas 연결 구성(Settings 프로필·키체인 토큰 → 관측기) | 머지 | #20 |
+| P-C1 TypeSafe(Jev) Choice 어댑터·`TYPESAFE_API_KEY` | 머지 | #21 |
+| P-C2 S2 연동(최소화·캐시·틱 예산·DEFERRED·readiness) | 머지 | #22 |
+| P-D 결정적 S4 태그·검색 fail-closed 필터·Behavior Contract v3 | 머지 | #23 (main `af3a905`) |
+| **P-E 공지·첨부** (LMS canonical 행 읽기, 첨부 intake 연결; `scripts/knu_lms_sync.py` 소스 첨부 리뷰 필요, 공지 행 create/update 0건) | **다음** | |
+| **P-F School 전체 흐름** (전사문 8개 + Canvas 자료 + 공지 end-to-end, 분류 지표) | 남음 | |
+
+사용자 목표 해석: P-F까지가 "수집 → 자동 분류 → 태그 → 검색 → 공지" 데이터 흐름 완성. 이후 MCP로 연결해 AI 클라이언트에 요청해 복습/문제를 받는다. **복습 스케줄·모의고사 세트·채점은 그 다음 단계이며 아직 어떤 계획 문서에도 없다**(사용자 확인 2026-10-13).
+
+### 사용자 쪽 할 일 (미완)
+1. `~/.zshrc` 10~11행의 `GOOGLE_*_CREDENTIALS_FILE` export 제거.
+2. config.yaml: `intake.classification.enabled: true`, `schema_profile: legacy5-cls`, `credentials: {TYPESAFE_API_KEY: {source: keyring}}`. Canvas 관측을 쓰려면 `canvas_observation_enabled`, `canvas_origin`, `canvas_principal`(Settings user_id), `canvas_course_map` 도.
+3. 대화에 노출된 옛 TypeSafe 키는 폐기(새 키는 키체인 `Syllva LLM`/`typesafe_api_key`에 등록됨, live 합성 호출 성공 확인).
+4. `retrieval.v2_exposure_gate`는 아직 꺼짐. P-D 기준 켤 수 있으나 켜기 전 운영 데이터로 점검.
+
+### 알려진 한계·후속 과제 (전부 handoff 본문 각 절에도 있음)
+- 라벨 없는 인명·규칙으로 판별 불가한 개인정보/비밀 형태는 S2 최소화로 못 가림(P-C2). 호출 조건이 좁고 기본 꺼짐.
+- 강한 어휘 없이 쓰인 과제 지시는 탐지 불가(P-D); S4 Jev 정제는 후속. 청크=페이지/타임스탬프 창.
+- P-C 후속: 발췌 전송 중단 옵션, 두 학기 DEFERRED 재개 통합 테스트, readiness 카운터 시점.
+- P-B 후속: 다대일 Canvas 매핑 집계(P-A 스키마 변경), 포인터 쓰기 출처의 작업 단위 검증, readiness의 토큰 가용성, 중단된 AUTO를 HUMAN이 이어받을 때 오래된 `last_error` 문구.
+- P-D 후속: `CapabilityManager.authorize`/독립 helper에 정책 검증기 주입, 빈 청크만 있는 비-LAB 문서의 COMPLETE, 신호 JSON 스키마 제한(enrichment 생성 쪽).
+- P-C1(어댑터)과 Canvas 연결(#20)은 구현 리뷰 없이 머지했다.
+
+### 작업 방식 (사용자 지시, 유지)
+- 의미 있는 변경은 커밋·PR·머지까지 진행(메모리 `commit-policy`). 응답은 한국어. 서브에이전트 미사용. CLAUDE.md의 파이프라인 역할 표기는 무시.
+- 슬라이스마다: 불변식 표 → (큰 슬라이스는) 계획 리뷰 → 구현 → 전체 테스트(기존 실패 1건 `test_credential_resolver.py::test_keyring_dependency_missing_is_configuration_error`, ruff 207, mypy 134 기준선) → insane-review(GPT-6 Extra High, `--require-model GPT-6`, 120k 토큰) → PR → 머지. 프롬프트에 REQUIRED/HARDENING 기준을 박는다. 같은 컴포넌트에서 3건 이상 지적이 나오면 모양 하나씩 막지 말고 구조를 바꾸고, 그래도 REQUIRED가 남으면 사용자에게 머지/추가 라운드를 묻는다(메모리 `review-severity-discipline`).
+- Windows 매트릭스는 알려진 모듈(credential/settings/doctor/CLI)에서만 실패 → PR 코멘트에 근거를 남기고 머지.
+- 금지: `RESEARCH/` 접근·추가, 실제 비밀 값 출력/기록, 테스트에서 실제 provider 호출, 체커 핀·전역 설정 변경(요청 없이).
+
+### 리뷰 도구 (로컬, git 제외 `.insane-review/`)
+- 스테이징·전송 스크립트 사본: `.insane-review/intake-classification-20261009/tools/` (`stage_generic.py <폴더명> <프롬프트파일> <파일목록>`, `pc2-send.sh` 템플릿). 폴더명은 `native-final-*` 또는 `native-plan-icv2*` 이어야 `run_prepared.py`가 받는다. 파일목록은 `정식경로=>패킷경로` 줄 단위.
+- 흐름: `stage_generic.py` → `run_prepared.py <폴더> pack`(토큰 확인) → `send` 루프(슬롯 1·2) → 응답 `response_*.md`. 회수 실패 시 `insane-review-slot run --slot 2 --wait 1 -- --harvest <manifest>` (재전송 금지).
+- 각 라운드 처분 JSON은 `.insane-review/intake-classification-20261009/*disposition*.json`.
+
+
+## (이력) Syllva 인수인계 — 현재 상태 (2026-10-07)
 
 기준일: 2026-10-07. 현재 결과는 `a3e32472142a09b0bb5a7adda885ffcbd9e9c85d` (`codex/gui23-pr13-followups`)로 로컬 커밋 완료했다. 최신 인계와 재개 기준은 이 `handoff.md`가 직접 제공한다. 별도 파일 동기화는 하지 않는다. 기존 School 전체 흐름 통과 전 커밋 보류는 이번 명시 지시의 현재 로컬 커밋 범위에 한해 해제한다. push·PR·공개 배포·실제 provider 작업은 승인하지 않았다.
 
