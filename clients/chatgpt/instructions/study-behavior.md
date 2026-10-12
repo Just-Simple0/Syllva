@@ -1,6 +1,6 @@
 ---
-behavior_contract_version: 2
-behavior_contract_hash: sha256:987d09ec152f91e368e070c5ccbe961602a18da8b6113afd968ac965406aae1a
+behavior_contract_version: 3
+behavior_contract_hash: sha256:a2d19ec6f7eb22db3121651ea188f64805a9ec32ac7f8d681d40da1c46bec51b
 ---
 
 # ULS Study Behavior — ChatGPT projection
@@ -51,3 +51,11 @@ Resolve non-exact targets with `uls.resolve_entity`; confirm ambiguous choices w
 - `RESOLUTION_EXPIRED` → re-resolve the entity.
 - `CONTEXT_EXPIRED` → recreate the parent context, then retry the chunk once.
 - `LOCATOR_STALE` → recreate the parent context; never reuse the old locator directly.
+
+## Assignment instruction regions
+
+Every evidence item carries `usage_policy` and `assignment_decision`. Use an item with
+`usage_policy = NO_ANSWER_GENERATION` (assignment instructions, official Activity instructions, or
+unresolved/stale assignment status) only to confirm that a requirement exists, where it comes from,
+and to orient or summarize it. Never use it to write answers, code or submissions. A requirement
+that is absent from a default context is not proof that it does not exist.

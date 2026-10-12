@@ -33,6 +33,7 @@ from uls.domain.models import EvidenceItem, PageLocator, TimeLocator, parse_loca
 from uls.domain.source_ref import SourceFingerprint, SourceRef
 from uls.enrichment.schemas import coerce_enrichment
 
+from . import tags as _tags
 from ._compat import (
     coerce_fingerprint,
     field,
@@ -75,6 +76,7 @@ class _SessionEvidenceCollection:
     user_context: tuple[Mapping[str, Any], ...]
     professor_signals: tuple[Mapping[str, Any], ...]
     transcript_loaded: bool
+    transcript_decisions: tuple[Any, ...] = ()
 
 
 @dataclass
@@ -84,6 +86,7 @@ class _MaterialEvidenceCollection:
     evidence: list[EvidenceItem]
     bindings: list[CapabilityBinding]
     warnings: list[Any]
+    withheld: bool = False
 
 
 class RetrievalEngine:
@@ -143,11 +146,13 @@ class RetrievalEngine:
 
     def search_concept(self, course_key: str, concept: str, *,
                        include_textbook: bool = False,
-                       caller_scope: str | None = None) -> ContextPackage:
+                       caller_scope: str | None = None,
+                       include_assignment: bool = False) -> ContextPackage:
         from .additional import search_concept
 
         return search_concept(self, course_key, concept,
-                              include_textbook=include_textbook, caller_scope=caller_scope)
+                              include_textbook=include_textbook, caller_scope=caller_scope,
+                              include_assignment=include_assignment)
 
     def verify_claim(self, course_key: str, claim: str, *, entity_hint: str | None = None,
                      caller_scope: str | None = None) -> ContextPackage:
@@ -175,8 +180,12 @@ class RetrievalEngine:
         material_id: str,
         *,
         query: str | None = None,
+        include_assignment: bool = False,
     ) -> _MaterialEvidenceCollection:
         """Collect one material's raw candidates without budgeting or issuing."""
+
+        if type(include_assignment) is not bool:
+            raise PolicyDeniedError("include_assignment must be a boolean")
 
         material = self._lookup_material(material_id)
         if material is None:
@@ -219,13 +228,21 @@ class RetrievalEngine:
                 "material derivative has no validated page markers",
                 details={"material_id": material_id},
             )
+        doc_kind = self._doc_kind_of(material)
+        decided, withheld = self._apply_tag_policy(
+            material_id, chunks, doc_kind, material_type=material_type, is_material=True,
+            include_assignment=include_assignment, warnings=warnings)
+        if withheld:
+            return _MaterialEvidenceCollection(material, course, [], [], warnings, withheld=True)
         if query:
             from .chunking import select_chunks
 
-            chunks = select_chunks(chunks, query)
+            kept = select_chunks([chunk for chunk, _ in decided], query)
+            by_id = {id(chunk): decision for chunk, decision in decided}
+            decided = [(chunk, by_id[id(chunk)]) for chunk in kept]
         evidence: list[EvidenceItem] = []
         bindings: list[CapabilityBinding] = []
-        for chunk in chunks:
+        for chunk, decision in decided:
             item = self._evidence_from_chunk(
                 chunk,
                 source_class=source_class,
@@ -233,6 +250,7 @@ class RetrievalEngine:
                 front_matter=front,
                 source_ref=source_ref,
             )
+            self._annotate_item(item, decision.assignment, doc_kind)
             evidence.append(item)
             bindings.append(
                 CapabilityBinding(
@@ -246,6 +264,8 @@ class RetrievalEngine:
                     material_type=material_type,
                     course_relation_page_id=course.relation_page_id,
                     course_key=course.course_key,
+                    assignment_opt_in=include_assignment,
+                    doc_kind=doc_kind,
                 )
             )
         return _MaterialEvidenceCollection(material, course, evidence, bindings, warnings)
@@ -257,6 +277,7 @@ class RetrievalEngine:
         query: str | None = None,
         include_user_annotations: bool = False,
         caller_scope: str | None = None,
+        include_assignment: bool = False,
     ) -> ContextPackage:
         """Return a bounded material context for M0/read-only callers.
 
@@ -265,7 +286,13 @@ class RetrievalEngine:
         contract without exposing arbitrary Drive reads.
         """
 
-        collection = self._collect_material_evidence(material_id, query=query)
+        collection = self._collect_material_evidence(
+            material_id, query=query, include_assignment=include_assignment)
+        if collection.withheld:
+            raise PolicyDeniedError(
+                "assignment instruction material is withheld by default",
+                details={"material_id": material_id},
+            )
         material = collection.material
         warnings = collection.warnings
         sources, bindings = self._retain_current_evidence(
@@ -309,11 +336,14 @@ class RetrievalEngine:
         *,
         query: str | None = None,
         include_provisional: bool = False,
+        include_assignment: bool = False,
     ) -> _SessionEvidenceCollection:
         """Collect one Session's raw candidates without budgeting or issuing."""
 
         if type(include_provisional) is not bool:
             raise PolicyDeniedError("include_provisional must be a boolean")
+        if type(include_assignment) is not bool:
+            raise PolicyDeniedError("include_assignment must be a boolean")
         config_allows_provisional = self._config_bool(
             "allow_provisional_material_usage", True
         )
@@ -332,6 +362,7 @@ class RetrievalEngine:
         transcript_derivative: Any | None = None
         transcript_fingerprint: SourceFingerprint | None = None
         transcript_loaded = False
+        transcript_decisions: tuple[Any, ...] = ()
 
         transcript_source = self._resolve_source_ref(
             session,
@@ -358,6 +389,13 @@ class RetrievalEngine:
                 if derivative_status == DerivativeStatus.PARTIAL.value:
                     warnings.append(_warning("SOURCE_PARTIAL", "transcript derivative is partial"))
                 chunks = timestamp_chunks(transcript_derivative, entity_id=canonical_id)
+                tagged, _withheld = self._apply_tag_policy(
+                    canonical_id, chunks, "TRANSCRIPT", material_type=None, is_material=False,
+                    include_assignment=include_assignment, warnings=warnings)
+                transcript_decisions = tuple(
+                    _tags.assess_document(canonical_id, chunks, "TRANSCRIPT").decisions)
+                by_id = {id(chunk): decision for chunk, decision in tagged}
+                chunks = [chunk for chunk, _ in tagged]
                 if query:
                     from .chunking import select_chunks
                     from .resolver import extract_session_number, strip_intent_keywords
@@ -373,6 +411,7 @@ class RetrievalEngine:
                         front_matter=transcript_front,
                         source_ref=transcript_source,
                     )
+                    self._annotate_item(item, by_id[id(chunk)].assignment, "TRANSCRIPT")
                     evidence.append(item)
                     bindings.append(
                         CapabilityBinding(
@@ -386,6 +425,8 @@ class RetrievalEngine:
                             relation_required=False,
                             course_relation_page_id=session_course.relation_page_id,
                             course_key=session_course.course_key,
+                            assignment_opt_in=include_assignment,
+                            doc_kind="TRANSCRIPT",
                         )
                     )
         except SourcePartialError as exc:
@@ -481,6 +522,14 @@ class RetrievalEngine:
                         )
                     )
                     continue
+                doc_kind = self._doc_kind_of(material)
+                tagged, withheld = self._apply_tag_policy(
+                    usage_scope.material_id, chunks, doc_kind, material_type=material_type, is_material=True,
+                    include_assignment=include_assignment, warnings=warnings)
+                if withheld:
+                    continue
+                by_id = {id(chunk): decision for chunk, decision in tagged}
+                chunks = [chunk for chunk, _ in tagged]
                 if query:
                     from .chunking import select_chunks
 
@@ -494,6 +543,7 @@ class RetrievalEngine:
                         source_ref=material_source,
                         provisional=usage_scope.provisional,
                     )
+                    self._annotate_item(item, by_id[id(chunk)].assignment, doc_kind)
                     evidence.append(item)
                     bindings.append(
                         CapabilityBinding(
@@ -513,6 +563,8 @@ class RetrievalEngine:
                             course_relation_page_id=session_course.relation_page_id,
                             course_key=session_course.course_key,
                             usage_range=usage_scope.range,
+                            assignment_opt_in=include_assignment,
+                            doc_kind=doc_kind,
                         )
                     )
             except SourcePartialError as exc:
@@ -536,6 +588,7 @@ class RetrievalEngine:
             user_context,
             professor_signals,
             transcript_loaded,
+            transcript_decisions,
         )
 
     def get_exam_context(
@@ -544,6 +597,7 @@ class RetrievalEngine:
         *,
         query: str | None = None,
         caller_scope: str | None = None,
+        include_assignment: bool = False,
     ) -> ContextPackage:
         """Return verified evidence bounded by the current Exam scope."""
 
@@ -565,6 +619,7 @@ class RetrievalEngine:
                     session_id,
                     query=query,
                     include_provisional=False,
+                    include_assignment=include_assignment,
                 )
                 if collection.course != exam.course:
                     raise SourceUnavailableError(
@@ -666,6 +721,7 @@ class RetrievalEngine:
                         ),
                         constraint_metadata=constraint,
                     )
+                    self._annotate_item(item, _tags.YES, None, source_class="official_activity")
                     evidence.append(item)
                     bindings.append(
                         CapabilityBinding(
@@ -701,6 +757,7 @@ class RetrievalEngine:
                     session_id,
                     query=query,
                     include_provisional=False,
+                    include_assignment=True,
                 )
                 if session_collection.course != activity.course:
                     raise SourceUnavailableError(
@@ -730,7 +787,8 @@ class RetrievalEngine:
                 )
         for material_id in parent_materials or ():
             try:
-                material_collection = self._collect_material_evidence(material_id, query=query)
+                material_collection = self._collect_material_evidence(
+                    material_id, query=query, include_assignment=True)
                 if material_collection.course != activity.course:
                     raise SourceUnavailableError(
                         "related Material does not share the exact Activity Course identity"
@@ -792,7 +850,7 @@ class RetrievalEngine:
             official_evidence_set=returned_locators,
         )
         final_evidence = tuple(
-            replace(item, constraint_metadata=constraint)
+            _replace_keeping_extras(item, constraint_metadata=constraint)
             if item.source_class == "official_activity" else item
             for item in final_evidence
         )
@@ -982,6 +1040,7 @@ class RetrievalEngine:
         query: str | None = None,
         include_provisional: bool = False,
         caller_scope: str | None = None,
+        include_assignment: bool = False,
     ) -> ContextPackage:
         """Return bounded context for an already-resolved Session ID."""
 
@@ -989,8 +1048,12 @@ class RetrievalEngine:
             session_id,
             query=query,
             include_provisional=include_provisional,
+            include_assignment=include_assignment,
         )
         warnings = collection.warnings
+        if not include_assignment:
+            collection.professor_signals = self._filter_signals(
+                collection.professor_signals, collection.transcript_decisions, warnings)
         evidence, bindings = self._retain_current_evidence(
             collection.evidence,
             collection.bindings,
@@ -1191,6 +1254,40 @@ class RetrievalEngine:
                 "locator was authorized but no current chunk contains it",
                 details={"locator": str(parsed_locator)},
             )
+        range_decision = _tags.NO
+        current_kind = binding.doc_kind
+        current_type = binding.material_type
+        if binding.source_class == "official_activity":
+            range_decision = _tags.YES
+        else:
+            if binding.material_id is not None:
+                # The document Kind and Type are read again NOW: a Kind (or Type) changed after
+                # issuance applies to every capability already handed out (D4, D6).
+                try:
+                    current_material = self._lookup_material(binding.material_id)
+                    if current_material is None:
+                        raise LookupError("material is gone")
+                    current_kind = self._doc_kind_of(current_material)
+                    current_type = self._material_type(current_material)
+                except Exception as exc:
+                    raise LocatorNotAllowedError(
+                        "current Material authorization is unavailable",
+                        details={"entity_id": binding.entity_id},
+                    ) from exc
+            tag_state = _tags.assess_document(binding.entity_id, chunks, current_kind)
+            overlap = _tags.overlapping(tag_state.decisions, parsed_locator)
+            range_decision = _tags.aggregate_decision(overlap)
+            if not binding.assignment_opt_in and (
+                range_decision != _tags.NO
+                or _tags.document_blocked(
+                    current_kind, current_type, is_material=binding.material_id is not None)
+            ):
+                # The capability is re-evaluated against the CURRENT bytes: a range that is (now)
+                # an assignment section, undecided or unverifiable is never served (D5, D6).
+                raise LocatorNotAllowedError(
+                    "the authorized range is withheld from assignment-excluding results",
+                    details={"locator": str(parsed_locator)},
+                )
         if not chunk.content.strip():
             raise SourceUnavailableError(
                 "authorized page has no source text",
@@ -1218,7 +1315,90 @@ class RetrievalEngine:
             requested_locator=parsed_locator,
             provisional=binding.provisional,
         )
+        self._annotate_item(item, range_decision, current_kind, source_class=binding.source_class)
         return item
+
+    # ------------------------------------------------------------------
+    # P-D: section tags (S4) and the assignment gate (plan §7)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _doc_kind_of(material: Any) -> str | None:
+        value = strict_text(raw_field(material, "AI Kind", "ai_kind", default=None), default=None)
+        return value.strip().upper() if isinstance(value, str) and value.strip() else None
+
+    def _apply_tag_policy(
+        self,
+        doc_id: str,
+        chunks: list[Any],
+        doc_kind: str | None,
+        *,
+        material_type: str | None,
+        is_material: bool,
+        include_assignment: bool,
+        warnings: list[Any],
+    ) -> tuple[list[tuple[Any, Any]], bool]:
+        """(chunk, decision) pairs that may be served, and whether the whole document is withheld.
+
+        Default (assignment-excluding) mode serves only chunks decided NO and only from a document
+        whose tags are COMPLETE and that is not an assignment document; opt-in serves everything
+        with its decision attached."""
+
+        tags = _tags.assess_document(doc_id, chunks, doc_kind)
+        pairs = list(zip(chunks, tags.decisions, strict=True))
+        if include_assignment or not pairs:
+            return pairs, False
+        blocked = _tags.document_blocked(doc_kind, material_type, is_material=is_material)
+        if blocked or not tags.complete:
+            warnings.append(_warning("ASSIGNMENT_WITHHELD", f"{doc_id} is withheld from assignment-excluding results"))
+            return [], True
+        kept = [
+            (chunk, decision) for chunk, decision in pairs
+            if _tags.aggregate_decision(_tags.overlapping(tags.decisions, decision.locator)) == _tags.NO
+        ]
+        if len(kept) != len(pairs):
+            warnings.append(_warning("ASSIGNMENT_WITHHELD", f"assignment sections of {doc_id} are withheld"))
+        if not kept:
+            return [], True
+        return kept, False
+
+    @staticmethod
+    def _annotate_item(
+        item: EvidenceItem, decision: str, doc_kind: str | None, *, source_class: str | None = None,
+    ) -> None:
+        """Additive, non-authorizing policy metadata (same pattern as ``provisional``)."""
+
+        object.__setattr__(item, "assignment_decision", decision)
+        object.__setattr__(
+            item, "usage_policy",
+            _tags.usage_policy_for(decision, doc_kind=doc_kind, source_class=source_class or item.source_class))
+
+    def _filter_signals(
+        self, signals: tuple[Mapping[str, Any], ...], decisions: tuple[Any, ...], warnings: list[Any],
+    ) -> tuple[Mapping[str, Any], ...]:
+        """Drop enrichment signals that could restate an assignment instruction (D10)."""
+
+        kept: list[Mapping[str, Any]] = []
+        withheld = False
+        for signal in signals:
+            drop = _tags.signal_has_assignment_text(signal)
+            if not drop:
+                for text in _tags.signal_locators(signal):
+                    try:
+                        locator = parse_locator(text)
+                    except Exception:  # noqa: BLE001 - an unreadable locator proves nothing
+                        drop = True
+                        break
+                    overlap = _tags.overlapping(decisions, locator)
+                    if not overlap or any(item.assignment != _tags.NO for item in overlap):
+                        drop = True
+                        break
+            if drop:
+                withheld = True
+            else:
+                kept.append(signal)
+        if withheld:
+            warnings.append(_warning(_tags.SIGNAL_WITHHELD_CODE, "enrichment signals tied to assignment text are withheld"))
+        return tuple(kept)
 
     def _get_session(self, session_id: str) -> Any | None:
         method = getattr(self.notion_reader, "get_session", None)
@@ -2261,6 +2441,16 @@ def _contains(requested: Any, allowed: Any) -> bool:
     from uls.domain.models import is_contained
 
     return is_contained(requested, allowed)
+
+
+def _replace_keeping_extras(item: EvidenceItem, **fields: Any) -> EvidenceItem:
+    """``dataclasses.replace`` that keeps the additive metadata (provisional, usage policy, ...)."""
+
+    extras = {key: value for key, value in vars(item).items() if key not in EvidenceItem.__dataclass_fields__}
+    copy = replace(item, **fields)
+    for key, value in extras.items():
+        object.__setattr__(copy, key, value)
+    return copy
 
 
 def _warning(code: str, message: str) -> dict[str, str]:

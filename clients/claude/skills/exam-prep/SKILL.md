@@ -1,8 +1,8 @@
 ---
 name: exam-prep
 description: Prepare for an exam strictly within confirmed scope; label provisional scope.
-behavior_contract_version: 2
-behavior_contract_hash: sha256:987d09ec152f91e368e070c5ccbe961602a18da8b6113afd968ac965406aae1a
+behavior_contract_version: 3
+behavior_contract_hash: sha256:a2d19ec6f7eb22db3121651ea188f64805a9ec32ac7f8d681d40da1c46bec51b
 ---
 
 # Exam prep (EXAM intent)
@@ -35,3 +35,11 @@ The user asks about exam scope or practice — e.g. "중간고사 확정 범위�
 - If an Activity context is supplied alongside exam work and its official
   instructions are missing, partial, or truncated, disclose incomplete coverage and
   never claim to have the complete instruction set or infer omitted requirements.
+
+## Assignment instruction regions
+
+Every evidence item carries `usage_policy` and `assignment_decision`. Use an item with
+`usage_policy = NO_ANSWER_GENERATION` (assignment instructions, official Activity instructions, or
+unresolved/stale assignment status) only to confirm that a requirement exists, where it comes from,
+and to orient or summarize it. Never use it to write answers, code or submissions. A requirement
+that is absent from a default context is not proof that it does not exist.

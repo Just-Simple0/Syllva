@@ -1,8 +1,8 @@
 ---
 name: verify-source
 description: Verify a claim against normalized/original source evidence, not AI enrichment.
-behavior_contract_version: 2
-behavior_contract_hash: sha256:987d09ec152f91e368e070c5ccbe961602a18da8b6113afd968ac965406aae1a
+behavior_contract_version: 3
+behavior_contract_hash: sha256:a2d19ec6f7eb22db3121651ea188f64805a9ec32ac7f8d681d40da1c46bec51b
 ---
 
 # Verify a claim (VERIFY intent)
@@ -34,3 +34,11 @@ The user asks whether something is actually true — e.g. "교수님이 정말 �
 - If official Activity instructions are missing, partial, or truncated, disclose
   incomplete coverage and never claim to have the complete instruction set or infer
   omitted requirements, including after serialization.
+
+## Assignment instruction regions
+
+Every evidence item carries `usage_policy` and `assignment_decision`. Use an item with
+`usage_policy = NO_ANSWER_GENERATION` (assignment instructions, official Activity instructions, or
+unresolved/stale assignment status) only to confirm that a requirement exists, where it comes from,
+and to orient or summarize it. Never use it to write answers, code or submissions. A requirement
+that is absent from a default context is not proof that it does not exist.

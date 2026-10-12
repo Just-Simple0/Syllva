@@ -130,8 +130,14 @@ class CapabilityBinding:
     activity_instructions_source_url: str | None = None
     activity_normalized_instructions_url: str | None = None
     activity_binding_identity: tuple[str, str] | None = None
+    # P-D: the immutable assignment policy mode this capability was issued under, and the
+    # document Kind it was issued for.  A binding without them is default-mode (fail closed).
+    assignment_opt_in: bool = False
+    doc_kind: str | None = None
 
     def __post_init__(self) -> None:
+        if type(self.assignment_opt_in) is not bool:
+            raise ValueError("assignment_opt_in must be a boolean")
         for name in (
             "parent_included_session_ids",
             "parent_related_session_ids",
@@ -187,6 +193,8 @@ def evidence_item_to_dict(item: EvidenceItem) -> dict[str, Any]:
         "provenance": _value(item.provenance),
         "freshness": _value(item.freshness),
         **({"provisional": True} if getattr(item, "provisional", False) else {}),
+        "usage_policy": getattr(item, "usage_policy", "NORMAL"),
+        "assignment_decision": getattr(item, "assignment_decision", "NO"),
     }
     constraint = getattr(item, "constraint_metadata", None)
     if constraint is not None:

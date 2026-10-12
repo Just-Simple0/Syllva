@@ -76,7 +76,8 @@ def resolve_academic_entity(engine: Any, query: str, course_hint: Any, entity_ty
 
 
 def search_concept(engine: Any, course_key: str, concept: str, *,
-                   include_textbook: bool = False, caller_scope: str | None = None) -> ContextPackage:
+                   include_textbook: bool = False, caller_scope: str | None = None,
+                   include_assignment: bool = False) -> ContextPackage:
     if not concept.strip() or type(include_textbook) is not bool:
         raise ValueError('concept and boolean include_textbook are required')
     course_record, course = _course(engine, course_key)
@@ -108,9 +109,11 @@ def search_concept(engine: Any, course_key: str, concept: str, *,
     for _, kind, entity_id in candidates[:limit]:
         try:
             if kind == 'session':
-                collection = engine._collect_session_evidence(entity_id, query=concept, include_provisional=False)
+                collection = engine._collect_session_evidence(
+                    entity_id, query=concept, include_provisional=False, include_assignment=include_assignment)
             else:
-                collection = engine._collect_material_evidence(entity_id, query=concept)
+                collection = engine._collect_material_evidence(
+                    entity_id, query=concept, include_assignment=include_assignment)
         except (EntityNotFoundError, SourceUnavailableError):
             warnings.append({'code': 'SOURCE_UNAVAILABLE', 'message': 'A candidate source is unavailable.'})
             continue
@@ -159,12 +162,15 @@ def verify_claim(engine: Any, course_key: str, claim: str, *, entity_hint: str |
                 actual = record.course if letter in {'E', 'A'} else engine._course_for_record(record, entity_id)
                 if actual != course:
                     raise EntityNotFoundError('Verification entity is outside the Course')
-                package = method(entity_id, query=claim, caller_scope=caller_scope)
+                # VERIFY confirms existence and provenance, so assignment text may be returned - always
+                # carrying NO_ANSWER_GENERATION - but it is never an answer-generation source (D9).
+                extra = {'include_assignment': True} if letter in {'S', 'M', 'E'} else {}
+                package = method(entity_id, query=claim, caller_scope=caller_scope, **extra)
                 break
         else:
             raise EntityNotFoundError('Invalid verification entity')
     else:
-        package = search_concept(engine, course_key, claim, caller_scope=caller_scope)
+        package = search_concept(engine, course_key, claim, caller_scope=caller_scope, include_assignment=True)
     allowed = {'professor_material', 'professor_transcript', 'official_activity', 'official_exam'}
     sources = tuple(item for item in package.sources if item.source_class in allowed)
     original = engine.capabilities.bindings_for(package.context_id) or ()

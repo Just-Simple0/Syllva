@@ -1,5 +1,5 @@
 ---
-behavior_contract_version: 2
+behavior_contract_version: 3
 ---
 
 # ULS Study Behavior Contract
@@ -126,3 +126,18 @@ LOCATOR_STALE
 → let the Retrieval Engine re-resolve against the current source fingerprint
 → never reuse the old locator directly
 ```
+
+## 13. Assignment instruction regions (global rule)
+
+Every evidence item carries `usage_policy` (`NORMAL` or `NO_ANSWER_GENERATION`) and
+`assignment_decision` (`YES`, `NO`, `UNRESOLVED` or `STALE`). This rule applies to every intent.
+
+- Use an item whose `usage_policy` is `NO_ANSWER_GENERATION` (assignment instructions, official
+  Activity instructions, or any region whose assignment status is unresolved or stale) only to
+  confirm that a requirement exists, where it comes from, and to orient or summarize it. Never use
+  it to write answers, code or submissions.
+- Default Session, Material, Exam and concept contexts leave assignment regions out. A missing
+  region is not evidence that the course has no such requirement; do not claim to know the full
+  assignment requirements from them. Official instructions come from the Activity context.
+- Verification (VERIFY) may return such an item to confirm existence and provenance only.
+
