@@ -22,7 +22,7 @@ def test_minimize_replaces_identifiers() -> None:
     out = s2.minimize(text)
     for leaked in ("a.b@", "010-1234", "20231234", "x.example", "홍길동"):
         assert leaked not in out
-    assert "<email>" in out and "<phone>" in out and "<url>" in out and "<redacted>" in out
+    assert "<email>" in out and "<url>" in out and "<redacted>" in out and "<id>" in out
 
 
 def test_minimized_payload_passes_the_final_check() -> None:
@@ -32,9 +32,8 @@ def test_minimized_payload_passes_the_final_check() -> None:
 
 
 @pytest.mark.parametrize("excerpt", ["1 2 3 4 5 6 7 8 9 0", "9 8 7 - 6 5 4 - 3 2 1"])
-def test_separator_evaded_digit_runs_are_pii_uncertain(excerpt) -> None:
-    with pytest.raises(s2.PiiUncertain):
-        _payload(excerpt=excerpt)
+def test_separator_evaded_digit_runs_are_removed(excerpt) -> None:
+    assert not any(ch.isdigit() for ch in _payload(excerpt=excerpt).excerpt)
 
 
 def test_excerpt_is_cut_at_the_limit_and_snapshot_hashes_the_sent_bytes() -> None:
@@ -86,3 +85,77 @@ def test_cache_key_depends_on_content_not_on_the_surrogate_hash() -> None:
     assert one == same and one != other
     assert one != s2.cache_key(payload=_payload(excerpt="alpha"), **{**base, "byte_sha256": "b" * 64})
     assert one != s2.cache_key(payload=_payload(excerpt="alpha"), **{**base, "source_version": 2})
+
+
+@pytest.mark.parametrize("text,leaked", [
+    ("Name: John Smith", "Smith"), ("이름: 홍 길동", "길동"), ("성 명 : 김 철 수\nnext line", "철"),
+    ("Student ID: 2023-1234", "2023"), ("ID: 2023-1234", "2023-1234"), ("학번 2023 1234", "1234"),
+    ("no. 2023.1234.56", "1234"),
+])
+def test_labelled_and_separated_identifiers_are_removed_whole(text, leaked) -> None:
+    assert leaked not in s2.minimize(text)
+    payload = _payload(excerpt=text, title="Week1.pdf")
+    assert leaked not in str(payload.state["excerpt"])
+
+
+def test_dates_survive_minimization() -> None:
+    assert s2.minimize("Lecture 2026-10-12 and 2026.09.17") == "Lecture 2026-10-12 and 2026.09.17"
+
+
+def test_a_leftover_identifier_after_minimization_is_pii_uncertain(monkeypatch) -> None:
+    monkeypatch.setattr(s2, "minimize", lambda text: text)
+    for leaked in ("ID 2023-1234", "Name: Jane Roe", "see https://x.example/a", "lms.example.ac.kr/a?t=1", "a@b.co"):
+        with pytest.raises(s2.PiiUncertain):
+            _payload(excerpt=leaked)
+
+
+@pytest.mark.parametrize("text,leaked", [
+    ("Name:<redacted> Jane Doe", "Jane"), ("이름:<redacted> 홍길동", "홍길동"),
+    ("2023\u20131234", "2023"), ("2023_1234", "1234"), ("010\u2013" + "1234\u20135678", "5678"),
+    ("0 1 0\u200b-1234-5678", "5678"), ("\uff12\uff10\uff12\uff13-\uff11\uff12\uff13\uff14", "1234"),
+    ("lms.example.ac.kr/courses/1234?access_token=MySecret", "MySecret"),
+    ("//cdn.example.org/a?token=XYZ", "XYZ"), ("example.com:8080/x", "8080"),
+])
+def test_bypass_forms_never_reach_the_payload(text, leaked) -> None:
+    payload = _payload(excerpt=text, title=text)
+    assert leaked not in str(payload.state)
+
+
+def test_source_text_cannot_forge_a_placeholder() -> None:
+    out = s2.minimize("Name:<redacted> Jane")
+    assert "Jane" not in out and "<" not in s2.minimize("<url> <id> x").replace("<url>", "").replace("<id>", "")
+
+
+def test_ordinary_titles_survive() -> None:
+    assert s2.minimize("Week1.pdf lec.v2.md Chapter 3") == "Week1.pdf lec.v2.md Chapter 3"
+
+
+@pytest.mark.parametrize("text,leaked", [
+    ("jane.doe@univ.ac.kr/assignments", "jane"), ("mail (jane.doe@univ.ac.kr), thanks", "jane"),
+    ("학번 2023/13/40", "2023"), ("ID 2026-10-12", "2026"), ("Student ID: 2023.10.12", "2023"),
+    ("010    1234    5678", "5678"), ("학번 2023    1234", "1234"), ("010 \u00a0 \u3000 1234 \u2014 5678", "5678"),
+])
+def test_round_three_bypasses_are_closed(text, leaked) -> None:
+    payload = _payload(excerpt=text, title=text)
+    assert leaked not in str(payload.state)
+
+
+def test_valid_dates_survive_outside_an_id_context() -> None:
+    assert s2.minimize("Lecture 2026-10-12 and 2026.09.17") == "Lecture 2026-10-12 and 2026.09.17"
+    assert "2026" not in s2.minimize("학번 2026-10-12")
+
+
+@pytest.mark.parametrize("text,leaked", [
+    ("010\n1234\n5678", "5678"), ("2023\n1234", "1234"), ("학번\n2023\n\n1234", "1234"),
+    ("10.0.0.1/private?access_token=MySecret", "MySecret"), ("localhost:8080/user?api_key=TopSecret", "TopSecret"),
+    ("see 192.168.0.5:9000/x", "9000"), ("한글.대학교.kr/경로?토큰=비밀", "비밀"), ("page.html?token=abc", "abc"),
+    ("Name = John Smith", "Smith"), ("이름 홍 길동", "길동"), ("Name - Jane Roe", "Roe"), ("성명 = 김철수", "철수"),
+])
+def test_round_four_bypasses_are_closed(text, leaked) -> None:
+    payload = _payload(excerpt=text, title=text)
+    assert leaked not in str(payload.state)
+
+
+def test_plain_prose_and_filenames_survive_the_new_rules() -> None:
+    text = "Name of the course is Operating Systems. See Week1.pdf and lec.v2.md, section 3.2."
+    assert s2.minimize(text) == text

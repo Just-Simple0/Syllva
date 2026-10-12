@@ -250,6 +250,9 @@ S2_NOTE_ORIGIN_INELIGIBLE = _s2.NOTE_ORIGIN_INELIGIBLE
 S2_NOTE_PII_UNCERTAIN = _s2.NOTE_PII_UNCERTAIN
 S2_NOTE_LOW_CONFIDENCE = _s2.NOTE_LOW_CONFIDENCE
 S2_NOTE_REQUEST_TOO_LARGE = _s2.NOTE_REQUEST_TOO_LARGE
+S2_KEPT_NOTES = frozenset({
+    "CLASSIFIER_TIMEOUT", "CLASSIFIER_TRANSPORT", "CLASSIFIER_INVALID_RESPONSE", "S2_REQUEST_TOO_LARGE",
+    "PII_UNCERTAIN", "S2_ORIGIN_INELIGIBLE", "LOW_CONFIDENCE", "CLASSIFIER_NO_MATCH"})
 S2_OPTIONS = _s2.OPTIONS
 S2_QUESTION = _s2.QUESTION
 S2_QUESTION_NAME = _s2.QUESTION_NAME
@@ -295,6 +298,7 @@ class IntakeWorker:
         self.s2_client: Any | None = None
         self._s2_tick = {"calls": 0, "invalid": 0, "transport": 0}
         self._s2_last_tick = {"calls": 0, "invalid": 0, "transport": 0}
+        self._s2_deferred_waiting: set[str] = set()
         # OAuth compositions hold this for a whole public entry so no other
         # entry can refresh the shared credential while provider work runs.
         self._entry_lock = threading.Lock()
@@ -414,6 +418,7 @@ class IntakeWorker:
             self._require_notion_workspace_verified()
         total = 0
         self._s2_last_tick, self._s2_tick = self._s2_tick, {"calls": 0, "invalid": 0, "transport": 0}
+        self._s2_deferred_waiting = set(self.state.list_deferred_intake_ids(list(self._group_workspaces()))) if self.s2_client is not None else set()
         for semester, workspaces in self._group_workspaces().items():
             workspace = workspaces[0]
             validate_registered_drive_layout(self.drive, workspaces)
@@ -2076,6 +2081,7 @@ class IntakeWorker:
     ) -> ClassificationOutcome | None:
         """S0/S1 + axes + calendar for one discovered upload; persists record, item columns and suggestion."""
 
+        self._s2_deferred_waiting.discard(item.intake_id)    # whatever happens now, it no longer waits
         if item.classification_source == "human":
             return None
         if self._unresolved_closure(item.intake_id):
@@ -2141,13 +2147,26 @@ class IntakeWorker:
             probe = self._source_probe(item)
             outcome = classify(probe)
         s2_result: S2Result | None = None
-        if self.s2_client is not None and not outcome.decided and item.classification_state != "HUMAN":
-            s2_result = self._run_s2(item, outcome, probe, binding)
+        if self.s2_client is not None and not outcome.decided:
+            # An item already settled as HUMAN never costs a new call, but its earlier S2 result is
+            # reproduced from the cache so the record, source label and notes are not lost.
+            s2_result = self._run_s2(item, outcome, probe, binding, cache_only=item.classification_state == "HUMAN")
             if s2_result.status == "DEFERRED":
                 self.state.update_intake_item(
                     item.intake_id, classification_state="DEFERRED",
                     last_error_code=S2_BUDGET_CODE, last_error=S2_BUDGET_TEXT)
+                self._s2_deferred_waiting.discard(item.intake_id)
                 return outcome
+            self._s2_deferred_waiting.discard(item.intake_id)
+            if (
+                item.classification_state == "HUMAN" and s2_result.status == "HUMAN"
+                and not s2_result.notes and s2_result.decision is None
+            ):
+                # No cached answer to reproduce: keep the earlier S3 reason instead of recomputing it away.
+                stored = self.state.get_intake_suggestion(item.intake_id) or {}
+                kept = tuple(
+                    code for code in str(stored.get("suggestion_note") or "").split(";") if code in S2_KEPT_NOTES)
+                s2_result = S2Result("HUMAN", notes=kept)
             outcome = classify(probe, s2_result)
         record_id: str | None = None
         byte_proven = probe is not None and probe.complete and probe.byte_sha256 is not None
@@ -2255,6 +2274,7 @@ class IntakeWorker:
 
     def _run_s2(
         self, item: IntakeItem, outcome: ClassificationOutcome, probe: SourceProbe | None, binding: Any,
+        *, cache_only: bool = False,
     ) -> S2Result:
         """One S2 decision (plan §3.2): eligibility, minimization, cache, budget, strict validation.
         Every failure is an S3 result with fixed notes; nothing here writes outside the local state."""
@@ -2262,7 +2282,9 @@ class IntakeWorker:
         client = self.s2_client
         if client is None:
             return S2Result("HUMAN", notes=("CLASSIFIER_DISABLED",))
-        if outcome.origin not in (Origin.PROFESSOR_SOURCE, Origin.USER_AUTHORED_TRANSCRIPT):
+        # A transcript is sent only after normalization has split :source from :user (plan §3.2);
+        # classification runs before that, so USER_AUTHORED_TRANSCRIPT never leaves the machine.
+        if outcome.origin is not Origin.PROFESSOR_SOURCE:
             return S2Result("HUMAN", notes=(S2_NOTE_ORIGIN_INELIGIBLE,))
         if probe is None or probe.unavailable:
             return S2Result("HUMAN", notes=(NOTE_SOURCE_UNAVAILABLE,))
@@ -2293,7 +2315,12 @@ class IntakeWorker:
                 answer = self._s2_cached_answer(cached)
                 if answer is not None:
                     return self._s2_result(answer, payload.snapshot_sha256)
-            if self._s2_tick["calls"] >= budget:
+            if cache_only:
+                return S2Result("HUMAN")
+            # Budget deferred items still waiting this tick (any semester) are served first: a
+            # new item may not take the calls they need (plan §4).
+            waiting = len(self._s2_deferred_waiting - {item.intake_id}) if item.classification_state != "DEFERRED" else 0
+            if self._s2_tick["calls"] + waiting >= budget:
                 return S2Result("DEFERRED")
             try:
                 reply = client.ask(payload.state, [S2_QUESTION])
@@ -2308,23 +2335,36 @@ class IntakeWorker:
                 self._s2_tick["transport"] += 1
                 return S2Result("HUMAN", notes=("CLASSIFIER_TRANSPORT",))
             self._s2_tick["calls"] += 1
-            answer = reply.answers[S2_QUESTION_NAME]
-            verified = {"choice": answer.choice, "confidence": answer.confidence,
-                        "probabilities": dict(answer.probabilities)}
-            self.state.put_s2_cache(key, verified)
-            return self._s2_result(verified, payload.snapshot_sha256)
+            try:
+                answer = reply.answers[S2_QUESTION_NAME]
+                verified = {"choice": answer.choice, "confidence": answer.confidence,
+                            "probabilities": dict(answer.probabilities)}
+                if self._s2_cached_answer(verified) is None:
+                    raise ValueError("unverified answer")
+                self.state.put_s2_cache(key, verified)
+                return self._s2_result(verified, payload.snapshot_sha256)
+            except Exception:  # noqa: BLE001 - a malformed answer is a fixed invalid-response code
+                self._s2_tick["invalid"] += 1
+                return S2Result("HUMAN", notes=("CLASSIFIER_INVALID_RESPONSE",))
         return S2Result("HUMAN", notes=(S2_NOTE_REQUEST_TOO_LARGE,))
 
     @staticmethod
     def _s2_cached_answer(cached: Mapping[str, Any]) -> dict[str, Any] | None:
         choice, confidence, probabilities = cached.get("choice"), cached.get("confidence"), cached.get("probabilities")
-        if (
+        if not (
             isinstance(choice, str) and choice in S2_OPTIONS
             and isinstance(confidence, float) and not isinstance(confidence, bool)
+            and 0.0 <= confidence <= 1.0
             and isinstance(probabilities, dict) and set(probabilities) == set(S2_OPTIONS)
         ):
-            return {"choice": choice, "confidence": confidence, "probabilities": probabilities}
-        return None
+            return None
+        values = list(probabilities.values())
+        if any(isinstance(v, bool) or not isinstance(v, int | float) or not 0.0 <= v <= 1.0 for v in values):
+            return None
+        top = max(values)
+        if abs(sum(values) - 1.0) > 1e-6 or [k for k, v in probabilities.items() if v == top] != [choice]:
+            return None
+        return {"choice": choice, "confidence": confidence, "probabilities": probabilities}
 
     @staticmethod
     def _s2_result(answer: Mapping[str, Any], snapshot_sha256: str) -> S2Result:

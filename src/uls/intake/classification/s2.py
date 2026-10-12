@@ -4,10 +4,12 @@ Pure helpers: option set, excerpt extraction, outbound minimization with a final
 the confidence decision and the cache key.  Nothing here performs I/O or holds a secret."""
 from __future__ import annotations
 
+import datetime
 import hashlib
 import io
 import json
 import re
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final
@@ -45,29 +47,104 @@ INSTRUCTIONS: Final[str] = (
 )
 QUESTION: Final[ChoiceQuestion] = ChoiceQuestion(QUESTION_NAME, INSTRUCTIONS, OPTIONS)
 
-_URL = re.compile(r"(?i)\b(?:https?://|ftp://|www\.)\S+")
-_EMAIL = re.compile(r"[\w.+\-]+@[\w\-]+(?:\.[\w\-]+)+")
-_PHONE = re.compile(r"(?<!\d)(?:\+?\d{1,3}[\s.\-]?)?\(?\d{2,4}\)?[\s.\-]\d{3,4}[\s.\-]\d{4}(?!\d)")
-_LONG_DIGITS = re.compile(r"\d{7,}")
-_LABELLED = re.compile(r"(학번|이름|성명|성\s*명|Student\s*ID|Name)(\s*[:：]\s*)(?!<redacted>)\S+", re.IGNORECASE)
-# The re-check is deliberately looser than the substitution (separator-tolerant digit runs,
-# any "@" or scheme-looking text, any label that still has a value).
-_RECHECK: Final[tuple[re.Pattern[str], ...]] = (
-    re.compile(r"(?:\d[\s.\-]{0,3}){9,}"), re.compile(r"\S@\S+\.\S"), re.compile(r"(?i)(?:https?|ftp)://|www\."),
-    re.compile(r"(?i)(?:학번|이름|성명|student\s*id|name)\s*[:：]\s*(?!<redacted>)\S"),
-)
+# --- outbound minimization (plan §3.2) -------------------------------------------------------
+# Every string is first canonicalized (NFKC, invisible characters removed, angle brackets removed so
+# source text can never forge one of our placeholders), then identifiers are replaced, and the
+# result is checked again by independent rules; anything still suspicious blocks the send.
+_URL = re.compile(
+    r"(?i)(?:\b[a-z][a-z0-9+.\-]*://|//(?=[\w\-]+\.)|\bwww\.)\S+"
+    r"|(?<![\w.\-])(?:[^\W_]+(?:-[^\W_]+)*\.)+[^\W\d_]{2,24}(?=[/?#:])\S*"
+    r"|(?<![\w.])\d{1,3}(?:\.\d{1,3}){3}(?=[/?#:]|$)\S*"
+    r"|(?<![\w.\-])localhost(?=[/?#:]|$)\S*"
+    r"|\S*\?\S*=\S*|\S+:\d{2,5}/\S*")
+_LABEL = r"(?:학번|이름|성명|성\s*명|Student\s*ID|Name)"
+# A label's whole value (to the end of the line) goes: "Name: John Smith" must not leave "Smith".
+_LABELLED = re.compile(
+    r"((?:학번|이름|성명|성\s*명)|(?:Student\s*ID|Name))((?<=[가-힣])[ \t]+|\s*[:：=\-–—]+\s*)[^\r\n]*", re.IGNORECASE)
+# A group of digits with ANY run of separators between them (spaces, dashes of every kind, underscores).
+_DIGIT_RUN = re.compile(r"\d(?:[^\w]|_|\d)*")
+_ID_CONTEXT = re.compile(r"(?i)(?:학번|번호|id|student|no)[\W_]*$")
+MAX_RUN_DIGITS: Final[int] = 7
+PLACEHOLDERS: Final[tuple[str, ...]] = ("<url>", "<email>", "<id>", "<redacted>")
+_LABEL_VALUE_LEFT = re.compile(
+    rf"(?i){_LABEL}(?:(?<=[가-힣])[ \t]+|\s*[:：=\-–—]+\s*)(?!<redacted>$)\S", re.MULTILINE)
+_TOKEN_EDGE = "()[]{}'\",;"
 
 
 class PiiUncertain(Exception):
     """The final payload still looks like it carries an identifier; nothing is sent."""
 
 
+def _canonical(text: str) -> str:
+    text = unicodedata.normalize("NFKC", text)
+    text = "".join(ch for ch in text if unicodedata.category(ch) not in ("Cf", "Co", "Cn") and (ch in "\n\t" or ord(ch) >= 32))
+    return text.replace("<", " ").replace(">", " ")
+
+
+def _is_plain_date(run: str) -> bool:
+    parts = re.fullmatch(r"(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})", run)
+    if parts is None:
+        return False
+    try:
+        datetime.date(int(parts[1]), int(parts[2]), int(parts[3]))
+    except ValueError:
+        return False
+    return True
+
+
+def _digit_runs(text: str, *, replace: bool) -> tuple[str, bool]:
+    """7+ digits in one group that is not a valid plain date (outside an ID context) are an identifier."""
+
+    found = False
+
+    def swap(match: re.Match[str]) -> str:
+        nonlocal found
+        raw = match.group(0)
+        run = raw.rstrip()
+        trimmed = run.rstrip("".join(ch for ch in run if not ch.isdigit()))
+        trailer = raw[len(trimmed):]
+        if sum(ch.isdigit() for ch in trimmed) < MAX_RUN_DIGITS:
+            return raw
+        if _is_plain_date(trimmed) and not _ID_CONTEXT.search(text[max(0, match.start() - 16):match.start()]):
+            return raw
+        found = True
+        return "<id>" + trailer
+
+    return _DIGIT_RUN.sub(swap, text), found
+
+
+def _replace_tokens(text: str) -> str:
+    """Emails and URLs are replaced as WHOLE whitespace-delimited tokens, so overlapping shapes
+    ("jane@univ.ac.kr/path") cannot leave a fragment."""
+
+    pieces = re.split(r"(\s+)", text)
+    for index, piece in enumerate(pieces):
+        if not piece or piece.isspace():
+            continue
+        core = piece.strip(_TOKEN_EDGE)
+        if "@" in core:
+            pieces[index] = "<email>"
+        elif _URL.search(core):
+            pieces[index] = "<url>"
+    return "".join(pieces)
+
+
 def minimize(text: str) -> str:
-    text = _URL.sub("<url>", text)
-    text = _EMAIL.sub("<email>", text)
+    text = _replace_tokens(_canonical(text))
     text = _LABELLED.sub(lambda m: f"{m.group(1)}{m.group(2)}<redacted>", text)
-    text = _PHONE.sub("<phone>", text)
-    return _LONG_DIGITS.sub("<id>", text)
+    return _digit_runs(text, replace=True)[0]
+
+
+def still_suspicious(text: str) -> bool:
+    """Independent final check of an already minimized string."""
+
+    stripped = text
+    for placeholder in PLACEHOLDERS:
+        stripped = stripped.replace(placeholder, " ")
+    return bool(
+        "<" in stripped or ">" in stripped or "@" in stripped
+        or _URL.search(stripped) or _LABEL_VALUE_LEFT.search(text) or _digit_runs(stripped, replace=False)[1]
+        or re.search(r"(?i)(?:https?|ftp)://|www\.", stripped))
 
 
 def _decode(payload: bytes) -> str | None:
@@ -126,7 +203,7 @@ def build_payload(
         "excerpt": sent,
     }
     serialized = json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    if any(pattern.search(serialized) for pattern in _RECHECK):
+    if any(still_suspicious(value) for value in state.values() if isinstance(value, str)):
         raise PiiUncertain
     return S2Payload(
         state, sent, hashlib.sha256(sent.encode("utf-8")).hexdigest(),

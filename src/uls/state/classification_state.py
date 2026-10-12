@@ -14,7 +14,7 @@ import hashlib
 import json
 import re
 import sqlite3
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -1567,6 +1567,13 @@ class ClassificationStateMixin:
                 "ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
                 (name, value, _now()),
             )
+
+    def list_deferred_intake_ids(self, semesters: Sequence[str] | None = None) -> list[str]:
+        with self._transaction() as connection:
+            rows = connection.execute(
+                "SELECT intake_id, semester FROM intake_items WHERE classification_state = 'DEFERRED' "
+                "ORDER BY intake_id").fetchall()
+        return [str(row["intake_id"]) for row in rows if semesters is None or row["semester"] in semesters]
 
     def get_s2_cache(self, cache_key: str) -> dict[str, Any] | None:
         with self._transaction() as connection:
