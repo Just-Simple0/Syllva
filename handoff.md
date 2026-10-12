@@ -551,3 +551,7 @@ GUI-2/3 구현 리뷰를 전송한 대화나 회수할 미완료 final manifest�
 - 배선: cli `sync|process|run`이 `credentials.TYPESAFE_API_KEY.source` 명시 시에만 키를 해석 → `build_worker(classifier_key=)` → `worker.s2_client`.
 - 판단 사항: readiness `status`는 P-B 의미(S1만으로도 READY) 유지, 키 없음은 별도 `s2_status=DISABLED`로 표기(계획 O2의 "credential 미해석→DISABLED"와 다름).
 - 알려진 한계: PDF 발췌는 선택 의존성 pypdf가 있을 때만(없으면 메타데이터만 전송). 이름 PII는 라벨(`이름:` 등) 기반 제거만 가능. S4(청크 태그)는 P-D.
+
+- **P-C2 구현 리뷰(2026-10-12)**: GPT-6 Extra High 5라운드, REQUIRED 4→4→4→4→2 (전부 S2 개인정보/비밀 최소화 우회 형태 + 상태 보존). 사용자 결정으로 5차 수정까지 반영 후 6차 없이 머지.
+  - 알려진 한계: 라벨 없는 인명, 정규식으로 판별 불가한 개인정보/비밀 형태. 호출 조건(키 source 명시 + 분류 enabled + S1 미결 + 바이트 검증된 Canvas 교수 자료)으로 노출면이 좁고 기본 꺼짐.
+  - 후속 후보: 발췌 전송 중단 옵션(제목·메타만), 두 학기 DEFERRED 재개 통합 테스트, readiness 카운터 시점.
