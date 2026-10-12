@@ -88,6 +88,7 @@ from uls.intake.classification.pipeline import (
     SourceProbe,
     classify_upload_item,
 )
+from uls.intake.classification.rules import CANVAS_MODULE_ITEM
 from uls.intake.classification.s2 import PiiUncertain, S2Result
 from uls.intake.identity import (
     derivative_marker,
@@ -292,6 +293,12 @@ class IntakeWorker:
         self._classification_profile_mismatch: str | None = None
         # Metadata-only Canvas observer (plan §6.3); None keeps the worker Canvas-free.
         self.canvas_observer: Any | None = None
+        # Plan §6.2 r15 (P-E): the trusted Canvas attachment download path (installed by composition).
+        self.canvas_attachment_fetcher: Any | None = None
+        from .canvas_attachments import FetchReport
+
+        # R-PEI-03: every counter exists from the first readiness on (zero until a fetch runs).
+        self._canvas_attachment_report: dict[str, Any] = FetchReport().as_dict()
         self._canvas_denied: set[str] = set()
         self._canvas_cursor = 0
         # S2 (Jev Choice, plan §3.2/§4); None keeps classification S1-only (CLASSIFIER_DISABLED).
@@ -963,6 +970,7 @@ class IntakeWorker:
         start = int(self.state.get_classification_cursor("canvas_observation_cursor") or 0) % len(course_ids)
         chosen = [course_ids[(start + offset) % len(course_ids)] for offset in range(min(limit, len(course_ids)))]
         self.state.set_classification_cursor("canvas_observation_cursor", str((start + len(chosen)) % len(course_ids)))
+        complete: list[tuple[int, Any]] = []
         for course_id in chosen:
             course_key = mapping.get(course_id)
             try:
@@ -975,8 +983,48 @@ class IntakeWorker:
             else:
                 if course_key and getattr(result, "status", None) == "COMPLETE":
                     self._canvas_denied.discard(course_key)
+                    complete.append((course_id, result))
                 elif course_key:
                     self._canvas_denied.add(course_key)      # every non-COMPLETE result keeps the calendar unusable
+        self._fetch_canvas_attachments(complete)
+
+    def _fetch_canvas_attachments(self, complete: list[tuple[int, Any]]) -> None:
+        """Plan §6.2 r15 (P-E E6/E13): download the attachments of COMPLETE observations into the
+        course's private upload folder and bind them, before discovery.  Off by default; a failure
+        never blocks Drive intake."""
+
+        classification = getattr(self.config.intake, "classification", None)
+        fetcher = self.canvas_attachment_fetcher
+        if fetcher is None or not getattr(classification, "canvas_attachment_download_enabled", False):
+            return
+        from .canvas_attachments import FetchReport
+
+        report = FetchReport()
+        budget = max(0, int(getattr(classification, "max_canvas_downloads_per_tick", 5)))
+        mapping = getattr(classification, "canvas_course_map", {}) or {}
+        for course_id, result in complete:
+            candidates = tuple(getattr(result, "attachments", ()) or ())
+            course_key = mapping.get(course_id)
+            if not candidates or not course_key or sum(1 for key in mapping.values() if key == course_key) != 1:
+                continue
+            folder_id = self._attachment_folder(course_key)
+            if folder_id is None:
+                report.codes["NO_UPLOAD_FOLDER"] += 1
+                continue
+            try:
+                budget = fetcher.fetch_course(course_id, candidates, folder_id, budget, report)
+            except Exception:  # noqa: BLE001 - one course never blocks the tick (fixed code only)
+                report.failed += 1
+                report.codes["FETCH_FAILED"] += 1
+        self._canvas_attachment_report = report.as_dict()
+
+    def _attachment_folder(self, course_key: str) -> str | None:
+        """The course's registered upload folder, else its semester upload folder (E6)."""
+
+        for workspace in self.workspaces:
+            if workspace.course_key == course_key:
+                return workspace.optional_upload_folder_id or workspace.drive_upload_folder_id
+        return None
 
     def _run_once_attested(self, *, sync: bool, process: bool, max_jobs: int) -> dict[str, Any]:
         if not self.state.acquire_local_worker_lock():
@@ -1931,6 +1979,13 @@ class IntakeWorker:
             "stale_tag_documents": counts.get("stale_tag_documents", 0),
             "invalid_response_count": self._s2_last_tick["invalid"],
             "transport_failure_count": self._s2_last_tick["transport"],
+            "canvas_attachments": {
+                "status": "ENABLED" if getattr(classification_cfg, "canvas_attachment_download_enabled", False)
+                and self.canvas_attachment_fetcher is not None else "DISABLED",
+                **self._canvas_attachment_report,
+                "intents": self.state.canvas_attachment_intent_counts()
+                if hasattr(self.state, "canvas_attachment_intent_counts") else {},
+            },
         }
 
     def _s2_calls_remaining(self, classification_cfg: Any) -> int:
@@ -2101,7 +2156,8 @@ class IntakeWorker:
         axes = transcript_signals(item.original_name, alias_index)
         course_key = explicit or (str(axes["course_key"]) if axes.get("course_key") else None)
         calendar = self._course_calendar(course_key, semester) if course_key else None
-        binding = self.state.get_canvas_drive_binding(item.provider_file_id)
+        binding = self._canvas_binding(item.provider_file_id)
+        canvas_course_key, canvas_week = self._canvas_binding_axes(binding)
 
         def classify(probe: SourceProbe | None, s2: S2Result | None = None) -> ClassificationOutcome:
             # S0: PROFESSOR_SOURCE only when the stored Canvas binding is proven by the
@@ -2121,6 +2177,8 @@ class IntakeWorker:
                 model_kind=None if s2 is None else s2.kind,
                 model_decision=None if s2 is None else s2.decision,
                 s2_notes=() if s2 is None else s2.notes,
+                canvas_course_key=canvas_course_key if verified_binding else None,
+                canvas_week=canvas_week if verified_binding else None,
             )
 
         outcome = classify(None)
@@ -2415,11 +2473,45 @@ class IntakeWorker:
             blockers.append(BLOCK_CANVAS_COURSE)
         return tuple(dict.fromkeys(blockers))
 
+    def _canvas_binding(self, drive_file_id: str) -> dict[str, Any] | None:
+        """The Canvas→Drive binding of a file, only when it was recorded for the Canvas origin the
+        course map is verified against now (P-E R-PE2-04).  A binding of another origin - or a
+        legacy binding without one - is no provenance for this origin's courses and weeks."""
+
+        binding = self.state.get_canvas_drive_binding(drive_file_id)
+        origin = getattr(getattr(self.config.intake, "classification", None), "canvas_origin", "")
+        if binding is None or not origin or binding.get("origin") != origin:
+            return None
+        return dict(binding)
+
+    def _canvas_binding_axes(self, binding: Mapping[str, Any] | None) -> tuple[str | None, int | None]:
+        """P-E E11 (plan §6.3 r14 O1): the course key of a binding's Canvas course under the CURRENT
+        verified 1:1 course map, and - for a module File item - the module week of its active,
+        completely collected observation.  Used only once the caller proved the binding by bytes."""
+
+        if binding is None:
+            return None, None
+        cfg = getattr(self.config.intake, "classification", None)
+        mapping = getattr(cfg, "canvas_course_map", {}) or {}
+        course_id = int(binding["canvas_course_id"])
+        key = mapping.get(course_id)
+        course_key = key if key and sum(1 for value in mapping.values() if value == key) == 1 else None
+        week: int | None = None
+        origin = getattr(cfg, "canvas_origin", "")
+        if binding.get("resource_kind") == CANVAS_MODULE_ITEM and origin:
+            observed = self.state.latest_canvas_observation(
+                origin, course_id, CANVAS_MODULE_ITEM, str(binding["resource_id"]))
+            value = None if observed is None else observed.get("module_week")
+            if (observed is not None and observed.get("active") == 1 and observed.get("collection_complete") == 1
+                    and isinstance(value, int) and not isinstance(value, bool) and value >= 1):
+                week = value
+        return course_key, week
+
     def _canvas_course_mismatch(self, item: IntakeItem, record: ClassificationRecord) -> bool:
         """A PROFESSOR_SOURCE is only usable for the course its Canvas course is mapped to
         in the verified ``canvas_course_map``; unmapped or different → HUMAN (r4 #3)."""
 
-        binding = self.state.get_canvas_drive_binding(item.provider_file_id)
+        binding = self._canvas_binding(item.provider_file_id)
         mapping = getattr(getattr(self.config.intake, "classification", None), "canvas_course_map", {}) or {}
         mapped = None if binding is None else mapping.get(binding.get("canvas_course_id"))
         return mapped is None or mapped != record.course_key
@@ -3346,11 +3438,11 @@ class IntakeWorker:
             self._course_alias_entries(workspace.semester), notion_aliases
         ):
             return "ALIAS_BASIS"
-        seen = self.state.get_canvas_drive_binding(item.provider_file_id)
+        seen = self._canvas_binding(item.provider_file_id)
         if (None if seen is None else self._canvas_basis(seen)) != basis.get("canvas_binding_seen"):
             return "CANVAS_BINDING"  # a binding added, removed or changed since the decision (r9 #2)
         if record.origin == Origin.PROFESSOR_SOURCE.value:
-            binding = self.state.get_canvas_drive_binding(item.provider_file_id)
+            binding = self._canvas_binding(item.provider_file_id)
             if binding is None or basis.get("canvas_binding") != self._canvas_basis(binding):
                 return "CANVAS_BINDING"
             if binding.get("byte_sha256") != record.byte_sha256:

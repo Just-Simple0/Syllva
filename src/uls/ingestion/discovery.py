@@ -9,6 +9,7 @@ from typing import Any
 from uls.adapters.drive.worker import DRIVE_FOLDER_MIME, DriveMetadata, DriveWorkerPort
 from uls.config.intake import ResolvedSemesterWorkspace
 from uls.domain.errors import PolicyDeniedError, SourceUnavailableError
+from uls.intake.canvas_attachments import is_attachment_marker
 from uls.intake.identity import canonical_json, sha256_hex
 from uls.intake.models import FileKind, IntakeStatus
 from uls.state.models import IntakeItem
@@ -25,6 +26,22 @@ class IntakeDiscoveryResult:
     @property
     def count(self) -> int:
         return len(self.items)
+
+
+def _unbound_canvas_attachment(state: Any, item: DriveMetadata) -> bool:
+    """A Canvas attachment upload is invisible to intake until its binding exists (P-E E9):
+    an upload whose response was lost, or a crash before the binding, never reaches the HUMAN
+    request path.  A store that cannot answer hides it too (fail closed)."""
+
+    if not is_attachment_marker(item.app_properties):
+        return False
+    lookup = getattr(state, "get_canvas_drive_binding", None)
+    if lookup is None:
+        return True
+    try:
+        return lookup(item.file_id) is None
+    except Exception:  # noqa: BLE001 - an unreadable binding hides only this file; discovery continues
+        return True
 
 
 def discover_intake(
@@ -52,6 +69,7 @@ def discover_intake(
             item for item in port.list_folder(folder_id)
             if item.mime_type != DRIVE_FOLDER_MIME
             and item.app_properties.get("uls_r") != "AI_STUDY_NOTE"
+            and not _unbound_canvas_attachment(state, item)
         )
     if len(records) > max_files:
         raise ValueError("Drive intake listing exceeds bounded limit")

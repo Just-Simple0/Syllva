@@ -48,6 +48,7 @@ NOTE_SOURCE_TOO_LARGE: Final[str] = "SOURCE_TOO_LARGE"
 NOTE_SOURCE_UNAVAILABLE: Final[str] = "SOURCE_UNAVAILABLE"
 NOTE_UNSUPPORTED: Final[str] = "UNSUPPORTED_FORMAT"
 NOTE_AUTO_UNAVAILABLE: Final[str] = "AUTO_NOT_ENABLED"
+NOTE_CANVAS_WEEK_CONFLICT: Final[str] = "CANVAS_WEEK_CONFLICT"
 # Stage A (plan §3.4) blockers: why an item cannot get an AUTO_CLASSIFICATION plan.
 BLOCK_NOT_DECIDED: Final[str] = "AUTO_BLOCK_NOT_DECIDED"
 BLOCK_UNSUPPORTED: Final[str] = "AUTO_BLOCK_UNSUPPORTED"
@@ -66,6 +67,7 @@ BLOCK_ALIAS_EVIDENCE: Final[str] = "AUTO_BLOCK_ALIAS_EVIDENCE"
 BLOCK_SESSION_UNKNOWN: Final[str] = "AUTO_BLOCK_SESSION_UNKNOWN"
 BLOCK_SESSION_AMBIGUOUS: Final[str] = "AUTO_BLOCK_SESSION_AMBIGUOUS"
 BLOCK_SESSION_OCCUPIED: Final[str] = "AUTO_BLOCK_SESSION_OCCUPIED"
+BLOCK_WEEK_CONFLICT: Final[str] = "AUTO_BLOCK_WEEK_CONFLICT"
 
 
 @dataclass(frozen=True)
@@ -150,6 +152,8 @@ class ClassificationOutcome:
             blockers.append(BLOCK_ORIGIN_UNKNOWN)
         if self.handling not in (HandlingMode.NORMALIZE, HandlingMode.REGISTER_OPAQUE_NO_RETRIEVAL):
             blockers.append(BLOCK_HANDLING)
+        if NOTE_CANVAS_WEEK_CONFLICT in self.notes:
+            blockers.append(BLOCK_WEEK_CONFLICT)     # r14 O1: conflicting week evidence is never auto-chosen
         return tuple(blockers)
 
     @property
@@ -193,6 +197,8 @@ def classify_upload_item(
     model_kind: Kind | None = None,
     model_decision: Mapping[str, Any] | None = None,
     s2_notes: tuple[str, ...] = (),
+    canvas_course_key: str | None = None,
+    canvas_week: int | None = None,
 ) -> ClassificationOutcome:
     """Run S0/S1 and the assignment axes for one Drive file.
 
@@ -232,6 +238,9 @@ def classify_upload_item(
     transcript_axes = transcript_signals(name, alias_index) if from_upload_folder else {}
     if explicit_course_key:
         course_key, course_basis = explicit_course_key, "upload_folder"
+    elif canvas_course_key and origin is Origin.PROFESSOR_SOURCE:
+        # P-E E11: the course of a byte-proven Canvas binding (current verified 1:1 course map).
+        course_key, course_basis = canvas_course_key, "canvas_binding"
     elif transcript_axes.get("course_key"):
         course_key, course_basis = str(transcript_axes["course_key"]), "config_alias"
     if transcript_axes:
@@ -241,6 +250,14 @@ def classify_upload_item(
         recorded_date = parsed if isinstance(parsed, date) else None
     else:
         week = week_from_filename(name)
+    week_conflict = False
+    if canvas_week is not None and origin is Origin.PROFESSOR_SOURCE:
+        # r14 O1: the active Canvas observation's module week; a different week in the file name
+        # is conflicting evidence and is not resolved automatically.
+        if week is None or week == canvas_week:
+            week = canvas_week
+        else:
+            week, week_conflict = None, True
     resolved_origin = origin
     # --- decision type / S3 reasons ------------------------------------------------
     decision_type: DecisionType | None = (
@@ -252,6 +269,8 @@ def classify_upload_item(
         notes.extend(s2_notes)
     elif kind is Kind.UNSUPPORTED:
         notes.append(NOTE_UNSUPPORTED)
+    if week_conflict:
+        notes.append(NOTE_CANVAS_WEEK_CONFLICT)
     if kind is not None and kind is not Kind.UNSUPPORTED and course_key is None:
         notes.append(NOTE_COURSE_UNRESOLVED)
     # --- calendar (TRANSCRIPT only) -----------------------------------------------
@@ -321,9 +340,11 @@ __all__ = [
     "BLOCK_NOT_DECIDED",
     "BLOCK_ORIGIN_UNKNOWN",
     "BLOCK_UNSUPPORTED",
+    "BLOCK_WEEK_CONFLICT",
     "NOTE_AUTO_UNAVAILABLE",
     "NOTE_CALENDAR_AMBIGUOUS",
     "NOTE_CALENDAR_MISMATCH",
+    "NOTE_CANVAS_WEEK_CONFLICT",
     "NOTE_CLASSIFIER_DISABLED",
     "NOTE_COURSE_UNRESOLVED",
     "NOTE_FORMAT_KIND_MISMATCH",

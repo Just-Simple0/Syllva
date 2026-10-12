@@ -38,8 +38,12 @@ class _TrustedCanvas:
         return None
 
 
+CANVAS_TEST_ORIGIN = "https://canvas.example.edu"   # the origin the synthetic bindings were downloaded from
+
+
 def _enable(system, *, profile: str | None = "legacy5-cls"):
     system["config"].intake.classification.enabled = True
+    system["config"].intake.classification.canvas_origin = CANVAS_TEST_ORIGIN
     registry = system["config"].google_drive.semester_registries[0]
     registry.start_date, registry.end_date = "2026-09-01", "2026-12-20"
     # A recorded calendar is only used for a verified Canvas mapping (P-B3 A5).
@@ -205,7 +209,7 @@ def test_origin_is_independent_of_kind_and_follows_verified_bindings(tmp_path: P
     with _system(tmp_path / "bound", name=TRANSCRIPT_NAME, raw=raw) as system:
         _enable(system)
         system["state"].record_canvas_drive_binding(
-            drive_file_id=system["source_id"], canvas_course_id=67535, resource_kind="announcement",
+            origin=CANVAS_TEST_ORIGIN, drive_file_id=system["source_id"], canvas_course_id=67535, resource_kind="announcement",
             resource_id="a1", observation_revision=1, attachment_id="att-1", attachment_filename=TRANSCRIPT_NAME,
             attachment_size=len(raw), byte_sha256=hashlib.sha256(raw).hexdigest())
         item = _tick_item(system)
@@ -214,7 +218,7 @@ def test_origin_is_independent_of_kind_and_follows_verified_bindings(tmp_path: P
     with _system(tmp_path / "unbound", name=TRANSCRIPT_NAME, raw=raw) as system:
         _enable(system)
         system["state"].record_canvas_drive_binding(
-            drive_file_id=system["source_id"], canvas_course_id=67535, resource_kind="announcement",
+            origin=CANVAS_TEST_ORIGIN, drive_file_id=system["source_id"], canvas_course_id=67535, resource_kind="announcement",
             resource_id="a1", observation_revision=1, attachment_id="att-1", attachment_filename=TRANSCRIPT_NAME,
             attachment_size=len(raw), byte_sha256="f" * 64)
         item = _tick_item(system)
@@ -374,7 +378,7 @@ def test_verified_binding_settles_origin_and_p4_even_when_s1_is_undecided(tmp_pa
     with _system(tmp_path / "lecture", name="lecture.md", raw=raw) as system:
         _enable(system)
         system["state"].record_canvas_drive_binding(
-            drive_file_id=system["source_id"], canvas_course_id=67535, resource_kind="announcement",
+            origin=CANVAS_TEST_ORIGIN, drive_file_id=system["source_id"], canvas_course_id=67535, resource_kind="announcement",
             resource_id="a1", observation_revision=1, attachment_id="att-1", attachment_filename="lecture.md",
             attachment_size=len(raw), byte_sha256=hashlib.sha256(raw).hexdigest())
         item = _tick_item(system)
@@ -385,7 +389,7 @@ def test_verified_binding_settles_origin_and_p4_even_when_s1_is_undecided(tmp_pa
     with _system(tmp_path / "assignment", name="mbti.csv", mime_type="text/csv", raw=csv) as system:
         _enable(system)
         system["state"].record_canvas_drive_binding(
-            drive_file_id=system["source_id"], canvas_course_id=67535, resource_kind="assignment",
+            origin=CANVAS_TEST_ORIGIN, drive_file_id=system["source_id"], canvas_course_id=67535, resource_kind="assignment",
             resource_id="as-1", observation_revision=1, attachment_id="att-9", attachment_filename="mbti.csv",
             attachment_size=len(csv), byte_sha256=hashlib.sha256(csv).hexdigest())
         item = _tick_item(system)
@@ -395,7 +399,7 @@ def test_verified_binding_settles_origin_and_p4_even_when_s1_is_undecided(tmp_pa
     with _system(tmp_path / "unverified", name="mbti.csv", mime_type="text/csv", raw=csv) as system:
         _enable(system)
         system["state"].record_canvas_drive_binding(
-            drive_file_id=system["source_id"], canvas_course_id=67535, resource_kind="assignment",
+            origin=CANVAS_TEST_ORIGIN, drive_file_id=system["source_id"], canvas_course_id=67535, resource_kind="assignment",
             resource_id="as-1", observation_revision=1, attachment_id="att-9", attachment_filename="mbti.csv",
             attachment_size=len(csv), byte_sha256="e" * 64)
         item = _tick_item(system)

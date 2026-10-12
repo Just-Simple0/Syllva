@@ -28,8 +28,10 @@ REQUEST_TIMEOUT_SECONDS = 10.0
 DISCOVERY_TIMEOUT_SECONDS = 45.0
 _FIXED_CODES = frozenset({
     "INVALID_CREDENTIAL", "PERMISSION_MISSING", "NOT_FOUND", "PROVIDER_UNAVAILABLE",
-    "TIMEOUT", "RATE_LIMITED", "DESTINATION_NOT_ALLOWED", "CHECK_NOT_READ_ONLY",
+    "TIMEOUT", "RATE_LIMITED", "DESTINATION_NOT_ALLOWED", "CHECK_NOT_READ_ONLY", "SIZE_MISMATCH",
 })
+MAX_DOWNLOAD_REDIRECTS = 2
+DOWNLOAD_TIMEOUT_SECONDS = 60.0
 
 
 class CanvasCheckError(Exception):
@@ -237,8 +239,7 @@ class _HTTPTransport:
     def __init__(self, connection: _PinnedHTTPSConnection) -> None:
         self._connection = connection
 
-    def request(self, method: str, target: str, headers: Mapping[str, str],
-                timeout: float) -> CanvasResponse:
+    def _arm(self, timeout: float) -> _PinnedHTTPSConnection:
         connection = self._connection
         connection.timeout = timeout
         connection.deadline = time.monotonic() + timeout
@@ -246,6 +247,31 @@ class _HTTPTransport:
             connection.sock.settimeout(timeout)
             if isinstance(connection.sock, _DeadlineSocket):
                 connection.sock.deadline = connection.deadline
+        return connection
+
+    def fetch(self, target: str, headers: Mapping[str, str], timeout: float,
+              max_bytes: int) -> CanvasResponse:
+        """One GET for a file download: a 2xx body bounded by ``max_bytes`` or, for a 3xx, only
+        the Location header (nothing else of a redirect response is kept)."""
+        connection = self._arm(timeout)
+        try:
+            connection.request("GET", target, headers=dict(headers))
+            response = connection.getresponse()
+            if 300 <= response.status < 400:
+                location = response.getheader("Location")
+                return CanvasResponse(response.status, {"Location": location} if location else {}, b"")
+            if not 200 <= response.status < 300:
+                return CanvasResponse(response.status, {}, b"")
+            body = response.read(max_bytes + 1)
+            if len(body) > max_bytes:
+                raise CanvasCheckError("SIZE_MISMATCH")
+            return CanvasResponse(response.status, {}, body)
+        finally:
+            self.close()
+
+    def request(self, method: str, target: str, headers: Mapping[str, str],
+                timeout: float) -> CanvasResponse:
+        connection = self._arm(timeout)
         try:
             connection.request(method, target, headers=dict(headers))
             response = connection.getresponse()
@@ -333,6 +359,65 @@ def _observation_target(origin: CanvasOrigin, url: str) -> str:
     return urlunsplit(("", "", parsed.path, parsed.query, ""))
 
 
+_DOWNLOAD_QUERY_KEYS = frozenset({"download_frd", "verifier"})
+
+
+def _file_metadata_target(course_id: int, file_id: str) -> str:
+    """The course-scoped Files API object of one attachment (plan §6.2 r15, P-E E3)."""
+    if (isinstance(course_id, bool) or not isinstance(course_id, int) or course_id <= 0
+            or not isinstance(file_id, str) or not re.fullmatch(r"[0-9]{1,64}", file_id)):
+        raise CanvasCheckError("CHECK_NOT_READ_ONLY")
+    return f"/api/v1/courses/{course_id}/files/{file_id}"
+
+
+def _download_target(origin: CanvasOrigin, url: str, course_id: int, file_id: str) -> str:
+    """A same-origin Canvas file download path for exactly this file: ``/files/{id}/download``
+    or ``/courses/{cid}/files/{id}/download`` with only ``download_frd``/``verifier`` query keys."""
+    if (not isinstance(url, str) or len(url) > 8192 or "\\" in url or "#" in url
+            or any(ord(char) <= 32 or ord(char) == 127 for char in url)):
+        raise CanvasCheckError("DESTINATION_NOT_ALLOWED")
+    try:
+        parsed = urlsplit(urljoin(origin.origin + "/", url))
+        destination = validate_canvas_origin(f"{parsed.scheme}://{parsed.netloc}")
+    except (ValueError, CanvasCheckError):
+        destination = None
+    if destination != origin:
+        raise CanvasCheckError("DESTINATION_NOT_ALLOWED")
+    if parsed.path not in (f"/files/{file_id}/download", f"/courses/{course_id}/files/{file_id}/download"):
+        raise CanvasCheckError("CHECK_NOT_READ_ONLY")
+    try:
+        fields = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=bool(parsed.query),
+                           max_num_fields=2)
+    except ValueError:
+        raise CanvasCheckError("CHECK_NOT_READ_ONLY") from None
+    keys = [key for key, _ in fields]
+    if len(set(keys)) != len(keys) or not set(keys) <= _DOWNLOAD_QUERY_KEYS or any(
+            len(value) > 256 or not value.isascii() or not value.isprintable() for _, value in fields):
+        raise CanvasCheckError("CHECK_NOT_READ_ONLY")
+    return urlunsplit(("", "", parsed.path, parsed.query, ""))
+
+
+def _foreign_target(url: str, hosts: frozenset[str]) -> tuple[CanvasOrigin, str]:
+    """A redirect to a file-storage host: HTTPS on 443 to an exactly allowlisted host."""
+    if (not isinstance(url, str) or len(url) > 8192 or "\\" in url or "#" in url
+            or any(ord(char) <= 32 or ord(char) == 127 for char in url)):
+        raise CanvasCheckError("DESTINATION_NOT_ALLOWED")
+    try:
+        parsed = urlsplit(url)
+        destination = validate_canvas_origin(f"{parsed.scheme}://{parsed.netloc}")
+    except (ValueError, CanvasCheckError):
+        raise CanvasCheckError("DESTINATION_NOT_ALLOWED") from None
+    if destination.port != 443 or destination.host not in hosts or not parsed.path.startswith("/"):
+        raise CanvasCheckError("DESTINATION_NOT_ALLOWED")
+    return destination, urlunsplit(("", "", parsed.path, parsed.query, ""))
+
+
+def _require_token(token: str) -> None:
+    if (not isinstance(token, str) or not token or len(token) > 4096
+            or any(ord(char) < 33 or ord(char) > 126 for char in token)):
+        raise CanvasCheckError("INVALID_CREDENTIAL")
+
+
 @dataclass
 class CanvasConnection:
     """One origin-bound connection; all requests are GETs carrying one header-only token."""
@@ -354,6 +439,105 @@ class CanvasConnection:
         self._admit()
         return self._send(_observation_target(self.target, url), token, deadline)
 
+    def file_metadata(self, course_id: int, file_id: str, token: str, *,
+                      deadline: float | None = None) -> Any:
+        """The course-scoped File object of one attachment (JSON; plan §6.2 r15, P-E E3)."""
+        self._request_limit = OBSERVATION_MAX_REQUESTS
+        self._admit()
+        return _json(self._send(_file_metadata_target(course_id, file_id), token, deadline))
+
+    def download(self, url: str, token: str, *, course_id: int, file_id: str, expected_size: int,
+                 deadline: float, file_hosts: Iterable[str] = (), resolver: Resolver | None = None,
+                 connector: Connector | None = None) -> bytes:
+        """Exactly ``expected_size`` bytes of one Canvas file (P-E E3-E5).
+
+        The token is sent only to this Canvas origin.  At most two redirects are followed: within
+        the origin to the same file's download path (token kept), or to an exactly allowlisted
+        file-storage host over a NEW pinned connection WITHOUT the token, where further redirects
+        stay on that host.  Nothing of a redirect response but its Location is read, and no URL is
+        ever returned or raised."""
+        if isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size < 1:
+            raise CanvasCheckError("SIZE_MISMATCH")
+        _require_token(token)
+        hosts = frozenset(file_hosts)
+        target = _download_target(self.target, url, course_id, file_id)
+        for hop in range(MAX_DOWNLOAD_REDIRECTS + 1):
+            self._request_limit = OBSERVATION_MAX_REQUESTS
+            self._admit()
+            response = self._fetch(self, target, {"Authorization": f"Bearer {token}", "Accept": "*/*"},
+                                   deadline, expected_size)
+            if not 300 <= response.status < 400:
+                return _exact(response, expected_size)
+            location = _header(response.headers, "Location")
+            if not location:
+                raise CanvasCheckError("PROVIDER_UNAVAILABLE")
+            absolute = urljoin(self.target.origin + target, location)
+            if urlsplit(absolute).netloc.lower() == urlsplit(self.target.origin).netloc.lower():
+                target = _download_target(self.target, absolute, course_id, file_id)
+                continue
+            if hop >= MAX_DOWNLOAD_REDIRECTS:
+                break
+            return self._foreign(absolute, hosts, expected_size, deadline, resolver, connector,
+                                 MAX_DOWNLOAD_REDIRECTS - hop)
+        raise CanvasCheckError("PROVIDER_UNAVAILABLE")
+
+    def _foreign(self, url: str, hosts: frozenset[str], expected_size: int, deadline: float,
+                 resolver: Resolver | None, connector: Connector | None, requests: int) -> bytes:
+        """At most ``requests`` GETs on the storage host: the redirect budget is shared with the
+        Canvas hops, so the whole chain never follows more than MAX_DOWNLOAD_REDIRECTS."""
+        storage, target = _foreign_target(url, hosts)
+        with open_canvas_connection(storage.origin, resolver=resolver, connector=connector) as other:
+            for _ in range(requests):
+                other._request_limit = requests
+                other._admit()
+                response = self._fetch(other, target, {"Accept": "*/*"}, deadline, expected_size)
+                if not 300 <= response.status < 400:
+                    return _exact(response, expected_size)
+                location = _header(response.headers, "Location")
+                if not location:
+                    raise CanvasCheckError("PROVIDER_UNAVAILABLE")
+                again, target = _foreign_target(urljoin(storage.origin + target, location), hosts)
+                if again != storage:
+                    raise CanvasCheckError("DESTINATION_NOT_ALLOWED")
+        raise CanvasCheckError("PROVIDER_UNAVAILABLE")
+
+    @staticmethod
+    def _fetch(connection: CanvasConnection, target: str, headers: Mapping[str, str], deadline: float,
+               expected_size: int) -> CanvasResponse:
+        fetch = getattr(connection.transport, "fetch", None)
+        if fetch is None:
+            raise CanvasCheckError("PROVIDER_UNAVAILABLE")
+        remaining = min(DOWNLOAD_TIMEOUT_SECONDS, deadline - time.monotonic())
+        if remaining <= 0:
+            raise CanvasCheckError("TIMEOUT")
+        connection._request_count += 1
+        failure_code: str | None = None
+        try:
+            response: CanvasResponse = fetch(target, headers, remaining, expected_size)
+        except CanvasCheckError as error:
+            failure_code = error.code
+        except TimeoutError:
+            failure_code = "TIMEOUT"
+        except Exception:  # noqa: BLE001 -- redact arbitrary provider/transport failures (may carry a URL)
+            failure_code = "PROVIDER_UNAVAILABLE"
+        if failure_code is not None:
+            raise CanvasCheckError(failure_code)
+        if time.monotonic() > deadline:
+            raise CanvasCheckError("TIMEOUT")
+        if 300 <= response.status < 400:
+            return response
+        if response.status == 401:
+            raise CanvasCheckError("INVALID_CREDENTIAL")
+        if response.status == 403:
+            raise CanvasCheckError("PERMISSION_MISSING")
+        if response.status == 404:
+            raise CanvasCheckError("NOT_FOUND")
+        if response.status == 429:
+            raise CanvasCheckError("RATE_LIMITED")
+        if not 200 <= response.status < 300:
+            raise CanvasCheckError("PROVIDER_UNAVAILABLE")
+        return response
+
     def request(self, method: str, url: str, token: str, *, deadline: float | None = None) -> CanvasResponse:
         if method != "GET":
             raise CanvasCheckError("CHECK_NOT_READ_ONLY")
@@ -365,9 +549,7 @@ class CanvasConnection:
             raise CanvasCheckError("PROVIDER_UNAVAILABLE")
 
     def _send(self, path: str, token: str, deadline: float | None) -> CanvasResponse:
-        if (not isinstance(token, str) or not token or len(token) > 4096
-                or any(ord(char) < 33 or ord(char) > 126 for char in token)):
-            raise CanvasCheckError("INVALID_CREDENTIAL")
+        _require_token(token)
         remaining = REQUEST_TIMEOUT_SECONDS
         now = time.monotonic()
         if self._request_count == 0 and self._first_request_deadline is not None:
@@ -422,6 +604,12 @@ class CanvasConnection:
 
     def __exit__(self, *_: object) -> None:
         self.close()
+
+
+def _exact(response: CanvasResponse, expected_size: int) -> bytes:
+    if len(response.body) != expected_size:
+        raise CanvasCheckError("SIZE_MISMATCH")
+    return bytes(response.body)
 
 
 def open_canvas_connection(origin: str, *, resolver: Resolver | None = None,

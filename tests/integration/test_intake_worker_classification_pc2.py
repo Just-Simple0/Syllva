@@ -7,7 +7,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from tests.integration.test_intake_worker_classification_pb1 import _assign_request, _enable
+from tests.integration.test_intake_worker_classification_pb1 import (
+    CANVAS_TEST_ORIGIN,
+    _assign_request,
+    _enable,
+)
 from tests.integration.test_intake_worker_preview import _system
 
 from uls.adapters.llm.typesafe_choice import (
@@ -49,7 +53,7 @@ class FakeClient:
 
 def _bind(system, raw=RAW):
     system["state"].record_canvas_drive_binding(
-        drive_file_id=system["source_id"], canvas_course_id=67535, resource_kind="module_file",
+        origin=CANVAS_TEST_ORIGIN, drive_file_id=system["source_id"], canvas_course_id=67535, resource_kind="module_file",
         resource_id="m1", observation_revision=1, attachment_id="att-1", attachment_filename="lecture.md",
         attachment_size=len(raw), byte_sha256=hashlib.sha256(raw).hexdigest())
 
@@ -140,7 +144,7 @@ def test_binding_with_different_bytes_is_never_sent(tmp_path: Path) -> None:
     cm, system, worker = _setup(tmp_path, client, bound=False)
     try:
         system["state"].record_canvas_drive_binding(
-            drive_file_id=system["source_id"], canvas_course_id=67535, resource_kind="module_file",
+            origin=CANVAS_TEST_ORIGIN, drive_file_id=system["source_id"], canvas_course_id=67535, resource_kind="module_file",
             resource_id="m1", observation_revision=1, attachment_id="att-1", attachment_filename="lecture.md",
             attachment_size=len(RAW), byte_sha256="f" * 64)
         worker.run_once()
@@ -186,7 +190,8 @@ def test_cache_hit_costs_no_call_and_no_budget(tmp_path: Path) -> None:
         worker.run_once()
         item = _item(system)
         probe = worker._source_probe(item)
-        outcome = SimpleNamespace(origin=s2_origin(), course_key=None, week=None)
+        # P-E E11: a proven Canvas binding now also supplies the course, so the cached payload has it.
+        outcome = SimpleNamespace(origin=s2_origin(), course_key=item.inferred_course_key, week=None)
         binding = system["state"].get_canvas_drive_binding(item.provider_file_id)
         before = worker._s2_tick["calls"]
         result = worker._run_s2(item, outcome, probe, binding)

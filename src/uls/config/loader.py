@@ -429,7 +429,26 @@ def _intake_section(raw: Mapping[str, Any]) -> IntakeCfg:
     cfg.canvas_principal = cfg.canvas_principal.strip()
     if cfg.canvas_observation_enabled and not (cfg.canvas_origin and cfg.canvas_principal):
         raise ValueError("intake.classification.canvas_observation_enabled requires canvas_origin and canvas_principal")
-    for name in ("max_calls_per_tick", "max_source_bytes", "max_terminal_scan", "max_canvas_courses_per_tick"):
+    if not isinstance(cfg.canvas_attachment_download_enabled, bool):
+        raise ValueError("intake.classification.canvas_attachment_download_enabled must be boolean")  # noqa: TRY004
+    if cfg.canvas_attachment_download_enabled and not cfg.canvas_observation_enabled:
+        raise ValueError("intake.classification.canvas_attachment_download_enabled requires canvas_observation_enabled")
+    hosts = cfg.canvas_file_hosts if cfg.canvas_file_hosts is not None else []
+    if not isinstance(hosts, list):
+        raise ValueError("intake.classification.canvas_file_hosts must be a list of host names")  # noqa: TRY004
+    normalized_hosts: list[str] = []
+    for host in hosts:
+        from uls.settings.canvas_checks import CanvasCheckError, validate_canvas_origin
+
+        if not isinstance(host, str) or not host or ":" in host or "/" in host:
+            raise ValueError("intake.classification.canvas_file_hosts entries must be bare host names")
+        try:
+            normalized_hosts.append(validate_canvas_origin(f"https://{host}").host)
+        except CanvasCheckError:
+            raise ValueError("intake.classification.canvas_file_hosts entries must be public host names") from None
+    cfg.canvas_file_hosts = sorted(set(normalized_hosts))
+    for name in ("max_calls_per_tick", "max_source_bytes", "max_terminal_scan", "max_canvas_courses_per_tick",
+                 "max_canvas_downloads_per_tick"):
         value = getattr(cfg, name)
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise ValueError(f"intake.classification.{name} must be a positive integer")
