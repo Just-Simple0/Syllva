@@ -17,8 +17,8 @@
 | P-C1 TypeSafe(Jev) Choice 어댑터·`TYPESAFE_API_KEY` | 머지 | #21 |
 | P-C2 S2 연동(최소화·캐시·틱 예산·DEFERRED·readiness) | 머지 | #22 |
 | P-D 결정적 S4 태그·검색 fail-closed 필터·Behavior Contract v3 | 머지 | #23 (main `af3a905`) |
-| **P-E 공지·첨부** (LMS canonical 행 읽기, 첨부 intake 연결; `scripts/knu_lms_sync.py` 소스 첨부 리뷰 필요, 공지 행 create/update 0건) | **다음** | |
-| **P-F School 전체 흐름** (전사문 8개 + Canvas 자료 + 공지 end-to-end, 분류 지표) | 남음 | |
+| P-E 공지·첨부 (r15: 수집기에 공지 행·첨부가 없어 Canvas 첨부 다운로드 → 개인 Drive → binding 경로 신설, 공지 본문은 메타만) | 머지 | (PR 본문 참조) |
+| **P-F School 전체 흐름** (전사문 8개 + Canvas 자료 + 공지 첨부 end-to-end, 분류 지표; KNU 파일 저장소 호스트·공지 `attachments[]` 실제 모양 확인 포함) | **다음** | |
 
 사용자 목표 해석: P-F까지가 "수집 → 자동 분류 → 태그 → 검색 → 공지" 데이터 흐름 완성. 이후 MCP로 연결해 AI 클라이언트에 요청해 복습/문제를 받는다. **복습 스케줄·모의고사 세트·채점은 그 다음 단계이며 아직 어떤 계획 문서에도 없다**(사용자 확인 2026-10-13).
 
@@ -621,4 +621,5 @@ GUI-2/3 구현 리뷰를 전송한 대화나 회수할 미완료 final manifest�
 - 알려진 한계: 과제 첨부(설명 HTML 링크)는 범위 밖; 모듈 File의 같은 file id 제자리 교체는 재다운로드 안 함; `UPLOAD_UNCERTAIN`(결과 미확인 create)은 자동 해제되지 않음(readiness `intents`에 표시, 정리 도구는 후속); KNU Canvas 파일 저장소 호스트와 실제 공지 `attachments[]` 응답 모양은 P-F에서 사용자 환경으로 확인.
 - 의도된 변화: 바이트로 증명된 binding의 과목이 S2 payload `course_key`에 들어간다(P-C2 캐시 테스트 1건 갱신).
 - 계획 리뷰 3라운드(GPT-6 Extra High): r1 REVISE 9/2(7건이 fetcher에 집중 → marker 검색 복구를 intent 원장으로 구조 변경), r2 REVISE 4/3(이전 미확정 버전 선정리, 복구 revision 고정, 관측 revision에 첨부 서명, binding origin), r3 **GO 0/1**(H-PE3-01 다운로드 ON/OFF 전환 시 revision 불변으로 반영). 처분 `.insane-review/intake-classification-20261009/pe-plan-disposition-r{1,2,3}.json`.
+- 구현 리뷰(GPT-6 Extra High): r1 REVISE 3/3(공지 첨부 listing 사전 판정, Unicode Cc/Cf 파일명, readiness 초기 카운터; H 2건 반영·시간 예산 1건 후속), r2 REVISE 2/0(정규화된 같은-origin redirect, 저장소 루트 URL), r3 **GO 0/0**. 처분 `pe-impl-disposition-r{1,2,3}.json`.
 - 상태 추가(가산 마이그레이션): `canvas_attachment_intents` 테이블, `canvas_observations.attachment_signature`, `canvas_drive_bindings.origin`(기존 NULL 행은 출처 증명 아님).
