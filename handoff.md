@@ -555,3 +555,10 @@ GUI-2/3 구현 리뷰를 전송한 대화나 회수할 미완료 final manifest�
 - **P-C2 구현 리뷰(2026-10-12)**: GPT-6 Extra High 5라운드, REQUIRED 4→4→4→4→2 (전부 S2 개인정보/비밀 최소화 우회 형태 + 상태 보존). 사용자 결정으로 5차 수정까지 반영 후 6차 없이 머지.
   - 알려진 한계: 라벨 없는 인명, 정규식으로 판별 불가한 개인정보/비밀 형태. 호출 조건(키 source 명시 + 분류 enabled + S1 미결 + 바이트 검증된 Canvas 교수 자료)으로 노출면이 좁고 기본 꺼짐.
   - 후속 후보: 발췌 전송 중단 옵션(제목·메타만), 두 학기 DEFERRED 재개 통합 테스트, readiness 카운터 시점.
+
+## P-D 검색 필터 (2026-10-12~13)
+- 표: `docs/plans/intake-classification-pd-invariants.md`(D1–D14). 계획 리뷰 2라운드(REQUIRED 6→1, 반영), 구현 리뷰 4라운드(3→1→1→1; 2~4차는 enrichment 신호 필터의 모양 변형: 중첩 locator, locator가 키, 과제 어휘가 키). 사용자 결정으로 4차 수정까지 반영 후 5차 없이 머지.
+- 구현: `retrieval/tags.py`(결정적 읽기 시점 assignment 태그; Jev 없음·영속 상태 없음), 엔진 수집기·get_source_chunk 재검증(현재 Kind/Type), `CapabilityBinding.assignment_opt_in/doc_kind`, EvidenceItem 추가 메타 `usage_policy`/`assignment_decision`, 신호 필터(locator 문법 + 어휘를 키·값 전부에서), Behavior Contract v3 + 투영 6개 재생성.
+- 편차(수용됨): 청크=페이지/타임스탬프 창(같은 페이지 NO/YES 공존 수용 사례는 "페이지 전체 YES"로 개정), LAB_MATERIAL은 규칙으로 증명 불가 → 항상 기본 검색 차단, MCP 스키마 불변(`include_assignment`는 엔진 API 전용).
+- 알려진 한계: 강한 어휘 없이 쓰인 과제 지시는 탐지 불가(Jev 정제는 후속).
+- 후속: `CapabilityManager.authorize`/독립 helper에 정책 검증기 주입, 빈 청크만 있는 비-LAB 문서의 COMPLETE, 신호 JSON 모양 스키마 제한(enrichment 생성 쪽), S4 Jev 정제, `v2_exposure_gate`를 켜기 전 운영 점검.
