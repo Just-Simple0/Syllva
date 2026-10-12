@@ -489,11 +489,18 @@ def dispatch(args: argparse.Namespace) -> Any:
     if args.command in {'sync', 'process', 'run'}:
         if not config.worker.enabled:
             return {'status': 'disabled', 'processed': 0}
+        from uls.adapters.llm.typesafe_choice import resolve_typesafe_key
         from uls.worker import build_worker
-        credentials = CredentialResolver(config.credentials, path_overrides=getattr(config, 'google_path_overrides', {})).resolve(
+
+        resolver = CredentialResolver(config.credentials, path_overrides=getattr(config, 'google_path_overrides', {}))
+        credentials = resolver.resolve(
             required=frozenset({'GOOGLE_WORKER_CREDENTIALS_FILE', 'NOTION_WORKER_TOKEN'})
         )
-        worker = build_worker(config, credentials)
+        classifier_key = resolve_typesafe_key(config.credentials, resolver)
+        worker = (
+            build_worker(config, credentials, classifier_key=classifier_key)
+            if classifier_key else build_worker(config, credentials)
+        )
         try:
             return worker.runner.run_once(sync=args.command != 'process', process=args.command != 'sync',
                                            max_jobs=args.max_jobs)

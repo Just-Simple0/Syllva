@@ -26,6 +26,7 @@ from uls.adapters.drive.worker import (
     ensure_marked_folder,
     require_private_ownership,
 )
+from uls.adapters.llm.typesafe_choice import ClassifierError, RequestTooLarge
 from uls.adapters.notion.intake import (
     AUTO_RESOLVED_STATUS,
     CONTENT_STATUSES,
@@ -65,6 +66,7 @@ from uls.intake.classification import (
     handling_mode,
     transcript_signals,
 )
+from uls.intake.classification import s2 as _s2
 from uls.intake.classification.calendar import CourseCalendar
 from uls.intake.classification.pipeline import (
     BLOCK_ALIAS_EVIDENCE,
@@ -80,10 +82,13 @@ from uls.intake.classification.pipeline import (
     BLOCK_SESSION_UNKNOWN,
     NOTE_AUTO_UNAVAILABLE,
     NOTE_FORMAT_KIND_MISMATCH,
+    NOTE_SOURCE_TOO_LARGE,
+    NOTE_SOURCE_UNAVAILABLE,
     ClassificationOutcome,
     SourceProbe,
     classify_upload_item,
 )
+from uls.intake.classification.s2 import PiiUncertain, S2Result
 from uls.intake.identity import (
     derivative_marker,
     derive_operation_key,
@@ -239,6 +244,25 @@ class _LayoutValidationContext:
         return dict(self.workspace_fingerprints).get(semester)
 
 
+S2_BUDGET_CODE = "CLASSIFIER_BUDGET_EXHAUSTED"
+S2_BUDGET_TEXT = "Classification is deferred until the per-tick classifier budget allows it."
+S2_NOTE_ORIGIN_INELIGIBLE = _s2.NOTE_ORIGIN_INELIGIBLE
+S2_NOTE_PII_UNCERTAIN = _s2.NOTE_PII_UNCERTAIN
+S2_NOTE_LOW_CONFIDENCE = _s2.NOTE_LOW_CONFIDENCE
+S2_NOTE_REQUEST_TOO_LARGE = _s2.NOTE_REQUEST_TOO_LARGE
+S2_KEPT_NOTES = frozenset({
+    "CLASSIFIER_TIMEOUT", "CLASSIFIER_TRANSPORT", "CLASSIFIER_INVALID_RESPONSE", "S2_REQUEST_TOO_LARGE",
+    "PII_UNCERTAIN", "S2_ORIGIN_INELIGIBLE", "LOW_CONFIDENCE", "CLASSIFIER_NO_MATCH"})
+S2_OPTIONS = _s2.OPTIONS
+S2_QUESTION = _s2.QUESTION
+S2_QUESTION_NAME = _s2.QUESTION_NAME
+S2_EXCERPT_LIMITS = _s2.EXCERPT_LIMITS
+s2_extract_excerpt = _s2.extract_excerpt
+s2_build_payload = _s2.build_payload
+s2_cache_key = _s2.cache_key
+s2_decide = _s2.decide
+
+
 class IntakeWorker:
     """One local, bounded, single-active worker for configured semesters."""
 
@@ -270,6 +294,11 @@ class IntakeWorker:
         self.canvas_observer: Any | None = None
         self._canvas_denied: set[str] = set()
         self._canvas_cursor = 0
+        # S2 (Jev Choice, plan §3.2/§4); None keeps classification S1-only (CLASSIFIER_DISABLED).
+        self.s2_client: Any | None = None
+        self._s2_tick = {"calls": 0, "invalid": 0, "transport": 0}
+        self._s2_last_tick = {"calls": 0, "invalid": 0, "transport": 0}
+        self._s2_deferred_waiting: set[str] = set()
         # OAuth compositions hold this for a whole public entry so no other
         # entry can refresh the shared credential while provider work runs.
         self._entry_lock = threading.Lock()
@@ -388,6 +417,8 @@ class IntakeWorker:
         if self.provider_account_binding_id and self.notion is not None:
             self._require_notion_workspace_verified()
         total = 0
+        self._s2_last_tick, self._s2_tick = self._s2_tick, {"calls": 0, "invalid": 0, "transport": 0}
+        self._s2_deferred_waiting = set(self.state.list_deferred_intake_ids(list(self._group_workspaces()))) if self.s2_client is not None else set()
         for semester, workspaces in self._group_workspaces().items():
             workspace = workspaces[0]
             validate_registered_drive_layout(self.drive, workspaces)
@@ -421,7 +452,9 @@ class IntakeWorker:
                 optional_course_uploads=optional,
             )
             total += discovery.count
-            for item in discovery.items:
+            # A budget-deferred item resumes before any newly observed one (plan §4).
+            ordered = sorted(discovery.items, key=lambda entry: entry.classification_state != "DEFERRED")
+            for item in ordered:
                 if item.status == IntakeStatus.NEEDS_INPUT.value and self._classification_enabled():
                     # Plan §4 boundary: observe → classify → S3 decision → request.
                     self._classify_discovered_item(item, workspace, config_fingerprint, workspace_fingerprint)
@@ -1890,14 +1923,27 @@ class IntakeWorker:
                 else "DISABLED"),
             "rule_table_version": RULE_TABLE_VERSION,
             "tag_rule_version": TAG_RULE_VERSION,
-            "calls_remaining": 0,
+            "calls_remaining": self._s2_calls_remaining(classification_cfg),
+            "s2_status": self._s2_status(counts),
             "deferred_items": counts.get("deferred_items", 0),
             "human_fallback_items": counts.get("human_fallback_items", 0),
             "partial_tag_documents": counts.get("partial_tag_documents", 0),
             "stale_tag_documents": counts.get("stale_tag_documents", 0),
-            "invalid_response_count": 0,
-            "transport_failure_count": 0,
+            "invalid_response_count": self._s2_last_tick["invalid"],
+            "transport_failure_count": self._s2_last_tick["transport"],
         }
+
+    def _s2_calls_remaining(self, classification_cfg: Any) -> int:
+        if self.s2_client is None:
+            return 0
+        return max(0, int(getattr(classification_cfg, "max_calls_per_tick", 50)) - self._s2_tick["calls"])
+
+    def _s2_status(self, counts: Mapping[str, int]) -> str:
+        if self.s2_client is None:
+            return "DISABLED"
+        if self._s2_last_tick["invalid"] or self._s2_last_tick["transport"] or counts.get("deferred_items", 0):
+            return "DEGRADED"
+        return "READY"
 
     def _request_creation_allowed(self, item: IntakeItem) -> bool:
         """observe → classify → S3 decision → request (plan §4): with classification
@@ -2035,6 +2081,7 @@ class IntakeWorker:
     ) -> ClassificationOutcome | None:
         """S0/S1 + axes + calendar for one discovered upload; persists record, item columns and suggestion."""
 
+        self._s2_deferred_waiting.discard(item.intake_id)    # whatever happens now, it no longer waits
         if item.classification_source == "human":
             return None
         if self._unresolved_closure(item.intake_id):
@@ -2056,7 +2103,7 @@ class IntakeWorker:
         calendar = self._course_calendar(course_key, semester) if course_key else None
         binding = self.state.get_canvas_drive_binding(item.provider_file_id)
 
-        def classify(probe: SourceProbe | None) -> ClassificationOutcome:
+        def classify(probe: SourceProbe | None, s2: S2Result | None = None) -> ClassificationOutcome:
             # S0: PROFESSOR_SOURCE only when the stored Canvas binding is proven by the
             # bytes just read (exact file id + byte_sha256); never from a title.  The
             # proven binding's resource kind is the only Canvas signal S1 may use (r2 #3).
@@ -2070,6 +2117,10 @@ class IntakeWorker:
                 origin=Origin.PROFESSOR_SOURCE if verified_binding else None,
                 canvas_attachment_of=str(binding["resource_kind"]) if verified_binding and binding else None,
                 alias_index=alias_index, semester=semester, calendar=calendar, probe=probe,
+                s2_available=self.s2_client is not None,
+                model_kind=None if s2 is None else s2.kind,
+                model_decision=None if s2 is None else s2.decision,
+                s2_notes=() if s2 is None else s2.notes,
             )
 
         outcome = classify(None)
@@ -2095,6 +2146,28 @@ class IntakeWorker:
             # settle S0 (and its P4 signal) even when S1 is undecided (r2 R3).
             probe = self._source_probe(item)
             outcome = classify(probe)
+        s2_result: S2Result | None = None
+        if self.s2_client is not None and not outcome.decided:
+            # An item already settled as HUMAN never costs a new call, but its earlier S2 result is
+            # reproduced from the cache so the record, source label and notes are not lost.
+            s2_result = self._run_s2(item, outcome, probe, binding, cache_only=item.classification_state == "HUMAN")
+            if s2_result.status == "DEFERRED":
+                self.state.update_intake_item(
+                    item.intake_id, classification_state="DEFERRED",
+                    last_error_code=S2_BUDGET_CODE, last_error=S2_BUDGET_TEXT)
+                self._s2_deferred_waiting.discard(item.intake_id)
+                return outcome
+            self._s2_deferred_waiting.discard(item.intake_id)
+            if (
+                item.classification_state == "HUMAN" and s2_result.status == "HUMAN"
+                and not s2_result.notes and s2_result.decision is None
+            ):
+                # No cached answer to reproduce: keep the earlier S3 reason instead of recomputing it away.
+                stored = self.state.get_intake_suggestion(item.intake_id) or {}
+                kept = tuple(
+                    code for code in str(stored.get("suggestion_note") or "").split(";") if code in S2_KEPT_NOTES)
+                s2_result = S2Result("HUMAN", notes=kept)
+            outcome = classify(probe, s2_result)
         record_id: str | None = None
         byte_proven = probe is not None and probe.complete and probe.byte_sha256 is not None
         # AUTO course evidence for an alias-based course: config + USER Notion Aliases, with
@@ -2124,15 +2197,19 @@ class IntakeWorker:
                 provider_file_id=item.provider_file_id,
                 byte_sha256=probe.byte_sha256 if probe else None,
                 byte_md5=probe.byte_md5 if probe else None,
-                snapshot_sha256=None,
+                snapshot_sha256=s2_result.snapshot_sha256 if outcome.model_decision is not None and s2_result else None,
                 source_version=item.source_version,
                 workspace_fingerprint=workspace_fingerprint,
                 config_fingerprint=config_fingerprint,
                 rule_table_version=outcome.rule_table_version,
-                decision={"type": "rule", "rule_id": outcome.rule_id,
-                          "candidates": [kind.value for kind in outcome.candidates],
-                          "source_name": item.original_name, "source_mime": item.mime_type,
-                          "source_parent": item.observed_parent_id},
+                decision=(
+                    {**outcome.model_decision, "source_name": item.original_name, "source_mime": item.mime_type,
+                     "source_parent": item.observed_parent_id}
+                    if outcome.model_decision is not None else
+                    {"type": "rule", "rule_id": outcome.rule_id,
+                     "candidates": [kind.value for kind in outcome.candidates],
+                     "source_name": item.original_name, "source_mime": item.mime_type,
+                     "source_parent": item.observed_parent_id}),
                 kind=outcome.kind.value,
                 origin=outcome.origin.value,
                 course_key=outcome.course_key,
@@ -2178,7 +2255,7 @@ class IntakeWorker:
             item.intake_id,
             origin=outcome.origin.value,
             classified_kind=outcome.kind.value if decided and outcome.kind is not None else None,
-            classification_source=f"rule:{outcome.rule_id}" if decided else None,
+            classification_source=outcome.source_label if decided else None,
             classification_record_id=record_id,
             inferred_course_key=outcome.course_key,
             inferred_week=outcome.week,
@@ -2188,11 +2265,113 @@ class IntakeWorker:
             # other outcome is an S3 decision and receives a HUMAN draft with
             # suggestions (plan §3.3, §3.4 stage A).
             classification_state="CLASSIFIED" if auto_plan is not None else "HUMAN",
+            **({"last_error_code": None, "last_error": None} if item.last_error_code == S2_BUDGET_CODE else {}),
         )
         self.state.upsert_intake_suggestion(item.intake_id, **outcome_notes)
         if auto_plan is not None and record is not None:
             self._close_blank_drafts(self._require_item(item.intake_id), auto_plan, record, workspace)
         return outcome
+
+    def _run_s2(
+        self, item: IntakeItem, outcome: ClassificationOutcome, probe: SourceProbe | None, binding: Any,
+        *, cache_only: bool = False,
+    ) -> S2Result:
+        """One S2 decision (plan §3.2): eligibility, minimization, cache, budget, strict validation.
+        Every failure is an S3 result with fixed notes; nothing here writes outside the local state."""
+
+        client = self.s2_client
+        if client is None:
+            return S2Result("HUMAN", notes=("CLASSIFIER_DISABLED",))
+        # A transcript is sent only after normalization has split :source from :user (plan §3.2);
+        # classification runs before that, so USER_AUTHORED_TRANSCRIPT never leaves the machine.
+        if outcome.origin is not Origin.PROFESSOR_SOURCE:
+            return S2Result("HUMAN", notes=(S2_NOTE_ORIGIN_INELIGIBLE,))
+        if probe is None or probe.unavailable:
+            return S2Result("HUMAN", notes=(NOTE_SOURCE_UNAVAILABLE,))
+        if probe.too_large:
+            return S2Result("HUMAN", notes=(NOTE_SOURCE_TOO_LARGE,))
+        byte_sha = probe.byte_sha256
+        if byte_sha is None:
+            return S2Result("HUMAN", notes=(NOTE_SOURCE_UNAVAILABLE,))
+        classification = getattr(self.config.intake, "classification", None)
+        budget = max(0, int(getattr(classification, "max_calls_per_tick", 50)))
+        raw_excerpt = s2_extract_excerpt(item.original_name, item.mime_type, probe.payload)
+        extension = item.original_name.rsplit(".", 1)[1].lower() if "." in item.original_name else ""
+        item_type = str(binding["resource_kind"]) if binding is not None else None
+        for limit in S2_EXCERPT_LIMITS:
+            try:
+                payload = s2_build_payload(
+                    title=item.original_name, extension=extension, origin=outcome.origin.value,
+                    course_key=outcome.course_key, module_week=outcome.week, item_type=item_type,
+                    excerpt=raw_excerpt, limit=limit)
+            except PiiUncertain:
+                return S2Result("HUMAN", notes=(S2_NOTE_PII_UNCERTAIN,))
+            key = s2_cache_key(
+                payload=payload, byte_sha256=byte_sha, source_version=item.source_version,
+                title=item.original_name, course_key=outcome.course_key, module_week=outcome.week,
+                item_type=item_type, origin=outcome.origin.value)
+            cached = self.state.get_s2_cache(key)
+            if cached is not None:
+                answer = self._s2_cached_answer(cached)
+                if answer is not None:
+                    return self._s2_result(answer, payload.snapshot_sha256)
+            if cache_only:
+                return S2Result("HUMAN")
+            # Budget deferred items still waiting this tick (any semester) are served first: a
+            # new item may not take the calls they need (plan §4).
+            waiting = len(self._s2_deferred_waiting - {item.intake_id}) if item.classification_state != "DEFERRED" else 0
+            if self._s2_tick["calls"] + waiting >= budget:
+                return S2Result("DEFERRED")
+            try:
+                reply = client.ask(payload.state, [S2_QUESTION])
+            except RequestTooLarge:
+                continue                      # nothing was sent; try a smaller excerpt
+            except ClassifierError as error:
+                self._s2_tick["calls"] += 1
+                self._s2_tick["invalid" if error.code == "CLASSIFIER_INVALID_RESPONSE" else "transport"] += 1
+                return S2Result("HUMAN", notes=(error.code,))
+            except Exception:  # noqa: BLE001 - any other client failure is a fixed transport code
+                self._s2_tick["calls"] += 1
+                self._s2_tick["transport"] += 1
+                return S2Result("HUMAN", notes=("CLASSIFIER_TRANSPORT",))
+            self._s2_tick["calls"] += 1
+            try:
+                answer = reply.answers[S2_QUESTION_NAME]
+                verified = {"choice": answer.choice, "confidence": answer.confidence,
+                            "probabilities": dict(answer.probabilities)}
+                if self._s2_cached_answer(verified) is None:
+                    raise ValueError("unverified answer")
+                self.state.put_s2_cache(key, verified)
+                return self._s2_result(verified, payload.snapshot_sha256)
+            except Exception:  # noqa: BLE001 - a malformed answer is a fixed invalid-response code
+                self._s2_tick["invalid"] += 1
+                return S2Result("HUMAN", notes=("CLASSIFIER_INVALID_RESPONSE",))
+        return S2Result("HUMAN", notes=(S2_NOTE_REQUEST_TOO_LARGE,))
+
+    @staticmethod
+    def _s2_cached_answer(cached: Mapping[str, Any]) -> dict[str, Any] | None:
+        choice, confidence, probabilities = cached.get("choice"), cached.get("confidence"), cached.get("probabilities")
+        if not (
+            isinstance(choice, str) and choice in S2_OPTIONS
+            and isinstance(confidence, float) and not isinstance(confidence, bool)
+            and 0.0 <= confidence <= 1.0
+            and isinstance(probabilities, dict) and set(probabilities) == set(S2_OPTIONS)
+        ):
+            return None
+        values = list(probabilities.values())
+        if any(isinstance(v, bool) or not isinstance(v, int | float) or not 0.0 <= v <= 1.0 for v in values):
+            return None
+        top = max(values)
+        if abs(sum(values) - 1.0) > 1e-6 or [k for k, v in probabilities.items() if v == top] != [choice]:
+            return None
+        return {"choice": choice, "confidence": confidence, "probabilities": probabilities}
+
+    @staticmethod
+    def _s2_result(answer: Mapping[str, Any], snapshot_sha256: str) -> S2Result:
+        decision = s2_decide(answer["choice"], answer["confidence"], answer["probabilities"])
+        if decision.kind is None:
+            return S2Result("HUMAN", decision=decision.record(), notes=(decision.note or S2_NOTE_LOW_CONFIDENCE,))
+        return S2Result("DECIDED", kind=decision.kind, decision=decision.record(), snapshot_sha256=snapshot_sha256)
 
     # ------------------------------------------------------------------
     # Intake classification v2 (P-B2a): AUTO_PENDING plans and Draft auto-close

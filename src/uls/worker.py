@@ -343,7 +343,7 @@ class NativeWorker:
         )
 
 
-def build_worker(config: Any, credentials: ResolvedCredentials) -> Any:
+def build_worker(config: Any, credentials: ResolvedCredentials, *, classifier_key: str | None = None) -> Any:
     # credentials is a required ResolvedCredentials snapshot produced by
     # exactly one CredentialResolver.resolve() call at this composition's
     # root (cli/main.py's dispatch(), sync|process|run branch); this
@@ -354,7 +354,7 @@ def build_worker(config: Any, credentials: ResolvedCredentials) -> Any:
     if config.google_drive.semester_registries and config.notion.semester_workspaces:
         from uls.runtime import build_intake_worker
 
-        return build_intake_worker(config, credentials)
+        return build_intake_worker(config, credentials, classifier_key=classifier_key)
     from notion_client import Client
     for key in ('GOOGLE_WORKER_CREDENTIALS_FILE', 'NOTION_WORKER_TOKEN'):
         if not credentials.get(key):

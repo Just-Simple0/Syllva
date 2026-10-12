@@ -11,9 +11,10 @@ note, exactly as plan §4 prescribes for an unspecified credential.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
-from typing import Final
+from typing import Any, Final
 
 from .calendar import CalendarMatch, CourseCalendar, MatchStatus, SemesterRange, match_transcript
 from .rules import (
@@ -104,6 +105,17 @@ class ClassificationOutcome:
     notes: tuple[str, ...]
     suggestion_source: str | None
     semester: SemesterRange | None
+    model_decision: Mapping[str, Any] | None = None   # the S2 decision record when the Kind is the model's
+
+    @property
+    def source_label(self) -> str | None:
+        """``rule:<id>`` or ``jev:<model>`` - where the Kind came from."""
+
+        if self.kind is None:
+            return None
+        if self.decision_type is DecisionType.MODEL and self.model_decision is not None:
+            return f"jev:{self.model_decision.get('model')}"
+        return f"rule:{self.rule_id}"
 
     @property
     def decided(self) -> bool:
@@ -178,6 +190,9 @@ def classify_upload_item(
     probe: SourceProbe | None,
     s2_available: bool = False,
     canvas_attachment_of: str | None = None,
+    model_kind: Kind | None = None,
+    model_decision: Mapping[str, Any] | None = None,
+    s2_notes: tuple[str, ...] = (),
 ) -> ClassificationOutcome:
     """Run S0/S1 and the assignment axes for one Drive file.
 
@@ -206,6 +221,9 @@ def classify_upload_item(
     decision: RuleDecision = classify_by_rules(signals)
     notes: list[str] = []
     kind = decision.kind
+    decided_by_model = kind is None and model_kind is not None and model_decision is not None
+    if decided_by_model:
+        kind = model_kind
     # --- assignment axes -------------------------------------------------------
     course_key: str | None = None
     course_basis: str | None = None
@@ -225,11 +243,13 @@ def classify_upload_item(
         week = week_from_filename(name)
     resolved_origin = origin
     # --- decision type / S3 reasons ------------------------------------------------
-    decision_type: DecisionType | None = DecisionType.RULE if decision.decided else None
+    decision_type: DecisionType | None = (
+        DecisionType.RULE if decision.decided else DecisionType.MODEL if decided_by_model else None)
     if kind is None:
         notes.append(NOTE_NO_SINGLE_RULE)
         if not s2_available:
             notes.append(NOTE_CLASSIFIER_DISABLED)
+        notes.extend(s2_notes)
     elif kind is Kind.UNSUPPORTED:
         notes.append(NOTE_UNSUPPORTED)
     if kind is not None and kind is not Kind.UNSUPPORTED and course_key is None:
@@ -268,6 +288,7 @@ def classify_upload_item(
                 notes.append(NOTE_FORMAT_KIND_MISMATCH)
     suggestion_source = (
         f"rule:{decision.rule_id}" if decision.decided
+        else f"jev:{(model_decision or {}).get('model')}" if decided_by_model
         else "calendar" if calendar_match is not None and calendar_match.status is MatchStatus.MATCHED
         else None
     )
@@ -287,6 +308,7 @@ def classify_upload_item(
         notes=tuple(dict.fromkeys(notes)),
         suggestion_source=suggestion_source,
         semester=semester,
+        model_decision=dict(model_decision) if decided_by_model and model_decision is not None else None,
     )
 
 

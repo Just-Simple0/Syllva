@@ -408,6 +408,7 @@ def build_intake_worker(
     source_reader: Any | None = None,
     study_note_block_port: Any | None = None,
     entry_attestor: Any | None = None,
+    classifier_key: str | None = None,
 ) -> Any:
     """Compose the writable preview worker behind explicit provider ports.
 
@@ -488,6 +489,10 @@ def build_intake_worker(
     from uls.intake.canvas_composition import install_canvas_observer
 
     install_canvas_observer(worker, config, state)
+    if classifier_key:
+        from uls.adapters.llm.typesafe_choice import TypesafeChoiceClient
+
+        worker.s2_client = TypesafeChoiceClient(classifier_key)
     return worker
 
 
