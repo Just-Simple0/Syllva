@@ -46,6 +46,7 @@ def _complete_calendar(state) -> None:
     state.replace_recording_calendar_current(
         COURSE, 67535, build_calendar(COURSE, entries, semester=SEMESTER, collection_complete=True),
         collection_complete=True)
+    state.set_classification_cursor(f"calendar_proof:{COURSE}", "test-proof")
 
 
 def _auto_plans(state):
@@ -988,7 +989,12 @@ def test_a_closed_sibling_the_human_edited_stops_further_closures(tmp_path: Path
         _spy_preflight(worker, edit_closed)
         worker.run_once()
         assert len(_auto_resolved_pages(notion)) == 1
-        assert sum(1 for p in notion.data_sources["synthetic-requests"] if p["Request Status"] == "Draft") == 1
+        # The second Draft stays open (never closed).  Since P-B3c the human edit of the closed first
+        # one is a terminal change; an unprocessed HUMAN request of the intake already exists, so no
+        # new generation is opened and that request is only marked.
+        drafts = [p for p in notion.data_sources["synthetic-requests"] if p["Request Status"] == "Draft"]
+        assert len(drafts) == 1 and len(notion.data_sources["synthetic-requests"]) == 2
+        assert drafts[0].get("Error") == "TERMINAL_CHANGED_AGAIN"
         assert _auto_plans(state)[0]["status"] == "SUPERSEDED"
     finally:
         system_cm.__exit__(None, None, None)

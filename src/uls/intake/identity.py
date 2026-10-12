@@ -45,6 +45,18 @@ def provider_binding_id(provider: str, provider_account_stable_id: str, oauth_ap
     )
 
 
+def _supersession(superseded_request_key: str | None, request_generation: int | None) -> list[Any] | None:
+    if superseded_request_key is None and request_generation is None:
+        return None
+    if (
+        not isinstance(superseded_request_key, str) or not superseded_request_key
+        or isinstance(request_generation, bool) or not isinstance(request_generation, int)
+        or request_generation < 1
+    ):
+        raise ValueError("superseded_request_key and request_generation must be given together")
+    return [superseded_request_key, request_generation]
+
+
 def derive_request_revision(
     *,
     provider: str,
@@ -54,9 +66,28 @@ def derive_request_revision(
     observation_refs: Sequence[Sequence[str] | Mapping[str, Any]],
     config_fingerprint: str,
     target_snapshot_hash: str,
+    superseded_request_key: str | None = None,
+    request_generation: int | None = None,
 ) -> str:
+    supersession = _supersession(superseded_request_key, request_generation)
     refs = [_canonical_observation_ref(value) for value in observation_refs]
     refs.sort(key=lambda value: canonical_json(value))
+    if supersession is not None:
+        # V2 (plan §3.4 r8 R1): the same inputs plus the superseded key and the durable
+        # generation, under its own domain tag so LEGACY derivations are untouched.
+        return sha256_hex(
+            [
+                "intake.request-revision.v2",
+                provider,
+                provider_account_binding_id,
+                semester,
+                request_type,
+                refs,
+                config_fingerprint,
+                target_snapshot_hash,
+                supersession,
+            ]
+        )
     return sha256_hex(
         [
             "intake.request-revision.v1",
@@ -80,9 +111,12 @@ def derive_request_key(
     request_revision_hash: str,
     intake_ids: Sequence[str],
     target_snapshot_hash: str,
+    superseded_request_key: str | None = None,
+    request_generation: int | None = None,
 ) -> str:
     """Derive the immutable R3 Request Key from one accepted tuple form."""
 
+    supersession = _supersession(superseded_request_key, request_generation)
     for value, name in (
         (provider, "provider"),
         (provider_account_binding_id, "provider_account_binding_id"),
@@ -99,6 +133,18 @@ def derive_request_key(
         raise ValueError("intake_ids must contain non-empty strings")
     if len(set(canonical_intake_ids)) != len(canonical_intake_ids):
         raise ValueError("intake_ids must be unique")
+    if supersession is not None:
+        return sha256_hex([
+            "intake.request.v2",
+            provider,
+            provider_account_binding_id,
+            semester,
+            request_type,
+            sorted(canonical_intake_ids),
+            request_revision_hash,
+            target_snapshot_hash,
+            supersession,
+        ])
     return sha256_hex([
         "intake.request.v1",
         provider,

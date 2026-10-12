@@ -51,6 +51,8 @@ P-B2는 리뷰 단위로 다시 둘로 나눈다.
 
 수용: §9 P-B 행의 잔여 항목 + §6.3 테스트.
 
+구현은 세 조각으로 나뉜다(불변식 표 `intake-classification-pb3-invariants.md`, PLAN GO r7): **P-B3a** Canvas 관측 어댑터(1), **P-B3b** V2 request generation(키 파생·예약-결속-생성 순서·claim-time 검증), **P-B3c** 터미널 스캔·handover·ASSIGN_COURSE 보호(2·3). 구현 메모: 한 course_key에 여러 Canvas course가 매핑되면 P-A가 course_key↔Canvas course를 1:1로 결속하므로 관측·달력 모두 부적격(닫힘)으로 처리한다. 런타임에서 Settings Canvas 토큰을 관측기에 주입하는 구성(`worker.canvas_observer`)은 Settings 쪽 읽기 전용 접근자가 필요해 이 슬라이스에서 제외하고 후속으로 남긴다.
+
 ## 구현 메모
 
 - `classification_records.course_basis.type`은 구현에서 `upload_folder|config_alias|notion_alias`를 쓴다. Canvas course map은 근거 유형이 아니라 단계 A와 첫 mutation preflight의 교차 검증이며 `canvas_map` 유형은 P-B3에 남긴다(P-B2a r14 O1).

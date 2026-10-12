@@ -32,6 +32,8 @@ class RequestGeneration:
     target_snapshot_hash: str
     request_revision_hash: str
     request_key: str
+    superseded_request_key: str | None = None
+    request_generation: int | None = None
 
 
 def validate_request_input(
@@ -142,8 +144,15 @@ def build_request_generation(
     config_fingerprint: str,
     target_snapshot: Mapping[str, Any],
     intake_ids: Sequence[str],
+    superseded_request_key: str | None = None,
+    request_generation: int | None = None,
 ) -> RequestGeneration:
-    """Compute and freeze a pre-receipt generation before page creation."""
+    """Compute and freeze a pre-receipt generation before page creation.
+
+    ``superseded_request_key`` and ``request_generation`` (both or neither) select the V2
+    derivation of a new HUMAN generation (plan §3.4); without them the LEGACY derivation
+    is unchanged.
+    """
 
     snapshot = dict(target_snapshot)
     target_hash = sha256_hex(["intake.target-snapshot.v1", snapshot])
@@ -155,6 +164,8 @@ def build_request_generation(
         observation_refs=observation_refs,
         config_fingerprint=config_fingerprint,
         target_snapshot_hash=target_hash,
+        superseded_request_key=superseded_request_key,
+        request_generation=request_generation,
     )
     key = derive_request_key(
         provider=provider,
@@ -164,6 +175,8 @@ def build_request_generation(
         request_revision_hash=revision,
         intake_ids=intake_ids,
         target_snapshot_hash=target_hash,
+        superseded_request_key=superseded_request_key,
+        request_generation=request_generation,
     )
     return RequestGeneration(
         request_type=request_type,
@@ -173,6 +186,8 @@ def build_request_generation(
         target_snapshot_hash=target_hash,
         request_revision_hash=revision,
         request_key=key,
+        superseded_request_key=superseded_request_key,
+        request_generation=request_generation,
     )
 
 

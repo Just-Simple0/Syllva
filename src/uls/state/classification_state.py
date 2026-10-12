@@ -14,7 +14,7 @@ import hashlib
 import json
 import re
 import sqlite3
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -271,6 +271,11 @@ CREATE TABLE IF NOT EXISTS terminal_change_ledger (
     created_at TEXT NOT NULL,
     PRIMARY KEY (original_receipt_id, changed_user_snapshot_hash)
 );
+CREATE TABLE IF NOT EXISTS classification_cursors (
+    name TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS handover_records (
     from_plan_revision TEXT NOT NULL,
     to_plan_revision TEXT NOT NULL,
@@ -315,6 +320,9 @@ def _recording_observation(item_type: Any, title: Any, resource_kind: Any = RECO
     except ValueError:
         return False
     return True
+
+
+is_recording_observation = _recording_observation
 
 
 def _unit_interval(value: Any) -> bool:
@@ -979,16 +987,113 @@ class ClassificationStateMixin:
         return deactivated
 
     def list_active_canvas_observations(
-        self, canvas_course_id: int, resource_kind: str | None = None
+        self, canvas_course_id: int, resource_kind: str | None = None, origin: str | None = None
     ) -> list[dict[str, Any]]:
         query = "SELECT * FROM canvas_observations WHERE canvas_course_id = ? AND active = 1"
         params: list[Any] = [int(canvas_course_id)]
+        if origin is not None:
+            query += " AND origin = ?"
+            params.append(origin)
         if resource_kind is not None:
             query += " AND resource_kind = ?"
             params.append(resource_kind)
         query += " ORDER BY resource_kind, resource_id, observation_revision"
         with self._transaction() as connection:
             return [dict(row) for row in connection.execute(query, params).fetchall()]
+
+    def close_recording_calendar(self, course_key: str, canvas_course_id: int) -> None:
+        """Fail-closed barrier written *before* a Canvas collection starts (plan §2.3, P-B3 A4).
+
+        One transaction binds the course key to its Canvas course (first binding wins,
+        a different pairing is refused) and withdraws any completeness proof.  Only a
+        later verified complete projection reopens the calendar.
+        """
+
+        with self._transaction(immediate=True) as connection:
+            bound = connection.execute(
+                "SELECT course_key, canvas_course_id FROM recording_calendar_courses "
+                "WHERE course_key = ? OR canvas_course_id = ?",
+                (course_key, int(canvas_course_id)),
+            ).fetchall()
+            if any(
+                (b["course_key"], int(b["canvas_course_id"])) != (course_key, int(canvas_course_id))
+                for b in bound
+            ):
+                raise ValueError("course_key / canvas_course_id binding differs from the recorded one")
+            connection.execute(
+                "INSERT INTO recording_calendar_courses(course_key, canvas_course_id, "
+                "collection_complete, projection_revision_hash, updated_at) VALUES (?, ?, 0, NULL, ?) "
+                "ON CONFLICT(course_key) DO UPDATE SET collection_complete = 0, "
+                "projection_revision_hash = NULL, updated_at = excluded.updated_at",
+                (course_key, int(canvas_course_id), _now()),
+            )
+
+    def deactivate_foreign_origin_observations(self, canvas_course_id: int, origin: str) -> int:
+        """Observations of this numeric Canvas course under another origin are history, not
+        evidence for the origin the mapping is verified against now (plan §2.3).  Rows stay."""
+
+        with self._transaction(immediate=True) as connection:
+            cursor = connection.execute(
+                "UPDATE canvas_observations SET active = 0 WHERE canvas_course_id = ? AND origin <> ? AND active = 1",
+                (int(canvas_course_id), origin),
+            )
+            if cursor.rowcount:
+                connection.execute(
+                    "UPDATE recording_calendar_courses SET collection_complete = 0, projection_revision_hash = NULL, "
+                    "updated_at = ? WHERE canvas_course_id = ?", (_now(), int(canvas_course_id)))
+            return int(cursor.rowcount)
+
+    def latest_canvas_observation(
+        self, origin: str, canvas_course_id: int, resource_kind: str, resource_id: str
+    ) -> dict[str, Any] | None:
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM canvas_observations WHERE origin = ? AND canvas_course_id = ? "
+                "AND resource_kind = ? AND resource_id = ? ORDER BY observation_revision DESC LIMIT 1",
+                (origin, int(canvas_course_id), resource_kind, str(resource_id)),
+            ).fetchone()
+            return None if row is None else dict(row)
+
+    def record_canvas_classification(self, **values: Any) -> dict[str, Any]:
+        """Persist the metadata-only S1 verdict of one observation revision (immutable)."""
+
+        for name in ("observation_fingerprint", "origin", "canvas_course_id", "resource_kind",
+                     "resource_id", "observation_revision", "decision_json", "rule_table_version"):
+            if values.get(name) in (None, ""):
+                raise ValueError(f"canvas classification requires {name}")
+        params = (
+            values["observation_fingerprint"], values["origin"], int(values["canvas_course_id"]),
+            values["resource_kind"], str(values["resource_id"]), int(values["observation_revision"]),
+            values.get("kind"), values["decision_json"], values["rule_table_version"],
+        )
+        with self._transaction(immediate=True) as connection:
+            existing = connection.execute(
+                "SELECT * FROM canvas_classifications WHERE observation_fingerprint = ?",
+                (params[0],),
+            ).fetchone()
+            if existing is not None:
+                if (existing["kind"], existing["decision_json"], existing["rule_table_version"]) != (
+                    params[6], params[7], params[8]
+                ):
+                    raise ValueError("canvas classification of an observation revision is immutable")
+                return dict(existing)
+            connection.execute(
+                "INSERT INTO canvas_classifications(observation_fingerprint, origin, canvas_course_id, "
+                "resource_kind, resource_id, observation_revision, kind, decision_json, "
+                "rule_table_version, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (*params, _now()),
+            )
+            return dict(connection.execute(
+                "SELECT * FROM canvas_classifications WHERE observation_fingerprint = ?", (params[0],)
+            ).fetchone())
+
+    def list_canvas_classifications(self, canvas_course_id: int) -> list[dict[str, Any]]:
+        with self._transaction() as connection:
+            return [dict(r) for r in connection.execute(
+                "SELECT * FROM canvas_classifications WHERE canvas_course_id = ? "
+                "ORDER BY resource_kind, resource_id, observation_revision",
+                (int(canvas_course_id),),
+            ).fetchall()]
 
     def replace_recording_calendar_current(
         self,
@@ -1293,87 +1398,169 @@ class ClassificationStateMixin:
         """Persist the next generation number before any provider create (r8 R1)."""
 
         with self._transaction(immediate=True) as connection:
-            # One supersession basis owns exactly one generation: a retry after the
-            # key was bound (lost provider response) and a retry before it both come
-            # back to the same number (R9, P-A r2 #5).
-            same_basis = connection.execute(
-                "SELECT generation FROM intake_request_generations "
-                "WHERE intake_id = ? AND request_type = ? AND superseded_request_key IS ? ",
-                (intake_id, request_type, superseded_request_key),
-            ).fetchone()
-            if same_basis is not None:
-                return int(same_basis["generation"])
-            pending = connection.execute(
-                "SELECT generation, superseded_request_key FROM intake_request_generations "
-                "WHERE intake_id = ? AND request_type = ? AND request_key IS NULL "
-                "ORDER BY generation DESC LIMIT 1",
+            return int(self._reserve_generation_tx(connection, intake_id, request_type, superseded_request_key))
+
+    def _reserve_generation_tx(
+        self, connection: sqlite3.Connection, intake_id: str, request_type: str, superseded_request_key: str | None,
+    ) -> int:
+        # One supersession basis owns exactly one generation: a retry after the
+        # key was bound (lost provider response) and a retry before it both come
+        # back to the same number (R9, P-A r2 #5).
+        same_basis = connection.execute(
+            "SELECT generation FROM intake_request_generations "
+            "WHERE intake_id = ? AND request_type = ? AND superseded_request_key IS ? ",
+            (intake_id, request_type, superseded_request_key),
+        ).fetchone()
+        if same_basis is not None:
+            return int(same_basis["generation"])
+        pending = connection.execute(
+            "SELECT generation, superseded_request_key FROM intake_request_generations "
+            "WHERE intake_id = ? AND request_type = ? AND request_key IS NULL "
+            "ORDER BY generation DESC LIMIT 1",
+            (intake_id, request_type),
+        ).fetchone()
+        if pending is not None:
+            # A reservation whose create never completed blocks a new basis: the
+            # caller must bind or reconcile it first, never skip a number.
+            raise ValueError("pending request generation has a different supersession basis")
+        if superseded_request_key is not None:
+            latest = connection.execute(
+                "SELECT generation, request_key FROM intake_request_generations "
+                "WHERE intake_id = ? AND request_type = ? ORDER BY generation DESC LIMIT 1",
                 (intake_id, request_type),
             ).fetchone()
-            if pending is not None:
-                # A reservation whose create never completed blocks a new basis: the
-                # caller must bind or reconcile it first, never skip a number.
-                raise ValueError("pending request generation has a different supersession basis")
-            if superseded_request_key is not None:
-                latest = connection.execute(
-                    "SELECT generation, request_key FROM intake_request_generations "
-                    "WHERE intake_id = ? AND request_type = ? ORDER BY generation DESC LIMIT 1",
-                    (intake_id, request_type),
-                ).fetchone()
-                if latest is None or latest["request_key"] != superseded_request_key:
-                    raise ValueError("a new generation may only supersede the latest bound request key")
-            row = connection.execute(
-                "SELECT COALESCE(MAX(generation), 0) AS g FROM intake_request_generations "
-                "WHERE intake_id = ? AND request_type = ?",
-                (intake_id, request_type),
-            ).fetchone()
-            generation = int(row["g"]) + 1
-            if superseded_request_key is None and generation > 1:
-                raise ValueError("a superseding generation must name the superseded request key")
-            connection.execute(
-                "INSERT INTO intake_request_generations(intake_id, request_type, generation, "
-                "request_key, superseded_request_key, derivation_version, created_at) "
-                "VALUES (?, ?, ?, NULL, ?, 'V2', ?)",
-                (intake_id, request_type, generation, superseded_request_key, _now()),
-            )
-            return generation
+            if latest is None or latest["request_key"] != superseded_request_key:
+                raise ValueError("a new generation may only supersede the latest bound request key")
+        row = connection.execute(
+            "SELECT COALESCE(MAX(generation), 0) AS g FROM intake_request_generations "
+            "WHERE intake_id = ? AND request_type = ?",
+            (intake_id, request_type),
+        ).fetchone()
+        generation = int(row["g"]) + 1
+        if superseded_request_key is None and generation > 1:
+            raise ValueError("a superseding generation must name the superseded request key")
+        connection.execute(
+            "INSERT INTO intake_request_generations(intake_id, request_type, generation, "
+            "request_key, superseded_request_key, derivation_version, created_at) "
+            "VALUES (?, ?, ?, NULL, ?, 'V2', ?)",
+            (intake_id, request_type, generation, superseded_request_key, _now()),
+        )
+        return generation
 
     def bind_request_generation_key(
         self, intake_id: str, request_type: str, generation: int, request_key: str
     ) -> None:
         with self._transaction(immediate=True) as connection:
-            current = connection.execute(
-                "SELECT request_key, superseded_request_key FROM intake_request_generations "
-                "WHERE intake_id = ? AND request_type = ? AND generation = ?",
-                (intake_id, request_type, int(generation)),
+            self._bind_generation_tx(connection, intake_id, request_type, generation, request_key)
+
+    def _bind_generation_tx(
+        self, connection: sqlite3.Connection, intake_id: str, request_type: str, generation: int, request_key: str,
+    ) -> None:
+        current = connection.execute(
+            "SELECT request_key, superseded_request_key FROM intake_request_generations "
+            "WHERE intake_id = ? AND request_type = ? AND generation = ?",
+            (intake_id, request_type, int(generation)),
+        ).fetchone()
+        if current is None:
+            raise KeyError((intake_id, request_type, generation))
+        if current["request_key"] not in (None, request_key):
+            raise ValueError("request generation is already bound to another key")
+        if current["request_key"] == request_key:
+            return  # idempotent re-bind
+        # Every generation carries a new key: never the superseded one nor any key
+        # of another generation of this (intake, type).  FILE_DETAILS keys are
+        # single-intake; ASSIGN_COURSE keys may legitimately span intakes (r3 #4).
+        others = connection.execute(
+            "SELECT intake_id, request_type, generation FROM intake_request_generations "
+            "WHERE request_key = ? AND NOT (intake_id = ? AND request_type = ? AND generation = ?)",
+            (request_key, intake_id, request_type, int(generation)),
+        ).fetchall()
+        if any(
+            (o["intake_id"], o["request_type"]) == (intake_id, request_type) for o in others
+        ):
+            raise ValueError("request key is already bound to another generation of this intake")
+        if others and request_type != "ASSIGN_COURSE":
+            raise ValueError(f"{request_type} request keys are single-intake")
+        if any(o["request_type"] != request_type for o in others):
+            raise ValueError("request key is bound to another request type")
+        if current["superseded_request_key"] == request_key:
+            raise ValueError("a superseding generation needs a new request key")
+        connection.execute(
+            "UPDATE intake_request_generations SET request_key = ? "
+            "WHERE intake_id = ? AND request_type = ? AND generation = ?",
+            (request_key, intake_id, request_type, int(generation)),
+        )
+
+    def ensure_legacy_request_generation(self, intake_id: str, request_type: str, request_key: str) -> int:
+        """Record a request created before/outside v2 as a LEGACY generation (idempotent).
+
+        The migration backfill only runs when the store opens; a request created by this
+        process must be recognisable as the latest bound generation before it can be
+        superseded.  The receipt must prove the key, type and intake binding.
+        """
+
+        with self._transaction(immediate=True) as connection:
+            bound = connection.execute(
+                "SELECT generation FROM intake_request_generations WHERE intake_id = ? "
+                "AND request_type = ? AND request_key = ?",
+                (intake_id, request_type, request_key),
             ).fetchone()
-            if current is None:
-                raise KeyError((intake_id, request_type, generation))
-            if current["request_key"] not in (None, request_key):
-                raise ValueError("request generation is already bound to another key")
-            if current["request_key"] == request_key:
-                return  # idempotent re-bind
-            # Every generation carries a new key: never the superseded one nor any key
-            # of another generation of this (intake, type).  FILE_DETAILS keys are
-            # single-intake; ASSIGN_COURSE keys may legitimately span intakes (r3 #4).
-            others = connection.execute(
-                "SELECT intake_id, request_type, generation FROM intake_request_generations "
-                "WHERE request_key = ? AND NOT (intake_id = ? AND request_type = ? AND generation = ?)",
-                (request_key, intake_id, request_type, int(generation)),
-            ).fetchall()
-            if any(
-                (o["intake_id"], o["request_type"]) == (intake_id, request_type) for o in others
-            ):
-                raise ValueError("request key is already bound to another generation of this intake")
-            if others and request_type != "ASSIGN_COURSE":
-                raise ValueError(f"{request_type} request keys are single-intake")
-            if any(o["request_type"] != request_type for o in others):
-                raise ValueError("request key is bound to another request type")
-            if current["superseded_request_key"] == request_key:
-                raise ValueError("a superseding generation needs a new request key")
+            if bound is not None:
+                return int(bound["generation"])
+            receipt = connection.execute(
+                "SELECT request_type, intake_ids_json FROM request_receipts WHERE request_key = ?",
+                (request_key,),
+            ).fetchone()
+            try:
+                intake_ids = json.loads(receipt["intake_ids_json"]) if receipt is not None else None
+            except (TypeError, ValueError):
+                intake_ids = None
+            if (receipt is None or receipt["request_type"] != request_type
+                    or not isinstance(intake_ids, list) or intake_id not in intake_ids):
+                raise ValueError("the receipt does not prove this request key for the intake")
+            latest = connection.execute(
+                "SELECT generation, request_key FROM intake_request_generations "
+                "WHERE intake_id = ? AND request_type = ? ORDER BY generation DESC LIMIT 1",
+                (intake_id, request_type),
+            ).fetchone()
+            if latest is not None and latest["request_key"] is None:
+                raise ValueError("a pending request generation blocks recording a legacy one")
+            generation = 1 if latest is None else int(latest["generation"]) + 1
             connection.execute(
-                "UPDATE intake_request_generations SET request_key = ? "
-                "WHERE intake_id = ? AND request_type = ? AND generation = ?",
-                (request_key, intake_id, request_type, int(generation)),
+                "INSERT INTO intake_request_generations(intake_id, request_type, generation, "
+                "request_key, superseded_request_key, derivation_version, created_at) "
+                "VALUES (?, ?, ?, ?, ?, 'LEGACY', ?)",
+                (intake_id, request_type, generation, request_key,
+                 None if latest is None else latest["request_key"], _now()),
+            )
+            return generation
+
+    def get_generation_superseding(
+        self, intake_id: str, request_type: str, request_key: str
+    ) -> dict[str, Any] | None:
+        """The generation that superseded ``request_key`` for this intake (None if none)."""
+
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM intake_request_generations WHERE intake_id = ? AND request_type = ? "
+                "AND superseded_request_key = ?",
+                (intake_id, request_type, request_key),
+            ).fetchone()
+            return None if row is None else dict(row)
+
+    def get_classification_cursor(self, name: str) -> str | None:
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT value FROM classification_cursors WHERE name = ?", (name,)
+            ).fetchone()
+            return None if row is None else str(row["value"])
+
+    def set_classification_cursor(self, name: str, value: str) -> None:
+        with self._transaction(immediate=True) as connection:
+            connection.execute(
+                "INSERT INTO classification_cursors(name, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                (name, value, _now()),
             )
 
     def get_request_generation(self, request_key: str, intake_id: str | None = None) -> dict[str, Any] | None:
@@ -1884,6 +2071,176 @@ class ClassificationStateMixin:
                 (from_plan_revision, to_plan_revision),
             ).fetchone()
             return dict(row)
+
+    def terminal_change_counts(self) -> dict[str, int]:
+        with self._transaction() as connection:
+            return {str(r["state"]): int(r["n"]) for r in connection.execute(
+                "SELECT state, COUNT(*) AS n FROM terminal_change_ledger GROUP BY state").fetchall()}
+
+    def begin_terminal_generation(
+        self, original_receipt_id: str, changed_hash: str, intake_id: str, request_type: str,
+        superseded_request_key: str, derive_request_key: Callable[[int], str],
+    ) -> tuple[int, str]:
+        """(receipt, changed hash) -> generation -> request key in ONE transaction (plan §3.4,
+        G2/T2): reserve-or-resume the generation, bind its key and write the PENDING ledger
+        entry together, so no crash can separate a generation from the change that owns it.
+        An unsettled earlier change of the same receipt blocks a different one."""
+
+        with self._transaction(immediate=True) as connection:
+            other = connection.execute(
+                "SELECT changed_user_snapshot_hash FROM terminal_change_ledger WHERE original_receipt_id = ? "
+                "AND state = 'PENDING' AND changed_user_snapshot_hash <> ?",
+                (original_receipt_id, changed_hash),
+            ).fetchone()
+            if other is not None:
+                raise ValueError("an unsettled earlier change owns the pending generation")
+            number = self._reserve_generation_tx(connection, intake_id, request_type, superseded_request_key)
+            key = derive_request_key(number)
+            self._bind_generation_tx(connection, intake_id, request_type, number, key)
+            existing = connection.execute(
+                "SELECT created_generation, created_request_key FROM terminal_change_ledger "
+                "WHERE original_receipt_id = ? AND changed_user_snapshot_hash = ?",
+                (original_receipt_id, changed_hash),
+            ).fetchone()
+            if existing is None:
+                connection.execute(
+                    "INSERT INTO terminal_change_ledger(original_receipt_id, changed_user_snapshot_hash, "
+                    "created_generation, created_request_key, state, created_at) VALUES (?, ?, ?, ?, 'PENDING', ?)",
+                    (original_receipt_id, changed_hash, number, key, _now()),
+                )
+            elif (existing["created_generation"], existing["created_request_key"]) != (number, key):
+                raise ValueError("terminal change ledger entry is immutable")
+            return number, key
+
+    def latest_request_generation(self, intake_id: str, request_type: str) -> dict[str, Any] | None:
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM intake_request_generations WHERE intake_id = ? AND request_type = ? "
+                "ORDER BY generation DESC LIMIT 1",
+                (intake_id, request_type),
+            ).fetchone()
+            return None if row is None else dict(row)
+
+    def list_terminal_changes(self, original_receipt_id: str) -> list[dict[str, Any]]:
+        with self._transaction() as connection:
+            return [dict(r) for r in connection.execute(
+                "SELECT * FROM terminal_change_ledger WHERE original_receipt_id = ? ORDER BY created_at, "
+                "changed_user_snapshot_hash", (original_receipt_id,)).fetchall()]
+
+    def rebind_recording_calendar(self, course_key: str, canvas_course_id: int, *, release_other: bool = False) -> None:
+        """The verified mapping moved a course key to another Canvas course: drop the old
+        projection and close the calendar until the new course is observed completely.
+
+        ``release_other`` (the caller proved from the CURRENT verified mapping that the Canvas
+        course now belongs to this course key) also withdraws an earlier binding of that
+        Canvas course to another key: its projection, proof and binding are removed in the
+        same transaction, so the stale binding cannot block the re-mapping."""
+
+        with self._transaction(immediate=True) as connection:
+            other = connection.execute(
+                "SELECT course_key FROM recording_calendar_courses WHERE canvas_course_id = ? AND course_key <> ?",
+                (int(canvas_course_id), course_key),
+            ).fetchone()
+            if other is not None:
+                if not release_other:
+                    raise ValueError("the Canvas course is bound to another course key")
+                released = other["course_key"]
+                connection.execute("DELETE FROM recording_calendar_current WHERE course_key = ?", (released,))
+                connection.execute("DELETE FROM recording_calendar_courses WHERE course_key = ?", (released,))
+                connection.execute("DELETE FROM classification_cursors WHERE name = ?", (f"calendar_proof:{released}",))
+            connection.execute("DELETE FROM recording_calendar_current WHERE course_key = ?", (course_key,))
+            connection.execute("DELETE FROM classification_cursors WHERE name = ?", (f"calendar_proof:{course_key}",))
+            connection.execute(
+                "UPDATE recording_calendar_courses SET canvas_course_id = ?, collection_complete = 0, "
+                "projection_revision_hash = NULL, updated_at = ? WHERE course_key = ?",
+                (int(canvas_course_id), _now(), course_key),
+            )
+
+    def recording_calendar_key_for_canvas(self, canvas_course_id: int) -> str | None:
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT course_key FROM recording_calendar_courses WHERE canvas_course_id = ?",
+                (int(canvas_course_id),)).fetchone()
+            return None if row is None else str(row["course_key"])
+
+    def has_write_attempt_for_page(self, operation: str, page_id: str, entity_id: str | None = None) -> bool:
+        """Whether this worker's own create of ``page_id`` is recorded and read back (durable
+        effect evidence); with ``entity_id`` the read-back row must carry that entity ID."""
+
+        with self._transaction() as connection:
+            rows = connection.execute(
+                "SELECT readback_json FROM provider_write_attempts WHERE operation = ? AND target_id = ? "
+                "AND response_state = 'READBACK_OK'", (operation, page_id)).fetchall()
+        if entity_id is None:
+            return bool(rows)
+        for row in rows:
+            try:
+                if (json.loads(row["readback_json"] or "null") or {}).get("ID") == entity_id:
+                    return True
+            except (TypeError, ValueError, AttributeError):
+                continue
+        return False
+
+    def page_value_was_written(self, page_id: str, field: str, value: Any) -> bool:
+        """Whether a read-back of ``page_id`` recorded by this worker carries exactly ``value``
+        in ``field`` - i.e. the current value is one the worker wrote and verified."""
+
+        with self._transaction() as connection:
+            rows = connection.execute(
+                "SELECT readback_json FROM provider_write_attempts WHERE target_id = ? "
+                "AND response_state = 'READBACK_OK'", (page_id,)).fetchall()
+        for row in rows:
+            try:
+                if (json.loads(row["readback_json"] or "null") or {}).get(field) == value:
+                    return True
+            except (TypeError, ValueError, AttributeError):
+                continue
+        return False
+
+    def list_handovers_from(self, from_plan_revision: str) -> list[dict[str, Any]]:
+        with self._transaction() as connection:
+            return [dict(r) for r in connection.execute(
+                "SELECT * FROM handover_records WHERE from_plan_revision = ? ORDER BY created_at",
+                (from_plan_revision,)).fetchall()]
+
+    def get_handover(self, from_plan_revision: str, to_plan_revision: str) -> dict[str, Any] | None:
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM handover_records WHERE from_plan_revision = ? AND to_plan_revision = ?",
+                (from_plan_revision, to_plan_revision),
+            ).fetchone()
+            return None if row is None else dict(row)
+
+    def handovers_to_plan(self, to_plan_revision: str) -> list[dict[str, Any]]:
+        with self._transaction() as connection:
+            return [dict(r) for r in connection.execute(
+                "SELECT * FROM handover_records WHERE to_plan_revision = ? ORDER BY created_at",
+                (to_plan_revision,),
+            ).fetchall()]
+
+    def adopt_entity_reservation(
+        self, reservation_id: str, *, from_plan_revision: str, to_plan_revision: str
+    ) -> None:
+        """Hand a live reservation to the next plan keeping its identity (plan §3.4 r8 R3).
+
+        Only the owning plan changes; reservation id, entity id, marker and parent stay, so
+        every key derived from them is the one the earlier plan already used.  Idempotent."""
+
+        with self._transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT plan_revision, state FROM entity_reservations WHERE reservation_id = ?",
+                (reservation_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(reservation_id)
+            if row["plan_revision"] == to_plan_revision:
+                return
+            if row["plan_revision"] != from_plan_revision or row["state"] not in ("PENDING", "APPLIED"):
+                raise ValueError("the reservation is not adoptable from this plan")
+            connection.execute(
+                "UPDATE entity_reservations SET plan_revision = ?, updated_at = ? WHERE reservation_id = ?",
+                (to_plan_revision, _now(), reservation_id),
+            )
 
     # --- chunk tags ----------------------------------------------------------------
 

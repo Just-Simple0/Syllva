@@ -413,7 +413,23 @@ def _intake_section(raw: Mapping[str, Any]) -> IntakeCfg:
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 <= value <= 1.0:
             raise ValueError(f"intake.classification.{name} must be a number in [0, 1]")
         setattr(cfg, name, float(value))
-    for name in ("max_calls_per_tick", "max_source_bytes", "max_terminal_scan"):
+    if not isinstance(cfg.canvas_observation_enabled, bool):
+        raise ValueError("intake.classification.canvas_observation_enabled must be boolean")  # noqa: TRY004
+    if not isinstance(cfg.canvas_origin, str):
+        raise ValueError("intake.classification.canvas_origin must be a string")  # noqa: TRY004
+    if cfg.canvas_origin:
+        from uls.settings.canvas_checks import CanvasCheckError, validate_canvas_origin
+
+        try:
+            cfg.canvas_origin = validate_canvas_origin(cfg.canvas_origin).origin
+        except CanvasCheckError:
+            raise ValueError("intake.classification.canvas_origin must be a public HTTPS origin") from None
+    if not isinstance(cfg.canvas_principal, str):
+        raise ValueError("intake.classification.canvas_principal must be a string")  # noqa: TRY004
+    cfg.canvas_principal = cfg.canvas_principal.strip()
+    if cfg.canvas_observation_enabled and not (cfg.canvas_origin and cfg.canvas_principal):
+        raise ValueError("intake.classification.canvas_observation_enabled requires canvas_origin and canvas_principal")
+    for name in ("max_calls_per_tick", "max_source_bytes", "max_terminal_scan", "max_canvas_courses_per_tick"):
         value = getattr(cfg, name)
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise ValueError(f"intake.classification.{name} must be a positive integer")
