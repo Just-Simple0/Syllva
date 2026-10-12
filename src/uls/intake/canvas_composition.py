@@ -50,7 +50,7 @@ def install_canvas_observer(
 
     def semester_for(course_key: str) -> Any:
         semester = semesters.get(course_key)
-        return worker._semester_range(semester) if semester else None  # noqa: SLF001
+        return worker._semester_range(semester) if semester else None
 
     worker.canvas_observer = CanvasObserver(
         state,
