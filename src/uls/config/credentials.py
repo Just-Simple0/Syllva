@@ -30,6 +30,7 @@ ALLOWED_SOURCES: Final[dict[str, frozenset[str]]] = {
     "CANVAS_PAT": frozenset({"keyring"}),
     "GITHUB_READ_TOKEN": frozenset({"environment", "keyring"}),
     "LLM_API_KEY": frozenset({"environment", "keyring"}),
+    "TYPESAFE_API_KEY": frozenset({"environment", "keyring"}),
     "NOTION_WORKER_TOKEN": frozenset({"environment", "file"}),
     "GOOGLE_WORKER_CREDENTIALS_FILE": frozenset({"environment"}),
     "GOOGLE_MCP_CREDENTIALS_FILE": frozenset({"environment"}),
@@ -45,6 +46,7 @@ KEYRING_BINDINGS: Final[dict[str, tuple[str, str]]] = {
     "NOTION_MCP_TOKEN": ("Syllva MCP", "notion_mcp_token"),
     "GITHUB_READ_TOKEN": ("Syllva MCP", "github_read_token"),
     "LLM_API_KEY": ("Syllva LLM", "llm_api_key"),
+    "TYPESAFE_API_KEY": ("Syllva LLM", "typesafe_api_key"),
     "REMOTE_MCP_GOOGLE_CLIENT_SECRET": ("Syllva MCP", "remote_mcp_google_client_secret"),
 }
 
