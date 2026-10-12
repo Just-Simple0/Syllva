@@ -105,7 +105,7 @@ def test_each_projection_body_contains_the_phase5_behavior_semantics() -> None:
 def test_each_projection_has_current_metadata_before_body_semantics_are_used() -> None:
     version, contract_hash = canonical_version_and_hash()
 
-    assert version == 2
+    assert version == 3
     assert contract_hash.startswith("sha256:")
     for path in PROJECTION_PATHS:
         assert _metadata(path.read_text(encoding="utf-8")) == (version, contract_hash)
