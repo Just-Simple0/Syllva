@@ -136,6 +136,8 @@ class CapabilityBinding:
     doc_kind: str | None = None
 
     def __post_init__(self) -> None:
+        if type(self.assignment_opt_in) is not bool:
+            raise ValueError("assignment_opt_in must be a boolean")
         for name in (
             "parent_included_session_ids",
             "parent_related_session_ids",

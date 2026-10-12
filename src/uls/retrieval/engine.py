@@ -184,6 +184,9 @@ class RetrievalEngine:
     ) -> _MaterialEvidenceCollection:
         """Collect one material's raw candidates without budgeting or issuing."""
 
+        if type(include_assignment) is not bool:
+            raise PolicyDeniedError("include_assignment must be a boolean")
+
         material = self._lookup_material(material_id)
         if material is None:
             raise EntityNotFoundError(
@@ -339,6 +342,8 @@ class RetrievalEngine:
 
         if type(include_provisional) is not bool:
             raise PolicyDeniedError("include_provisional must be a boolean")
+        if type(include_assignment) is not bool:
+            raise PolicyDeniedError("include_assignment must be a boolean")
         config_allows_provisional = self._config_bool(
             "allow_provisional_material_usage", True
         )
@@ -1250,14 +1255,32 @@ class RetrievalEngine:
                 details={"locator": str(parsed_locator)},
             )
         range_decision = _tags.NO
-        if binding.source_class != "official_activity":
-            tag_state = _tags.assess_document(binding.entity_id, chunks, binding.doc_kind)
+        current_kind = binding.doc_kind
+        current_type = binding.material_type
+        if binding.source_class == "official_activity":
+            range_decision = _tags.YES
+        else:
+            if binding.material_id is not None:
+                # The document Kind and Type are read again NOW: a Kind (or Type) changed after
+                # issuance applies to every capability already handed out (D4, D6).
+                try:
+                    current_material = self._lookup_material(binding.material_id)
+                    if current_material is None:
+                        raise LookupError("material is gone")
+                    current_kind = self._doc_kind_of(current_material)
+                    current_type = self._material_type(current_material)
+                except Exception as exc:
+                    raise LocatorNotAllowedError(
+                        "current Material authorization is unavailable",
+                        details={"entity_id": binding.entity_id},
+                    ) from exc
+            tag_state = _tags.assess_document(binding.entity_id, chunks, current_kind)
             overlap = _tags.overlapping(tag_state.decisions, parsed_locator)
             range_decision = _tags.aggregate_decision(overlap)
             if not binding.assignment_opt_in and (
                 range_decision != _tags.NO
                 or _tags.document_blocked(
-                    binding.doc_kind, binding.material_type, is_material=binding.material_id is not None)
+                    current_kind, current_type, is_material=binding.material_id is not None)
             ):
                 # The capability is re-evaluated against the CURRENT bytes: a range that is (now)
                 # an assignment section, undecided or unverifiable is never served (D5, D6).
@@ -1292,7 +1315,7 @@ class RetrievalEngine:
             requested_locator=parsed_locator,
             provisional=binding.provisional,
         )
-        self._annotate_item(item, range_decision, binding.doc_kind, source_class=binding.source_class)
+        self._annotate_item(item, range_decision, current_kind, source_class=binding.source_class)
         return item
 
     # ------------------------------------------------------------------
@@ -1328,7 +1351,10 @@ class RetrievalEngine:
         if blocked or not tags.complete:
             warnings.append(_warning("ASSIGNMENT_WITHHELD", f"{doc_id} is withheld from assignment-excluding results"))
             return [], True
-        kept = [(chunk, decision) for chunk, decision in pairs if decision.assignment == _tags.NO]
+        kept = [
+            (chunk, decision) for chunk, decision in pairs
+            if _tags.aggregate_decision(_tags.overlapping(tags.decisions, decision.locator)) == _tags.NO
+        ]
         if len(kept) != len(pairs):
             warnings.append(_warning("ASSIGNMENT_WITHHELD", f"assignment sections of {doc_id} are withheld"))
         if not kept:

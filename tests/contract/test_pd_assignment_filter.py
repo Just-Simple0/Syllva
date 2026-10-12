@@ -268,3 +268,48 @@ def test_every_projection_carries_the_assignment_region_rule() -> None:
     for path in paths:
         text = path.read_text(encoding="utf-8")
         assert "NO_ANSWER_GENERATION" in text and "assignment_decision" in text, path
+
+
+# --- review round 1 -------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("kind", ["ASSIGNMENT_BRIEF", "LAB_MATERIAL"])
+def test_a_kind_changed_after_issuance_applies_to_existing_capabilities(kind) -> None:
+    engine, _ = _engine(material_extra={"AI Kind": "LECTURE_SLIDES"}, pages=(CLEAN, "Implement a stack using an array."))
+    package = engine.get_session_context("COMP319-S05")
+    assert engine.get_source_chunk(package.context_id, "COMP319-M03:p2").usage_policy == "NORMAL"
+    opt_in = engine.get_session_context("COMP319-S05", include_assignment=True)
+    engine.notion_reader.materials["COMP319-M03"]["AI Kind"] = kind
+    with pytest.raises(LocatorNotAllowedError):
+        engine.get_source_chunk(package.context_id, "COMP319-M03:p2")
+    with pytest.raises(PolicyDeniedError):
+        engine.get_material_context("COMP319-M03")
+    item = engine.get_source_chunk(opt_in.context_id, "COMP319-M03:p2")
+    assert item.usage_policy == "NO_ANSWER_GENERATION"
+
+
+@pytest.mark.parametrize("value", ["false", "0", 1, 0, None, "True"])
+def test_assignment_opt_in_must_be_a_real_boolean(value) -> None:
+    engine, _ = _engine(lines=(CLEAN, ASSIGNMENT))
+    for call in (
+        lambda: engine.get_session_context("COMP319-S05", include_assignment=value),
+        lambda: engine.get_material_context("COMP319-M03", include_assignment=value),
+    ):
+        with pytest.raises(PolicyDeniedError):
+            call()
+
+
+def test_a_binding_rejects_a_non_boolean_opt_in() -> None:
+    from uls.retrieval.schemas import CapabilityBinding
+
+    with pytest.raises(ValueError):
+        CapabilityBinding("S1", None, "h", 1, "professor_transcript", assignment_opt_in="false")  # type: ignore[arg-type]
+
+
+def test_official_activity_keeps_its_decision_on_refetch() -> None:
+    import test_get_activity_context as activity_fixture
+
+    engine = activity_fixture._engine()[0]
+    package = engine.get_activity_context("COMP319-A01")
+    official = next(item for item in package.sources if item.source_class == "official_activity")
+    chunk = engine.get_source_chunk(package.context_id, str(official.locator))
+    assert chunk.assignment_decision == "YES" and chunk.usage_policy == "NO_ANSWER_GENERATION"
