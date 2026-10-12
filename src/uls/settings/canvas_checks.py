@@ -407,9 +407,19 @@ def _foreign_target(url: str, hosts: frozenset[str]) -> tuple[CanvasOrigin, str]
         destination = validate_canvas_origin(f"{parsed.scheme}://{parsed.netloc}")
     except (ValueError, CanvasCheckError):
         raise CanvasCheckError("DESTINATION_NOT_ALLOWED") from None
-    if destination.port != 443 or destination.host not in hosts or not parsed.path.startswith("/"):
+    path = parsed.path or "/"          # R-PEI2-02: a storage root URL requests "/"
+    if destination.port != 443 or destination.host not in hosts or not path.startswith("/"):
         raise CanvasCheckError("DESTINATION_NOT_ALLOWED")
-    return destination, urlunsplit(("", "", parsed.path, parsed.query, ""))
+    return destination, urlunsplit(("", "", path, parsed.query, ""))
+
+
+def _redirect_origin(url: str) -> CanvasOrigin | None:
+    """The normalized origin of a redirect target, or None when it is not a valid HTTPS origin."""
+    try:
+        parsed = urlsplit(url)
+        return validate_canvas_origin(f"{parsed.scheme}://{parsed.netloc}")
+    except (ValueError, CanvasCheckError):
+        return None
 
 
 def _require_token(token: str) -> None:
@@ -472,7 +482,8 @@ class CanvasConnection:
             if not location:
                 raise CanvasCheckError("PROVIDER_UNAVAILABLE")
             absolute = urljoin(self.target.origin + target, location)
-            if urlsplit(absolute).netloc.lower() == urlsplit(self.target.origin).netloc.lower():
+            if _redirect_origin(absolute) == self.target:
+                # R-PEI2-01: compared as normalized origins (an explicit :443 is the same origin).
                 target = _download_target(self.target, absolute, course_id, file_id)
                 continue
             if hop >= MAX_DOWNLOAD_REDIRECTS:

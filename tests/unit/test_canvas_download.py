@@ -163,3 +163,28 @@ def test_the_redirect_budget_is_shared_between_canvas_and_storage_hops() -> None
     with pytest.raises(CanvasCheckError):
         world.download()
     assert [h for h, _, _ in world.calls] == ["canvas.example.edu", "canvas.example.edu", STORAGE]
+
+
+def test_a_same_origin_redirect_with_an_explicit_default_port_keeps_the_token() -> None:
+    """R-PEI2-01."""
+    world = World({
+        ("canvas.example.edu", PATH): _redirect("https://canvas.example.edu:443/files/31/download?verifier=secret-v"),
+        ("canvas.example.edu", "/files/31/download?verifier=secret-v"): _ok(),
+    })
+    assert world.download(hosts=()) == DATA
+    assert world.connections == ["canvas.example.edu"]
+    assert all(h["Authorization"] == "Bearer tok" for _, _, h in world.calls)
+
+
+@pytest.mark.parametrize("hops", [1, 2])
+def test_an_allowlisted_storage_root_url_is_fetched_without_the_token(hops: int) -> None:
+    """R-PEI2-02: an empty path is the root "/" on the first and on a later storage hop."""
+    routes = {("canvas.example.edu", PATH): _redirect(f"https://{STORAGE}?sig=abc")}
+    if hops == 1:
+        routes[(STORAGE, "/?sig=abc")] = _ok()
+    else:
+        routes[(STORAGE, "/?sig=abc")] = _redirect(f"https://{STORAGE}?sig=def")
+        routes[(STORAGE, "/?sig=def")] = _ok()
+    world = World(routes)
+    assert world.download() == DATA                 # at most 2 redirects in total: within budget
+    assert all("Authorization" not in h for host, _, h in world.calls if host == STORAGE)
