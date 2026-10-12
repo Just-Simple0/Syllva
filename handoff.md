@@ -539,3 +539,8 @@ GUI-2/3 구현 리뷰를 전송한 대화나 회수할 미완료 final manifest�
 - 프로필은 프로세스 시작 시점 config 기준(Settings 변경 시 워커 재시작 필요). 토큰은 매 사용 시 읽고 보관하지 않음.
 - 사용자: config.yaml에 `canvas_observation_enabled: true`, `canvas_origin`, `canvas_principal`(=Settings user_id), `canvas_course_map` 설정.
 - 구현 리뷰는 아직 안 돌림(소규모 배선).
+
+## P-C1 Jev(TypeSafe Choice) 어댑터
+- `src/uls/adapters/llm/typesafe_choice.py`: 고정 endpoint/모델, stdlib HTTPS(프록시 미사용·redirect 미추적·재시도 0), socket 10s/총 15s, 요청 ≤16,384B/응답 ≤65,536B, strict 응답 검증(중복키·NaN·질문/옵션 집합 일치·확률 합·유일 최고·model 일치·usage), 고정 오류 코드만 노출.
+- `TYPESAFE_API_KEY`: ALLOWED_SOURCES {environment, keyring}, Keychain `Syllva LLM/typesafe_api_key`. `resolve_typesafe_key`: config에 source 명시가 없으면 None(DISABLED), 환경 암묵 fallback 없음.
+- 남음(P-C2): S2 파이프라인 연동(payload 최소화·PII guard·캐시·틱 예산·DEFERRED), readiness `classification` 블록, 실제 키 live 합성 1회(사용자 키 필요).
