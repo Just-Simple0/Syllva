@@ -313,3 +313,26 @@ def test_official_activity_keeps_its_decision_on_refetch() -> None:
     official = next(item for item in package.sources if item.source_class == "official_activity")
     chunk = engine.get_source_chunk(package.context_id, str(official.locator))
     assert chunk.assignment_decision == "YES" and chunk.usage_policy == "NO_ANSWER_GENERATION"
+
+
+@pytest.mark.parametrize("signal", [
+    {"content": "Implement a stack using an array.", "locator": "COMP319-S05:t00:00:20-00:00:20"},
+    {"content": "Implement a stack using an array.", "source_locators": [{"locator": "COMP319-S05:t00:00:20-00:00:20"}]},
+    {"content": "Implement a stack using an array.", "locators": ["COMP319-S05:t00:00:10-00:00:10", "COMP319-S05:t00:00:20-00:00:20"]},
+    {"content": "Implement a stack using an array.", "evidence": {"source_locator": {"start": "COMP319-S05:t00:00:20-00:00:20"}}},
+    {"content": "Implement a stack using an array.", "locator": "not-a-locator"},
+])
+def test_signals_tied_to_a_yes_chunk_are_withheld_whatever_the_locator_shape(signal) -> None:
+    engine, _ = _engine(lines=(CLEAN, "Implement a stack using an array. Upload it Friday."),
+                        enrichment=_enrichment({"professor_signals": [signal]}))
+    default = engine.get_session_context("COMP319-S05")
+    assert default.professor_signals == ()
+    assert any(isinstance(w, dict) and w.get("code") == tags.SIGNAL_WITHHELD_CODE for w in default.warnings)
+    assert len(engine.get_session_context("COMP319-S05", include_assignment=True).professor_signals) == 1
+
+
+def test_a_signal_whose_every_locator_is_clean_is_kept() -> None:
+    signal = {"content": "Binary search is emphasised.", "source_locators": [{"locator": "COMP319-S05:t00:00:10-00:00:10"}]}
+    engine, _ = _engine(lines=(CLEAN, "Implement a stack using an array. Upload it Friday."),
+                        enrichment=_enrichment({"professor_signals": [signal]}))
+    assert len(engine.get_session_context("COMP319-S05").professor_signals) == 1

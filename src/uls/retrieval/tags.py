@@ -102,7 +102,8 @@ def assess_document(doc_id: str, chunks: Iterable[Any], doc_kind: str | None) ->
         content = str(getattr(chunk, "content", ""))
         locator = getattr(chunk, "locator", None)
         if not content.strip():
-            decisions.append(ChunkDecision(chunk_id_for(doc_id, locator, content), locator, NO, ()))
+            blank = UNRESOLVED if doc_kind in ALWAYS_UNRESOLVED_KINDS else NO
+            decisions.append(ChunkDecision(chunk_id_for(doc_id, locator, content), locator, blank, ()))
             continue
         if doc_kind in ALWAYS_UNRESOLVED_KINDS:
             verdict = UNRESOLVED       # an instruction-heavy document cannot be certified by rules
@@ -165,19 +166,19 @@ def usage_policy_for(
     return NORMAL if decision == NO else NO_ANSWER_GENERATION
 
 
-def signal_locators(value: Any) -> list[str]:
-    """Every string stored under a key that names a locator, anywhere inside a signal."""
+def signal_locators(value: Any, _inside: bool = False) -> list[str]:
+    """Every string stored under a locator-named key at any depth (lists, mappings, nested)."""
 
     found: list[str] = []
-    if isinstance(value, dict):
+    if isinstance(value, str):
+        if _inside:
+            found.append(value)
+    elif isinstance(value, dict):
         for key, item in value.items():
-            if "locator" in str(key).casefold():
-                found.extend(text for text in (item if isinstance(item, (list, tuple)) else [item]) if isinstance(text, str))
-            else:
-                found.extend(signal_locators(item))
+            found.extend(signal_locators(item, _inside or "locator" in str(key).casefold()))
     elif isinstance(value, (list, tuple)):
         for item in value:
-            found.extend(signal_locators(item))
+            found.extend(signal_locators(item, _inside))
     return found
 
 
