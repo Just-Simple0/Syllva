@@ -276,6 +276,11 @@ CREATE TABLE IF NOT EXISTS classification_cursors (
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS classification_s2_cache (
+    cache_key TEXT PRIMARY KEY,
+    decision_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS handover_records (
     from_plan_revision TEXT NOT NULL,
     to_plan_revision TEXT NOT NULL,
@@ -1561,6 +1566,28 @@ class ClassificationStateMixin:
                 "INSERT INTO classification_cursors(name, value, updated_at) VALUES (?, ?, ?) "
                 "ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
                 (name, value, _now()),
+            )
+
+    def get_s2_cache(self, cache_key: str) -> dict[str, Any] | None:
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT decision_json FROM classification_s2_cache WHERE cache_key = ?", (cache_key,)
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            value = json.loads(row["decision_json"])
+        except ValueError:
+            return None
+        return value if isinstance(value, dict) else None
+
+    def put_s2_cache(self, cache_key: str, decision: dict[str, Any]) -> None:
+        """Only a verified decision (never source text or a secret) is stored; first write wins."""
+
+        with self._transaction(immediate=True) as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO classification_s2_cache(cache_key, decision_json, created_at) VALUES (?, ?, ?)",
+                (cache_key, json.dumps(decision, sort_keys=True, separators=(",", ":")), _now()),
             )
 
     def get_request_generation(self, request_key: str, intake_id: str | None = None) -> dict[str, Any] | None:
