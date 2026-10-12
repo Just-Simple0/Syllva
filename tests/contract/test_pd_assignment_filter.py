@@ -360,3 +360,22 @@ def test_signal_locator_extraction_shapes() -> None:
     ]
     for value, expected in cases:
         assert tags.signal_locators(value) == expected
+
+
+@pytest.mark.parametrize("signal", [
+    {"Upload the .py file to Canvas before Friday.": "instruction metadata", "content": "Binary search is emphasised."},
+    {"content": "Binary search is emphasised.", "meta": {"homework": {"x": 1}}},
+    {"content": "Binary search is emphasised.", "items": [{"\uff35pload it": "y"}],
+     "source_locators": [{"locator": "COMP319-S05:t00:00:10-00:00:10"}]},
+    {"content": "Binary search is emphasised.", "과제 안내": True},
+])
+def test_assignment_words_in_signal_keys_are_withheld(signal) -> None:
+    engine, _ = _engine(enrichment=_enrichment({"professor_signals": [signal]}))
+    default = engine.get_session_context("COMP319-S05")
+    assert default.professor_signals == ()
+    assert any(isinstance(w, dict) and w.get("code") == tags.SIGNAL_WITHHELD_CODE for w in default.warnings)
+    assert len(engine.get_session_context("COMP319-S05", include_assignment=True).professor_signals) == 1
+
+
+def test_a_normalised_locator_is_not_also_claimed_in_its_raw_form() -> None:
+    assert tags.signal_locators({"locator": "\uff23OMP319-S05:t00:00:10-00:00:10"}) == ["COMP319-S05:t00:00:10-00:00:10"]

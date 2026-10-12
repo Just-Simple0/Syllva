@@ -181,8 +181,9 @@ def signal_locators(value: Any, _inside: bool = False) -> list[str]:
 
     found: list[str] = []
     if isinstance(value, str):
-        found.extend(_LOCATOR_TOKEN.findall(_canonical(value)))
-        if _inside:
+        tokens = _LOCATOR_TOKEN.findall(_canonical(value))
+        found.extend(tokens)
+        if _inside and not tokens:
             found.append(value)
     elif isinstance(value, dict):
         for key, item in value.items():
@@ -195,12 +196,15 @@ def signal_locators(value: Any, _inside: bool = False) -> list[str]:
 
 
 def signal_has_assignment_text(value: Any) -> bool:
-    """True when any string inside an enrichment signal carries a strong assignment word (D10)."""
+    """True when any string inside an enrichment signal - a value OR a mapping key, at any depth -
+    carries a strong assignment word (D10)."""
 
     if isinstance(value, str):
         return has_strong_assignment_signal(value)
     if isinstance(value, dict):
-        return any(signal_has_assignment_text(item) for item in value.values())
+        return any(
+            has_strong_assignment_signal(str(key)) or signal_has_assignment_text(item)
+            for key, item in value.items())
     if isinstance(value, (list, tuple)):
         return any(signal_has_assignment_text(item) for item in value)
     return False
