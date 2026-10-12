@@ -159,3 +159,21 @@ def test_round_four_bypasses_are_closed(text, leaked) -> None:
 def test_plain_prose_and_filenames_survive_the_new_rules() -> None:
     text = "Name of the course is Operating Systems. See Week1.pdf and lec.v2.md, section 3.2."
     assert s2.minimize(text) == text
+
+
+@pytest.mark.parametrize("text,leaked", [
+    ("Student ID 654321", "654321"), ("Student ID A12345", "A12345"), ("student id  B-77", "B-77"),
+    ("API_KEY=sk-example-AbCDEfgHijkLMNOP", "AbCDE"), ("Authorization: Bearer ghp_ExampleTokenABCDxyz", "ExampleToken"),
+    ("access_token: abcdef123456", "abcdef123456"), ("password = hunter2", "hunter2"),
+    ("use ghp_ExampleTokenABCDxyz now", "ExampleToken"), ("key AKIAIOSFODNN7EXAMPLE x", "AKIAIOSFODNN7EXAMPLE"),
+    ("blob 0123456789abcdef0123456789abcdefXYZ end", "0123456789abcdef"),
+    ("api key: secretvalue", "secretvalue"), ("Basic dXNlcjpwYXNz", "dXNlcjpwYXNz"),
+])
+def test_round_five_identifiers_and_secrets_never_reach_the_payload(text, leaked) -> None:
+    payload = _payload(excerpt=text, title=text)
+    assert leaked not in str(payload.state)
+
+
+def test_prose_about_ids_and_tokens_survives() -> None:
+    text = "The student ID card is issued in week 2. A token ring network, and the secret of recursion."
+    assert s2.minimize(text) == text

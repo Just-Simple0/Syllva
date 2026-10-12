@@ -60,7 +60,16 @@ _URL = re.compile(
 _LABEL = r"(?:학번|이름|성명|성\s*명|Student\s*ID|Name)"
 # A label's whole value (to the end of the line) goes: "Name: John Smith" must not leave "Smith".
 _LABELLED = re.compile(
-    r"((?:학번|이름|성명|성\s*명)|(?:Student\s*ID|Name))((?<=[가-힣])[ \t]+|\s*[:：=\-–—]+\s*)[^\r\n]*", re.IGNORECASE)
+    r"((?:학번|이름|성명|성\s*명)|(?:Student\s*ID|Name))((?<=[가-힣])[ \t]+|\s*[:：=\-–—]+\s*)[^\r\n]*",
+    re.IGNORECASE)
+_STUDENT_ID_SPACE = re.compile(r"(?i)\b(Student\s*ID)([ \t]+)(?=\S*\d)\S+")
+# Explicit credential assignments / headers and well-known token shapes.
+_SECRET_NAME = r"(?:[\w\-]*(?:api[_\-\s]?key|token|secret|passw(?:or)?d|pwd|credential|private[_\-\s]?key)[\w\-]*|authorization)"
+_SECRET_ASSIGN = re.compile(rf"(?i)\b({_SECRET_NAME})(\s*[:=]\s*)[^\r\n]*")
+_BEARER = re.compile(r"(?i)\b(bearer|basic)(\s+)[^\s]+")
+_TOKEN_SHAPE = re.compile(
+    r"\b(?:sk|pk|rk|ghp|gho|ghs|ghu|github_pat|xox[abprs]|AKIA|ASIA|AIza|ya29|eyJ)[\w\-.]{8,}"
+    r"|\b(?=[A-Za-z0-9_\-+/=]*\d)(?=[A-Za-z0-9_\-+/=]*[A-Za-z])[A-Za-z0-9_\-+/=]{32,}")
 # A group of digits with ANY run of separators between them (spaces, dashes of every kind, underscores).
 _DIGIT_RUN = re.compile(r"\d(?:[^\w]|_|\d)*")
 _ID_CONTEXT = re.compile(r"(?i)(?:학번|번호|id|student|no)[\W_]*$")
@@ -68,6 +77,8 @@ MAX_RUN_DIGITS: Final[int] = 7
 PLACEHOLDERS: Final[tuple[str, ...]] = ("<url>", "<email>", "<id>", "<redacted>")
 _LABEL_VALUE_LEFT = re.compile(
     rf"(?i){_LABEL}(?:(?<=[가-힣])[ \t]+|\s*[:：=\-–—]+\s*)(?!<redacted>$)\S", re.MULTILINE)
+_STUDENT_ID_LEFT = re.compile(r"(?i)\bStudent\s*ID[ \t]+(?=\S*\d)(?!<redacted>)\S")
+_SECRET_LEFT = re.compile(rf"(?i)\b{_SECRET_NAME}\s*[:=]\s*(?!<redacted>$)\S|\b(?:bearer|basic)\s+(?!<redacted>)\S", re.MULTILINE)
 _TOKEN_EDGE = "()[]{}'\",;"
 
 
@@ -131,7 +142,11 @@ def _replace_tokens(text: str) -> str:
 
 def minimize(text: str) -> str:
     text = _replace_tokens(_canonical(text))
+    text = _SECRET_ASSIGN.sub(lambda m: f"{m.group(1)}{m.group(2)}<redacted>", text)
+    text = _BEARER.sub(lambda m: f"{m.group(1)}{m.group(2)}<redacted>", text)
+    text = _TOKEN_SHAPE.sub("<redacted>", text)
     text = _LABELLED.sub(lambda m: f"{m.group(1)}{m.group(2)}<redacted>", text)
+    text = _STUDENT_ID_SPACE.sub(lambda m: f"{m.group(1)}{m.group(2)}<redacted>", text)
     return _digit_runs(text, replace=True)[0]
 
 
@@ -143,7 +158,8 @@ def still_suspicious(text: str) -> bool:
         stripped = stripped.replace(placeholder, " ")
     return bool(
         "<" in stripped or ">" in stripped or "@" in stripped
-        or _URL.search(stripped) or _LABEL_VALUE_LEFT.search(text) or _digit_runs(stripped, replace=False)[1]
+        or _URL.search(stripped) or _LABEL_VALUE_LEFT.search(text) or _SECRET_LEFT.search(text) or _STUDENT_ID_LEFT.search(text)
+        or _TOKEN_SHAPE.search(stripped) or _digit_runs(stripped, replace=False)[1]
         or re.search(r"(?i)(?:https?|ftp)://|www\.", stripped))
 
 
