@@ -485,6 +485,9 @@ def build_intake_worker(
         from uls.intake.study_note_composition import install_study_notes
 
         install_study_notes(worker, config, state, notion, source_reader, block_port=study_note_block_port)
+    from uls.intake.canvas_composition import install_canvas_observer
+
+    install_canvas_observer(worker, config, state)
     return worker
 
 

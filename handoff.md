@@ -532,3 +532,10 @@ GUI-2/3 구현 리뷰를 전송한 대화나 회수할 미완료 final manifest�
   `syllva.dev`/`mcp.syllva.dev` 경로 및 Claude/Codex `uls.ping`은 과거 확인됐으며,
   Antigravity/Gemini remote ping은 미검증·후순위다. 이번 채팅에서 live 상태를 재검증하지 않았다.
 - 과거 학사 데이터가 없는 `SOURCE_UNAVAILABLE` 상황에 가짜 Session/Material을 만들어 대응하지 않는다.
+
+## Canvas 연결 구성 (P-B3 후속)
+- `src/uls/intake/canvas_composition.py`: Settings Canvas 프로필(`config.canvas.profile`)과 키체인 토큰을 관측기에 연결, `build_intake_worker`가 호출.
+- 설치 조건: `canvas_observation_enabled` + Settings 프로필의 origin/user_id가 `canvas_origin`/`canvas_principal`과 정확히 일치. 불일치·프로필 없음이면 관측기 없음 → 달력 미사용.
+- 프로필은 프로세스 시작 시점 config 기준(Settings 변경 시 워커 재시작 필요). 토큰은 매 사용 시 읽고 보관하지 않음.
+- 사용자: config.yaml에 `canvas_observation_enabled: true`, `canvas_origin`, `canvas_principal`(=Settings user_id), `canvas_course_map` 설정.
+- 구현 리뷰는 아직 안 돌림(소규모 배선).
