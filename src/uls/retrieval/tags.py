@@ -166,20 +166,32 @@ def usage_policy_for(
     return NORMAL if decision == NO else NO_ANSWER_GENERATION
 
 
+_LOCATOR_TOKEN = re.compile(
+    r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*:(?:p\d+(?:-p\d+)?|t\d{2}:\d{2}:\d{2}(?:-\d{2}:\d{2}:\d{2})?)(?::[a-z_]+)?")
+
+
 def signal_locators(value: Any, _inside: bool = False) -> list[str]:
-    """Every string stored under a locator-named key at any depth (lists, mappings, nested)."""
+    """Every locator an enrichment signal carries, whatever the shape of the payload.
+
+    Locator grammar is searched in EVERY string - keys and values, at any depth, so a locator
+    used as a mapping key is found too.  In addition a plain string (or a list of strings)
+    stored directly under a locator-named key is a claimed locator even if it does not parse
+    (the caller then withholds the signal).  Descriptive strings inside a mapping stored under
+    a locator-named key are not claims."""
 
     found: list[str] = []
     if isinstance(value, str):
+        found.extend(_LOCATOR_TOKEN.findall(_canonical(value)))
         if _inside:
             found.append(value)
     elif isinstance(value, dict):
         for key, item in value.items():
-            found.extend(signal_locators(item, _inside or "locator" in str(key).casefold()))
+            found.extend(_LOCATOR_TOKEN.findall(_canonical(str(key))))
+            found.extend(signal_locators(item, "locator" in str(key).casefold()))
     elif isinstance(value, (list, tuple)):
         for item in value:
             found.extend(signal_locators(item, _inside))
-    return found
+    return list(dict.fromkeys(found))
 
 
 def signal_has_assignment_text(value: Any) -> bool:

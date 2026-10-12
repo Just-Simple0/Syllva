@@ -321,6 +321,11 @@ def test_official_activity_keeps_its_decision_on_refetch() -> None:
     {"content": "Implement a stack using an array.", "locators": ["COMP319-S05:t00:00:10-00:00:10", "COMP319-S05:t00:00:20-00:00:20"]},
     {"content": "Implement a stack using an array.", "evidence": {"source_locator": {"start": "COMP319-S05:t00:00:20-00:00:20"}}},
     {"content": "Implement a stack using an array.", "locator": "not-a-locator"},
+    {"content": "Implement a stack using an array.", "source_locators": {"COMP319-S05:t00:00:20-00:00:20": True}},
+    {"content": "Implement a stack using an array.", "source_locators": {"COMP319-S05:t00:00:20-00:00:20": 3}},
+    {"content": "Implement a stack using an array.", "refs": [{"COMP319-S05:t00:00:10-00:00:10": 1, "COMP319-S05:t00:00:20-00:00:20": 2}]},
+    {"content": "Implement a stack using an array.", "note": "see COMP319-S05:t00:00:20-00:00:20 for the source"},
+    {"content": "Implement a stack using an array.", "weird": {"\uff23OMP319-S05:t00:00:20-00:00:20": None}},
 ])
 def test_signals_tied_to_a_yes_chunk_are_withheld_whatever_the_locator_shape(signal) -> None:
     engine, _ = _engine(lines=(CLEAN, "Implement a stack using an array. Upload it Friday."),
@@ -336,3 +341,22 @@ def test_a_signal_whose_every_locator_is_clean_is_kept() -> None:
     engine, _ = _engine(lines=(CLEAN, "Implement a stack using an array. Upload it Friday."),
                         enrichment=_enrichment({"professor_signals": [signal]}))
     assert len(engine.get_session_context("COMP319-S05").professor_signals) == 1
+
+
+def test_descriptive_metadata_under_a_locator_named_mapping_is_not_a_claim() -> None:
+    signal = {"content": "Binary search is emphasised.",
+              "source_locators": {"type": "timestamp", "note": "first minute", "range": [10, 20]}}
+    engine, _ = _engine(lines=(CLEAN, "Implement a stack using an array. Upload it Friday."),
+                        enrichment=_enrichment({"professor_signals": [signal]}))
+    assert len(engine.get_session_context("COMP319-S05").professor_signals) == 1
+
+
+def test_signal_locator_extraction_shapes() -> None:
+    cases = [
+        ({"a": {"X-1:t00:00:01": True}}, ["X-1:t00:00:01"]),
+        ({"locator": "bogus"}, ["bogus"]),
+        ({"source_locators": {"type": "page"}}, []),
+        ({"x": ["see M1-3:p2-p4 and S1:t00:00:01-00:00:09:source"]}, ["M1-3:p2-p4", "S1:t00:00:01-00:00:09:source"]),
+    ]
+    for value, expected in cases:
+        assert tags.signal_locators(value) == expected
