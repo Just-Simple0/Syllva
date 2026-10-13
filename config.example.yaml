@@ -24,6 +24,8 @@ google_drive:
   semester_registries:
     - semester: "2026-2"
       # Effective semester date range (classification v2 recording calendar).
+      # Required for transcript auto-matching: without it every transcript date is
+      # unverifiable and goes to a human request.  Use the real first/last day of term.
       # start_date: "2026-09-01"
       # end_date: "2026-12-20"
       # Top-level semester folder in Drive.
@@ -204,5 +206,31 @@ intake:
     max_source_bytes: 52428800   # 50 MiB; larger sources are never sent to a model
     max_terminal_scan: 50
     # Canvas course id -> course key (classification v2 Canvas origin).
+    # The id is the number in the course URL (https://<canvas>/courses/<id>) and in
+    # config.yaml canvas.registry.courses[].course_id after "Apply selection" in Settings.
     canvas_course_map: {}
     #   67535: "2026-2_LMS67535-001"
+    #
+    # Canvas metadata observation (off by default).  Connect Canvas first in
+    # "uls setup" -> Connections -> Canvas LMS (address -> Test & connect -> token ->
+    # select courses -> Apply selection); the token stays in the OS keychain.
+    canvas_observation_enabled: false
+    # Must equal canvas.profile.origin that Settings wrote, e.g. "https://canvas.example.edu".
+    canvas_origin: ""
+    # Must equal canvas.profile.user_id that Settings wrote (an account number, not a secret).
+    canvas_principal: ""
+    max_canvas_courses_per_tick: 5
+    # Canvas attachment download -> private Drive upload folder (P-E).  Needs
+    # canvas_observation_enabled.  Turn it on only after a first run with it off.
+    canvas_attachment_download_enabled: false
+    # Exact host names a Canvas file download may redirect to (fetched WITHOUT the
+    # token).  Empty = only the Canvas address itself.
+    canvas_file_hosts: []
+    max_canvas_downloads_per_tick: 5
+
+# Credential sources.  Secret VALUES never live in this file: each entry only says
+# where the value is read from.  "keyring" = the OS keychain item stored by
+# Settings or `uls credential set <NAME>`.  Add only the names you use.
+# credentials:
+#   NOTION_MCP_TOKEN: {source: keyring}
+#   TYPESAFE_API_KEY: {source: keyring}   # intake classification S2 (TypeSafe/Jev); omit = S2 off
