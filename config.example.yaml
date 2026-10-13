@@ -1,6 +1,14 @@
 # University Learning System — example configuration (spec §5)
-# Copy to config.yaml. Secrets come from the process environment, never here.
-# The CLI does not automatically load .env files.
+# Copy to config.yaml. The CLI does not automatically load .env files.
+#
+# ── 표시 규칙 (config.yaml을 채울 때) ─────────────────────────────────────
+#   [비밀·직접]     비밀값. 본인이 직접 넣고, 커밋·채팅·스크린샷 금지.
+#   [직접]          본인 환경 값(ID·주소·날짜·계정 번호). 비밀 아님.
+#   [Settings 관리] `uls setup`(Settings 화면)이 쓰는 값. 손으로 고치지 않음.
+#   표시 없음       기본값 그대로 두면 됨.
+# 비밀값 대부분(Notion·Canvas·TypeSafe 토큰)은 이 파일이 아니라 OS 키체인에 있고,
+# 이 파일에는 "어디서 읽을지"(credentials: source)만 적습니다.
+# 예외: google_oauth.client_secret 은 이 파일에 직접 들어갑니다.
 
 system:
   timezone: Asia/Seoul
@@ -16,7 +24,7 @@ storage:
   normalized_derivatives: google_drive
 
 google_drive:
-  university_root_id: "..."
+  university_root_id: "..."   # [직접]
   # Legacy global inbox (v1.2 reader only). Not used when semester_registries is active.
   inbox_root_id: "..."
 
@@ -24,7 +32,7 @@ google_drive:
   semester_registries:
     - semester: "2026-2"
       # Effective semester date range (classification v2 recording calendar).
-      # Required for transcript auto-matching: without it every transcript date is
+      # [직접] Required for transcript auto-matching: without it every transcript date is
       # unverifiable and goes to a human request.  Use the real first/last day of term.
       # start_date: "2026-09-01"
       # end_date: "2026-12-20"
@@ -115,9 +123,9 @@ remote_mcp:
   auth_mode: oauth_or_bearer  # "oauth_or_bearer" | "oidc" | "bearer" | "mcp_oauth"
   edge_mode: direct_tls  # "direct_tls" | "cloudflare_tunnel" (mcp_oauth only)
   public_unauthenticated: false
-  # public_url: https://uls.example/mcp
-  # host: 127.0.0.1
-  # port: 8765
+  public_url: "https://uls.example/mcp"   # [직접] 원격 접속 주소
+  host: 127.0.0.1
+  port: 8765
   # tls_certfile: /path/to/fullchain.pem
   # tls_keyfile: /path/to/privkey.pem
   # oidc:
@@ -125,9 +133,9 @@ remote_mcp:
   #   audience: "your-client-id.apps.googleusercontent.com"
   #   authorized_subject: "your-sub-id"
   #   authorized_email: "your-email@example.com"
-  # oauth:  # used only by auth_mode: mcp_oauth
-  #   google_client_id: "your-google-web-client.apps.googleusercontent.com"
-  #   authorized_email: "owner@example.com"
+  oauth:  # used only by auth_mode: mcp_oauth (its client secret = credentials.REMOTE_MCP_GOOGLE_CLIENT_SECRET, keyring)
+    google_client_id: "your-google-web-client.apps.googleusercontent.com"   # [직접]
+    authorized_email: "owner@example.com"                                    # [직접]
   #   access_token_ttl_seconds: 900
   #   refresh_token_ttl_seconds: 2592000
   #   authorization_ttl_seconds: 600
@@ -205,7 +213,7 @@ intake:
     max_calls_per_tick: 50
     max_source_bytes: 52428800   # 50 MiB; larger sources are never sent to a model
     max_terminal_scan: 50
-    # Canvas course id -> course key (classification v2 Canvas origin).
+    # [직접] Canvas course id -> course key (classification v2 Canvas origin).
     # The id is the number in the course URL (https://<canvas>/courses/<id>) and in
     # config.yaml canvas.registry.courses[].course_id after "Apply selection" in Settings.
     canvas_course_map: {}
@@ -215,9 +223,9 @@ intake:
     # "uls setup" -> Connections -> Canvas LMS (address -> Test & connect -> token ->
     # select courses -> Apply selection); the token stays in the OS keychain.
     canvas_observation_enabled: false
-    # Must equal canvas.profile.origin that Settings wrote, e.g. "https://canvas.example.edu".
+    # [직접] Must equal canvas.profile.origin that Settings wrote, e.g. "https://canvas.example.edu".
     canvas_origin: ""
-    # Must equal canvas.profile.user_id that Settings wrote (an account number, not a secret).
+    # [직접] Must equal canvas.profile.user_id that Settings wrote (an account number, not a secret).
     canvas_principal: ""
     max_canvas_courses_per_tick: 5
     # Canvas attachment download -> private Drive upload folder (P-E).  Needs
@@ -228,9 +236,30 @@ intake:
     canvas_file_hosts: []
     max_canvas_downloads_per_tick: 5
 
-# Credential sources.  Secret VALUES never live in this file: each entry only says
-# where the value is read from.  "keyring" = the OS keychain item stored by
-# Settings or `uls credential set <NAME>`.  Add only the names you use.
-# credentials:
-#   NOTION_MCP_TOKEN: {source: keyring}
-#   TYPESAFE_API_KEY: {source: keyring}   # intake classification S2 (TypeSafe/Jev); omit = S2 off
+
+# ── Google 개인 OAuth (Desktop client) ──────────────────────────────────────
+# Google Cloud Console > API 및 서비스 > 사용자 인증 정보 > OAuth 클라이언트(데스크톱 앱).
+# (주석을 풀어 config.yaml에 넣으세요)
+# google_oauth:
+#   client_id: "<123-abc.apps.googleusercontent.com>"   # [직접]
+#   client_secret: "<GOCSPX-...>"                       # [비밀·직접] 이 파일에 직접 들어가는 유일한 비밀값
+
+# ── Settings가 관리하는 값 (손으로 고치지 않음, Google 연결 후 자동 생성) ─────
+# Google 토큰 파일 위치(파일 자체가 비밀, 경로는 비밀 아님).
+# google_worker_credentials_path: "~/.uls/secrets/google-worker.json"   # [Settings 관리]
+# google_mcp_credentials_path: "~/.uls/secrets/google-mcp.json"         # [Settings 관리]
+# 저장된 자격증명의 버전 표시(32자 hex).
+# credential_revisions: {google-worker: "<32 hex>", google-mcp: "<32 hex>"}   # [Settings 관리]
+# Canvas 연결(Connections > Canvas LMS > Test & connect > 과목 선택 > Apply selection) 후 생김.
+# canvas:                                 # [Settings 관리]
+#   profile: {id: "...", origin: "https://canvas.example.edu", user_id: "12345", display_name: "...", credential: "..."}
+#   sync_enabled: false
+#   registry: {term_id: "...", courses: [{course_id: "67535", term_id: "..."}]}
+
+# ── 자격증명 출처 (값이 아니라 "어디서 읽을지"만) ────────────────────────────
+# "keyring" = Settings 또는 `uls credential set <NAME>`이 OS 키체인에 저장한 항목.
+# 쓰는 이름만 남기세요. 값 자체는 [비밀·직접]으로 키체인에 넣습니다(이 파일 아님).
+credentials:
+  NOTION_MCP_TOKEN: {source: keyring}
+  REMOTE_MCP_GOOGLE_CLIENT_SECRET: {source: keyring}   # remote_mcp.auth_mode: mcp_oauth 일 때만
+  TYPESAFE_API_KEY: {source: keyring}                  # intake 분류 S2(TypeSafe/Jev). 빼면 S2 꺼짐
