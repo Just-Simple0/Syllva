@@ -18,7 +18,7 @@
 | P-C2 S2 연동(최소화·캐시·틱 예산·DEFERRED·readiness) | 머지 | #22 |
 | P-D 결정적 S4 태그·검색 fail-closed 필터·Behavior Contract v3 | 머지 | #23 (main `af3a905`) |
 | P-E 공지·첨부 (r15: 수집기에 공지 행·첨부가 없어 Canvas 첨부 다운로드 → 개인 Drive → binding 경로 신설, 공지 본문은 메타만) | 머지 | #25 (main `92d9a01`) |
-| **P-F School 전체 흐름** (전사문 8개 + Canvas 자료 + 공지 첨부 end-to-end, 분류 지표; KNU 파일 저장소 호스트·공지 `attachments[]` 실제 모양 확인 포함) | **진행 중**: 전사문 8개 end-to-end 완료(2026-10-13, 8 processed·Ready, Session 8, 업로드 폴더 0). Canvas 자료·공지 첨부·분류 지표 남음 | #30, #31 |
+| **P-F School 전체 흐름** (전사문 8개 + Canvas 자료 + 공지 첨부 end-to-end, 분류 지표; KNU 파일 저장소 호스트·공지 `attachments[]` 실제 모양 확인 포함) | 완료(2026-10-13 실실행): 전사문 8·공지 첨부 PDF 2 end-to-end, 분류 지표, 검색 질의 | #30, #31, #33, #34 |
 
 사용자 목표 해석: P-F까지가 "수집 → 자동 분류 → 태그 → 검색 → 공지" 데이터 흐름 완성. 이후 MCP로 연결해 AI 클라이언트에 요청해 복습/문제를 받는다. **복습 스케줄·모의고사 세트·채점은 그 다음 단계이며 아직 어떤 계획 문서에도 없다**(사용자 확인 2026-10-13).
 
@@ -29,6 +29,14 @@
 - Notion: Input Requests DB 맨 앞에 "입력 필요" 보기(Views API, 필터 Draft/Needs Input·미취소, 내부 칸 숨김). **처리 끝난 요청 행을 지우거나 보관하지 말 것**(10월 9일 RECONCILE_REQUIRED의 원인).
 - `uls gui`(로컬 확인 화면)는 사용자 결정으로 보류: 브랜치 `codex/uls-gui`(c5b6353, 미푸시·미머지). 계획 `docs/plans/intake-review-gui*.md`는 그 브랜치에만 있음.
 - 후속(관찰): (1) 성공한 요청에도 이전 검증 실패 Error 문구가 남음. (2) Session ID 번호가 날짜순이 아니라 처리 순서(예: 09.17이 S01). (3) 과목 제안이 하나면 FILE_DETAILS로 바로 시작하는 한 번 제출(D4) 미구현. (4) Canvas 녹화 달력이 데이타베이스·네트워크프로그래밍에는 없음.
+
+### P-F 결과 (2026-10-13 완료)
+- 처리: Drive intake 10개 전부 ORGANIZED·Ready — 전사문 8(HUMAN, Session 8), 공지 첨부 `알고리즘2_중간고사_기출문제지.pdf`(AUTO, EXAM, PROFESSOR_SOURCE), `UCWIT2026_CFP_초안.pdf`(HUMAN, SUPPLEMENT·Reference). zip 첨부 2개는 UNSUPPORTED_TYPE(116 MB 1개 포함)로 건너뜀.
+- 분류 지표(O1): 자동 1 / 사람 9, S1 규칙 결정 9(P3 전사문 8, P2 시험 1), S2 호출 1회, Kind 오분류 0(사람 확정 전사문 8개 모두 일치). 사람 경로 사유는 Kind가 아니라 달력(데이타베이스·네트워크프로그래밍 Canvas 녹화 달력 없음, 알고리즘2 파일명 주차가 Canvas보다 1 작음). Canvas 관측 83개 중 Kind 미결정 3.
+- KNU Canvas 실측: 강의자료는 모듈의 ExternalTool(LTI) 항목이고 Canvas File이 아님 → 첨부 경로로 받을 수 있는 건 공지 첨부뿐. 공지 `attachments[]` 필드는 P-E 가정과 일치(id·display_name·filename·content-type·size·url·updated_at), 다운로드 URL 호스트 canvas.knu.ac.kr, 리다이렉트 호스트 불필요(`canvas_file_hosts: []`). 첨부 목록은 다운로드가 켜졌을 때만 수집됨.
+- 검색: `get_session_context(LMS67535-S02)` 전사문 근거 12개, 5.8초(#34 전 4분+). 날짜 문자열로 Session resolve는 안 됨.
+- 실실행에서 고친 버그: #30 macOS NFD 파일명, #31 제안 칸 가독성, #33 AUTO preflight가 비-전사문에도 달력 비교(Canvas 출처 Material 전부 정지) + 테스트용 InMemoryDriveWorker md5, #34 검색 근거마다 원본 재다운로드(요청 내 basis 1회 검증). #33·#34는 사용자 결정으로 리뷰 생략.
+- 후속: (1) 공지 본문 수집(현재 범위 밖, 사용자 관심) (2) 과목 제안이 하나면 FILE_DETAILS로 바로 시작(D4) — 실제로 1단계 행에 Kind를 넣어 거부되는 혼동 2회 (3) 성공한 요청에도 이전 Error 문구 잔존 (4) Session ID가 처리 순서로 매겨짐 (5) Canvas LTI 강의자료 수집 방법 (6) zip 첨부 처리 여부.
 
 ### 사용자 쪽 할 일 (미완)
 3. 대화에 노출된 옛 TypeSafe 키는 폐기(새 키는 키체인 `Syllva LLM`/`typesafe_api_key`에 등록됨, live 합성 호출 성공 확인).
