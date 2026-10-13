@@ -154,3 +154,34 @@ def test_forbidden_formats_are_terminal_without_a_probe() -> None:
     assert outcome.handling is HandlingMode.S3 and outcome.course_key is None
     assert outcome.stage_a_blockers() == (BLOCK_UNSUPPORTED,)
     assert NOTE_COURSE_UNRESOLVED not in outcome.notes
+
+
+# --- NFD file names (macOS uploads keep decomposed Hangul in Drive) -----------------
+
+def test_a_decomposed_hangul_transcript_name_is_classified_like_the_composed_one() -> None:
+    import unicodedata
+
+    from uls.intake.classification.taxonomy import Kind, Origin
+
+    composed = "2026.09.10_알고리즘2_1주차.md"
+    decomposed = unicodedata.normalize("NFD", composed)
+    assert decomposed != composed
+    outcomes = [_classify(name) for name in (composed, decomposed)]
+    for outcome in outcomes:
+        assert outcome.kind is Kind.TRANSCRIPT and outcome.rule_id == "P3:transcript_filename"
+        assert outcome.origin is Origin.USER_AUTHORED_TRANSCRIPT
+    first, second = ((o.course_key, o.week, o.recorded_date) for o in outcomes)
+    assert first == second and first[0] == "2026-2_LMS67535-001"
+
+
+def test_decomposed_aliases_and_weeks_resolve() -> None:
+    import unicodedata
+
+    from uls.intake.classification.rules import CourseAliasIndex, week_from_filename
+
+    index = CourseAliasIndex.build([("2026-2_LMS67535-001", [unicodedata.normalize("NFD", "알고리즘2")])])
+    assert index.resolve("알고리즘2") == "2026-2_LMS67535-001"
+    assert week_from_filename(unicodedata.normalize("NFD", "강의자료_4주차.pdf")) == 4
+    from uls.intake.classification.rules import week_from_module_name
+
+    assert week_from_module_name(unicodedata.normalize("NFD", "4주차")) == week_from_module_name("4주차") == 4

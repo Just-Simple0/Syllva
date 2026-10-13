@@ -23,6 +23,7 @@ from .rules import (
     ItemSignals,
     RuleDecision,
     classify_by_rules,
+    nfc,
     transcript_signals,
     week_from_filename,
 )
@@ -209,6 +210,7 @@ def classify_upload_item(
     its MIME, and everything else is UNKNOWN.
     """
 
+    name = nfc(name)        # Drive names from macOS are NFD (decomposed Hangul)
     if origin is None:
         origin = (
             Origin.USER_AUTHORED_TRANSCRIPT
