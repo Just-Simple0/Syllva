@@ -2952,7 +2952,9 @@ class IntakeWorker:
         inventory the record was decided on are still the current ones (r4 #2)."""
 
         semester = self._semester_range(workspace.semester)
-        if record.course_key:
+        # The recording calendar is part of a TRANSCRIPT decision only (§2.3); a Material's
+        # record never captured it, so comparing it would stop every Canvas-sourced Material.
+        if record.course_key and record.kind == Kind.TRANSCRIPT.value:
             calendar = self._course_calendar(record.course_key, semester)
             if (None if calendar is None else calendar.revision_hash()) != record.calendar_projection_revision_hash:
                 return "CALENDAR"
