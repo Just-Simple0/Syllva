@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS canvas_observations (
     module_week INTEGER,
     item_type TEXT,
     updated_at TEXT,
+    attachment_signature TEXT,
     observed_at TEXT NOT NULL,
     collection_complete INTEGER NOT NULL DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1,
@@ -116,8 +117,29 @@ CREATE TABLE IF NOT EXISTS canvas_drive_bindings (
     attachment_size INTEGER,
     byte_sha256 TEXT NOT NULL,
     bound_at TEXT NOT NULL,
+    origin TEXT,
     UNIQUE (canvas_course_id, resource_kind, resource_id, observation_revision, attachment_id)
 );
+CREATE TABLE IF NOT EXISTS canvas_attachment_intents (
+    fingerprint TEXT PRIMARY KEY,
+    origin TEXT NOT NULL,
+    canvas_course_id INTEGER NOT NULL,
+    resource_kind TEXT NOT NULL,
+    resource_id TEXT NOT NULL,
+    observation_revision INTEGER NOT NULL,
+    attachment_id TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    canvas_updated_at TEXT,
+    byte_sha256 TEXT NOT NULL,
+    folder_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    drive_file_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS canvas_attachment_intents_by_attachment
+    ON canvas_attachment_intents(canvas_course_id, resource_kind, resource_id, attachment_id);
 CREATE TABLE IF NOT EXISTS recording_calendar (
     canvas_course_id INTEGER NOT NULL,
     resource_id TEXT NOT NULL,
@@ -821,7 +843,7 @@ class ClassificationStateMixin:
             # The completeness proof is never derived from truthiness (r11 R3).
             raise ValueError("collection_complete must be a bool")
         payload = (values["title"], values.get("module_name"), values.get("module_week"),
-                   values.get("item_type"), values.get("updated_at"))
+                   values.get("item_type"), values.get("updated_at"), values.get("attachment_signature"))
         with self._transaction(immediate=True) as connection:
             existing = connection.execute(
                 "SELECT * FROM canvas_observations WHERE origin = ? AND canvas_course_id = ? "
@@ -830,7 +852,7 @@ class ClassificationStateMixin:
             ).fetchone()
             if existing is not None:
                 stored = (existing["title"], existing["module_name"], existing["module_week"],
-                          existing["item_type"], existing["updated_at"])
+                          existing["item_type"], existing["updated_at"], existing["attachment_signature"])
                 if stored != payload:
                     raise ValueError("canvas observation revision is immutable")
                 # Content and metadata of a revision are immutable, but a verified complete
@@ -891,9 +913,9 @@ class ClassificationStateMixin:
                 """
                 INSERT INTO canvas_observations(
                     origin, canvas_course_id, resource_kind, resource_id, observation_revision,
-                    title, module_name, module_week, item_type, updated_at, observed_at,
+                    title, module_name, module_week, item_type, updated_at, attachment_signature, observed_at,
                     collection_complete, active
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     *identity, revision, *payload,
@@ -1342,7 +1364,8 @@ class ClassificationStateMixin:
                         "canvas_course_id", "resource_kind", "resource_id", "observation_revision",
                         "attachment_id", "byte_sha256", "attachment_filename",
                     )
-                ) and (existing["attachment_size"] == values.get("attachment_size"))
+                ) and (existing["attachment_size"] == values.get("attachment_size")) \
+                    and existing["origin"] == values.get("origin")
                 if not same:
                     raise ValueError("drive file is already bound to another Canvas attachment")
                 return dict(existing)
@@ -1351,14 +1374,14 @@ class ClassificationStateMixin:
                 INSERT INTO canvas_drive_bindings(
                     drive_file_id, canvas_course_id, resource_kind, resource_id,
                     observation_revision, attachment_id, attachment_filename, attachment_size,
-                    byte_sha256, bound_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    byte_sha256, bound_at, origin
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     values["drive_file_id"], int(values["canvas_course_id"]), values["resource_kind"],
                     str(values["resource_id"]), int(values["observation_revision"]),
                     str(values["attachment_id"]), values["attachment_filename"],
-                    values.get("attachment_size"), values["byte_sha256"], _now(),
+                    values.get("attachment_size"), values["byte_sha256"], _now(), values.get("origin"),
                 ),
             )
             row = connection.execute(
@@ -1394,6 +1417,99 @@ class ClassificationStateMixin:
                 "SELECT * FROM canvas_drive_bindings WHERE drive_file_id = ?", (drive_file_id,)
             ).fetchone()
             return None if row is None else dict(row)
+
+    # --- canvas attachment upload intents (P-E r2: the trusted download ledger) -------------
+
+    _INTENT_STATUSES = frozenset({"PENDING", "UNCERTAIN", "BOUND", "SAME_BYTES", "CONFLICT"})
+
+    def get_canvas_attachment_intent(self, fingerprint: str) -> dict[str, Any] | None:
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM canvas_attachment_intents WHERE fingerprint = ?", (fingerprint,)).fetchone()
+            return None if row is None else dict(row)
+
+    def list_canvas_attachment_intents(
+        self, *, origin: str, canvas_course_id: int, resource_kind: str, resource_id: str, attachment_id: str,
+    ) -> list[dict[str, Any]]:
+        with self._transaction() as connection:
+            rows = connection.execute(
+                "SELECT * FROM canvas_attachment_intents WHERE origin = ? AND canvas_course_id = ? "
+                "AND resource_kind = ? AND resource_id = ? AND attachment_id = ? ORDER BY created_at, fingerprint",
+                (origin, int(canvas_course_id), resource_kind, str(resource_id), str(attachment_id))).fetchall()
+            return [dict(row) for row in rows]
+
+    def record_canvas_attachment_intent(self, **values: Any) -> dict[str, Any]:
+        """Persist, BEFORE the Drive create, the Canvas bytes that are about to be uploaded (their
+        SHA-256 comes from the Canvas download itself).  First write wins; a different value for
+        the same fingerprint is refused."""
+
+        names = ("fingerprint", "origin", "canvas_course_id", "resource_kind", "resource_id",
+                 "observation_revision", "attachment_id", "filename", "size", "canvas_updated_at",
+                 "byte_sha256", "folder_id", "status")
+        for name in names:
+            if name != "canvas_updated_at" and values.get(name) in (None, ""):
+                raise ValueError(f"canvas attachment intent requires {name}")
+        if values["status"] not in self._INTENT_STATUSES:
+            raise ValueError("unknown canvas attachment intent status")
+        with self._transaction(immediate=True) as connection:
+            existing = connection.execute(
+                "SELECT * FROM canvas_attachment_intents WHERE fingerprint = ?", (values["fingerprint"],)).fetchone()
+            if existing is not None:
+                if existing["byte_sha256"] != values["byte_sha256"] or existing["folder_id"] != values["folder_id"]:
+                    raise ValueError("canvas attachment intent differs from the recorded one")
+                return dict(existing)
+            now = _now()
+            connection.execute(
+                "INSERT INTO canvas_attachment_intents(" + ", ".join(names) + ", drive_file_id, created_at, updated_at) "
+                "VALUES (" + ", ".join("?" for _ in names) + ", ?, ?, ?)",
+                (*(values[name] for name in names), values.get("drive_file_id"), now, now))
+            row = connection.execute(
+                "SELECT * FROM canvas_attachment_intents WHERE fingerprint = ?", (values["fingerprint"],)).fetchone()
+            return dict(row)
+
+    def set_canvas_attachment_intent_status(
+        self, fingerprint: str, status: str, *, drive_file_id: str | None = None,
+    ) -> None:
+        if status not in self._INTENT_STATUSES:
+            raise ValueError("unknown canvas attachment intent status")
+        with self._transaction(immediate=True) as connection:
+            connection.execute(
+                "UPDATE canvas_attachment_intents SET status = ?, drive_file_id = COALESCE(?, drive_file_id), "
+                "updated_at = ? WHERE fingerprint = ?", (status, drive_file_id, _now(), fingerprint))
+
+    def canvas_attachment_intent_counts(self) -> dict[str, int]:
+        with self._transaction() as connection:
+            rows = connection.execute(
+                "SELECT status, COUNT(*) AS n FROM canvas_attachment_intents GROUP BY status").fetchall()
+            return {str(row["status"]): int(row["n"]) for row in rows}
+
+    def canvas_drive_binding_slot(
+        self, *, canvas_course_id: int, resource_kind: str, resource_id: str, observation_revision: int,
+        attachment_id: str,
+    ) -> dict[str, Any] | None:
+        """The binding occupying the UNIQUE (resource, revision, attachment) slot, of any origin."""
+
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM canvas_drive_bindings WHERE canvas_course_id = ? AND resource_kind = ? "
+                "AND resource_id = ? AND observation_revision = ? AND attachment_id = ?",
+                (int(canvas_course_id), resource_kind, str(resource_id), int(observation_revision),
+                 str(attachment_id))).fetchone()
+            return None if row is None else dict(row)
+
+    def list_canvas_drive_bindings_for_attachment(
+        self, *, origin: str, canvas_course_id: int, resource_kind: str, resource_id: str, attachment_id: str,
+    ) -> list[dict[str, Any]]:
+        """Every binding of one Canvas attachment key of exactly this origin, over all observation
+        revisions (P-E E7/E10, R-PE2-04: a binding of another or unknown origin is never matched)."""
+
+        with self._transaction() as connection:
+            rows = connection.execute(
+                "SELECT * FROM canvas_drive_bindings WHERE origin = ? AND canvas_course_id = ? AND resource_kind = ? "
+                "AND resource_id = ? AND attachment_id = ? ORDER BY observation_revision, drive_file_id",
+                (origin, int(canvas_course_id), resource_kind, str(resource_id), str(attachment_id)),
+            ).fetchall()
+            return [dict(row) for row in rows]
 
     # --- request generations ------------------------------------------------------
 

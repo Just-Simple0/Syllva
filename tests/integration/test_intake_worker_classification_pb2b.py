@@ -6,7 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from tests.integration.test_intake_worker_classification_pb1 import _enable
+from tests.integration.test_intake_worker_classification_pb1 import CANVAS_TEST_ORIGIN, _enable
 from tests.integration.test_intake_worker_classification_pb2a import (
     COURSE,
     MATCHED_NAME,
@@ -59,13 +59,14 @@ def _material_system(system, name: str, raw: bytes, resource_kind: str = "module
     registry = system["config"].google_drive.semester_registries[0]
     registry.optional_course_upload_folder_ids[COURSE] = "synthetic-course-upload-1"
     system["config"].intake.classification.canvas_course_map = {67535: COURSE}
+    system["config"].intake.classification.canvas_origin = CANVAS_TEST_ORIGIN
     system["worker"] = build_intake_worker(
         system["config"], ResolvedCredentials({}), state=state, drive=drive, notion=system["notion"],
         provider_account_binding_id=provider_binding_id("google_drive", "synthetic-owner", "synthetic-oauth"),
         semester="2026-2")
     worker = _rewire(system, "legacy5-cls")
     state.record_canvas_drive_binding(
-        drive_file_id=system["source_id"], canvas_course_id=67535, resource_kind=resource_kind, resource_id="r-1",
+        origin=CANVAS_TEST_ORIGIN, drive_file_id=system["source_id"], canvas_course_id=67535, resource_kind=resource_kind, resource_id="r-1",
         observation_revision=1, attachment_id="att-9", attachment_filename=name, attachment_size=len(raw),
         byte_sha256=hashlib.sha256(raw).hexdigest())
     return worker

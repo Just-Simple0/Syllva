@@ -8,7 +8,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
-from tests.integration.test_intake_worker_classification_pb1 import _enable
+from tests.integration.test_intake_worker_classification_pb1 import CANVAS_TEST_ORIGIN, _enable
 from tests.integration.test_intake_worker_classification_profile import _rewire
 from tests.integration.test_intake_worker_preview import COURSE_KEYS, _assign_request, _system
 
@@ -131,7 +131,7 @@ def test_material_from_a_proven_binding_in_a_course_folder_is_auto_eligible(tmp_
             semester="2026-2")
         worker = _rewire(system, "legacy5-cls")
         system["state"].record_canvas_drive_binding(
-            drive_file_id=system["source_id"], canvas_course_id=67535, resource_kind="assignment",
+            origin=CANVAS_TEST_ORIGIN, drive_file_id=system["source_id"], canvas_course_id=67535, resource_kind="assignment",
             resource_id="as-1", observation_revision=1, attachment_id="att-9", attachment_filename="mbti.csv",
             attachment_size=len(csv), byte_sha256=hashlib.sha256(csv).hexdigest())
         worker.run_once()
@@ -1077,7 +1077,7 @@ def test_preflight_rechecks_alias_and_canvas_provenance(tmp_path: Path) -> None:
             semester="2026-2")
         worker = _rewire(system, "legacy5-cls")
         state.record_canvas_drive_binding(
-            drive_file_id=system["source_id"], canvas_course_id=67535, resource_kind="assignment", resource_id="as-1",
+            origin=CANVAS_TEST_ORIGIN, drive_file_id=system["source_id"], canvas_course_id=67535, resource_kind="assignment", resource_id="as-1",
             observation_revision=1, attachment_id="att-9", attachment_filename="mbti.csv", attachment_size=len(csv),
             byte_sha256=hashlib.sha256(csv).hexdigest())
         worker.run_once()
@@ -1198,7 +1198,7 @@ def test_canvas_course_must_match_the_classified_course(tmp_path: Path) -> None:
                 semester="2026-2")
             worker = _rewire(system, "legacy5-cls")
             state.record_canvas_drive_binding(
-                drive_file_id=system["source_id"], canvas_course_id=67535, resource_kind="assignment", resource_id="as-1",
+                origin=CANVAS_TEST_ORIGIN, drive_file_id=system["source_id"], canvas_course_id=67535, resource_kind="assignment", resource_id="as-1",
                 observation_revision=1, attachment_id="att-9", attachment_filename="mbti.csv", attachment_size=len(csv),
                 byte_sha256=hashlib.sha256(csv).hexdigest())
             worker.run_once()
@@ -1814,7 +1814,7 @@ def test_a_late_canvas_binding_changes_the_provenance(tmp_path: Path) -> None:
         def bind(call: int) -> None:
             if call == 1:
                 state.record_canvas_drive_binding(
-                    drive_file_id=system["source_id"], canvas_course_id=99999, resource_kind="assignment",
+                    origin=CANVAS_TEST_ORIGIN, drive_file_id=system["source_id"], canvas_course_id=99999, resource_kind="assignment",
                     resource_id="as-9", observation_revision=1, attachment_id="att-1",
                     attachment_filename="x.md", attachment_size=len(RAW), byte_sha256=hashlib.sha256(RAW).hexdigest())
         _spy_preflight(worker, bind)
@@ -2039,7 +2039,7 @@ def test_canonical_bindings_without_an_intake_row_count_as_duplicates(tmp_path: 
             state = system["state"]
             if kind == "canvas":
                 state.record_canvas_drive_binding(
-                    drive_file_id="legacy-only-file", canvas_course_id=1, resource_kind="assignment",
+                    origin=CANVAS_TEST_ORIGIN, drive_file_id="legacy-only-file", canvas_course_id=1, resource_kind="assignment",
                     resource_id="as-1", observation_revision=1, attachment_id="att-1", attachment_filename="x.md",
                     attachment_size=len(RAW), byte_sha256=sha)
             else:
@@ -2268,7 +2268,7 @@ def test_a_canvas_binding_with_an_intake_row_is_still_duplicate_evidence(tmp_pat
         _complete_calendar(system["state"])
         _second_file(system, name="a.md", raw=b"completely different content here", md5=True)
         system["state"].record_canvas_drive_binding(
-            drive_file_id="synthetic-other", canvas_course_id=1, resource_kind="assignment", resource_id="as-1",
+            origin=CANVAS_TEST_ORIGIN, drive_file_id="synthetic-other", canvas_course_id=1, resource_kind="assignment", resource_id="as-1",
             observation_revision=1, attachment_id="att-1", attachment_filename="a.md", attachment_size=len(RAW),
             byte_sha256=hashlib.sha256(RAW).hexdigest())
         worker.run_once()

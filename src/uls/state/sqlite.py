@@ -567,6 +567,15 @@ class SQLiteStateStore(UsageRangeStateMixin, ClassificationStateMixin):
     def _migrate_classification_columns(self) -> None:
         """Additive intake classification v2 columns and the generation=1 backfill (P-A)."""
 
+        # P-E r2: the attachment signature makes an attachment change a new observation revision
+        # (R-PE2-03); a binding carries the Canvas origin it was downloaded from (R-PE2-04; legacy
+        # rows have none and are never proof).
+        observation_columns = {row[1] for row in self._connection.execute("PRAGMA table_info(canvas_observations)")}
+        if "attachment_signature" not in observation_columns:
+            self._connection.execute("ALTER TABLE canvas_observations ADD COLUMN attachment_signature TEXT")
+        binding_columns = {row[1] for row in self._connection.execute("PRAGMA table_info(canvas_drive_bindings)")}
+        if "origin" not in binding_columns:
+            self._connection.execute("ALTER TABLE canvas_drive_bindings ADD COLUMN origin TEXT")
         intake_columns = {row[1] for row in self._connection.execute("PRAGMA table_info(intake_items)")}
         for column, declaration in (
             ("origin", "TEXT NOT NULL DEFAULT 'UNKNOWN'"), ("classified_kind", "TEXT"),

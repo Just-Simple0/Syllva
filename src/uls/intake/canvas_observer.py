@@ -31,6 +31,11 @@ from ..settings.canvas_checks import (
     validate_canvas_origin,
 )
 from ..state.classification_state import is_recording_observation
+from .canvas_attachments import (
+    AttachmentCandidate,
+    candidate_from_announcement,
+    candidate_from_module_item,
+)
 from .classification.calendar import RecordingEntry, SemesterRange, build_calendar
 from .classification.rules import (
     CANVAS_ANNOUNCEMENT,
@@ -72,14 +77,27 @@ class ObservationResult:
     canvas_course_id: int = 0
     observed: int = 0
     classified: int = 0
+    # P-E E1: attachment candidates of a COMPLETE observation (memory only; empty otherwise).
+    attachments: tuple[AttachmentCandidate, ...] = ()
 
 
 class ConnectionReader:
     """Production reader over one pinned CanvasConnection (never exposes the token)."""
 
-    def __init__(self, connection: CanvasConnection, token: str) -> None:
+    def __init__(self, connection: CanvasConnection, token: str, file_hosts: tuple[str, ...] = ()) -> None:
         self._connection = connection
         self._token = token
+        self._file_hosts = file_hosts
+
+    def file_metadata(self, course_id: int, file_id: str, deadline: float) -> Any:
+        """The course-scoped File object of one attachment (P-E E3)."""
+        return self._connection.file_metadata(course_id, file_id, self._token, deadline=deadline)
+
+    def download(self, url: str, *, course_id: int, file_id: str, expected_size: int, deadline: float) -> bytes:
+        """Exactly ``expected_size`` bytes; the token never leaves the Canvas origin (P-E E3-E5)."""
+        return self._connection.download(url, self._token, course_id=course_id, file_id=file_id,
+                                         expected_size=expected_size, deadline=deadline,
+                                         file_hosts=self._file_hosts)
 
     def get_page(self, url: str, deadline: float) -> tuple[list[Any], str | None]:
         response = self._connection.observe(url, self._token, deadline=deadline)
@@ -237,20 +255,34 @@ def _with_page(url: str, number: int) -> str:
 
 
 def connection_reader_factory(
-    origin: str, token_provider: Callable[[], str | None],
-) -> Callable[[], AbstractContextManager[CanvasReader | None]]:
+    origin: str, token_provider: Callable[[], str | None], file_hosts: tuple[str, ...] = (),
+) -> Callable[[], AbstractContextManager[ConnectionReader | None]]:
     """A factory yielding a pinned reader, or None when no Canvas credential is available."""
 
     @contextmanager
-    def factory() -> Iterator[CanvasReader | None]:
+    def factory() -> Iterator[ConnectionReader | None]:
         token = token_provider()
         if not token:
             yield None
             return
         with open_canvas_connection(origin) as connection:
-            yield ConnectionReader(connection, token)
+            yield ConnectionReader(connection, token, file_hosts)
 
     return factory
+
+
+def _attachment_signature(attachments: list[dict[str, Any]]) -> str | None:
+    """P-E R-PE2-03: a change of the attached files (id, size, version) is a change of the
+    observation, so a new attachment version always gets a new observation revision.  None when
+    there are no attachments, so collecting them never bumps a revision without attachments."""
+
+    keys = sorted(
+        json.dumps([str(a.get("id")), a.get("size"), a.get("updated_at") or a.get("modified_at"),
+                    a.get("display_name") or a.get("filename")], ensure_ascii=False, separators=(",", ":"))
+        for a in attachments)
+    if not keys:
+        return None
+    return hashlib.sha256("\n".join(keys).encode()).hexdigest()
 
 
 def _text(value: Any) -> str | None:
@@ -278,8 +310,10 @@ class CanvasObserver:
         profile_provider: Callable[[], str | None] | None = None,
         principal_provider: Callable[[], str | None] | None = None,
         verified_principal: str = "",
+        collect_attachments: bool = False,
     ) -> None:
         self._state = state
+        self._collect_attachments = collect_attachments
         self._profile_provider = profile_provider
         self._fresh: set[str] = set()    # calendars proven by a COMPLETE observation of THIS process
         self._denied: set[str] = set()   # calendars whose closing could not be persisted: unusable until it is
@@ -511,7 +545,11 @@ class CanvasObserver:
         for row in assignments:
             out[CANVAS_ASSIGNMENT].append(self._plain(row, "name", None, None))
         for row in announcements:
-            out[CANVAS_ANNOUNCEMENT].append(self._plain(row, "title", None, None))
+            plain = self._plain(row, "title", None, None)
+            if self._collect_attachments and isinstance(row.get("attachments"), list):
+                plain["_attachments"] = [a for a in row["attachments"] if isinstance(a, dict)]
+                plain["attachment_signature"] = _attachment_signature(plain["_attachments"])
+            out[CANVAS_ANNOUNCEMENT].append(plain)
         total = 0
         for module in modules:
             if not isinstance(module, dict):
@@ -535,7 +573,12 @@ class CanvasObserver:
                 total += 1
                 if total > MAX_ITEMS:
                     raise _Incomplete("ITEM_LIMIT")
-                out[CANVAS_MODULE_ITEM].append(self._plain(item, "title", name, week))
+                plain = self._plain(item, "title", name, week)
+                if self._collect_attachments and isinstance(item, dict) and item.get("type") == "File":
+                    plain["_file_item"] = item
+                    plain["attachment_signature"] = _attachment_signature(
+                        [{"id": item.get("content_id")}])
+                out[CANVAS_MODULE_ITEM].append(plain)
         for kind, rows in out.items():
             if len({r["resource_id"] for r in rows}) != len(rows):
                 raise _Incomplete(f"DUPLICATE_{kind.upper()}")
@@ -559,11 +602,16 @@ class CanvasObserver:
 
     def _revision(self, kind: str, row: dict[str, Any], course_id: int, bump: bool = False) -> int:
         latest = self._state.latest_canvas_observation(self._origin, course_id, kind, row["resource_id"])
+        if not self._collect_attachments:
+            # H-PE3-01: attachments are not looked at while downloads are off, so the stored
+            # signature is carried over unchanged - switching the feature never bumps a revision.
+            row["attachment_signature"] = None if latest is None else latest.get("attachment_signature")
         if latest is None:
             return 1
         stored = (latest["title"], latest["module_name"], latest["module_week"],
-                  latest["item_type"], latest["updated_at"])
-        payload = (row["title"], row["module_name"], row["module_week"], row["item_type"], row["updated_at"])
+                  latest["item_type"], latest["updated_at"], latest.get("attachment_signature"))
+        payload = (row["title"], row["module_name"], row["module_week"], row["item_type"], row["updated_at"],
+                   row.get("attachment_signature"))
         # The whole stored payload is compared, not only updated_at (P-B3 A3); after a re-mapping
         # every observation is a new revision (the calendar history is immutable per key).
         return int(latest["observation_revision"]) + (0 if stored == payload and not bump else 1)
@@ -572,15 +620,25 @@ class CanvasObserver:
         self, course_key: str, course_id: int, collected: dict[str, list[dict[str, Any]]], bump: bool = False,
     ) -> ObservationResult:
         observed = classified = 0
+        candidates: list[AttachmentCandidate] = []
         self._state.deactivate_foreign_origin_observations(course_id, self._origin)
         for kind, rows in collected.items():
             for row in rows:
                 revision = self._revision(kind, row, course_id, bump)
+                for raw in row.get("_attachments", ()):
+                    found = candidate_from_announcement(raw, row["resource_id"], revision)
+                    if found is not None:
+                        candidates.append(found)
+                if "_file_item" in row:
+                    found = candidate_from_module_item(row["_file_item"], row["resource_id"], revision)
+                    if found is not None:
+                        candidates.append(found)
                 self._state.record_canvas_observation(
                     origin=self._origin, canvas_course_id=course_id, resource_kind=kind,
                     resource_id=row["resource_id"], observation_revision=revision, title=row["title"],
                     module_name=row["module_name"], module_week=row["module_week"],
                     item_type=row["item_type"], updated_at=row["updated_at"], collection_complete=True,
+                    attachment_signature=row.get("attachment_signature"),
                 )
                 observed += 1
                 classified += self._classify(course_id, kind, row, revision)
@@ -590,7 +648,8 @@ class CanvasObserver:
             )
         reason = self._project_calendar(course_key, course_id)
         status = "COMPLETE" if reason == "" else "INCOMPLETE"
-        return ObservationResult(status, reason, course_key, course_id, observed, classified)
+        return ObservationResult(status, reason, course_key, course_id, observed, classified,
+                                 tuple(candidates) if status == "COMPLETE" else ())
 
     def _classify(self, course_id: int, kind: str, row: dict[str, Any], revision: int) -> int:
         decision = classify_by_rules(ItemSignals(

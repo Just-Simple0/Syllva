@@ -112,3 +112,33 @@ intake:
 def test_canvas_observation_rejects_unsafe_values(tmp_path, body) -> None:
     with pytest.raises(ValueError):
         _load(tmp_path, f"intake:\n  classification:\n    {body}\n")
+
+
+def test_attachment_downloads_default_off_and_normalize_hosts(tmp_path) -> None:
+    cls = _load(tmp_path, "system:\n  timezone: Asia/Seoul\n").intake.classification
+    assert (cls.canvas_attachment_download_enabled, cls.canvas_file_hosts, cls.max_canvas_downloads_per_tick) == (
+        False, [], 5)
+    ok = _load(tmp_path, """
+intake:
+  classification:
+    canvas_observation_enabled: true
+    canvas_origin: "https://lms.example.edu"
+    canvas_principal: "1"
+    canvas_attachment_download_enabled: true
+    canvas_file_hosts: ["Files.Example.com", "files.example.com"]
+""").intake.classification
+    assert ok.canvas_attachment_download_enabled and ok.canvas_file_hosts == ["files.example.com"]
+
+
+@pytest.mark.parametrize("body", [
+    "canvas_attachment_download_enabled: true",                # needs observation
+    "canvas_attachment_download_enabled: 1",
+    "canvas_file_hosts: 'files.example.com'",                  # a list
+    "canvas_file_hosts: ['https://files.example.com']",        # bare host names only
+    "canvas_file_hosts: ['files.example.com:8443']",
+    "canvas_file_hosts: ['10.0.0.1']",
+    "max_canvas_downloads_per_tick: 0",
+])
+def test_attachment_download_settings_reject_unsafe_values(tmp_path, body) -> None:
+    with pytest.raises(ValueError):
+        _load(tmp_path, f"intake:\n  classification:\n    {body}\n")

@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from uls.intake.canvas_attachments import CanvasAttachmentFetcher
 from uls.intake.canvas_observer import CanvasObserver, connection_reader_factory
 
 
@@ -52,15 +53,25 @@ def install_canvas_observer(
         semester = semesters.get(course_key)
         return worker._semester_range(semester) if semester else None
 
+    downloads = bool(getattr(classification, "canvas_attachment_download_enabled", False))
+    factory = connection_reader_factory(
+        origin, (token_reader or _settings_token_reader)(profile["id"]),
+        tuple(getattr(classification, "canvas_file_hosts", ()) or ()))
     worker.canvas_observer = CanvasObserver(
         state,
         origin=origin,
         verified_origin=classification.canvas_origin,
         course_map=lambda: classification.canvas_course_map,
-        reader_factory=connection_reader_factory(origin, (token_reader or _settings_token_reader)(profile["id"])),
+        reader_factory=factory,
         semester_for=semester_for,
         profile_provider=lambda: origin,
         principal_provider=lambda: principal,
         verified_principal=classification.canvas_principal,
+        collect_attachments=downloads,
     )
+    if downloads:
+        # Plan §6.2 r15 (P-E): the trusted Canvas download path, the only binding writer.
+        worker.canvas_attachment_fetcher = CanvasAttachmentFetcher(
+            state, worker.drive, origin=origin, reader_factory=factory,
+            max_bytes=int(classification.max_source_bytes))
     return "INSTALLED"

@@ -237,6 +237,13 @@ class ClassificationCfg:
     # calendar use require the active connection to be this principal.
     canvas_principal: str = ""
     max_canvas_courses_per_tick: int = 5
+    # Canvas attachment download -> private Drive -> canvas_drive_bindings (plan §6.2 r15, P-E):
+    # off by default and only with observation on.  canvas_file_hosts lists the exact file-storage
+    # host names a Canvas download may redirect to (fetched WITHOUT the token); empty = the Canvas
+    # origin itself only.
+    canvas_attachment_download_enabled: bool = False
+    canvas_file_hosts: list[str] = field(default_factory=list)
+    max_canvas_downloads_per_tick: int = 5
 
 
 @dataclass
