@@ -12,6 +12,7 @@ checked by the observed-item fixture.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date
@@ -110,7 +111,7 @@ def _valid_date_title(title: str) -> bool:
 def classify_by_rules(signals: ItemSignals) -> RuleDecision:
     """Apply the P0–P4 table (§3.1) and return a decision or a deferral."""
 
-    title = signals.title.strip()
+    title = nfc(signals.title).strip()
     ext = _extension(title, signals.extension)
     mime = (signals.mime_type or "").lower()
     is_assignment_attachment = signals.canvas_attachment_of == CANVAS_ASSIGNMENT
@@ -215,8 +216,14 @@ class CourseAliasIndex:
         return self.resolved.get(key)
 
 
+def nfc(value: str) -> str:
+    """Unicode NFC.  Drive keeps the names macOS uploads as decomposed Hangul (NFD), which
+    looks identical but never matches the composed text of the rules and aliases."""
+    return unicodedata.normalize("NFC", value)
+
+
 def _normalize_alias(value: str) -> str:
-    return "".join(value.split()).lower()
+    return "".join(nfc(value).split()).lower()
 
 
 def course_aliases_from_config(
@@ -235,7 +242,7 @@ def course_aliases_from_config(
 def week_from_module_name(name: str | None) -> int | None:
     if not name:
         return None
-    match = _WEEK_MODULE.match(name.strip())
+    match = _WEEK_MODULE.match(nfc(name).strip())
     return int(match.group(1)) if match else None
 
 
@@ -244,7 +251,7 @@ def week_from_filename(name: str | None) -> int | None:
 
     if not name:
         return None
-    weeks = {int(m) for m in _WEEK_IN_NAME.findall(name)}
+    weeks = {int(m) for m in _WEEK_IN_NAME.findall(nfc(name))}
     return weeks.pop() if len(weeks) == 1 else None
 
 
@@ -255,7 +262,7 @@ def date_from_text(text: str | None) -> date | None:
     if not text:
         return None
     found: set[date] = set()
-    for year, _sep, month, day in _ISO_DATE.findall(text):
+    for year, _sep, month, day in _ISO_DATE.findall(nfc(text)):
         try:
             found.add(date(int(year), int(month), int(day)))
         except ValueError:
@@ -266,7 +273,7 @@ def date_from_text(text: str | None) -> date | None:
 def transcript_signals(filename: str, index: CourseAliasIndex) -> dict[str, object]:
     """Course/week/date from an upload-folder transcript name (empty when no match)."""
 
-    match = TRANSCRIPT_FILENAME.match(filename.strip())
+    match = TRANSCRIPT_FILENAME.match(nfc(filename).strip())
     if not match:
         return {}
     course_key = index.resolve(match.group("course"))
@@ -293,6 +300,7 @@ __all__ = [
     "classify_by_rules",
     "course_aliases_from_config",
     "date_from_text",
+    "nfc",
     "transcript_signals",
     "week_from_filename",
     "week_from_module_name",
