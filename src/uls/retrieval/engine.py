@@ -89,6 +89,16 @@ class _MaterialEvidenceCollection:
     withheld: bool = False
 
 
+def _basis_key(binding: CapabilityBinding) -> CapabilityBinding | None:
+    """The binding without its locator: everything its freshness revalidation depends on."""
+
+    key = replace(binding, locator=None)
+    try:
+        hash(key)
+    except TypeError:
+        return None
+    return key
+
 class RetrievalEngine:
     """Read-only retrieval policy and execution boundary.
 
@@ -1860,6 +1870,10 @@ class RetrievalEngine:
             )
         retained_evidence: list[EvidenceItem] = []
         retained_bindings: list[CapabilityBinding] = []
+        # One context assembly revalidates each distinct basis once: chunks of one source
+        # share it and differ only by locator.  Never reused across calls.
+        current_by_basis: dict[CapabilityBinding, SourceFingerprint | None] = {}
+        failure_by_basis: dict[CapabilityBinding, Exception] = {}
         for item, binding in zip(evidence, bindings):
             if not self._evidence_matches_binding(item, binding):
                 warnings.append(
@@ -1869,8 +1883,19 @@ class RetrievalEngine:
                     )
                 )
                 continue
+            key = _basis_key(binding)
+            if key is not None and key not in current_by_basis and key not in failure_by_basis:
+                try:
+                    current_by_basis[key] = self._current_fingerprint_for_binding(binding)
+                except Exception as exc:  # noqa: BLE001 - replayed through the original handlers below
+                    failure_by_basis[key] = exc
             try:
-                current = self._current_fingerprint_for_binding(binding)
+                if key is None:
+                    current = self._current_fingerprint_for_binding(binding)
+                elif key in failure_by_basis:
+                    raise failure_by_basis[key]
+                else:
+                    current = current_by_basis[key]
             except SourceUnavailableError as exc:
                 warnings.append(_warning("SOURCE_UNAVAILABLE", exc.message))
                 continue
