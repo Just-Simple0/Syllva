@@ -18,13 +18,19 @@
 | P-C2 S2 연동(최소화·캐시·틱 예산·DEFERRED·readiness) | 머지 | #22 |
 | P-D 결정적 S4 태그·검색 fail-closed 필터·Behavior Contract v3 | 머지 | #23 (main `af3a905`) |
 | P-E 공지·첨부 (r15: 수집기에 공지 행·첨부가 없어 Canvas 첨부 다운로드 → 개인 Drive → binding 경로 신설, 공지 본문은 메타만) | 머지 | #25 (main `92d9a01`) |
-| **P-F School 전체 흐름** (전사문 8개 + Canvas 자료 + 공지 첨부 end-to-end, 분류 지표; KNU 파일 저장소 호스트·공지 `attachments[]` 실제 모양 확인 포함) | **다음** | |
+| **P-F School 전체 흐름** (전사문 8개 + Canvas 자료 + 공지 첨부 end-to-end, 분류 지표; KNU 파일 저장소 호스트·공지 `attachments[]` 실제 모양 확인 포함) | **진행 중**: 전사문 8개 end-to-end 완료(2026-10-13, 8 processed·Ready, Session 8, 업로드 폴더 0). Canvas 자료·공지 첨부·분류 지표 남음 | #30, #31 |
 
 사용자 목표 해석: P-F까지가 "수집 → 자동 분류 → 태그 → 검색 → 공지" 데이터 흐름 완성. 이후 MCP로 연결해 AI 클라이언트에 요청해 복습/문제를 받는다. **복습 스케줄·모의고사 세트·채점은 그 다음 단계이며 아직 어떤 계획 문서에도 없다**(사용자 확인 2026-10-13).
 
+### P-F 진행 기록 (2026-10-13)
+- 사용자 설정 완료: `~/.zshrc` export 제거, config.yaml 분류·Canvas(`https://canvas.knu.ac.kr`, principal 25960, 과목 5개 map)·학기 기간(2026-09-01~12-20)·`TYPESAFE_API_KEY` keyring·`worker.enabled: true`. Canvas는 Settings로 연결. `canvas_attachment_download_enabled`는 아직 false.
+- 실실행에서 고친 것: macOS NFD 파일명 미매칭(#30, NFC 정규화), Input Request 제안 칸 가독성(#31, 과목 이름·한국어 사유). 10월 9일 실행 잔여 로컬 기록(보관된 Notion 페이지를 가리키는 쓰기 시도 40건·receipt 8건)은 백업(`state.sqlite3.bak-pf*`) 후 정리.
+- 전사문 8개: S1 Kind=TRANSCRIPT·과목·주차·날짜 인식. 달력 판정은 데이타베이스·네트워크프로그래밍 NO_CALENDAR, 알고리즘2 MISMATCH(Canvas 녹화 달력은 09.10=2주차, 09.17=3주차; 파일명은 1·2주차) → HUMAN 두 단계(ASSIGN_COURSE → FILE_DETAILS) 제출 → 8 processed, Session 8개 Ready, 파일 이동 완료.
+- Notion: Input Requests DB 맨 앞에 "입력 필요" 보기(Views API, 필터 Draft/Needs Input·미취소, 내부 칸 숨김). **처리 끝난 요청 행을 지우거나 보관하지 말 것**(10월 9일 RECONCILE_REQUIRED의 원인).
+- `uls gui`(로컬 확인 화면)는 사용자 결정으로 보류: 브랜치 `codex/uls-gui`(c5b6353, 미푸시·미머지). 계획 `docs/plans/intake-review-gui*.md`는 그 브랜치에만 있음.
+- 후속(관찰): (1) 성공한 요청에도 이전 검증 실패 Error 문구가 남음. (2) Session ID 번호가 날짜순이 아니라 처리 순서(예: 09.17이 S01). (3) 과목 제안이 하나면 FILE_DETAILS로 바로 시작하는 한 번 제출(D4) 미구현. (4) Canvas 녹화 달력이 데이타베이스·네트워크프로그래밍에는 없음.
+
 ### 사용자 쪽 할 일 (미완)
-1. `~/.zshrc` 10~11행의 `GOOGLE_*_CREDENTIALS_FILE` export 제거.
-2. config.yaml: `intake.classification.enabled: true`, `schema_profile: legacy5-cls`, `credentials: {TYPESAFE_API_KEY: {source: keyring}}`. Canvas 관측을 쓰려면 `canvas_observation_enabled`, `canvas_origin`, `canvas_principal`(Settings user_id), `canvas_course_map` 도.
 3. 대화에 노출된 옛 TypeSafe 키는 폐기(새 키는 키체인 `Syllva LLM`/`typesafe_api_key`에 등록됨, live 합성 호출 성공 확인).
 4. `retrieval.v2_exposure_gate`는 아직 꺼짐. P-D 기준 켤 수 있으나 켜기 전 운영 데이터로 점검.
 
