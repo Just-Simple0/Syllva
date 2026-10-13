@@ -9,6 +9,7 @@ matching folder names.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import re
 import threading
@@ -587,6 +588,7 @@ class InMemoryDriveWorker:
             parents=(parent_id,),
             modified_time=f"2026-01-01T00:00:{self._counter:02d}Z",
             size=len(content),
+            md5_checksum=None if mime_type == DRIVE_FOLDER_MIME else hashlib.md5(content).hexdigest(),
             owned_by_me=True,
             drive_id=(self.files.get(parent_id).drive_id if self.files.get(parent_id) else None),
             permission_types=("user",),
