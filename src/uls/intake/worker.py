@@ -109,6 +109,7 @@ from uls.intake.requests import (
     request_from_mapping,
     validate_request_input,
 )
+from uls.intake.suggestion_display import readable_course, readable_note
 from uls.normalization.pdf import PDFContentStatus, extract_pdf
 from uls.normalization.transcript import normalize_transcript
 from uls.normalization.validators import validate_normalized_transcript
@@ -3819,7 +3820,10 @@ class IntakeWorker:
             return {}
         props: dict[str, Any] = {}
         if suggestion.get("suggested_course_key"):
-            props["Suggested Course"] = suggestion["suggested_course_key"]
+            props["Suggested Course"] = readable_course(
+                suggestion["suggested_course_key"],
+                ((course.course_key, course.name) for course in self.config.courses),
+            )
         if suggestion.get("suggested_kind") in AI_KIND_OPTIONS:
             props["Suggested Kind"] = suggestion["suggested_kind"]
         if suggestion.get("suggested_date"):
@@ -3829,7 +3833,7 @@ class IntakeWorker:
         if suggestion.get("suggestion_source"):
             props["Suggestion Source"] = suggestion["suggestion_source"]
         if suggestion.get("suggestion_note"):
-            props["Suggestion Note"] = suggestion["suggestion_note"]
+            props["Suggestion Note"] = readable_note(suggestion["suggestion_note"])
         return props
 
     def _human_handling_errors(self, request: RequestInput) -> tuple[str, ...]:

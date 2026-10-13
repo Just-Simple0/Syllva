@@ -72,7 +72,7 @@ def test_transcript_upload_is_classified_locally_and_suggested_on_the_draft(tmp_
         assert state.get_intake_suggestion(item.intake_id)["written_to_notion"] == 1
         # The draft carries only SYSTEM_DERIVED suggestions; USER fields stay blank (plan §3.3).
         assign = _assign_request(notion)
-        assert assign["Suggested Course"] == COURSE_KEYS[1] and assign["Suggested Kind"] == "TRANSCRIPT"
+        assert assign["Suggested Course"].endswith(COURSE_KEYS[1]) and assign["Suggested Kind"] == "TRANSCRIPT"
         assert assign["Suggested Date"] == "2026-09-10" and assign["Suggested Week"] == 2
         assert assign["Suggestion Source"] == "rule:P3:transcript_filename"
         assert "NO_CALENDAR" in assign["Suggestion Note"] and "AUTO_BLOCK_CALENDAR" in assign["Suggestion Note"]
@@ -105,7 +105,9 @@ def test_undecided_upload_gets_only_the_fixed_note(tmp_path: Path) -> None:
         assert item.classified_kind is None and item.classification_state == "HUMAN"
         assert item.classification_record_id is None and item.origin == "UNKNOWN"
         assign = _assign_request(system["notion"])
-        assert assign["Suggestion Note"] == "NO_SINGLE_RULE;CLASSIFIER_DISABLED;AUTO_BLOCK_NOT_DECIDED"
+        assert assign["Suggestion Note"] == (
+            "규칙으로 종류를 정하지 못함 · AI 분류가 꺼져 있음 (NO_SINGLE_RULE;CLASSIFIER_DISABLED;AUTO_BLOCK_NOT_DECIDED)"
+        )
         assert all(assign.get(field) is None for field in SUGGESTED if field != "Suggestion Note")
 
 
