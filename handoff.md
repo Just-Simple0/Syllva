@@ -30,6 +30,17 @@
 - `uls gui`(로컬 확인 화면)는 사용자 결정으로 보류: 브랜치 `codex/uls-gui`(c5b6353, 미푸시·미머지). 계획 `docs/plans/intake-review-gui*.md`는 그 브랜치에만 있음.
 - 후속(관찰): (1) 성공한 요청에도 이전 검증 실패 Error 문구가 남음. (2) Session ID 번호가 날짜순이 아니라 처리 순서(예: 09.17이 S01). (3) 과목 제안이 하나면 FILE_DETAILS로 바로 시작하는 한 번 제출(D4) 미구현. (4) Canvas 녹화 달력이 데이타베이스·네트워크프로그래밍에는 없음.
 
+### 보류 (2026-10-14, 사용자 결정: "다 보류, 중간고사 치고 나서 뭘 하던지")
+사용자가 실사용 뒤 "이것도 안 되면 프로젝트 갈아엎어야겠다"고 함. 재개 시 개선과 재설계 중 무엇을 할지 먼저 사용자와 정한다.
+- 현재 운영 상태: Codex 로컬 MCP 등록(`uls mcp local`), `retrieval.v2_exposure_gate: true`, 첨부 다운로드 켜짐, worker 켜짐(수동 `uls run`). 검색 가능: 데이타베이스·알고리즘2 전사문, 네트워크프로그래밍 전사문 S01~S05·강의자료/부록/설치/과정소개(M24=Chapter 04_05 수정본, 구 M16은 Notion 휴지통), 알고리즘2 기출(M01).
+- 실사용에서 드러난 핵심 문제(우선순위 순):
+  1. **ID 없이는 못 찾음**: `resolve_entity`가 제목·별칭 정확 일치만, 과목은 course_key만 받음("TCP", "Chapter 04", "4주차", 날짜, 과목 이름 전부 실패). `search_concept`은 본문 어휘 일치만. → AI 클라이언트가 자연어로 자료를 고르지 못함.
+  2. **사람 입력 경로가 무거움**: Notion 요청이 두 단계(ASSIGN_COURSE→FILE_DETAILS)·24칸, 1단계에 Kind를 넣어 거부되는 혼동 반복. 실제로는 사용자 지시로 AI가 일괄 기입(Course/Kind/Role/Submitted만, readback 확인). `uls gui`는 `codex/uls-gui`(c5b6353, 미머지)에 보관.
+  3. **강의자료 수집 불가**: KNU 강의자료는 LearningX(강의실) — 원본 다운로드 없음, 숨은 API는 범위 밖. 사용자가 PDF를 직접 받아 업로드.
+  4. **수정본 교체 기능 없음**: 새 Material로 들어오고 구 Material은 수동으로 Notion 휴지통.
+  5. 기타: `.txt` 받는 Kind 없음(과제 2-3 데이터 3개 대기), `00-Windows…설치.pdf` source unavailable(24.5 MB, 원인 미확인), 과제 hw01 PDF 작업 FAILED(PERMANENT, 메시지 없음, Notion M08은 Ready), 큰 PDF 조회 20~40초(원본 재다운로드 지문), 성공한 요청에 이전 Error 잔존, Session ID가 처리 순서, 공지 본문 미수집, 장시간 `uls run` 중 RECONNECT_REQUIRED 1회(재실행 시 정상).
+- 업로드 폴더 잔여(처리 안 함, 요청 행은 지우지 말 것): 바이트 동일 전사문 사본 3(요청 취소), `.txt` 3, Windows 설치 PDF, hw01 PDF.
+
 ### P-F 결과 (2026-10-13 완료)
 - 처리: Drive intake 10개 전부 ORGANIZED·Ready — 전사문 8(HUMAN, Session 8), 공지 첨부 `알고리즘2_중간고사_기출문제지.pdf`(AUTO, EXAM, PROFESSOR_SOURCE), `UCWIT2026_CFP_초안.pdf`(HUMAN, SUPPLEMENT·Reference). zip 첨부 2개는 UNSUPPORTED_TYPE(116 MB 1개 포함)로 건너뜀.
 - 분류 지표(O1): 자동 1 / 사람 9, S1 규칙 결정 9(P3 전사문 8, P2 시험 1), S2 호출 1회, Kind 오분류 0(사람 확정 전사문 8개 모두 일치). 사람 경로 사유는 Kind가 아니라 달력(데이타베이스·네트워크프로그래밍 Canvas 녹화 달력 없음, 알고리즘2 파일명 주차가 Canvas보다 1 작음). Canvas 관측 83개 중 Kind 미결정 3.
