@@ -84,6 +84,8 @@ pytest -m unit
 pytest                    # 전체
 ruff check src tests
 mypy
+lint-imports                                          # v2 import 방향 계약 (점감 예외, pyproject [tool.importlinter])
+python scripts/check_invariants.py                    # v2 정적 불변식 (점감 기준선 scripts/invariants_baseline.json)
 
 syllva --help                                          # CLI (uls는 별칭)
 python scripts/project_behavior_contract.py --print   # v1.2 Behavior Contract 버전/해시 (v4 전환 전까지)

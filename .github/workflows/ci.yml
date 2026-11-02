@@ -21,4 +21,10 @@ jobs:
         if: ${{ (success() || failure()) && runner.os == 'Windows' }}
         run: python -m pytest -q -ra tests/unit/test_secure_file.py
       - run: python scripts/lint_behavior_projection.py
+      - name: v2 import-direction contracts (ratchet, implementation spec §1.3)
+        if: ${{ success() || failure() }}
+        run: lint-imports
+      - name: v2 static invariants (ratchet, implementation spec §13.5)
+        if: ${{ success() || failure() }}
+        run: python scripts/check_invariants.py
       - run: python -m compileall -q src
