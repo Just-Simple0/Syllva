@@ -213,3 +213,18 @@ def test_tampered_original_is_refused(v2_db: Database, blobs: BlobStore) -> None
 def test_unknown_version(v2_db: Database, blobs: BlobStore) -> None:
     with pytest.raises(NormalizeError):
         _normalize(v2_db, blobs, 999, "transcript")
+
+
+def test_page_footer_pdf_is_flagged_for_reprocessing_not_as_textless(v2_db: Database, blobs: BlobStore) -> None:
+    """Spec errata E12: text is there, the legacy page index is not; the reason says so."""
+
+    pytest.importorskip("pypdf")
+    ingested = _ingest(v2_db, blobs, make_pdf_bytes(["Intro to TCP\nPage 1", "Flow control\nPage 2"]))
+    result = _normalize(v2_db, blobs, ingested.source_version_id, "pdf")
+    assert (result.status, result.reason, result.completeness) == ("NEEDS_REVIEW", "NO_PAGE_INDEX", None)
+
+
+def test_invisible_only_transcript_is_not_evidence(v2_db: Database, blobs: BlobStore) -> None:
+    ingested = _ingest(v2_db, blobs, "\ufeff\u200b\n".encode(), "S04.txt")
+    result = _normalize(v2_db, blobs, ingested.source_version_id, "transcript")
+    assert result.status == "NEEDS_REVIEW" and result.completeness is None

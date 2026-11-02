@@ -77,6 +77,13 @@ def chunks_payload(chunks: Sequence[DerivativeChunk]) -> bytes:
     return json.dumps({"schema": CHUNKS_SCHEMA, "chunks": rows}, ensure_ascii=False, sort_keys=True).encode("utf-8")
 
 
+_INVISIBLE = "\ufeff\u200b\u200c\u200d\u2060\x00"
+
+
+def _has_text(content: str) -> bool:
+    return bool(content.translate({ord(c): None for c in _INVISIBLE}).strip())
+
+
 def _existing(writer: StateWriter, source_version_id: int, schema_version: str, processor_version: str) -> NormalizeResult | None:
     rows = writer.query(
         "SELECT id, kind, completeness, blob_sha256 FROM derivatives "
@@ -89,6 +96,8 @@ def _existing(writer: StateWriter, source_version_id: int, schema_version: str, 
             raise NormalizeError("incomplete derivative set for this processor version; bump processor_version")
         return None
     completeness = str(by_kind["normalized"]["completeness"])
+    # Only completeness is stored, so a result first reported as NEEDS_REVIEW (with some
+    # citable text) is reported as PARTIAL on re-run; both mean "not complete".
     status = "READY" if completeness == "COMPLETE" else "PARTIAL"
     return NormalizeResult(status, completeness, int(by_kind["normalized"]["id"]), int(by_kind["chunks"]["id"]), -1, "ALREADY_NORMALIZED")
 
@@ -154,7 +163,11 @@ def normalize_source_version(
     status = _STATUS.get(derivative_status.lower(), "FAILED")
     if status == "FAILED":
         return NormalizeResult(status, None, None, None, 0, reason)
-    if not any(chunk.content.strip() for chunk in chunks):
+    if not any(_has_text(chunk.content) for chunk in chunks):
+        if derivative_status in ("ready", "partial") and kind == "pdf":
+            # Text was extracted but no validated page index could be built (spec errata E12,
+            # e.g. a "Page N" footer line). Distinct code so R1b-5 can find and reprocess these.
+            return NormalizeResult("NEEDS_REVIEW", None, None, None, 0, "NO_PAGE_INDEX")
         # Nothing citable was extracted (marker-only pages carry no SOURCE text) (e.g. unreadable or image-only PDF): store no
         # derivative rather than an empty PARTIAL one; a person has to look at it.
         return NormalizeResult("NEEDS_REVIEW", None, None, None, 0, reason or "NO_EXTRACTABLE_TEXT")
@@ -163,6 +176,9 @@ def normalize_source_version(
     normalized_blob = blobs.put_bytes(markdown.encode("utf-8"))
     chunks_blob = blobs.put_bytes(chunks_payload(chunks))
     with writer.transaction():
+        concurrent = _existing(writer, source_version_id, schema_version, processor_version)
+        if concurrent is not None:  # another caller finished first; stay idempotent
+            return concurrent
         derivative_ids: list[int] = []
         for derivative_kind, stored in (("normalized", normalized_blob), ("chunks", chunks_blob)):
             if writer.query_one("SELECT 1 FROM blobs WHERE sha256 = ?", (stored.sha256,)) is None:
