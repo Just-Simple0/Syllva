@@ -3,23 +3,33 @@
 Midterm use showed the v1.2 resolver could not find anything without exact ids
 ("TCP", "Chapter 04", "4주차", dates and course names all failed). Because v2
 agents have no tools, choosing the right sources IS answer quality, so this
-resolver must handle how students actually ask.
+resolver must handle how students actually ask — and must never pick one of
+several plausible entities silently (design §5.3, §7.2).
 
-Order (spec §9.3):
+Pipeline:
 
-1. normalise (NFC, casefold, whitespace, intent words);
-2. course: name / code / key / alias contained in the query, or a one-letter
-   typo of a name token; a ``course_hint`` restricts the search;
-3. session: "N주차" (both the session number AND the calendar week are offered,
-   because file names and the LMS calendar disagreed by one week in practice),
-   "N강/N회차/N번째 강의", "S01", "week N", dates (MM.DD, M/D, YYYY-MM-DD, M월 D일);
-4. material: title tokens, chapter numbers ("Chapter 04" ↔ "04_05", "ch4", "4장"),
-   kind words (기출, 전사문, 과제, ...);
-5. otherwise ``none`` (a concept question: the caller asks for a course or runs
-   concept search).
-
-Several candidates are ALWAYS returned as ``ambiguous`` with a resolution
-handle; one is never picked silently.
+1. normalise (NFC, casefold, whitespace);
+2. extract CUES from the full text first (so intent-word removal cannot break
+   them): weeks ("N주차", "week N" — offered as BOTH session number and calendar
+   week, because file names and the LMS calendar disagreed by one week in
+   practice), sessions ("N강", "N강의", "N회차", "N번째", "S01"), dates (MM.DD, M/D,
+   ISO, "M월 D일"), chapters ("Chapter 04", "ch4", "4장");
+3. COURSES are matched on the text with those cue spans masked, by TOKEN
+   boundaries: a name matches when a run of consecutive query tokens (the last
+   one may carry a Korean particle) concatenates exactly to the name. Short
+   aliases such as "DB"/"OS" therefore never match inside other words, and
+   "알고리즘 2강" means course "알고리즘" + session 2, not course "알고리즘2".
+   When two matches overlap the longer one wins ("알고리즘2" over "알고리즘");
+   separate mentions of different courses are kept as several courses.
+   One-letter typos are accepted only when the digits are identical;
+4. MATERIALS: kind words narrow hard; chapter numbers and title words are
+   scored separately and, when they point at different materials, all of them
+   are offered (conflicting cues are ambiguous, not a pick);
+5. result: ``resolved`` for exactly one candidate, ``ambiguous`` (always via an
+   ``EphemeralStore`` handle with per-candidate reasons) for several, ``none``
+   otherwise. Free words that match nothing are treated as a concept question:
+   with one known course the result is ``none`` with ``course_key`` set and
+   reason ``CONCEPT_QUERY`` (the caller runs concept search in that course).
 """
 
 from __future__ import annotations
@@ -27,11 +37,12 @@ from __future__ import annotations
 import difflib
 import re
 import unicodedata
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Literal
 
+from syllva.ephemeral.base import EphemeralStore
 from syllva.ephemeral.models import ResolutionCandidate, ResolvedEntity
 from syllva.state.v2.reader import StateReader
 
@@ -45,15 +56,19 @@ _KIND_WORDS: dict[str, frozenset[str]] = {
     "ASSIGNMENT_BRIEF": frozenset({"과제", "숙제", "hw", "homework", "assignment"}),
     "LAB_MATERIAL": frozenset({"실습", "lab"}),
 }
+_ALL_KIND_WORDS = frozenset(w for words in _KIND_WORDS.values() for w in words)
 _INTENT_WORDS = frozenset(
     {"정리", "정리해줘", "설명", "설명해줘", "요약", "요약해줘", "알려줘", "알려", "summarize", "summary",
-     "explain", "explanation", "please", "강의", "자료", "보여줘", "찾아줘", "뭐야", "뭐였지"}
+     "explain", "explanation", "please", "강의", "자료", "보여줘", "찾아줘", "뭐야", "뭐였지", "내용"}
 )
-_WEEK_RE = re.compile(r"(\d{1,2})\s*주\s*차")
-_WEEK_EN_RE = re.compile(r"\bweek\s*(\d{1,2})\b")
-_SESSION_RE = re.compile(r"(\d{1,2})\s*(?:강(?![가-힣])|회차|번째\s*강의)")
-_SESSION_ID_RE = re.compile(r"(?<![a-z0-9])s(\d{1,2})(?![0-9])")
-_DATE_PATTERNS = (
+_PARTICLES = ("이랑", "에서", "으로", "에게", "하고", "이나", "랑", "의", "을", "를", "은", "는", "이", "가", "에", "도", "로", "와", "과", "나")
+
+_WEEK_RES = (re.compile(r"(\d{1,2})\s*주\s*차"), re.compile(r"\bweek\s*(\d{1,2})\b"))
+_SESSION_RES = (
+    re.compile(r"(\d{1,2})\s*(?:강(?:의)?|회차|번째(?:\s*강의)?)(?![가-힣])"),
+    re.compile(r"(?<![a-z0-9])s(\d{1,2})(?![0-9])"),
+)
+_DATE_RES = (
     re.compile(r"(?P<y>\d{4})-(?P<m>\d{1,2})-(?P<d>\d{1,2})"),
     re.compile(r"(?<![\d.])(?P<m>\d{1,2})\.(?P<d>\d{1,2})(?![\d.])"),
     re.compile(r"(?<![\d/])(?P<m>\d{1,2})/(?P<d>\d{1,2})(?![\d/])"),
@@ -61,11 +76,6 @@ _DATE_PATTERNS = (
 )
 _CHAPTER_RE = re.compile(r"(?:chapter|chap|ch)\.?\s*0*(\d{1,3})|0*(\d{1,3})\s*장(?![가-힣])")
 _TOKEN_RE = re.compile(r"[0-9a-z가-힣]+")
-_PARTICLES = ("에서", "으로", "에게", "의", "을", "를", "은", "는", "이", "가", "에", "도", "로", "와", "과")
-
-
-def strip_intent_words(text: str) -> str:
-    return " ".join(t for t in text.split(" ") if t.strip("?!.,") not in _INTENT_WORDS)
 
 
 def norm(text: str) -> str:
@@ -73,14 +83,18 @@ def norm(text: str) -> str:
 
 
 def compact(text: str) -> str:
-    return re.sub(r"[\s_\-.()\[\]]+", "", norm(text))
+    return "".join(_TOKEN_RE.findall(norm(text)))
 
 
-def _strip_particle(token: str) -> str:
+def strip_particle(token: str) -> str:
     for particle in _PARTICLES:
         if len(token) > len(particle) + 1 and token.endswith(particle):
             return token[: -len(particle)]
     return token
+
+
+def _digits(text: str) -> str:
+    return "".join(ch for ch in text if ch.isdigit())
 
 
 @dataclass(frozen=True)
@@ -90,7 +104,7 @@ class NaturalResolution:
     resolution_id: str | None = None
     candidates: tuple[ResolutionCandidate, ...] = ()
     reason: str | None = None
-    course_key: str | None = None  # course the query was narrowed to, when known
+    course_key: str | None = None  # the single course the query was narrowed to, when known
 
 
 @dataclass
@@ -124,11 +138,60 @@ class _Material:
     kind: str
 
 
+@dataclass(frozen=True)
+class _Cues:
+    weeks: tuple[int, ...]
+    sessions: tuple[int, ...]
+    dates: tuple[tuple[int | None, int, int], ...]  # (year or None, month, day)
+    chapters: tuple[int, ...]
+    masked: str  # text with every cue span blanked out
+
+    @property
+    def any_session_cue(self) -> bool:
+        return bool(self.weeks or self.sessions or self.dates)
+
+
+def extract_cues(text: str) -> _Cues:
+    spans: list[tuple[int, int]] = []
+    weeks: list[int] = []
+    sessions: list[int] = []
+    dates: list[tuple[int | None, int, int]] = []
+    chapters: list[int] = []
+
+    def free(start: int) -> bool:
+        return not any(a <= start < b for a, b in spans)
+
+    for regex in _WEEK_RES:
+        for m in regex.finditer(text):
+            weeks.append(int(m.group(1)))
+            spans.append(m.span())
+    for regex in _SESSION_RES:
+        for m in regex.finditer(text):
+            if free(m.start()):
+                sessions.append(int(m.group(1)))
+                spans.append(m.span())
+    for regex in _DATE_RES:
+        for m in regex.finditer(text):
+            if free(m.start()):
+                year = int(m.group("y")) if "y" in regex.groupindex else None
+                dates.append((year, int(m.group("m")), int(m.group("d"))))
+                spans.append(m.span())
+    for m in _CHAPTER_RE.finditer(text):
+        if free(m.start()):
+            chapters.append(int(m.group(1) or m.group(2)))
+            spans.append(m.span())
+    chars = list(text)
+    for a, b in spans:
+        for i in range(a, b):
+            chars[i] = " "
+    return _Cues(tuple(weeks), tuple(sessions), tuple(dates), tuple(chapters), "".join(chars))
+
+
 class NaturalResolver:
     def __init__(
         self,
         reader: StateReader,
-        ephemeral: object,
+        ephemeral: EphemeralStore,
         *,
         today: date | None = None,
         semester_starts: Mapping[str, date] | None = None,
@@ -168,170 +231,215 @@ class NaturalResolver:
 
     def resolve(self, query: str, *, course_hint: str | None = None) -> NaturalResolution:
         courses, sessions, materials = self._load()
-        text = norm(strip_intent_words(norm(query)))
-        flat = compact(text)
+        cues = extract_cues(norm(query))
+        tokens = _TOKEN_RE.findall(cues.masked)
 
+        consumed: set[int] = set()
         if course_hint is not None:
             scoped = [c for c in courses.values() if c.key == course_hint]
             if not scoped:
                 return NaturalResolution("none", reason="UNKNOWN_COURSE_HINT")
             course_ids = {scoped[0].id}
         else:
-            course_ids = self._match_courses(courses.values(), text, flat)
+            course_ids, consumed = self._match_courses(list(courses.values()), tokens)
+        course_key = courses[next(iter(course_ids))].key if len(course_ids) == 1 else None
 
-        session_hits = self._match_sessions(courses, sessions, text, course_ids)
-        course_words = {compact(n) for c in courses.values() for n in c.names()}
-        material_hits = self._match_materials(materials, text, course_ids, session_hits, course_words)
+        free = [strip_particle(t) for i, t in enumerate(tokens) if i not in consumed]
+        free = [t for t in free if t not in _INTENT_WORDS]
+        kinds = {kind for kind, words in _KIND_WORDS.items() for t in free if t in words}
+        words = [t for t in free if len(t) >= 2 and t not in _ALL_KIND_WORDS and not t.isdigit()]
 
-        if material_hits is not None:
-            return self._finish([("material", m.material_id, self._material_label(courses, m), reason) for m, reason in material_hits], courses, course_ids)
+        session_hits = self._match_sessions(courses, sessions, cues, course_ids) if cues.any_session_cue else None
+        if session_hits is not None and not session_hits:
+            return NaturalResolution("none", reason="NO_MATCH", course_key=course_key)
+
+        if kinds or cues.chapters or words:
+            material_hits = self._match_materials(materials, course_ids, session_hits, kinds, cues.chapters, words)
+            if material_hits:
+                return self._finish(
+                    [("material", m.material_id, self._material_label(courses, m), r) for m, r in material_hits], course_key
+                )
+            if kinds or cues.chapters:
+                return NaturalResolution("none", reason="NO_MATCH", course_key=course_key)
+            # only free words that match no material: a concept question
+            if session_hits is None and len(course_ids) == 1:
+                return NaturalResolution("none", reason="CONCEPT_QUERY", course_key=course_key)
+            if session_hits is None and not course_ids:
+                return NaturalResolution("none", reason="NO_ENTITY_CUE")
+
         if session_hits is not None:
-            return self._finish([("session", s.session_id, self._session_label(courses, s), reason) for s, reason in session_hits], courses, course_ids)
+            return self._finish(
+                [("session", s.session_id, self._session_label(courses, s), r) for s, r in session_hits], course_key
+            )
         if course_ids:
-            return self._finish([("course", courses[i].key, courses[i].name, "course name") for i in sorted(course_ids)], courses, course_ids)
+            return self._finish(
+                [("course", courses[i].key, courses[i].name, "course name") for i in sorted(course_ids)], course_key
+            )
         return NaturalResolution("none", reason="NO_ENTITY_CUE")
 
     # -- matching -------------------------------------------------------------------
 
     @staticmethod
-    def _match_courses(courses: Iterable[_Course], text: str, flat: str) -> set[int]:
-        hits: set[int] = set()
-        tokens = [_strip_particle(t) for t in _TOKEN_RE.findall(text)]
+    def _match_courses(courses: list[_Course], tokens: list[str]) -> tuple[set[int], set[int]]:
+        """Token-boundary course matching; returns (course ids, consumed token indexes)."""
+
+        spans: list[tuple[int, int, int]] = []  # (start, end exclusive, course id)
         for course in courses:
-            for name in course.names():
-                key = compact(name)
-                if len(key) >= 2 and key in flat:
-                    hits.add(course.id)
-                    break
-            else:
-                name_tokens = {t for name in course.names() for t in _TOKEN_RE.findall(norm(name)) if len(t) >= 3}
-                whole = {compact(name) for name in course.names() if len(compact(name)) >= 3}
-                for token in tokens:
-                    if len(token) >= 3 and difflib.get_close_matches(token, list(name_tokens | whole), n=1, cutoff=0.8):
-                        hits.add(course.id)
-                        break
-        # a longer name that contains a shorter one wins ("알고리즘2" over "알고리즘")
-        if len(hits) > 1:
-            best = max(len(compact(n)) for c in courses if c.id in hits for n in c.names() if compact(n) in flat) if any(
-                compact(n) in flat for c in courses if c.id in hits for n in c.names()
-            ) else 0
-            if best:
-                hits = {c.id for c in courses if c.id in hits and any(len(compact(n)) == best and compact(n) in flat for n in c.names())}
-        return hits
+            names = {compact(n) for n in course.names() if compact(n)}
+            for start in range(len(tokens)):
+                joined = ""
+                for end in range(start, min(start + 5, len(tokens))):
+                    joined += tokens[end]
+                    if joined in names or strip_particle(joined) in names:
+                        spans.append((start, end + 1, course.id))
+        if not spans:
+            # one-letter typo of a whole name or name token (>= 3 chars, identical digits)
+            for course in courses:
+                targets = {compact(n) for n in course.names() if len(compact(n)) >= 3}
+                targets |= {t for n in course.names() for t in _TOKEN_RE.findall(norm(n)) if len(t) >= 3}
+                for index, token in enumerate(tokens):
+                    candidate = strip_particle(token)
+                    if len(candidate) < 3:
+                        continue
+                    close = difflib.get_close_matches(candidate, list(targets), n=3, cutoff=0.8)
+                    if any(_digits(t) == _digits(candidate) for t in close):
+                        spans.append((index, index + 1, course.id))
+        # Overlapping spans of different courses: only the strictly longer one survives
+        # ("알고리즘 2"/"알고리즘2" over "알고리즘"). Separate mentions are all kept.
+        spans.sort(key=lambda s: (-(s[1] - s[0]), s[0]))
+        kept: list[tuple[int, int, int]] = []
+        for span in spans:
+            length = span[1] - span[0]
+            shadowed = any(
+                span[0] < k[1] and k[0] < span[1] and k[2] != span[2] and (k[1] - k[0]) > length for k in kept
+            )
+            if not shadowed:
+                kept.append(span)
+        return {k[2] for k in kept}, {i for start, end, _ in kept for i in range(start, end)}
 
     def _match_sessions(
-        self, courses: Mapping[int, _Course], sessions: list[_Session], text: str, course_ids: set[int]
-    ) -> list[tuple[_Session, str]] | None:
+        self, courses: Mapping[int, _Course], sessions: list[_Session], cues: _Cues, course_ids: set[int]
+    ) -> list[tuple[_Session, str]]:
         pool = [s for s in sessions if not course_ids or s.course_id in course_ids]
+        starts = self._course_starts(courses, sessions)
         found: dict[str, tuple[_Session, str]] = {}
-        cue = False
 
-        def add(items: Iterable[_Session], reason: str) -> None:
-            for item in items:
-                found.setdefault(item.session_id, (item, reason))
+        def add(session: _Session, reason: str) -> None:
+            found.setdefault(session.session_id, (session, reason))
 
-        for regex in (_WEEK_RE, _WEEK_EN_RE):
-            for match in regex.finditer(text):
-                cue = True
-                week = int(match.group(1))
-                add((s for s in pool if s.number == week), f"session number {week}")
-                add((s for s in pool if self._calendar_week(courses, sessions, s) == week), f"calendar week {week}")
-        for regex in (_SESSION_RE, _SESSION_ID_RE):
-            for match in regex.finditer(text):
-                cue = True
-                number = int(match.group(1))
-                add((s for s in pool if s.number == number), f"session number {number}")
-        for day in self._dates(courses, course_ids, text):
-            cue = True
-            add((s for s in pool if s.held_on == day), f"held on {day.isoformat()}")
-        if not cue:
-            return None
+        for week in cues.weeks:
+            for s in pool:
+                if s.number == week:
+                    add(s, f"session number {week}")
+            for s in pool:
+                if self._calendar_week(starts, s) == week:
+                    add(s, f"calendar week {week}")
+        for number in cues.sessions:
+            for s in pool:
+                if s.number == number:
+                    add(s, f"session number {number}")
+        for day in self._dates(courses, course_ids, cues):
+            for s in pool:
+                if s.held_on == day:
+                    add(s, f"held on {day.isoformat()}")
         return list(found.values())
 
-    def _calendar_week(self, courses: Mapping[int, _Course], sessions: list[_Session], session: _Session) -> int | None:
-        if session.held_on is None:
+    def _course_starts(self, courses: Mapping[int, _Course], sessions: list[_Session]) -> dict[int, date]:
+        starts: dict[int, date] = {}
+        for course in courses.values():
+            configured = self.semester_starts.get(course.semester)
+            dated = [s.held_on for s in sessions if s.course_id == course.id and s.held_on is not None]
+            if configured is not None:
+                starts[course.id] = configured
+            elif dated:
+                starts[course.id] = min(dated)
+        return starts
+
+    @staticmethod
+    def _calendar_week(starts: Mapping[int, date], session: _Session) -> int | None:
+        start = starts.get(session.course_id)
+        if session.held_on is None or start is None:
             return None
-        course = courses.get(session.course_id)
-        start = self.semester_starts.get(course.semester) if course else None
-        if start is None:
-            dated = [s.held_on for s in sessions if s.course_id == session.course_id and s.held_on is not None]
-            if not dated:
-                return None
-            start = min(dated)
         monday = start - timedelta(days=start.weekday())
         return (session.held_on - monday).days // 7 + 1
 
-    def _dates(self, courses: Mapping[int, _Course], course_ids: set[int], text: str) -> list[date]:
-        years = {int(c.semester[:4]) for c in courses.values() if (not course_ids or c.id in course_ids) and c.semester[:4].isdigit()}
+    def _dates(self, courses: Mapping[int, _Course], course_ids: set[int], cues: _Cues) -> list[date]:
+        years = {
+            int(c.semester[:4])
+            for c in courses.values()
+            if (not course_ids or c.id in course_ids) and c.semester[:4].isdigit()
+        }
         default_year = max(years) if years else self.today.year
         found: list[date] = []
-        for pattern in _DATE_PATTERNS:
-            for match in pattern.finditer(text):
-                year = int(match.group("y")) if "y" in pattern.groupindex else default_year
-                try:
-                    found.append(date(year, int(match.group("m")), int(match.group("d"))))
-                except ValueError:
-                    continue
+        for year, month, day in cues.dates:
+            try:
+                found.append(date(year or default_year, month, day))
+            except ValueError:
+                continue
         return found
 
+    @staticmethod
     def _match_materials(
-        self,
         materials: list[_Material],
-        text: str,
         course_ids: set[int],
         session_hits: list[tuple[_Session, str]] | None,
-        course_words: set[str],
-    ) -> list[tuple[_Material, str]] | None:
+        kinds: set[str],
+        chapters: tuple[int, ...],
+        words: list[str],
+    ) -> list[tuple[_Material, str]]:
         pool = [m for m in materials if not course_ids or m.course_id in course_ids]
         if session_hits:
             in_sessions = {s.session_id for s, _ in session_hits}
-            pool = [m for m in pool if m.session_id in in_sessions] or pool
-        kinds = {kind for kind, words in _KIND_WORDS.items() for t in _TOKEN_RE.findall(text) if _strip_particle(t) in words}
-        chapters = {int(a or b) for a, b in _CHAPTER_RE.findall(text)}
-        stop = {w for words in _KIND_WORDS.values() for w in words}
-        words = [
-            _strip_particle(t)
-            for t in _TOKEN_RE.findall(_CHAPTER_RE.sub(" ", _WEEK_RE.sub(" ", text)))
-            if len(_strip_particle(t)) >= 2 and _strip_particle(t) not in stop and not t.isdigit()
-            # words that belong to a course name or code identify the course, not a material
-            and not any(_strip_particle(t) in name for name in course_words)
-            and not _SESSION_ID_RE.fullmatch(t)
-        ]
-        if not (kinds or chapters or words):
-            return None
-        scored: list[tuple[int, _Material, str]] = []
-        for material in pool:
-            title = norm(material.title)
-            title_numbers = {int(n) for n in re.findall(r"\d+", title)}
-            score, reasons = 0, []
-            if kinds and material.kind in kinds:
-                score += 2
-                reasons.append(f"kind {material.kind}")
-            if chapters and chapters & title_numbers:
-                score += 3
-                reasons.append("chapter " + ",".join(str(c) for c in sorted(chapters & title_numbers)))
-            for word in words:
-                if word in title or word in compact(title):
-                    score += 2
-                    reasons.append(f"title has '{word}'")
-            if kinds and material.kind not in kinds:
-                continue  # the user named a kind; other kinds are not answers
-            if chapters and not chapters & title_numbers:
-                continue
-            if score:
-                scored.append((score, material, "; ".join(reasons)))
-        if not scored:
-            # words that are only course names or session cues are not material cues
-            return None if not (kinds or chapters) else []
-        top = max(score for score, _, _ in scored)
-        return [(m, reason) for score, m, reason in scored if score == top]
+            pool = [m for m in pool if m.session_id in in_sessions]
+        if kinds:
+            pool = [m for m in pool if m.kind in kinds]
+        wanted = set(chapters)
+
+        def title_numbers(m: _Material) -> set[int]:
+            return {int(n) for n in re.findall(r"\d+", norm(m.title))}
+
+        def title_words(m: _Material) -> list[str]:
+            title, flat = norm(m.title), compact(m.title)
+            return [w for w in words if w in title or w in flat]
+
+        by_chapter = [m for m in pool if wanted & title_numbers(m)] if wanted else []
+        scored = [(len(title_words(m)), m) for m in pool]
+        top = max((score for score, _ in scored), default=0)
+        by_words = [m for score, m in scored if top and score == top]
+
+        if wanted and words:
+            both = [m for m in by_chapter if m in by_words]
+            chosen = both or by_chapter + [m for m in by_words if m not in by_chapter]  # conflicting cues: offer all
+        elif wanted:
+            chosen = by_chapter
+        elif words:
+            chosen = by_words
+        else:
+            chosen = pool  # kind words only
+
+        def reason(m: _Material) -> str:
+            bits = []
+            if kinds:
+                bits.append(f"kind {m.kind}")
+            if m in by_chapter:
+                bits.append("chapter " + ",".join(str(c) for c in sorted(wanted)))
+            if m in by_words:
+                bits.append("title words " + ", ".join(title_words(m)))
+            return "; ".join(bits) or "matches the request"
+
+        return [(m, reason(m)) for m in chosen]
 
     # -- results ------------------------------------------------------------------------
 
     @staticmethod
     def _session_label(courses: Mapping[int, _Course], s: _Session) -> str:
         course = courses.get(s.course_id)
-        bits = [course.name if course else "", f"{s.number}회차" if s.number else "", s.held_on.isoformat() if s.held_on else "", s.title or ""]
+        bits = [
+            course.name if course else "",
+            f"{s.number}회차" if s.number else "",
+            s.held_on.isoformat() if s.held_on else "",
+            s.title or "",
+        ]
         return " · ".join(b for b in bits if b)
 
     @staticmethod
@@ -339,8 +447,7 @@ class NaturalResolver:
         course = courses.get(m.course_id)
         return f"{course.name if course else ''} · {m.title}"
 
-    def _finish(self, items: list[tuple[str, str, str, str]], courses: Mapping[int, _Course], course_ids: set[int]) -> NaturalResolution:
-        course_key = courses[next(iter(course_ids))].key if len(course_ids) == 1 else None
+    def _finish(self, items: list[tuple[str, str, str, str]], course_key: str | None) -> NaturalResolution:
         if not items:
             return NaturalResolution("none", reason="NO_MATCH", course_key=course_key)
         if len(items) == 1:
@@ -349,7 +456,7 @@ class NaturalResolver:
                 "resolved", entity=ResolvedEntity(entity_type, entity_id, label, reason=reason), course_key=course_key
             )
         candidates = [ResolutionCandidate("", t, i, label, reason) for t, i, label, reason in items[:MAX_CANDIDATES]]
-        handle = self.ephemeral.create_resolution(candidates, self.ttl)  # type: ignore[attr-defined]
+        handle = self.ephemeral.create_resolution(candidates, self.ttl)
         return NaturalResolution(
             "ambiguous", resolution_id=handle.resolution_id, candidates=tuple(handle.candidates), course_key=course_key
         )

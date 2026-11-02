@@ -8,7 +8,10 @@ catalog:
   courses:
     - {key: LMS67535, name: 알고리즘2, code: COMP0217, aliases: ["Algorithms 2", "알고리즘 2"]}
     - {key: LMS67536, name: 네트워크프로그래밍, aliases: ["네프", "Network Programming"]}
-    - {key: LMS67537, name: 데이타베이스, aliases: ["데이터베이스"]}
+    - {key: LMS67537, name: 데이타베이스, aliases: ["데이터베이스", "DB"]}
+    # a course whose name is a prefix of another, and a short Latin alias (review of PR #41)
+    - {key: LMS1, name: 알고리즘}
+    - {key: LMS2, name: 운영체제, aliases: ["OS"]}
   sessions:
     # 알고리즘2 starts in calendar week 2: session N is calendar week N+1
     - {id: LMS67535-S01, course: LMS67535, number: 1, held_on: "2026-09-10"}
@@ -19,6 +22,8 @@ catalog:
     - {id: LMS67536-S03, course: LMS67536, number: 3, held_on: "2026-09-16"}
     - {id: LMS67536-S04, course: LMS67536, number: 4, held_on: "2026-09-23"}
     - {id: LMS67537-S01, course: LMS67537, number: 1, held_on: "2026-09-04"}
+    - {id: LMS1-S01, course: LMS1, number: 1, held_on: "2026-09-07"}
+    - {id: LMS1-S02, course: LMS1, number: 2, held_on: "2026-09-14"}
   materials:
     - {id: M-A1, course: LMS67535, title: 알고리즘2_중간고사_기출문제지.pdf, kind: EXAM}
     - {id: M-N1, course: LMS67536, session: LMS67536-S04, title: Chapter 04_05 TCP 소켓 프로그래밍.pdf, kind: LECTURE_SLIDES}
@@ -45,7 +50,29 @@ queries:
   # file-name week vs LMS calendar week disagree: offer both, never pick silently
   - {q: "알고리즘 2 2주차", expect: ambiguous, candidates: [LMS67535-S01, LMS67535-S02]}
   - {q: "네프 강의자료", expect: ambiguous, candidates: [M-N1, M-N2]}
-  - {q: "2강", expect: ambiguous, candidates: [LMS67535-S02, LMS67536-S02]}
+  - {q: "2강", expect: ambiguous, candidates: [LMS67535-S02, LMS67536-S02, LMS1-S02]}
+  - {q: "4주차", expect: ambiguous, candidates: [LMS67536-S04, LMS67535-S03]}
+  # regressions from the PR #41 review: no silent picks
+  - {q: "알고리즘2 네트워크프로그래밍", expect: ambiguous, candidates: [LMS67535, LMS67536]}
+  - {q: "알고리즘2랑 네프 비교", expect: ambiguous, candidates: [LMS67535, LMS67536]}
+  - {q: "COMP0217 네프", expect: ambiguous, candidates: [LMS67535, LMS67536]}
+  - {q: "알고리즘 2강", expect: resolved, entity: [session, LMS1-S02]}
+  - {q: "알고리즘 2주차", expect: ambiguous, candidates: [LMS1-S02, LMS1-S01]}
+  - {q: "알고리즘2 2강", expect: resolved, entity: [session, LMS67535-S02]}
+  - {q: "to see this", expect: none}
+  - {q: "cosine 정리", expect: none}
+  - {q: "mongodb 설치", expect: none}
+  - {q: "DB", expect: resolved, entity: [course, LMS67537]}
+  - {q: "OS 1강", expect: none}
+  - {q: "네프 2번째 강의", expect: resolved, entity: [session, LMS67536-S02]}
+  - {q: "네프 3번째", expect: resolved, entity: [session, LMS67536-S03]}
+  - {q: "네프 2강의 내용", expect: resolved, entity: [session, LMS67536-S02]}
+  - {q: "알고리즘3", expect: none}
+  - {q: "TCP 알고리즘2", expect: none, reason: CONCEPT_QUERY, course: LMS67535}
+  - {q: "알고리즘2 다익스트라 설명해줘", expect: none, reason: CONCEPT_QUERY, course: LMS67535}
+  - {q: "Chapter 03 TCP", expect: ambiguous, candidates: [M-N1, M-N2]}
+  - {q: "", expect: none}
+  - {q: "정리해줘", expect: none}
   - {q: "양자역학 숙제", expect: none}
   - {q: "빅오 표기법 설명해줘", expect: none}
   - {q: "네트워크프로그래밍 9주차", expect: none}

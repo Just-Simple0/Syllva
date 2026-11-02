@@ -79,13 +79,15 @@ def test_resolve_query(resolver: NaturalResolver, case: dict[str, Any]) -> None:
         assert all(c.candidate_id.startswith("cand_") and c.reason for c in result.candidates)
     else:
         assert result.entity is None and not result.candidates
+        if "reason" in case:
+            assert (result.reason, result.course_key) == (case["reason"], case["course"])
 
 
 def test_ambiguity_is_resolved_only_through_the_handle(resolver: NaturalResolver) -> None:
     result = resolver.resolve("알고리즘 2 2주차")
     assert result.status == "ambiguous" and result.resolution_id
     chosen = result.candidates[0]
-    resolved = resolver.ephemeral.consume_resolution_choice(result.resolution_id, chosen.candidate_id)  # type: ignore[attr-defined]
+    resolved = resolver.ephemeral.consume_resolution_choice(result.resolution_id, chosen.candidate_id)
     assert resolved.entity_id == chosen.entity_id
     reasons = {c.entity_id: c.reason for c in result.candidates}
     assert reasons["LMS67535-S02"] == "session number 2" and reasons["LMS67535-S01"] == "calendar week 2"
@@ -101,7 +103,7 @@ def test_fixture_meets_the_spec_minimum() -> None:
     """Spec §9.3 lists the minimum query families the fixture must contain."""
 
     queries = [c["q"] for c in DATA["queries"]]
-    for required in ("TCP", "Chapter 04", "09.17"):
+    for required in ("TCP", "Chapter 04", "09.17", "4주차"):
         assert required in queries
     assert any("주차" in q for q in queries)
     expects = {c["expect"] for c in DATA["queries"]}
