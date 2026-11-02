@@ -1,6 +1,6 @@
 # Syllva v2 — 데스크탑 앱 전환 계획 (rev 3)
 
-상태: 계획 (2026-11-02, rev 3: MCP 필수 아님 → 도구 없는 에이전트 구조). 상세 설계는 `syllva-v2-design-frozen.md`(rev 4, 동결)가 우선한다. 프로즌 계약(v1.2)을 바꾸므로 R0에서 v2 개정서를 먼저 승인받는다.
+상태: 계획 (2026-11-02, rev 3: MCP 필수 아님 → 도구 없는 에이전트 구조). 상세 설계는 `syllva-v2-design-frozen.md`(rev 4, 동결), 구현은 `syllva-v2-implementation-spec-frozen.md`(동결)가 우선한다. 프로즌 계약(v1.2)을 바꾸므로 R0에서 v2 개정서를 먼저 승인받는다.
 
 rev 2 변경 요지: 독립 검토(Fable, 코드 대조)에서 human-only 증명, 에이전트 격리, MCP 연결 방향, 요약 freshness, R1 완료 기준, intake 워커 범위, 프로세스 모델이 빠지거나 틀렸음이 확인되어 §3·§4·§8·§9를 고쳤다.
 

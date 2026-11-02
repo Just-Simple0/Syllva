@@ -1,6 +1,6 @@
-# Syllva v2 — Implementation Specification (DRAFT rev 2)
+# Syllva v2 — Implementation Specification (FROZEN, rev 2)
 
-상태: **초안 rev 2 — 독립 검토(Fable, NO-GO) 조건 1~7 반영. 재검토 전, 구현 금지.** 승인되면 `syllva-v2-implementation-spec-frozen.md`로 동결한다.
+상태: **FROZEN — 2026-11-02.** 독립 읽기 전용 검토 2회(rev 1: NO-GO → rev 2: 조건부 GO, 조건 4건 국소 반영 후 동결 가능 판정). 사용자 지시(2026-11-02: 리뷰어 승인 시 다음 단계 진행)에 따라 동결. 이 문서를 위반하는 구현 변경은 개정을 요구한다.
 작성: 2026-11-02 · 권위: `syllva-v2-design-frozen.md` (rev 4, 동결). 이 문서는 설계서를 **구현 가능한 수준으로 구체화**할 뿐이며 설계서를 바꾸지 못한다. 충돌하면 설계서가 우선하고 이 문서를 고친다.
 
 표기: **MUST / MUST NOT / SHOULD**는 RFC 2119 의미다. `C-nn`은 설계서 §11 계약 테스트 ID, `D§n`은 설계서 절, `v1.2-IS§n`은 v1.2 구현 명세서 절이다.
@@ -43,7 +43,7 @@
 | `state/` | **개정** | 마이그레이션 `001_initial.sql`은 폐기하고 `001_v2_initial.sql` 신규(§3.4). `SQLiteStateStore`를 Writer/Reader로 분리(§3.5). `classification_state.py`, `usage_range.py`는 §3.6 표대로 선별 |
 | `ephemeral/` | **유지** | 용도 변경(D§6.1, §8.6). 모델 `ResolutionHandle`, `ResolvedEntity`, `AllowedLocator`는 그대로 사용 |
 | `ingestion/`, `normalization/` | **유지·개정** | 입력은 로컬 blob. 출력은 로컬 파생 blob + SQLite. Drive 경로 제거. 정규화 ≠ 요약 불변식(I3) 유지 |
-| `enrichment/` | **결정적 경로만 유지, LLM 경로 비활성** | `enrichment/{writer,session,_common,material}.py`는 `adapters/llm`을 통한 외부 LLM 호출 경로를 가진다. 이 경로는 설계서의 AI 경로(도구 없는 CLI 에이전트, 칩 기반 전송 고지)를 거치지 않는 **두 번째 AI 경로**이므로 v2에서 **비활성**(설정으로도 켤 수 없음)으로 둔다. AI가 필요한 enrichment는 R5에서 `agents/`+`prompt/` 경로로 흡수할지 결정한다(§16). 결정적(비-LLM) enrichment는 유지 |
+| `enrichment/` | **결정적 경로만 유지, LLM 경로 비활성** | 유지: `activity.py`, `exam.py`, `freshness.py`, `schemas.py`(LLM 의존 없음). 비활성: `_common.py`, `material.py`, `session.py`, `writer.py` — 이 4개는 `adapters/llm`을 통한 외부 LLM 호출 경로를 가진다. 이 경로는 설계서의 AI 경로(도구 없는 CLI 에이전트, 칩 기반 전송 고지)를 거치지 않는 **두 번째 AI 경로**이므로 v2에서 **비활성**(설정으로도 켤 수 없음)으로 둔다. AI가 필요한 enrichment는 R5에서 `agents/`+`prompt/` 경로로 흡수할지 결정한다(§16). 결정적(비-LLM) enrichment는 유지 |
 | `intake/` | **분할** | `classification/`(규칙, S2, 달력, 분류) 유지. 나머지(`worker.py` 6,116줄, `coordinator.py`, `requests.py`, `registry.py`, `attestation.py`, `composition.py`, `planner.py` 등 Notion 요청/receipt/intent 모델)는 **재작성**(§11). 재사용 가능한 순수 로직(`identity.py`, `suggestion_display.py`)은 추출 |
 | `adapters/notion/`, `adapters/drive/` | **삭제** (R1c 말) | 삭제 전까지 import 금지 린트(§13.5) |
 | `adapters/github/` | **선택 어댑터로 격리** | 기본 비활성 |
@@ -81,7 +81,7 @@ prompt: state를 import 금지 (ContextPackage만 입력)
 
 `agents`와 `prompt`가 DB/Reader에 닿지 않는다는 것은 구조적 불변식이다. import-linter 계약으로 CI에서 강제한다(C-02 보조).
 
-**점감(ratchet) 도입**: 현재 코드는 위 규칙을 이미 위반한다. 2026-11-02 확인된 목록: `retrieval/engine.py`(adapters.drive/notion/github), `retrieval/resolver.py`·`retrieval/_compat.py`(adapters.notion), `state/reader.py`(adapters.drive), `state/sqlite.py`·`state/classification_state.py`·`state/usage_range.py`(intake), `ingestion/discovery.py`(adapters.drive.worker), `enrichment/writer.py`(adapters.notion). R1b-1은 이 목록을 **허용 예외(ignore_imports)** 로 고정한 계약을 도입하고, 이후 PR은 예외를 **줄이기만** 할 수 있다(목록에 새 항목 추가 시 CI 실패). R1b 완료 시 예외 목록은 비어야 한다.
+**점감(ratchet) 도입**: 현재 코드는 위 규칙을 이미 위반한다. 2026-11-02 확인된 목록: `retrieval/engine.py`(adapters.drive/notion/github), `retrieval/resolver.py`·`retrieval/_compat.py`(adapters.notion), `state/reader.py`(adapters.drive), `state/sqlite.py`·`state/classification_state.py`·`state/usage_range.py`(intake), `ingestion/discovery.py`(adapters.drive.worker), `enrichment/writer.py`(adapters.notion), 그리고 `adapters.llm` 금지(§13.5)의 기존 위반자 `enrichment/{_common,material,session,writer}.py`, `intake/classification/s2.py`, `intake/worker.py`, `runtime.py`, `cli/main.py`. R1b-1은 이 목록을 **허용 예외(ignore_imports)** 로 고정한 계약을 도입하고, 이후 PR은 예외를 **줄이기만** 할 수 있다(목록에 새 항목 추가 시 CI 실패). R1b 완료 시 예외 목록은 비어야 한다.
 
 ---
 
@@ -121,10 +121,12 @@ D§3.1과 같다: Shell(Tauri/Rust), Core(Python sidecar), Agent(질문 1건당 
 | S→C | `hello` | 위 참조 | 비밀·버전 전달 (1회) |
 | C→S | `ready` | `port`, `bootstrap`, `core_version` | 기동 완료 |
 | C→S | `error` | `code`, `message` | 치명 오류 (`DB_LOCKED`, `MIGRATION_FAILED`, …) |
-| S→C | `gate.get` | `nonce_id` | 확인 다이얼로그에 표시할 정보 요청 |
+| S→C | `session.bootstrap` | `window_label` | 새 창용 1회용 bootstrap 토큰 요청 (§10.2) |
+| C→S | `session.bootstrap_ok` | `window_label`, `bootstrap` | 토큰 발급(창에 결속) |
+| S→C | `gate.get` | `nonce_id`, `window_label` | 확인 다이얼로그에 표시할 정보 요청 |
 | C→S | `gate.view` | `nonce_id`, `summary`, `target_id`, `target_label`, `source_ids[]`, `source_hash_prefixes[]`, `request_hash`, `expires_in_ms` | 표시용 요약 (§6.3) |
 | C→S | `gate.none` | `nonce_id`, `reason` | 없음/만료/이미 사용 |
-| S→C | `gate.confirm` | `nonce_id`, `mac_b64` | 사용자가 확인함. MAC은 §6.4 |
+| S→C | `gate.confirm` | `nonce_id`, `window_label`, `mac_b64` | 사용자가 확인함. `window_label`은 Shell이 커맨드를 호출한 창에서 직접 얻는다(웹뷰 인자 아님). MAC은 §6.3.2 |
 | S→C | `gate.deny` | `nonce_id` | 사용자가 취소함 |
 | C→S | `gate.result` | `nonce_id`, `status` (`COMMITTED`/`REJECTED`/`DENIED`/`EXPIRED`), `reason?` | 결과. Shell은 이를 `confirm_gate` Tauri 커맨드의 반환값으로 UI에 돌려준다 |
 | S→C | `shutdown` | `grace_ms` | 정상 종료 요청 |
@@ -387,7 +389,38 @@ WHEN NEW.verified = 1 BEGIN
     WHERE g.id = NEW.verified_gate_id AND g.action = 'VERIFY_MATERIAL'
       AND g.target_kind = 'material' AND g.target_id = m.material_id);
 END;
--- exams.scope_confirmed, activities.submission_status, user_notes(채택)도 동일 패턴의 트리거를 가진다.
+-- 게이트 로그 행은 정확히 한 번만 사용된다 (트리거가 삽입, PK가 재사용을 막음)
+CREATE TABLE human_gate_uses (
+  gate_id INTEGER PRIMARY KEY REFERENCES human_gate_log(id),
+  used_by TEXT NOT NULL                         -- 'material_usage:<id>' 등
+);
+CREATE TRIGGER material_usage_gate_insert BEFORE INSERT ON material_usage
+WHEN NEW.verified = 1 BEGIN
+  SELECT RAISE(ABORT, 'GATE_MISMATCH') WHERE NOT EXISTS (
+    SELECT 1 FROM human_gate_log g JOIN materials m ON m.id = NEW.material_id
+    WHERE g.id = NEW.verified_gate_id AND g.action = 'VERIFY_MATERIAL'
+      AND g.target_kind = 'material' AND g.target_id = m.material_id);
+  INSERT INTO human_gate_uses(gate_id, used_by) VALUES (NEW.verified_gate_id, 'material_usage:' || NEW.material_id);
+END;
+-- UPDATE 트리거는 위 일치 검사에 더해 (i) verified가 1로 바뀌거나 1인 채로 gate id가 바뀌면 NEW.verified_gate_id != OLD.verified_gate_id 를 요구하고
+-- (ii) human_gate_uses에 삽입한다(같은 로그 행 재사용 시 PK 위반으로 ABORT). verified 1→0(해제)은 gate id를 NULL로 되돌린다.
+-- exams.scope_confirmed, activities.submission_status, user_notes.adopt_gate_id 도 INSERT·UPDATE 양쪽에 동일 패턴의 트리거를 가진다.
+
+-- USER 노트 (AI 산출물 채택 포함, §5.1)
+CREATE TABLE user_notes (
+  id INTEGER PRIMARY KEY, note_id TEXT NOT NULL UNIQUE,
+  owner TEXT NOT NULL CHECK (owner = 'USER'),
+  course_id INTEGER REFERENCES courses(id),
+  body_blob_sha256 TEXT NOT NULL REFERENCES blobs(sha256),
+  adopted_from_artifact_id INTEGER REFERENCES ai_artifacts(id),
+  adopt_gate_id INTEGER REFERENCES human_gate_log(id),
+  CHECK (adopted_from_artifact_id IS NULL OR adopt_gate_id IS NOT NULL),
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE user_edits (                        -- USER 레코드 수정 이력 (§5.1)
+  id INTEGER PRIMARY KEY, record_kind TEXT NOT NULL, record_id INTEGER NOT NULL,
+  previous_blob_sha256 TEXT REFERENCES blobs(sha256), edited_at TEXT NOT NULL
+);
 
 CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL);
 ```
@@ -494,10 +527,11 @@ nonce 레코드(메모리): `{nonce_id, ui_session_id, action, target_kind, targ
             → nonce 레코드 저장(PENDING, ui_session_id=현재 세션, TTL 60초, monotonic)
       Core ──▶ UI: {nonce_id}                                     (요약·해시는 UI에 돌려주지 않는다)
 (2) UI ──Tauri command confirm_gate(nonce_id)──▶ Shell               (커맨드는 nonce_id 하나만 받음)
-      Shell ──{"t":"gate.get","nonce_id"}──▶ Core (stdio)
+      Shell ──{"t":"gate.get", nonce_id, window_label}──▶ Core (stdio)   (window_label: 커맨드를 호출한 창, Shell이 직접 결정)
+      Core: nonce의 ui_session_id에 결속된 window_label과 다르면 gate.none(WRONG_WINDOW)
       Core ──{"t":"gate.view", nonce_id, summary, target_id, target_label, source_ids[], source_hash_prefixes[], request_hash, expires_in_ms}──▶ Shell
 (3) Shell: 네이티브 다이얼로그(요약, target_id, 원본 식별자 source_ids + sha256 앞 12자, 남은 시간, 취소/확인)
-      확인: Shell ──{"t":"gate.confirm", nonce_id, mac_b64}──▶ Core     (MAC: §6.3.2)
+      확인: Shell ──{"t":"gate.confirm", nonce_id, window_label, mac_b64}──▶ Core     (MAC: §6.3.2)
       취소: Shell ──{"t":"gate.deny", nonce_id}──▶ Core
 (4) Core: gate.confirm 수신 시 **같은 처리 안에서** §6.4의 검증을 모두 수행하고 통과하면 즉시 커밋(단일 DB 트랜잭션).
       Core ──{"t":"gate.result", nonce_id, status}──▶ Shell ──(confirm_gate 반환값)──▶ UI
@@ -522,12 +556,14 @@ mac = HMAC-SHA256(
 
 Shell은 `request_hash`를 재계산하지 않는다. 표시 텍스트와 해시의 결속은 Core(T1)가 책임지며, 웹뷰가 그 사이에 끼어들 수 없다는 것이 이 절차의 요점이다(웹뷰는 `nonce_id`만 안다).
 
-### 6.4 커밋 시 검증 (D§5.1 (a)(c)(d))
+### 6.4 커밋 시 검증 (D§5.1 (a)-(d) 대응)
+
+설계서 대응: **(a)** UI 세션+CSRF+same-origin은 `begin`(HTTP)에서 강제하고, `confirm` 시점에는 아래 2번으로 그 세션의 생존과 창 일치를 재확인한다. **(b)** 네이티브 제스처는 Shell 다이얼로그와 `shell_secret` MAC(아래 3번). **(c)** Core 검증은 1·3·5번. **(d)** 대상 재검증은 4번.
 
 `gate.confirm` 처리에서 다음을 **모두** 확인하고 하나라도 실패하면 쓰지 않는다.
 
 1. nonce 레코드가 존재하고 `state == PENDING`, `monotonic() < deadline`.
-2. `ui_session_id`의 세션이 **아직 유효**(로그아웃·만료·Core 재시작이면 레코드 자체가 없음). 즉 begin을 시작한 세션에 결속된다(D§5.1(a)).
+2. `ui_session_id`의 세션이 **아직 유효**(로그아웃·만료·Core 재시작이면 레코드 자체가 없음)하고, 그 세션이 수립된 창의 `window_label`이 `gate.confirm`의 `window_label`과 **일치**한다. 창↔세션 매핑은 Core가 `session.bootstrap`으로 창별 토큰을 발급하고 그 토큰이 교환될 때 기록한다. 따라서 다른 창(다른 세션)이 begin한 nonce를 이 창에서 확인할 수 없다. (보조 방어: `nonce_id`는 16B 난수이며 begin 응답으로 시작 세션에만 노출된다.)
 3. MAC 일치(§6.3.2).
 4. **현재 상태로 재계산**: 저장된 `params`로 `target_fingerprint`를 다시 조회하고 같은 함수로 `summary`를 재생성해 `request_hash`를 재계산한다. 저장값과 다르면 `REJECTED(TARGET_CHANGED)` + 해당 제안 `SUPERSEDED`(v1.2-IS §15.2.2).
 5. 상태 CAS(`PENDING → COMMITTED`)는 Core 내 락으로 보호해 동시 `gate.confirm` 2건 중 하나만 성공한다.
@@ -837,7 +873,7 @@ class RetrievalService:
 2. Core는 bootstrap 토큰을 **1회만** 수락(수락 즉시 폐기, 만료 60초). 성공 시:
    - 세션 쿠키 `syllva_sid`: 256비트 난수, `HttpOnly; SameSite=Strict; Path=/` (HTTP 루프백이라 `Secure` 불가 — 한계로 인정, 루프백 한정 서버).
    - 응답 본문에 CSRF 토큰(256비트). 이후 모든 변경 요청은 `X-Syllva-CSRF` 헤더 필요.
-3. 세션은 Shell 창당 1개. 두 번째 창/탭은 새 bootstrap이 필요하다(Shell만 발급 가능). 세션 만료는 유휴 8시간 또는 Core 재시작.
+3. 세션은 Shell 창당 1개. 두 번째 창은 Shell이 `session.bootstrap{window_label}`로 Core에 새 토큰을 요청한다(Shell만 요청 가능, stdio). Core는 토큰을 `window_label`에 결속해 발급하고, 교환 시 세션에 그 `window_label`을 기록한다(§6.4-2). 첫 창의 토큰은 `ready`의 `bootstrap`이며 `window_label="main"`에 결속된다. 세션 만료는 유휴 8시간 또는 Core 재시작.
 
 ### 10.3 엔드포인트 (요지)
 
@@ -979,10 +1015,10 @@ Session ID는 **날짜순**으로 번호를 매긴다(handoff 후속 4). 확정 
 | C-01 | `test_agent_no_tools.py` | `build_agent_launch` 결과 argv/env/설정에 도구가 없음; MCP 구성 비어 있음; 저장소 어디에도 `submit_study_note_draft` 같은 에이전트 도달 가능 쓰기 서버가 없음(정적 검사) |
 | C-02 | `test_reader_read_only.py` | `StateReader`에 쓰기 SQL → `OperationalError`; `RetrievalService`가 `StateWriter`를 import하지 않음(import-linter) |
 | C-03 | `test_ownership_matrix.py` | §5.1 행렬 전 칸 파라미터화 테스트; `state/` 밖 쓰기 SQL 정적 검사 |
-| C-04 | `test_gate_auth.py` | 일반 HTTP API로 human-only 쓰기 불가; 다른 세션이 시작한 nonce의 confirm 거부; 세션 만료 후 confirm 거부; 잘못된 MAC 거부 |
+| C-04 | `test_gate_auth.py` | 일반 HTTP API로 human-only 쓰기 불가; 다른 창(`window_label` 불일치)에서의 `gate.get`/`gate.confirm` 거부; 세션 만료 후 confirm 거부; 잘못된 MAC 거부; `session.bootstrap` 토큰이 다른 창에서 교환되면 그 창에 결속 |
 | C-05 | `test_gate_nonce.py` | 재사용·만료(monotonic)·request_hash 불일치·TARGET_CHANGED → SUPERSEDED; 세션당 PENDING 1개·쿨다운; 동시 confirm 2건 중 1건만 커밋 |
 | C-06 | `test_ai_artifact_fingerprint.py` | 필수 필드 누락 거부; stale 산출물이 `get_*_context` factual evidence에서 제외 |
-| C-07 | `test_launch_env.py` | env 이름 allowlist만; 비밀 문자열(테스트용 센티널)이 argv/env/stdin system 블록/설정 파일에 없음 |
+| C-07 | `test_launch_env.py` | env 이름 allowlist만; 비밀 문자열(테스트용 센티널)이 argv/env/stdin 페이로드/시스템 지시 파일(`--system-prompt-file` 경로 포함)/설정 파일에 없음 |
 | C-08 | `test_agent_cwd.py` | cwd가 빈 새 디렉터리이고 `realpath`가 `<data>`와 상·하위 관계가 아님(겹치면 실행 거부), DB·blobs 경로 비포함, 심볼릭 링크 없음, 실행 후 삭제 |
 | C-09 | `test_single_spawn_path.py` | Python AST 스캔 + Rust 소스 grep(`std::process`, `tokio::process`, `Command::new`가 허용된 파일 목록 외에 없음) |
 | C-10 | `test_citation_allowlist.py` | 패키지 밖 locator·만료 컨텍스트·이전 `source_version` locator 거부 |
@@ -992,7 +1028,7 @@ Session ID는 **날짜순**으로 번호를 매긴다(handoff 후속 4). 확정 
 | C-14 | `test_resolve_queries.py` | `resolve_queries.yaml` 전수 |
 | C-15 | `test_template_manifest.py` | `behavior/manifest.json` 해시 일치 |
 | C-16 | CI 워크플로 | 매트릭스 실행; OS 비의존 테스트는 3개 OS 모두 통과 |
-| C-17 | `test_gate_replay.py` | COMMITTED(=APPLIED) 재제출 idempotent, REJECTED 재거부, 대상 변경 시 SUPERSEDED, 에이전트 경로로 자기 승인 불가, 게이트 로그-대상 불일치 트리거 거부, `nonce_id` 이중 기록 거부 |
+| C-17 | `test_gate_replay.py` | COMMITTED(=APPLIED) 재제출 idempotent, REJECTED 재거부, 대상 변경 시 SUPERSEDED, 에이전트 경로로 자기 승인 불가, 게이트 로그-대상 불일치 트리거 거부, `nonce_id` 이중 기록 거부; **INSERT 경로로 승격(verified=1, scope_confirmed=1, SUBMITTED, 채택 노트) 시도 시 게이트 불일치면 거부**; 같은 게이트 로그 행 재사용 거부(`human_gate_uses`) |
 | C-18 | `test_ui_xss_and_csp.py` | 악성 payload(`<script>`, `<img onerror>`, `javascript:` 링크, 마커 구분자)가 DOM에 텍스트로만 들어감(jsdom/Playwright); CSP 헤더 기준선 |
 | C-19 | `test_gate_summary_binding.py` | `gate/begin`이 요약 입력 필드를 받지 않음; `gate.view` 요약·원본 식별자가 `request_hash` 입력에 포함; Tauri 설정에 `dialog` 플러그인 없음, `confirm_gate`가 `nonce_id` 외 인자를 받지 않음 |
 | C-20 | `test_secret_and_lifecycle.py` | 센티널 `shell_secret`이 로그·자식 env·자식 stdio·HTTP 응답에 없음; 에이전트 자식이 Core의 프로토콜 파이프를 상속하지 않음; stdin EOF → Core 종료; 두 번째 Core는 `DB_LOCKED`; 재시작 후 이전 nonce 없음 |
@@ -1063,4 +1099,4 @@ PR: `agents/`(§7), `prompt/`(§8), 적합성 스파이크(실제 Claude Code), 
 9. **v1.2 테스트 파일 158개 처분 목록**(R1b 완료 조건).
 10. **enrichment·S2의 AI 경로**(§1.1, §11.2): v2에서 비활성. R5에서 `agents/`+`prompt/` 경로로 흡수할지(칩·전송 고지·매 실행 단언 적용) 결정.
 11. **R4 확인 항목 묶음**: A9 시스템 지시 전달 방식, 제로폭 공백 이스케이프의 실효성, 훅 이벤트가 스트림에 나오는 CLI 버전 범위, 관리형 설정 경로.
-12. rev 2는 Fable 재검토 후 동결한다.
+12. (해결) rev 2 재검토 조건 N1–N5 반영 후 동결.

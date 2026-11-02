@@ -17,7 +17,7 @@
 우선순위(위가 우선):
 
 1. `syllva-v2-design-frozen.md` — v2 설계서 (FROZEN, 2026-11-02 승인). 위반하는 변경은 **개정(revision)** 을 요구한다.
-2. v2 구현 명세서 — **작성 예정** (R1b 이전). 작성 전에는 설계서 §11 계약 테스트(C-01~C-26)가 구현 기준이다.
+2. `syllva-v2-implementation-spec-frozen.md` — v2 구현 명세서 (FROZEN, 2026-11-02). 계약 테스트 C-01~C-26의 파일·단언(§14)과 단계별 PR 분해(§15)가 여기 있다.
 3. `university-learning-system-v1.2-design-frozen.md`, `university-learning-system-v1.2-implementation-spec-frozen.md` — v1.2 동결 문서. v2 설계서 §1 처분표에서 **유지**로 표시된 부분만 유효하고, 대체·삭제된 부분(Notion/Drive, MCP 경계, Behavior Contract v3 등)은 역사 기록이다.
 4. `docs/plans/desktop-app-v2.md` — 전환 계획(로드맵 R0~R6). 설계서와 충돌하면 설계서가 우선.
 
@@ -71,7 +71,7 @@ tests/            unit / contract / integration / e2e / fixtures
 docs/plans/       전환 계획과 과거 설계 기록 (desktop-app-v2.md가 현행)
 ```
 
-Tauri 셸 디렉터리와 v2 구현 명세서는 R2 / R1b 이전에 추가된다.
+Tauri 셸 디렉터리(`shell/`)는 R2에서 추가된다.
 
 ## 개발 워크플로
 
@@ -96,7 +96,7 @@ python scripts/lint_behavior_projection.py            # 프로젝션 드리프�
 
 `R0 설계 개정` → `R1a 이름 변경(완료)` → `R1b 로컬 저장소·Retrieval Service 재구성` → `R1c 로컬 intake 워커` → `R2 UI·Tauri 셸·Human-Proof 스파이크` → `R3 Canvas·과제` → `R4 AI 패널(도구 없는 에이전트·적합성 시험)` → `R5 요약·시험 대비` → `R6 설치본·모바일 접속`
 
-R0 상태: 설계서 동결 완료, 이 파일 갱신 완료, v2 구현 명세서 작성 남음. 상세는 `docs/plans/desktop-app-v2.md` §8.
+R0 완료: 설계서·구현 명세서 동결, 이 파일 갱신. 상세는 `docs/plans/desktop-app-v2.md` §8.
 
 ## 규칙
 
