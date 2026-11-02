@@ -7,15 +7,15 @@ from starlette.testclient import TestClient
 from tests.contract._settings_support import FETCH, HOST, NAVIGATE, ORIGIN
 from tests.contract.test_settings_credential_service import service
 
-from uls.settings.app import create_settings_app
-from uls.settings.composition import build_settings_services
-from uls.settings.security import SessionSecurity, new_path_prefix
+from syllva.settings.app import create_settings_app
+from syllva.settings.composition import build_settings_services
+from syllva.settings.security import SessionSecurity, new_path_prefix
 
 pytestmark = pytest.mark.contract
 
 
 def _crash_at(expected):
-    from uls.settings.journal import SimulatedCrash
+    from syllva.settings.journal import SimulatedCrash
     def crash(point):
         if point == expected:
             raise SimulatedCrash(point)
@@ -23,8 +23,8 @@ def _crash_at(expected):
 
 
 def _promoted_replacement(credentials):
-    from uls.settings.credential_roles import ROLES
-    from uls.settings.journal import SimulatedCrash
+    from syllva.settings.credential_roles import ROLES
+    from syllva.settings.journal import SimulatedCrash
     role = ROLES["notion-mcp"]
     generation = credentials.save(role, b"old-preview", credentials.config.load().generation)["config_generation"]
     with pytest.raises(SimulatedCrash):
@@ -46,7 +46,7 @@ def _recovery_snapshot(credentials, role, operation_id):
 
 @pytest.mark.parametrize("action", ["leave", "retry_delete"])
 def test_direct_recovery_refuses_action_that_would_cross_the_recorded_effect_boundary(http, action):
-    from uls.settings.config_service import SettingsServiceError
+    from syllva.settings.config_service import SettingsServiceError
     _client, credentials, _headers = http
     role, operation_id, generation = _promoted_replacement(credentials)
     before = _recovery_snapshot(credentials, role, operation_id)
@@ -77,9 +77,9 @@ def test_authenticated_recovery_post_refuses_forged_leave_without_mutation_then_
 
 
 def test_retry_delete_cannot_continue_a_transaction_with_non_delete_effects_remaining(http):
-    from uls.settings.config_service import SettingsServiceError
-    from uls.settings.credential_roles import ROLES
-    from uls.settings.journal import SimulatedCrash
+    from syllva.settings.config_service import SettingsServiceError
+    from syllva.settings.credential_roles import ROLES
+    from syllva.settings.journal import SimulatedCrash
     _client, credentials, _headers = http
     role = ROLES["notion-mcp"]
     generation = credentials.config.load().generation
@@ -97,8 +97,8 @@ def test_retry_delete_cannot_continue_a_transaction_with_non_delete_effects_rema
 
 
 def test_leave_on_forget_is_a_locked_noop_and_keeps_the_recovery_reservation(http):
-    from uls.settings.credential_roles import ROLES
-    from uls.settings.journal import SimulatedCrash
+    from syllva.settings.credential_roles import ROLES
+    from syllva.settings.journal import SimulatedCrash
     _client, credentials, _headers = http
     role = ROLES["notion-mcp"]
     generation = credentials.save(role, b"forget-preview", credentials.config.load().generation)["config_generation"]
@@ -114,7 +114,7 @@ def test_leave_on_forget_is_a_locked_noop_and_keeps_the_recovery_reservation(htt
 
 
 def test_restore_live_mismatch_is_refused_before_recovery_journal_or_store_changes(http):
-    from uls.settings.config_service import SettingsServiceError
+    from syllva.settings.config_service import SettingsServiceError
     _client, credentials, _headers = http
     role, operation_id, _generation = _promoted_replacement(credentials)
     credentials.stores.write(role, b"unexpected-active-preview")
@@ -126,9 +126,9 @@ def test_restore_live_mismatch_is_refused_before_recovery_journal_or_store_chang
 
 
 def test_resume_finishes_already_verified_enrollment_cleanup_without_another_effect(http):
-    from uls.config.mutation import ConfigFileLock
-    from uls.settings.credential_roles import ROLES
-    from uls.settings.journal import SimulatedCrash
+    from syllva.config.mutation import ConfigFileLock
+    from syllva.settings.credential_roles import ROLES
+    from syllva.settings.journal import SimulatedCrash
     _client, credentials, _headers = http
     role = ROLES["notion-mcp"]
     generation = credentials.config.load().generation
@@ -158,9 +158,9 @@ def test_resume_finishes_already_verified_enrollment_cleanup_without_another_eff
 
 
 def test_resume_finishes_already_verified_replacement_restore_tail_without_another_effect(http):
-    from uls.config.mutation import ConfigFileLock
-    from uls.settings.credential_roles import ROLES
-    from uls.settings.journal import SimulatedCrash
+    from syllva.config.mutation import ConfigFileLock
+    from syllva.settings.credential_roles import ROLES
+    from syllva.settings.journal import SimulatedCrash
     _client, credentials, _headers = http
     role = ROLES["notion-mcp"]
     generation = credentials.save(role, b"restore-tail-old-preview", credentials.config.load().generation)["config_generation"]
@@ -233,7 +233,7 @@ def test_metadata_redacted_and_every_mutation_authenticated(http):
 
 def test_invalid_preview_replacement_is_terminal_and_old_card_stays_configured(http):
     client, s, headers = http
-    from uls.settings.credential_roles import ROLES
+    from syllva.settings.credential_roles import ROLES
     role = ROLES["notion-mcp"]
     response = client.post("/api/v1/credentials/notion-mcp/set", json={"generation": s.config.load().generation, "secret": "valid-preview"}, headers=headers)
     assert response.status_code == 200, response.text
@@ -249,10 +249,10 @@ def test_invalid_preview_replacement_is_terminal_and_old_card_stays_configured(h
 
 @pytest.mark.parametrize("secret,code", [(b"invalid-preview", "INVALID_CREDENTIAL"), (b"outage-preview", "PROVIDER_UNAVAILABLE")])
 def test_persistent_fake_replacement_cleanup_through_directory_alias(tmp_path, secret, code):
-    from uls.config.mutation import ConfigFileLock
-    from uls.settings.config_service import ConfigStore, SettingsServiceError
-    from uls.settings.credential_roles import ROLES
-    from uls.settings.fake_mode import FileFakeKeyring
+    from syllva.config.mutation import ConfigFileLock
+    from syllva.settings.config_service import ConfigStore, SettingsServiceError
+    from syllva.settings.credential_roles import ROLES
+    from syllva.settings.fake_mode import FileFakeKeyring
 
     s = service(tmp_path / "real")
     alias = tmp_path / "alias"

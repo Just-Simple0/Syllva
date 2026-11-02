@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "uls": {
-      "command": "/ABSOLUTE/PATH/TO/venv/bin/uls",
+      "command": "/ABSOLUTE/PATH/TO/venv/bin/syllva",
       "args": ["--config", "/ABSOLUTE/PATH/TO/config.yaml", "mcp", "local"]
     }
   }

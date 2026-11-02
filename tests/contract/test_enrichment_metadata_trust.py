@@ -9,13 +9,13 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures")
 from fake_drive import FakeDriveReader
 from fake_llm import FakeLLMAdapter, session_result
 from fake_notion import FakeNotionReader, FakeNotionWriter
-from uls.adapters.llm.base import LLMEnrichmentResult
-from uls.domain.enums import ProcessingStatus
-from uls.domain.source_ref import SourceFingerprint, SourceRef
-from uls.enrichment.schemas import EnrichmentRecord
-from uls.enrichment.writer import EnrichmentWriter
-from uls.normalization.transcript import normalize_transcript
-from uls.state.sqlite import SQLiteStateStore
+from syllva.adapters.llm.base import LLMEnrichmentResult
+from syllva.domain.enums import ProcessingStatus
+from syllva.domain.source_ref import SourceFingerprint, SourceRef
+from syllva.enrichment.schemas import EnrichmentRecord
+from syllva.enrichment.writer import EnrichmentWriter
+from syllva.normalization.transcript import normalize_transcript
+from syllva.state.sqlite import SQLiteStateStore
 
 
 FP = SourceFingerprint(1, "transcript-v1")

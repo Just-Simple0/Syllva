@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from uls.intake.identity import derive_study_note_key
-from uls.state.sqlite import SQLiteStateStore
+from syllva.intake.identity import derive_study_note_key
+from syllva.state.sqlite import SQLiteStateStore
 
 pytestmark = pytest.mark.unit
 

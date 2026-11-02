@@ -23,8 +23,8 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 
-from uls.config.errors import ConfigurationError
-from uls.mcp.transports.oidc import (
+from syllva.config.errors import ConfigurationError
+from syllva.mcp.transports.oidc import (
     JwksKeyManager,
     OidcTokenVerifier,
     _NoRedirectHandler,
@@ -334,7 +334,7 @@ def test_no_redirect_opener_actually_installs_the_no_redirect_handler():
     # having a correctly-behaving handler class that nothing uses.
     import urllib.request
 
-    from uls.mcp.transports import oidc as oidc_module
+    from syllva.mcp.transports import oidc as oidc_module
 
     handlers = oidc_module._NO_REDIRECT_OPENER.handlers
     assert any(isinstance(h, _NoRedirectHandler) for h in handlers)
@@ -364,7 +364,7 @@ def test_fetch_url_sync_rejects_a_redirect_response_instead_of_following_it(monk
         # response because it refused to follow the Location header.
         return _FakeRedirectResponse()
 
-    from uls.mcp.transports import oidc as oidc_module
+    from syllva.mcp.transports import oidc as oidc_module
     monkeypatch.setattr(oidc_module._NO_REDIRECT_OPENER, "open", fake_open)
     with pytest.raises(ConfigurationError, match="non-200 status"):
         km._fetch_url_sync("https://accounts.google.com/jwks")
@@ -541,7 +541,7 @@ def test_get_signing_key_concurrent_misses_single_flight_refresh(monkeypatch):
     # a removed double-check. Force the cooldown window to zero so this
     # test exercises the double-check branch specifically, not the
     # cooldown branch.
-    import uls.mcp.transports.oidc as oidc_module
+    import syllva.mcp.transports.oidc as oidc_module
     monkeypatch.setattr(oidc_module, "REFRESH_COOLDOWN_SECONDS", 0.0)
     km = JwksKeyManager("https://accounts.google.com", "https://accounts.google.com/jwks")
     km._cached_keys = {}

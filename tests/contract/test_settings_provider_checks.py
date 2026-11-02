@@ -6,10 +6,10 @@ import json
 
 import pytest
 
-from uls.config.loader import load_config_mapping
-from uls.settings.config_service import SettingsServiceError
-from uls.settings.credential_roles import ROLES
-from uls.settings.provider_checks import (
+from syllva.config.loader import load_config_mapping
+from syllva.settings.config_service import SettingsServiceError
+from syllva.settings.credential_roles import ROLES
+from syllva.settings.provider_checks import (
     MAX_RESPONSE_BYTES,
     MESSAGES,
     OAUTH_URL,

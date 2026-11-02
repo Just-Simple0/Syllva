@@ -16,10 +16,10 @@ from urllib.parse import urlsplit
 import pytest
 import yaml
 
-from uls.config.mutation import ConfigFileLock
-from uls.orchestration.locks import LocalFileLock
-from uls.settings import launcher
-from uls.settings.launcher import (
+from syllva.config.mutation import ConfigFileLock
+from syllva.orchestration.locks import LocalFileLock
+from syllva.settings import launcher
+from syllva.settings.launcher import (
     ControlHandler,
     SettingsLaunchError,
     acquire_ownership,
@@ -113,7 +113,7 @@ def test_windows_is_refused_before_any_runtime_state(tmp_path, monkeypatch):
 
 
 def test_cli_setup_refuses_windows_before_runtime_state(tmp_path, monkeypatch, capsys):
-    from uls.cli.main import main
+    from syllva.cli.main import main
 
     monkeypatch.setattr(launcher, "_IS_WINDOWS", True)
     runtime = tmp_path / "rt"
@@ -133,7 +133,7 @@ def test_missing_web_extra_is_reported_before_any_runtime_state(tmp_path, monkey
     result = launcher.run_setup(_write_config(tmp_path), open_browser=False, runtime_dir=runtime,
                                 announce=messages.append, emit_url=lambda _u: None)
     assert result == {"status": "failed", "code": "WEB_EXTRA_MISSING"}
-    assert "university-learning-system[web]" in messages[0]
+    assert "syllva[web]" in messages[0]
     assert not runtime.exists()
 
 
@@ -229,7 +229,7 @@ def test_launch_failure_never_emits_a_url(tmp_path, short_runtime):
 class _Launch:
     def __init__(self, config: Path, runtime: Path, *, browser: str | None = None) -> None:
         env = {**os.environ, launcher.RUNTIME_DIR_ENV: str(runtime)}
-        args = [sys.executable, "-m", "uls.cli.main", "--config", str(config), "setup"]
+        args = [sys.executable, "-m", "syllva.cli.main", "--config", str(config), "setup"]
         if browser is None:
             args.append("--no-browser")
         else:
@@ -455,7 +455,7 @@ def test_replacement_during_an_active_mutation_on_a_held_config_lock(tmp_path, m
         assert result["status"] == 200  # the in-flight mutation finished, not lost
         assert result["done_at"] <= exited_at
         assert yaml.safe_load(config.read_text())["system"]["timezone"] == "UTC"
-        from uls.settings.journal import JournalStore
+        from syllva.settings.journal import JournalStore
         assert JournalStore(tmp_path / "workspace").unresolved() == []
     finally:
         if held.acquire():

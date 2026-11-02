@@ -6,13 +6,13 @@ from pathlib import Path
 import pytest
 import yaml
 
-from uls.behavior import asset_root
-from uls.cli.main import main
-from uls.domain.enums import JobStatus
-from uls.domain.errors import PolicyDeniedError, ProviderUnavailableError
-from uls.orchestration.jobs import derive_job_key
-from uls.orchestration.runner import WorkerRunner
-from uls.state.sqlite import SQLiteStateStore
+from syllva.behavior import asset_root
+from syllva.cli.main import main
+from syllva.domain.enums import JobStatus
+from syllva.domain.errors import PolicyDeniedError, ProviderUnavailableError
+from syllva.orchestration.jobs import derive_job_key
+from syllva.orchestration.runner import WorkerRunner
+from syllva.state.sqlite import SQLiteStateStore
 
 pytestmark = pytest.mark.contract
 
@@ -107,11 +107,11 @@ def test_both_scheduler_definitions_invoke_identical_run_command():
     import xml.etree.ElementTree as ET
     root = Path(__file__).resolve().parents[2]
     plist = plistlib.loads((root / 'deployment/macos/com.syllva.uls.plist').read_bytes())
-    assert plist['ProgramArguments'][0].endswith('/uls')
+    assert plist['ProgramArguments'][0].endswith('/syllva')
     assert plist['ProgramArguments'][-1] == 'run'
     task = ET.parse(root / 'deployment/windows/uls-task.xml')
     ns = {'s': 'http://schemas.microsoft.com/windows/2004/02/mit/task'}
-    assert task.find('.//s:Command', ns).text.endswith('uls.exe')
+    assert task.find('.//s:Command', ns).text.endswith('syllva.exe')
     assert task.find('.//s:Arguments', ns).text.endswith(' run')
     assert task.find('.//s:MultipleInstancesPolicy', ns).text == 'IgnoreNew'
 
@@ -154,9 +154,9 @@ def test_google_credentials_substitution_race_prevention(tmp_path, monkeypatch):
 
     import google.auth
 
-    from uls.config._secure_file import write_secure_file
-    from uls.config.credentials import CredentialResolver
-    from uls.runtime import google_service
+    from syllva.config._secure_file import write_secure_file
+    from syllva.config.credentials import CredentialResolver
+    from syllva.runtime import google_service
 
     captured_info = []
     def fake_load_dict(info, scopes=None, **kwargs):
@@ -189,7 +189,7 @@ def test_google_credentials_substitution_race_prevention(tmp_path, monkeypatch):
 
 
 def test_cli_credential_set_guidance_and_execution(tmp_path, monkeypatch, capsys):
-    """Contract: uls credential set NAME returns guidance when undeclared,
+    """Contract: syllva credential set NAME returns guidance when undeclared,
     and does not accept a --value CLI argument.
     """
     raw = yaml.safe_load((asset_root() / 'config.example.yaml').read_text(encoding='utf-8'))

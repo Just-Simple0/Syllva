@@ -13,27 +13,27 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures")
 from no_v2_state import NoV2State
 from phase4 import phase4_applier_kwargs, phase4_proposal, ready_phase4
 
-from uls.adapters.drive.binding import (
+from syllva.adapters.drive.binding import (
     InMemorySourceBindingBackend,
     SourceBindingRecord,
     ValidatedSourceBindingResolver,
 )
-from uls.adapters.notion.base import HumanApprovalApplier, QueueState, upsert_proposal
-from uls.adapters.notion.guarded import GuardedNotionWriter
-from uls.config.schema import UlsConfig
-from uls.domain.enums import AutomationActor
-from uls.domain.errors import PolicyViolation, UlsError
-from uls.domain.models import PageLocator
-from uls.domain.page_range import PageRange
-from uls.domain.source_ref import SourceFingerprint, SourceRef
-from uls.ephemeral.memory import MemoryEphemeralStore
-from uls.ephemeral.models import AllowedLocator
-from uls.proposal.material_usage import MaterialUsageProposalProducer
-from uls.retrieval.capabilities import CapabilityManager, authorize_locator
-from uls.retrieval.chunking import page_chunks
-from uls.retrieval.engine import RetrievalEngine
-from uls.retrieval.schemas import CapabilityBinding
-from uls.retrieval.scope import material_usage_scopes
+from syllva.adapters.notion.base import HumanApprovalApplier, QueueState, upsert_proposal
+from syllva.adapters.notion.guarded import GuardedNotionWriter
+from syllva.config.schema import SyllvaConfig
+from syllva.domain.enums import AutomationActor
+from syllva.domain.errors import PolicyViolation, SyllvaError
+from syllva.domain.models import PageLocator
+from syllva.domain.page_range import PageRange
+from syllva.domain.source_ref import SourceFingerprint, SourceRef
+from syllva.ephemeral.memory import MemoryEphemeralStore
+from syllva.ephemeral.models import AllowedLocator
+from syllva.proposal.material_usage import MaterialUsageProposalProducer
+from syllva.retrieval.capabilities import CapabilityManager, authorize_locator
+from syllva.retrieval.chunking import page_chunks
+from syllva.retrieval.engine import RetrievalEngine
+from syllva.retrieval.schemas import CapabilityBinding
+from syllva.retrieval.scope import material_usage_scopes
 
 
 class _ReadTrap:
@@ -52,8 +52,8 @@ class _ReadTrap:
 @pytest.mark.parametrize("invalid", ["false", "true", 0, 1, None, [], {}])
 def test_include_provisional_type_is_rejected_before_provider_reads(invalid) -> None:
     notion, drive = _ReadTrap(), _ReadTrap()
-    engine = RetrievalEngine(notion, drive, NoV2State(), MemoryEphemeralStore(), UlsConfig())
-    with pytest.raises(UlsError):
+    engine = RetrievalEngine(notion, drive, NoV2State(), MemoryEphemeralStore(), SyllvaConfig())
+    with pytest.raises(SyllvaError):
         engine.get_session_context("COMP319-S05", include_provisional=invalid)
     assert notion.calls == []
     assert drive.calls == []
@@ -62,10 +62,10 @@ def test_include_provisional_type_is_rejected_before_provider_reads(invalid) -> 
 @pytest.mark.parametrize("invalid", ["false", "true", 0, 1, None, [], {}])
 def test_runtime_provisional_config_type_is_rejected_before_provider_reads(invalid) -> None:
     notion, drive = _ReadTrap(), _ReadTrap()
-    config = UlsConfig()
+    config = SyllvaConfig()
     config.retrieval.allow_provisional_material_usage = invalid
     engine = RetrievalEngine(notion, drive, NoV2State(), MemoryEphemeralStore(), config)
-    with pytest.raises(UlsError):
+    with pytest.raises(SyllvaError):
         engine.get_session_context("COMP319-S05", include_provisional=True)
     assert notion.calls == []
     assert drive.calls == []
@@ -73,7 +73,7 @@ def test_runtime_provisional_config_type_is_rejected_before_provider_reads(inval
 
 @pytest.mark.parametrize("bad", [{}, None, {"id": ""}, {"id": 42}])
 def test_mixed_malformed_course_relation_is_not_collapsed(bad) -> None:
-    from uls.domain.course_identity import resolve_course_relation
+    from syllva.domain.course_identity import resolve_course_relation
 
     assert resolve_course_relation([{"id": "course-a"}, bad]) is None
 
@@ -85,7 +85,7 @@ def test_typed_empty_source_binding_is_rejected() -> None:
         SourceRef("google_drive", "normalized"),
         SourceRef("", ""),
     )
-    with pytest.raises((UlsError, ValueError, TypeError)):
+    with pytest.raises((SyllvaError, ValueError, TypeError)):
         resolver = ValidatedSourceBindingResolver(InMemorySourceBindingBackend([record]))
         resolver.resolve_derivative_ref("COMP319-M03", "normalized")
 
@@ -94,7 +94,7 @@ def test_typed_empty_source_binding_is_rejected() -> None:
 def test_unjustified_pages_never_generate_evidence(body: str) -> None:
     try:
         chunks = page_chunks(body, entity_id="COMP319-M03")
-    except (UlsError, ValueError):
+    except (SyllvaError, ValueError):
         return
     assert chunks == []
 
@@ -103,7 +103,7 @@ def test_unjustified_pages_never_generate_evidence(body: str) -> None:
 def test_malformed_numeric_page_declarations_are_denied(body: str) -> None:
     try:
         chunks = page_chunks(body, entity_id="COMP319-M03")
-    except (UlsError, ValueError):
+    except (SyllvaError, ValueError):
         return
     assert chunks == []
 
@@ -176,7 +176,7 @@ def test_manager_role_only_callback_cannot_authorize_managed_material() -> None:
         usage_range=PageRange(1, 1),
     )
     capability = manager.issue([binding])
-    with pytest.raises(UlsError):
+    with pytest.raises(SyllvaError):
         authorize_locator(
             store,
             capability.context_id,
@@ -199,7 +199,7 @@ def test_guarded_uuid_usage_update_is_denied_before_backend() -> None:
         Backend(),
         database_ids={"Material Usage": "usage-uuid", "Automation Queue": "queue-uuid"},
     )
-    with pytest.raises(UlsError):
+    with pytest.raises(SyllvaError):
         writer.update_properties(
             "usage-uuid",
             "mu",
@@ -223,7 +223,7 @@ def test_guarded_region_and_property_shapes_fail_closed_before_backend() -> None
         Backend(),
         database_ids={"Material Usage": "usage-uuid", "Sessions": "sessions-uuid"},
     )
-    with pytest.raises(UlsError):
+    with pytest.raises(SyllvaError):
         writer.create_entity(
             "usage-uuid",
             {
@@ -235,9 +235,9 @@ def test_guarded_region_and_property_shapes_fail_closed_before_backend() -> None
                 "Verified": False,
             },
         )
-    with pytest.raises(UlsError):
+    with pytest.raises(SyllvaError):
         writer.write_ai_region("sessions-uuid", "COMP319-S05", {"ownership": "AI"})
-    with pytest.raises(UlsError):
+    with pytest.raises(SyllvaError):
         writer.write_ai_region(
             "usage-uuid",
             "MU:bad",
@@ -349,7 +349,7 @@ def test_producer_rejects_update_when_candidate_role_does_not_match_target() -> 
         writer,
         Proposer(),
         source_binding_resolver=resolver,
-        config=UlsConfig(),
+        config=SyllvaConfig(),
     ).propose("COMP319-S05")
     assert result.proposals == ()
     assert result.skipped
@@ -382,7 +382,7 @@ def test_producer_rereads_trusted_inputs_and_writes_nothing_after_source_drift()
         writer,
         MutatingProposer(),
         source_binding_resolver=resolver,
-        config=UlsConfig(),
+        config=SyllvaConfig(),
     ).propose("COMP319-S05")
     assert result.proposals == ()
     assert result.skipped
@@ -417,7 +417,7 @@ def test_producer_payload_is_bounded_and_confidence_is_a_select() -> None:
         writer,
         proposer,
         source_binding_resolver=resolver,
-        config=UlsConfig(),
+        config=SyllvaConfig(),
         max_chars_per_item=20,
         max_total_chars=30,
     ).propose("COMP319-S05")
@@ -436,7 +436,7 @@ def test_producer_payload_is_bounded_and_confidence_is_a_select() -> None:
 def test_post_issue_provisional_config_revocation_denies_followup() -> None:
     reader, writer, drive, resolver = ready_phase4()
     del writer
-    config = UlsConfig()
+    config = SyllvaConfig()
     engine = RetrievalEngine(
         reader,
         drive,
@@ -450,5 +450,5 @@ def test_post_issue_provisional_config_revocation_denies_followup() -> None:
         item for item in package.sources if item.source_class == "professor_material"
     )
     config.retrieval.allow_provisional_material_usage = False
-    with pytest.raises(UlsError):
+    with pytest.raises(SyllvaError):
         engine.get_source_chunk(package.context_id, str(material_item.locator))

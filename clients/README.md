@@ -2,7 +2,7 @@
 
 [한국어](README.ko.md)
 
-All clients consume the same read-only MCP tools and server-enforced evidence scope. `contracts/study-behavior.md` is canonical for shared study behavior. Each instruction/skill projection declares its contract relationship, and `uls behavior lint` should pass before packaging.
+All clients consume the same read-only MCP tools and server-enforced evidence scope. `contracts/study-behavior.md` is canonical for shared study behavior. Each instruction/skill projection declares its contract relationship, and `syllva behavior lint` should pass before packaging.
 
 Syllva 0.1.3 is beta. A checked-in client projection or config example means the integration shape exists; it does **not** automatically mean that a real end-user client has completed live domain E2E.
 

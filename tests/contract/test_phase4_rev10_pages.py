@@ -8,12 +8,12 @@ import pytest
 from tests.contract.test_phase4_rev6_recovery import _apply
 from tests.fixtures.phase4 import material_derivative, phase4_proposal, ready_phase4
 
-from uls.adapters.notion.base import (
+from syllva.adapters.notion.base import (
     _PHASE4_APPLY_MARKER_PREFIX,
     QueueState,
     upsert_proposal,
 )
-from uls.domain.page_range import PageRange
+from syllva.domain.page_range import PageRange
 
 
 def _pages_body(pages: list[int]) -> str:

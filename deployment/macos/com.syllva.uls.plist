@@ -3,7 +3,7 @@
 <plist version="1.0"><dict>
   <key>Label</key><string>com.syllva.uls</string>
   <key>ProgramArguments</key><array>
-    <string>/ABSOLUTE/PATH/TO/venv/bin/uls</string>
+    <string>/ABSOLUTE/PATH/TO/venv/bin/syllva</string>
     <string>--config</string><string>/ABSOLUTE/PATH/TO/config.yaml</string>
     <string>run</string>
   </array>

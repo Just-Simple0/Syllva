@@ -8,13 +8,13 @@ from typing import Any
 import pytest
 from tests.contract.test_c5_haa import PHYSICAL, REQUEST, claim_b, guard_args, setup_v2
 
-from uls.domain.approval_identity import (
+from syllva.domain.approval_identity import (
     c5_usage_snapshot_json,
     derive_usage_slot_key,
     parse_c5_usage_snapshot,
 )
-from uls.domain.errors import ProviderWriteNotAppliedError
-from uls.state.sqlite import SQLiteStateStore
+from syllva.domain.errors import ProviderWriteNotAppliedError
+from syllva.state.sqlite import SQLiteStateStore
 
 
 def claim_args(operation: str) -> dict[str, Any]:

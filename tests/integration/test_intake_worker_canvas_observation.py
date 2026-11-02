@@ -21,7 +21,7 @@ pytestmark = pytest.mark.integration
 
 @pytest.fixture(autouse=True)
 def _no_promotion(monkeypatch):
-    from uls.intake.worker import IntakeWorker
+    from syllva.intake.worker import IntakeWorker
 
     monkeypatch.setattr(IntakeWorker, "_promote_ready_plans", lambda self: None)
 
@@ -115,8 +115,8 @@ def test_an_observed_calendar_drives_the_match_end_to_end(tmp_path: Path) -> Non
 
     from tests.unit.test_canvas_observer import FakeReader
 
-    from uls.intake.canvas_observer import CanvasObserver
-    from uls.intake.classification import SemesterRange
+    from syllva.intake.canvas_observer import CanvasObserver
+    from syllva.intake.classification import SemesterRange
 
     with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
         worker = _enable(system)

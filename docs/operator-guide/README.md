@@ -22,7 +22,7 @@ An operator is responsible for:
 - keeping secrets out of the repository, prompts, and client instructions;
 - validating exact Drive/Notion/GitHub identities before enabling writes or retrieval;
 - keeping worker and MCP credentials separated where required;
-- running `uls doctor` and relevant read probes before activation;
+- running `syllva doctor` and relevant read probes before activation;
 - keeping the LMS scheduler paused until its credential/connection gates pass;
 - treating uncertain external write outcomes as reconciliation work, not automatic success;
 - preserving human-owned verification/scope decisions.

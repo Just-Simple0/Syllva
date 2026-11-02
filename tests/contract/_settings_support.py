@@ -11,10 +11,10 @@ from typing import Any
 import yaml
 from starlette.testclient import TestClient
 
-from uls.settings.app import create_settings_app
-from uls.settings.config_service import ConfigStore
-from uls.settings.journal import JournalStore
-from uls.settings.security import MutationBarrier, SessionSecurity, new_path_prefix
+from syllva.settings.app import create_settings_app
+from syllva.settings.config_service import ConfigStore
+from syllva.settings.journal import JournalStore
+from syllva.settings.security import MutationBarrier, SessionSecurity, new_path_prefix
 
 REPO = Path(__file__).resolve().parents[2]
 HOST = "127.0.0.1:8765"

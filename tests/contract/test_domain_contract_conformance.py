@@ -4,9 +4,9 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
-from uls.domain import contracts as domain_contracts
-from uls.ephemeral.memory import MemoryEphemeralStore
-from uls.state.sqlite import SQLiteStateStore
+from syllva.domain import contracts as domain_contracts
+from syllva.ephemeral.memory import MemoryEphemeralStore
+from syllva.state.sqlite import SQLiteStateStore
 
 
 def test_memory_ephemeral_store_conforms_to_domain_protocol() -> None:

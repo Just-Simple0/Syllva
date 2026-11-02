@@ -9,11 +9,11 @@ import yaml
 from tests.contract._settings_support import write_config
 from tests.contract.test_settings_credential_service import crash, service
 
-from uls.config import google_oauth as oauth
-from uls.config.mutation import atomic_replace_config
-from uls.settings.config_service import SettingsServiceError
-from uls.settings.credential_roles import ROLES
-from uls.settings.journal import SimulatedCrash
+from syllva.config import google_oauth as oauth
+from syllva.config.mutation import atomic_replace_config
+from syllva.settings.config_service import SettingsServiceError
+from syllva.settings.credential_roles import ROLES
+from syllva.settings.journal import SimulatedCrash
 
 pytestmark = pytest.mark.contract
 
@@ -269,14 +269,14 @@ def test_config_change_between_snapshot_and_provider_proof_is_refused(tmp_path):
 def test_another_writer_holding_the_config_lock_during_provider_proof_is_detected_without_deadlock(tmp_path):
     import threading
 
-    from uls.config.mutation import ConfigFileLock
+    from syllva.config.mutation import ConfigFileLock
 
     s = _service(tmp_path)
     generation = s.config.load().generation
     released = threading.Event()
 
     def other_writer():
-        from uls.config.mutation import read_config_bytes
+        from syllva.config.mutation import read_config_bytes
         with ConfigFileLock(s.config.path):
             raw = s.config._parse(read_config_bytes(s.config.path)).raw
             raw["system"]["timezone"] = "UTC"
@@ -486,7 +486,7 @@ def test_unrecognized_google_credential_type_is_never_treated_as_a_service_accou
         s.test(WORKER)
     assert error.value.code == "INVALID_CREDENTIAL" and getattr(error.value, "code_only", False) is True
     assert s.checks.transport.requests == 0
-    from uls.settings.provider_checks import LiveReadOnlyTransport, TransportCheckBudget
+    from syllva.settings.provider_checks import LiveReadOnlyTransport, TransportCheckBudget
     live = LiveReadOnlyTransport(google_loader=lambda *a, **k: (_ for _ in ()).throw(AssertionError("SA loader used")))
     with pytest.raises(SettingsServiceError) as error:
         live._google(orphan, TransportCheckBudget())
@@ -496,7 +496,7 @@ def test_unrecognized_google_credential_type_is_never_treated_as_a_service_accou
 def test_concurrent_cross_role_commits_with_different_accounts_never_both_persist(tmp_path):
     import threading
 
-    from uls.settings.journal import JournalError
+    from syllva.settings.journal import JournalError
 
     s = _service(tmp_path)
     generation = s.config.load().generation

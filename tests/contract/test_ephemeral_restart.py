@@ -3,9 +3,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
 import pytest
 
-from uls.domain.errors import ContextExpiredError, ResolutionExpiredError
-from uls.ephemeral.memory import MemoryEphemeralStore
-from uls.ephemeral.models import ResolutionCandidate
+from syllva.domain.errors import ContextExpiredError, ResolutionExpiredError
+from syllva.ephemeral.memory import MemoryEphemeralStore
+from syllva.ephemeral.models import ResolutionCandidate
 
 
 def test_new_memory_store_invalidates_resolution_and_context_ids() -> None:

@@ -26,11 +26,11 @@ from tests.integration.test_intake_worker_preview import (
     _system,
 )
 
-from uls.adapters.drive.worker import DRIVE_FOLDER_MIME, DriveMetadata
-from uls.config.credentials import ResolvedCredentials
-from uls.intake.identity import provider_binding_id
-from uls.intake.worker import IntakeReconcileRequired, RequestValidationError
-from uls.runtime import build_intake_worker
+from syllva.adapters.drive.worker import DRIVE_FOLDER_MIME, DriveMetadata
+from syllva.config.credentials import ResolvedCredentials
+from syllva.intake.identity import provider_binding_id
+from syllva.intake.worker import IntakeReconcileRequired, RequestValidationError
+from syllva.runtime import build_intake_worker
 
 pytestmark = pytest.mark.integration
 
@@ -142,7 +142,7 @@ def test_a_lecture_pdf_is_normalized_with_the_initial_type(tmp_path: Path) -> No
         assert material["Text Status"] == "Ready" and material.get("Normalized Source")
         assert item.exposure_block_reason is None
         # the read-only state used by retrieval marks it as an AUTO product (exposure gate, plan §9 P-B)
-        from uls.state.reader import ReadOnlyState
+        from syllva.state.reader import ReadOnlyState
 
         reader = ReadOnlyState(system["state"].db_path)
         assert reader.is_v2_material(material["ID"]) is True
@@ -219,7 +219,7 @@ def test_claim_and_authority_checks_guard_the_execution_entry(tmp_path: Path) ->
             worker._process_item_unlocked(item.intake_id, claimed=job)
         assert _sessions(system) == []
         # a bound identity under another authority or revision is refused
-        from uls.intake.worker import ClassificationExecutionContext
+        from syllva.intake.worker import ClassificationExecutionContext
 
         context = ClassificationExecutionContext(
             intake_id=item.intake_id, plan_revision="p", classification_revision_hash="h2", record_id="r", job_id=job.id,
@@ -316,7 +316,7 @@ def test_only_our_own_session_is_an_own_effect(tmp_path: Path) -> None:
             if label == "extra-session":
                 _seed_session(system["notion"], "TEST102-S77")
             if label == "unproven":
-                from uls.intake.worker import INTAKE_SESSION_OPERATION
+                from syllva.intake.worker import INTAKE_SESSION_OPERATION
 
                 op_key = worker._plan_operation_key(INTAKE_SESSION_OPERATION, item, plan, workspace, context, target_id=None)
                 with system["state"]._transaction(immediate=True) as connection:
@@ -652,7 +652,7 @@ def test_readiness_reports_the_auto_execution_counters(tmp_path: Path) -> None:
 
 def test_the_v2_marker_exists_before_the_material_page_and_before_any_job_binding(tmp_path: Path) -> None:
     # r3 R1: Material created and Ready, but the provenance/job binding never happened.
-    from uls.state.reader import ReadOnlyState
+    from syllva.state.reader import ReadOnlyState
 
     raw = _pdf_bytes()
     with _system(tmp_path, name="Lec.3_networks.pdf", mime_type="application/pdf", raw=raw) as system:
@@ -689,7 +689,7 @@ def test_the_v2_marker_exists_before_the_material_page_and_before_any_job_bindin
 def test_the_read_only_state_of_a_database_that_predates_v2_has_no_v2_product(tmp_path: Path) -> None:
     import sqlite3
 
-    from uls.state.reader import ReadOnlyState
+    from syllva.state.reader import ReadOnlyState
 
     path = tmp_path / "old.db"
     with sqlite3.connect(path) as connection:

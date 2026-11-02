@@ -5,7 +5,7 @@ from copy import deepcopy
 import pytest
 from tests.contract.test_phase4_rev6_recovery import _apply, _approved_phase4
 
-from uls.adapters.notion.base import QueueState
+from syllva.adapters.notion.base import QueueState
 
 
 def _make_desired(reader, operation):

@@ -7,15 +7,15 @@ from pathlib import Path
 
 import pytest
 
-from uls.intake.classification import (
+from syllva.intake.classification import (
     RULE_TABLE_VERSION,
     CourseCalendar,
     RecordingEntry,
     SemesterRange,
     build_calendar,
 )
-from uls.intake.classification.calendar import CalendarEntry, EntryStatus
-from uls.state.sqlite import SQLiteStateStore
+from syllva.intake.classification.calendar import CalendarEntry, EntryStatus
+from syllva.state.sqlite import SQLiteStateStore
 
 pytestmark = pytest.mark.unit
 
@@ -638,7 +638,7 @@ def test_auto_resolve_intent_closes_only_a_draft_with_the_terminal_snapshot(tmp_
 def test_recording_titles_are_exactly_iso_dates(tmp_path) -> None:
     """r16 R1: only YYYY-MM-DD titles are recordings; other date-like titles never block a calendar."""
 
-    from uls.state.classification_state import _recording_observation
+    from syllva.state.classification_state import _recording_observation
 
     assert _recording_observation("ExternalTool", "2026-09-17")
     assert _recording_observation("ExternalTool", " 2026-09-17 ")

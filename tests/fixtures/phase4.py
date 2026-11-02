@@ -7,18 +7,18 @@ from typing import Any
 from fake_drive import FakeDriveReader
 from fake_notion import COURSE_KEY, COURSE_PAGE_ID, FakeNotionAdapter, FakeNotionReader
 
-from uls.adapters.drive.binding import ActivityInstructionBinding, ValidatedSourceBindingResolver
-from uls.domain.approval_identity import (
+from syllva.adapters.drive.binding import ActivityInstructionBinding, ValidatedSourceBindingResolver
+from syllva.domain.approval_identity import (
     build_material_usage_semantics,
     canonical_action_json,
     derive_proposal_id,
 )
-from uls.domain.enums import AutomationActor
-from uls.domain.page_range import PageRange
-from uls.domain.source_ref import SourceFingerprint, SourceRef
-from uls.normalization.activity import normalize_activity_instructions
-from uls.normalization.transcript import normalize_transcript
-from uls.retrieval.scope import material_usage_scopes
+from syllva.domain.enums import AutomationActor
+from syllva.domain.page_range import PageRange
+from syllva.domain.source_ref import SourceFingerprint, SourceRef
+from syllva.normalization.activity import normalize_activity_instructions
+from syllva.normalization.transcript import normalize_transcript
+from syllva.retrieval.scope import material_usage_scopes
 
 
 def transcript_derivative(
@@ -276,13 +276,13 @@ def phase4_proposal(
 
 
 def phase4_applier_kwargs(reader, drive, resolver) -> dict[str, Any]:
-    from uls.config.schema import UlsConfig
+    from syllva.config.schema import SyllvaConfig
 
     return {
         "graph_reader": reader,
         "source_reader": drive,
         "source_binding_resolver": resolver,
-        "config": UlsConfig(),
+        "config": SyllvaConfig(),
     }
 
 

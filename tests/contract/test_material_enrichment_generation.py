@@ -8,12 +8,12 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures"))
 
-from uls.adapters.llm.base import LLMEnrichmentResult
+from syllva.adapters.llm.base import LLMEnrichmentResult
 from fake_llm import FakeLLMAdapter, material_result
-from uls.domain.enums import Explicitness, ProcessingStatus
-from uls.domain.source_ref import SourceFingerprint
-from uls.domain.errors import SourcePartialError
-from uls.enrichment.material import generate_material_enrichment
+from syllva.domain.enums import Explicitness, ProcessingStatus
+from syllva.domain.source_ref import SourceFingerprint
+from syllva.domain.errors import SourcePartialError
+from syllva.enrichment.material import generate_material_enrichment
 
 
 FP = SourceFingerprint(1, "material-v1")

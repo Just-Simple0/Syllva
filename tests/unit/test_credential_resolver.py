@@ -21,13 +21,13 @@ import types
 
 import pytest
 
-from uls.config.credentials import (
+from syllva.config.credentials import (
     ALLOWED_SOURCES,
     KEYRING_BINDINGS,
     CredentialResolver,
     ResolvedCredentials,
 )
-from uls.config.errors import ConfigurationError
+from syllva.config.errors import ConfigurationError
 
 pytestmark = pytest.mark.unit
 
@@ -80,7 +80,7 @@ def test_no_credentials_section_matches_environment_default(tmp_path):
     """Absent credentials: config -> every name defaults to 'environment',
     observably behavior-equivalent to the pre-resolver os.environ reads."""
     creds_file = tmp_path / 'x.json'
-    from uls.config._secure_file import write_secure_file
+    from syllva.config._secure_file import write_secure_file
     write_secure_file(creds_file, b'{}')
     resolver = CredentialResolver(None, environ={'GOOGLE_MCP_CREDENTIALS_FILE': str(creds_file)})
     snap = resolver.resolve(required=frozenset({'GOOGLE_MCP_CREDENTIALS_FILE'}))
@@ -297,7 +297,7 @@ def test_require_performs_no_new_keyring_read(monkeypatch):
 
 def test_select_mixed_required_and_optional_with_default(tmp_path):
     creds_file = tmp_path / 'mcp.json'
-    from uls.config._secure_file import write_secure_file
+    from syllva.config._secure_file import write_secure_file
     write_secure_file(creds_file, b'{}')
     resolver = CredentialResolver({}, environ={'GOOGLE_MCP_CREDENTIALS_FILE': str(creds_file),
                                                'NOTION_MCP_TOKEN': 'mcp-tok'})

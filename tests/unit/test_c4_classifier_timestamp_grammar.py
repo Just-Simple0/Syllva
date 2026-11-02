@@ -20,8 +20,8 @@ from __future__ import annotations
 
 import pytest
 
-from uls.ingestion.classifier import SourceKind, classify_source_detailed
-from uls.normalization.transcript import contains_timestamp_marker
+from syllva.ingestion.classifier import SourceKind, classify_source_detailed
+from syllva.normalization.transcript import contains_timestamp_marker
 
 pytestmark = pytest.mark.unit
 

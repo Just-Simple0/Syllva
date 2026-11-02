@@ -9,13 +9,13 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
-from uls.domain.errors import LocatorNotAllowedError
-from uls.domain.models import PageLocator
-from uls.domain.page_range import PageRange
-from uls.domain.source_ref import SourceFingerprint, SourceRef
-from uls.ephemeral.memory import MemoryEphemeralStore
-from uls.retrieval.capabilities import CapabilityManager, authorize_locator
-from uls.retrieval.schemas import CapabilityBinding
+from syllva.domain.errors import LocatorNotAllowedError
+from syllva.domain.models import PageLocator
+from syllva.domain.page_range import PageRange
+from syllva.domain.source_ref import SourceFingerprint, SourceRef
+from syllva.ephemeral.memory import MemoryEphemeralStore
+from syllva.retrieval.capabilities import CapabilityManager, authorize_locator
+from syllva.retrieval.schemas import CapabilityBinding
 
 _DEFAULT_USAGE_RANGE = PageRange(1, 10)
 

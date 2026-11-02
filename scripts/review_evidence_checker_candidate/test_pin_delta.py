@@ -12,8 +12,8 @@ import test_state_check as prior
 CANDIDATE = prior.CANDIDATE
 BASELINE = Path(__file__).resolve().parent / 'checker_active_baseline.py'
 REPLACED = (
-    'src/uls/settings/credential_service.py',
-    'src/uls/settings/credential_admission.py',
+    'src/syllva/settings/credential_service.py',
+    'src/syllva/settings/credential_admission.py',
     'tests/contract/test_settings_credential_admission.py',
 )
 ADDED = (

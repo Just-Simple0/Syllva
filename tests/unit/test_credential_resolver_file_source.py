@@ -3,17 +3,17 @@ composition-root path_overrides parameter
 (docs/plans/credential-secret-file-launcher.md, rev5).
 
 These tests never touch the real OS secrets directory
-(uls.config._secure_file.secrets_directory()); they monkeypatch
-uls.config.credentials.secret_file_path to resolve inside tmp_path.
+(syllva.config._secure_file.secrets_directory()); they monkeypatch
+syllva.config.credentials.secret_file_path to resolve inside tmp_path.
 """
 from __future__ import annotations
 
 import pytest
 
-from uls.config import credentials as credentials_module
-from uls.config._secure_file import write_secure_file
-from uls.config.credentials import CredentialResolver
-from uls.config.errors import ConfigurationError
+from syllva.config import credentials as credentials_module
+from syllva.config._secure_file import write_secure_file
+from syllva.config.credentials import CredentialResolver
+from syllva.config.errors import ConfigurationError
 
 pytestmark = pytest.mark.unit
 

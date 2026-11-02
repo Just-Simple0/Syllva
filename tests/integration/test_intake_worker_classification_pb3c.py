@@ -75,9 +75,9 @@ def test_a_human_change_creates_exactly_one_new_generation(tmp_path: Path) -> No
 
 
 def test_the_same_human_change_survives_a_restart_without_a_duplicate(tmp_path: Path) -> None:
-    from uls.config.credentials import ResolvedCredentials
-    from uls.intake.identity import provider_binding_id
-    from uls.runtime import build_intake_worker
+    from syllva.config.credentials import ResolvedCredentials
+    from syllva.intake.identity import provider_binding_id
+    from syllva.runtime import build_intake_worker
 
     with _closed_request(tmp_path) as (system, worker):
         _closed_page(system)["Cancelled"] = True
@@ -175,7 +175,7 @@ def test_a_matching_course_keeps_the_item_organized_and_asks_only_for_the_detail
 
 
 def test_a_different_course_is_reconcile_and_creates_nothing(tmp_path: Path) -> None:
-    from uls.intake.worker import IntakeReconcileRequired
+    from syllva.intake.worker import IntakeReconcileRequired
 
     with _closed_request(tmp_path) as (system, worker):
         before = _state_snapshot(system)
@@ -216,7 +216,7 @@ def test_a_matching_complete_result_is_adopted_without_any_new_work(tmp_path: Pa
     {"Course": ["synthetic-course-page-0"]},
 ])
 def test_a_human_request_that_differs_from_the_automatic_effects_is_reconcile(tmp_path: Path, override) -> None:
-    from uls.intake.worker import IntakeReconcileRequired
+    from syllva.intake.worker import IntakeReconcileRequired
 
     with _closed_request(tmp_path) as (system, worker):
         details = _fill_details(system, worker, **override)
@@ -227,7 +227,7 @@ def test_a_human_request_that_differs_from_the_automatic_effects_is_reconcile(tm
 
 
 def test_an_unverifiable_effect_blocks_the_hand_over(tmp_path: Path) -> None:
-    from uls.intake.worker import IntakeReconcileRequired
+    from syllva.intake.worker import IntakeReconcileRequired
 
     with _closed_request(tmp_path) as (system, worker):
         details = _fill_details(system, worker)
@@ -241,8 +241,8 @@ def test_an_unverifiable_effect_blocks_the_hand_over(tmp_path: Path) -> None:
 def test_the_gate_refuses_a_different_kind_before_anything_else(tmp_path: Path) -> None:
     from dataclasses import replace
 
-    from uls.intake.requests import RequestInput
-    from uls.intake.worker import IntakeReconcileRequired
+    from syllva.intake.requests import RequestInput
+    from syllva.intake.worker import IntakeReconcileRequired
 
     with _closed_request(tmp_path) as (system, worker):
         item = _item(system)
@@ -327,7 +327,7 @@ def test_a_lost_create_response_during_the_scan_recovers_on_a_later_cycle_withou
 
 
 def test_an_empty_lookup_after_a_create_attempt_never_creates_a_second_draft(tmp_path: Path) -> None:
-    from uls.intake.worker import IntakeReconcileRequired
+    from syllva.intake.worker import IntakeReconcileRequired
 
     with _closed_request(tmp_path) as (system, worker):
         old = _closed_page(system)
@@ -408,7 +408,7 @@ def test_a_cancelled_generation_lets_the_next_human_change_open_a_new_one(tmp_pa
 def test_an_automatic_result_whose_source_moved_is_not_adopted(tmp_path: Path) -> None:
     from dataclasses import replace
 
-    from uls.intake.worker import IntakeReconcileRequired
+    from syllva.intake.worker import IntakeReconcileRequired
 
     with _closed_request(tmp_path) as (system, worker):
         details = _fill_details(system, worker)
@@ -423,8 +423,8 @@ def test_an_automatic_result_whose_source_moved_is_not_adopted(tmp_path: Path) -
 def test_the_human_session_choice_must_be_the_automatic_session(tmp_path: Path) -> None:
     from dataclasses import replace
 
-    from uls.intake.requests import RequestInput
-    from uls.intake.worker import IntakeReconcileRequired
+    from syllva.intake.requests import RequestInput
+    from syllva.intake.worker import IntakeReconcileRequired
 
     with _closed_request(tmp_path) as (system, worker):
         item = _item(system)
@@ -437,7 +437,7 @@ def test_the_human_session_choice_must_be_the_automatic_session(tmp_path: Path) 
 
 
 def test_an_assign_course_does_not_skip_the_effect_verification(tmp_path: Path) -> None:
-    from uls.intake.worker import IntakeReconcileRequired
+    from syllva.intake.worker import IntakeReconcileRequired
 
     with _closed_request(tmp_path) as (system, worker):
         new = _new_generation(system, worker, Course=[AUTO_COURSE_PAGE], Submitted=True)
@@ -483,8 +483,8 @@ def test_generation_key_and_ledger_commit_together_or_not_at_all(tmp_path: Path)
 def test_a_move_in_flight_or_a_moved_unfinished_source_is_not_adopted(tmp_path: Path) -> None:
     from dataclasses import replace
 
-    from uls.intake.requests import RequestInput
-    from uls.intake.worker import IntakeReconcileRequired
+    from syllva.intake.requests import RequestInput
+    from syllva.intake.worker import IntakeReconcileRequired
 
     with _closed_request(tmp_path) as (system, worker):
         item = _item(system)
@@ -560,8 +560,8 @@ def test_an_organized_material_that_never_finished_is_not_complete(tmp_path: Pat
     from tests.integration.test_intake_worker_classification_pb2b import _material_system
     from tests.integration.test_intake_worker_preview import _pdf_bytes, _system
 
-    from uls.intake.requests import RequestInput
-    from uls.intake.worker import IntakeReconcileRequired
+    from syllva.intake.requests import RequestInput
+    from syllva.intake.worker import IntakeReconcileRequired
 
     raw = _pdf_bytes()
     with _system(tmp_path, name="Lec.3_networks.pdf", mime_type="application/pdf", raw=raw) as system:
@@ -584,7 +584,7 @@ def test_an_adopted_effect_must_still_have_the_exact_type_and_binding_it_had(tmp
     from tests.integration.test_intake_worker_classification_pb2a import MATCHED_NAME, RAW
     from tests.integration.test_intake_worker_preview import _system
 
-    from uls.intake.worker import IntakeReconcileRequired
+    from syllva.intake.worker import IntakeReconcileRequired
 
     with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
         worker = _enable(system)
@@ -610,7 +610,7 @@ def test_an_adopted_effect_must_still_have_the_exact_type_and_binding_it_had(tmp
 def test_a_look_alike_page_is_not_the_automatic_effect(tmp_path: Path) -> None:
     from copy import deepcopy
 
-    from uls.intake.worker import IntakeReconcileRequired
+    from syllva.intake.worker import IntakeReconcileRequired
 
     with _closed_request(tmp_path) as (system, worker):
         details = _fill_details(system, worker)
@@ -659,7 +659,7 @@ def test_the_result_status_is_the_verified_content_state_not_a_blanket_ready(tmp
 # --- review round 5 -----------------------------------------------------------------------
 
 def test_a_replaced_normalized_pointer_is_not_the_automatic_result(tmp_path: Path) -> None:
-    from uls.intake.worker import IntakeReconcileRequired
+    from syllva.intake.worker import IntakeReconcileRequired
 
     with _closed_request(tmp_path) as (system, worker):
         details = _fill_details(system, worker)
@@ -675,8 +675,8 @@ def test_a_replaced_material_source_pointer_is_not_the_automatic_result(tmp_path
     from tests.integration.test_intake_worker_classification_pb2b import _material_system
     from tests.integration.test_intake_worker_preview import _pdf_bytes, _system
 
-    from uls.intake.requests import RequestInput
-    from uls.intake.worker import IntakeReconcileRequired
+    from syllva.intake.requests import RequestInput
+    from syllva.intake.worker import IntakeReconcileRequired
 
     raw = _pdf_bytes()
     with _system(tmp_path, name="Lec.3_networks.pdf", mime_type="application/pdf", raw=raw) as system:
@@ -698,7 +698,7 @@ def test_a_second_hand_over_names_the_current_owner_of_the_reservation(tmp_path:
     from tests.integration.test_intake_worker_classification_pb2a import MATCHED_NAME, RAW
     from tests.integration.test_intake_worker_preview import _system
 
-    from uls.intake.requests import RequestInput
+    from syllva.intake.requests import RequestInput
 
     with _system(tmp_path, name=MATCHED_NAME, raw=RAW) as system:
         worker = _enable(system)
@@ -735,8 +735,8 @@ def test_an_opaque_material_must_still_be_unavailable_text_without_a_normalized_
     from tests.integration.test_intake_worker_classification_pb2b import _material_system
     from tests.integration.test_intake_worker_preview import _system
 
-    from uls.intake.requests import RequestInput
-    from uls.intake.worker import IntakeReconcileRequired
+    from syllva.intake.requests import RequestInput
+    from syllva.intake.worker import IntakeReconcileRequired
 
     csv = b"name,score\nA,1\n"
     with _system(tmp_path, name="dataset.csv", mime_type="text/csv", raw=csv) as system:

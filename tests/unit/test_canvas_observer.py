@@ -8,15 +8,15 @@ from typing import Any
 
 import pytest
 
-from uls.intake.canvas_observer import CanvasObserver, ObservationResult, _Incomplete
-from uls.intake.classification.calendar import SemesterRange
-from uls.settings.canvas_checks import (
+from syllva.intake.canvas_observer import CanvasObserver, ObservationResult, _Incomplete
+from syllva.intake.classification.calendar import SemesterRange
+from syllva.settings.canvas_checks import (
     CanvasCheckError,
     CanvasOrigin,
     _observation_target,
     validate_canvas_origin,
 )
-from uls.state.sqlite import SQLiteStateStore
+from syllva.state.sqlite import SQLiteStateStore
 
 pytestmark = pytest.mark.unit
 
@@ -222,7 +222,7 @@ def test_a_connection_failure_before_any_read_still_closes_a_complete_calendar(t
 
 
 def test_a_next_link_to_another_course_of_the_same_origin_is_incomplete(harness) -> None:
-    from uls.intake.canvas_observer import _next_url
+    from syllva.intake.canvas_observer import _next_url
 
     here = "/api/v1/courses/1/modules?include[]=items&per_page=50"
     for foreign in ("/api/v1/courses/2/modules?include[]=items&per_page=50&page=2",
@@ -320,7 +320,7 @@ class _Transport:
         self.requests: list[tuple[str, str, dict[str, str]]] = []
 
     def request(self, method, target, headers, timeout):
-        from uls.settings.canvas_checks import CanvasResponse
+        from syllva.settings.canvas_checks import CanvasResponse
 
         self.requests.append((method, target, dict(headers)))
         body, response_headers = self.pages[target]
@@ -331,8 +331,8 @@ class _Transport:
 
 
 def test_the_production_reader_follows_a_same_origin_next_link_with_get_only() -> None:
-    from uls.intake.canvas_observer import ConnectionReader
-    from uls.settings.canvas_checks import open_canvas_connection
+    from syllva.intake.canvas_observer import ConnectionReader
+    from syllva.settings.canvas_checks import open_canvas_connection
 
     first = "/api/v1/courses/1/assignments?per_page=50"
     second = "/api/v1/courses/1/assignments?per_page=50&page=2"
@@ -355,8 +355,8 @@ def test_the_production_reader_follows_a_same_origin_next_link_with_get_only() -
 
 
 def test_a_next_link_to_another_origin_is_refused() -> None:
-    from uls.intake.canvas_observer import ConnectionReader
-    from uls.settings.canvas_checks import open_canvas_connection
+    from syllva.intake.canvas_observer import ConnectionReader
+    from syllva.settings.canvas_checks import open_canvas_connection
 
     first = "/api/v1/courses/1/assignments?per_page=50"
     transport = _Transport({first: (b"[]", {"Link": '<https://evil.example.com/api/v1/courses/1/assignments>; rel="next"'})})
@@ -484,7 +484,7 @@ def test_a_remapped_canvas_course_replaces_its_stale_binding_to_another_key(tmp_
      '</api/v1/courses/1/modules?include[]=items&per_page=50&page=2>; rel="current next"'),
 ])
 def test_the_link_header_is_parsed_per_rfc_8288(header) -> None:
-    from uls.intake.canvas_observer import _next_url
+    from syllva.intake.canvas_observer import _next_url
 
     here = "/api/v1/courses/1/modules?include[]=items&per_page=50"
     assert _next_url(header, here, ORIGIN).endswith("page=2")
@@ -494,15 +494,15 @@ def test_the_link_header_is_parsed_per_rfc_8288(header) -> None:
     "</api/v1/courses/1/modules?page=2; rel=next", 'page=2; rel="next"', '</x>; rel="next', "</x> rel=next",
 ])
 def test_an_unparsable_link_header_is_incomplete_never_a_silent_end(header) -> None:
-    from uls.intake.canvas_observer import _next_url
+    from syllva.intake.canvas_observer import _next_url
 
     with pytest.raises(_Incomplete):
         _next_url(header, "/api/v1/courses/1/modules?per_page=50", ORIGIN)
 
 
 def test_a_real_two_page_collection_with_a_quoted_comma_link_is_read_to_the_end() -> None:
-    from uls.intake.canvas_observer import ConnectionReader
-    from uls.settings.canvas_checks import open_canvas_connection
+    from syllva.intake.canvas_observer import ConnectionReader
+    from syllva.settings.canvas_checks import open_canvas_connection
 
     first = "/api/v1/courses/1/modules?include[]=items&per_page=50"
     second = "/api/v1/courses/1/modules?include[]=items&per_page=50&page=2"
@@ -530,15 +530,15 @@ def test_an_unreadable_mapping_source_is_no_proof(tmp_path) -> None:
 
 @pytest.mark.parametrize("header", [",,,", ", </x>; rel=next", "</x>; rel=next,", "</x>; rel=next,, </y>; rel=last", ",", " , "])
 def test_stray_separators_and_empty_link_values_are_malformed(header) -> None:
-    from uls.intake.canvas_observer import _next_url
+    from syllva.intake.canvas_observer import _next_url
 
     with pytest.raises(_Incomplete):
         _next_url(header, "/api/v1/courses/1/modules?per_page=50", ORIGIN)
 
 
 def test_several_link_fields_are_all_read(harness) -> None:
-    from uls.intake.canvas_observer import ConnectionReader
-    from uls.settings.canvas_checks import open_canvas_connection
+    from syllva.intake.canvas_observer import ConnectionReader
+    from syllva.settings.canvas_checks import open_canvas_connection
 
     first = "/api/v1/courses/1/modules?include[]=items&per_page=50"
     second = "/api/v1/courses/1/modules?include[]=items&per_page=50&page=2"
@@ -558,7 +558,7 @@ def test_a_malformed_link_closes_a_complete_calendar(harness) -> None:
 
     class BadLink(FakeReader):
         def get_page(self, url, deadline):
-            from uls.intake.canvas_observer import _next_url
+            from syllva.intake.canvas_observer import _next_url
 
             rows, _ = super().get_page(url, deadline)
             return rows, _next_url(",,,", url, ORIGIN)
@@ -571,7 +571,7 @@ def test_a_malformed_link_closes_a_complete_calendar(harness) -> None:
 
 @pytest.mark.parametrize("params", ["rel=next@", 'rel=next="junk"', "rel=nex t", "title=a@b; rel=next", "rel=next}", "rel=;next", 'rel=""', 'rel="next"; rel="last"', "title; rel=next", "=x; rel=next"])
 def test_uninterpretable_link_parameters_are_malformed(params) -> None:
-    from uls.intake.canvas_observer import _next_url
+    from syllva.intake.canvas_observer import _next_url
 
     with pytest.raises(_Incomplete):
         _next_url(f"</api/v1/courses/1/modules?include[]=items&per_page=50&page=2>; {params}",
@@ -584,7 +584,7 @@ def test_a_bad_rel_on_page_one_closes_a_complete_calendar_and_opens_nothing(harn
 
     class BadRel(FakeReader):
         def get_page(self, url, deadline):
-            from uls.intake.canvas_observer import _next_url
+            from syllva.intake.canvas_observer import _next_url
 
             rows, _ = super().get_page(url, deadline)
             return rows, _next_url(f"<{url}&page=2>; rel=", url, ORIGIN)
@@ -602,14 +602,14 @@ def test_a_bad_rel_on_page_one_closes_a_complete_calendar_and_opens_nothing(harn
     '</api/v1/courses/1/modules?page=2>; rel="prev,next"x',
 ])
 def test_a_header_that_mentions_a_next_page_but_is_not_one_never_ends_the_collection(header) -> None:
-    from uls.intake.canvas_observer import _next_url
+    from syllva.intake.canvas_observer import _next_url
 
     with pytest.raises(_Incomplete):
         _next_url(header, "/api/v1/courses/1/modules?per_page=50", ORIGIN)
 
 
 def test_a_header_without_any_next_is_the_end_of_the_collection() -> None:
-    from uls.intake.canvas_observer import _next_url
+    from syllva.intake.canvas_observer import _next_url
 
     here = "/api/v1/courses/1/modules?per_page=50&page=2"
     assert _next_url('</api/v1/courses/1/modules?per_page=50&page=1>; rel="prev", '
@@ -621,7 +621,7 @@ def test_mutated_link_headers_never_conclude_the_end_of_a_collection_by_mistake(
 
     import random
 
-    from uls.intake.canvas_observer import _next_url
+    from syllva.intake.canvas_observer import _next_url
 
     base = ('</api/v1/courses/1/modules?include[]=items&per_page=50&page=2>; title="Page, two"; rel="next", '
             '</api/v1/courses/1/modules?include[]=items&per_page=50&page=9>; rel="last"')
@@ -650,8 +650,8 @@ def test_mutated_link_headers_never_conclude_the_end_of_a_collection_by_mistake(
 
 @pytest.mark.parametrize("value", [" ", "", "\t"])
 def test_a_present_but_blank_link_field_is_not_the_end_of_the_collection(value) -> None:
-    from uls.intake.canvas_observer import ConnectionReader
-    from uls.settings.canvas_checks import open_canvas_connection
+    from syllva.intake.canvas_observer import ConnectionReader
+    from syllva.settings.canvas_checks import open_canvas_connection
 
     first = "/api/v1/courses/1/modules?include[]=items&per_page=50"
     transport = _Transport({first: (b'[{"id":1}]', {"Link": value})})
@@ -663,7 +663,7 @@ def test_a_present_but_blank_link_field_is_not_the_end_of_the_collection(value) 
 
 @pytest.mark.parametrize("header", ["</x>; rel=ne\u212at", '</x>; rel="n\u0435xt"', "</x>; rel=next\x00", "</x>;\r\n rel=next"])
 def test_non_ascii_and_control_characters_are_malformed(header) -> None:
-    from uls.intake.canvas_observer import _next_url
+    from syllva.intake.canvas_observer import _next_url
 
     with pytest.raises(_Incomplete):
         _next_url(header, "/api/v1/courses/1/modules?per_page=50", ORIGIN)
@@ -680,14 +680,14 @@ def test_non_ascii_and_control_characters_are_malformed(header) -> None:
     "</a{b}>; rel=last",
 ])
 def test_every_link_target_and_every_character_is_validated(header) -> None:
-    from uls.intake.canvas_observer import _next_url
+    from syllva.intake.canvas_observer import _next_url
 
     with pytest.raises(_Incomplete):
         _next_url(header, "/api/v1/courses/1/modules?per_page=50", ORIGIN)
 
 
 def test_a_valid_target_with_encoded_characters_still_parses() -> None:
-    from uls.intake.canvas_observer import _next_url
+    from syllva.intake.canvas_observer import _next_url
 
     here = "/api/v1/courses/1/modules?include[]=items&per_page=50"
     assert _next_url('</api/v1/courses/1/modules?include[]=items&per_page=50&page=2>; rel="next"', here, ORIGIN).endswith("page=2")
@@ -695,7 +695,7 @@ def test_a_valid_target_with_encoded_characters_still_parses() -> None:
 
 @pytest.mark.parametrize("header", ['</%GG>; rel="last"', "</?q=%>; rel=last", "</a%2>; rel=last", "</a%>; rel=last"])
 def test_invalid_percent_escapes_are_malformed(header) -> None:
-    from uls.intake.canvas_observer import _next_url
+    from syllva.intake.canvas_observer import _next_url
 
     with pytest.raises(_Incomplete):
         _next_url(header, "/api/v1/courses/1/modules?per_page=50", ORIGIN)
@@ -708,7 +708,7 @@ class _Paged:
         self.total, self.per_page, self.urls = total, per_page, []
 
     def get_page(self, url, deadline):
-        from uls.intake.canvas_observer import _page_number
+        from syllva.intake.canvas_observer import _page_number
 
         self.urls.append(url)
         number = _page_number(url)
@@ -740,7 +740,7 @@ class _Sequenced:
         self.total, self.links, self.urls = total, links, []
 
     def get_page(self, url, deadline):
-        from uls.intake.canvas_observer import _page_number
+        from syllva.intake.canvas_observer import _page_number
 
         self.urls.append(url)
         number = _page_number(url)
@@ -778,7 +778,7 @@ def test_consecutive_next_links_read_every_page_once(harness) -> None:
 
 
 def test_a_last_link_beyond_the_current_page_without_a_next_link_is_incomplete() -> None:
-    from uls.intake.canvas_observer import _next_url
+    from syllva.intake.canvas_observer import _next_url
 
     here = "/api/v1/courses/1/modules?include[]=items&per_page=50"
     header = '</api/v1/courses/1/modules?include[]=items&per_page=50&page=3>; rel="last"'
@@ -829,7 +829,7 @@ def test_a_gate_that_fails_while_closing_denies_the_calendar_until_a_complete_ob
 
 def test_a_restarted_observer_does_not_vouch_for_a_persisted_proof_until_it_completes_an_observation(harness, tmp_path) -> None:
     assert harness.run().status == "COMPLETE" and harness.observer.current_proof(KEY)
-    from uls.intake.canvas_observer import CanvasObserver
+    from syllva.intake.canvas_observer import CanvasObserver
 
     reborn = CanvasObserver(
         harness.state, origin=ORIGIN, verified_origin=ORIGIN, course_map={COURSE_ID: KEY},

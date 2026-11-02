@@ -26,27 +26,27 @@ PINNED_SOURCE_ROOT_DEVICE = 16777230
 PINNED_SOURCE_ROOT_INODE = 22556999
 PINNED_SOURCE_PINS = MappingProxyType(
     {
-        "src/uls/cli/credential_set.py": (
+        "src/syllva/cli/credential_set.py": (
             "cada62beb0c0faacf34ed64e44eebb1cf24b6d6574380d0291943d709bc09e09",
             22654,
         ),
-        "src/uls/config/credentials.py": (
+        "src/syllva/config/credentials.py": (
             "ecbe398f52b4edf4267b07e368ae4e1a3413e0aa577dee0eac2fc4ae8cfefa86",
             20347,
         ),
-        "src/uls/settings/credential_admission.py": (
+        "src/syllva/settings/credential_admission.py": (
             "725b8098c8653b62853a5b15b1e93a30f2817058d4d25d87ab65e47b23586ff7",
             50977,
         ),
-        "src/uls/settings/credential_roles.py": (
+        "src/syllva/settings/credential_roles.py": (
             "f9f3ea23807747cc42ad7c08a9947ac255942619660218695e0e84eb58d763c9",
             4222,
         ),
-        "src/uls/settings/credential_stores.py": (
+        "src/syllva/settings/credential_stores.py": (
             "6ec843bcf25ef2046d3a580180468e658f923a816760c89a55eda7c5c7b88896",
             5608,
         ),
-        "src/uls/settings/credential_service.py": (
+        "src/syllva/settings/credential_service.py": (
             "ff2c8716b413d484b4bde3e1c70600df395ee0c9703fa2ee479081adeb889a8f",
             48443,
         ),

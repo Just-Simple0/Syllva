@@ -51,12 +51,12 @@ python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -e '.[dev,mcp,drive,notion,pdf]'
 
-uls init
-uls doctor
-uls behavior lint
+syllva init
+syllva doctor
+syllva behavior lint
 ```
 
-`uls init` creates local configuration/state only. It does not automatically watch Drive, create a Notion workspace, enroll credentials, or enable a scheduler.
+`syllva init` creates local configuration/state only. It does not automatically watch Drive, create a Notion workspace, enroll credentials, or enable a scheduler.
 
 Continue with the **[official documentation](https://just-simple0.github.io/Syllva/)** for the complete setup and usage flow.
 

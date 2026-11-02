@@ -12,14 +12,14 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures")
 
 from phase4 import phase4_proposal, ready_phase4
 
-from uls.adapters.drive.binding import (
+from syllva.adapters.drive.binding import (
     InMemorySourceBindingBackend,
     SourceBindingRecord,
     ValidatedSourceBindingResolver,
 )
-from uls.domain.approval_identity import canonical_semantics_from_queue
-from uls.domain.errors import ProviderUnavailableError, SourceUnavailableError
-from uls.domain.source_ref import SourceRef
+from syllva.domain.approval_identity import canonical_semantics_from_queue
+from syllva.domain.errors import ProviderUnavailableError, SourceUnavailableError
+from syllva.domain.source_ref import SourceRef
 
 
 def test_optional_absent_mirrors_preserve_canonical_identity() -> None:

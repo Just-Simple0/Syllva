@@ -10,8 +10,8 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
-from uls.config import google_oauth as oauth
-from uls.config.loader import load_config_unvalidated
+from syllva.config import google_oauth as oauth
+from syllva.config.loader import load_config_unvalidated
 
 pytestmark = pytest.mark.unit
 

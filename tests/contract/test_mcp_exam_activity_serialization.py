@@ -7,23 +7,23 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
-from uls.domain.academic import ActivityConstraintMetadata
-from uls.domain.enums import FreshnessStatus, SourceAuthority
-from uls.domain.errors import PolicyViolation
-from uls.domain.models import ContextPackage, EvidenceItem, PageLocator
-from uls.domain.provenance import Provenance
-from uls.domain.source_ref import SourceFingerprint, SourceRef
-from uls.mcp.schemas import (
+from syllva.domain.academic import ActivityConstraintMetadata
+from syllva.domain.enums import FreshnessStatus, SourceAuthority
+from syllva.domain.errors import PolicyViolation
+from syllva.domain.models import ContextPackage, EvidenceItem, PageLocator
+from syllva.domain.provenance import Provenance
+from syllva.domain.source_ref import SourceFingerprint, SourceRef
+from syllva.mcp.schemas import (
     ACTIVITY_CONTEXT_REQUEST_SCHEMA,
     CONTEXT_PACKAGE_RESPONSE_SCHEMA,
     EXAM_CONTEXT_REQUEST_SCHEMA,
     ActivityContextRequest,
     ExamContextRequest,
 )
-from uls.mcp.tools.activity import TOOL_NAME as ACTIVITY_TOOL_NAME
-from uls.mcp.tools.activity import ActivityContextTool
-from uls.mcp.tools.exam import TOOL_NAME as EXAM_TOOL_NAME
-from uls.mcp.tools.exam import ExamContextTool
+from syllva.mcp.tools.activity import TOOL_NAME as ACTIVITY_TOOL_NAME
+from syllva.mcp.tools.activity import ActivityContextTool
+from syllva.mcp.tools.exam import TOOL_NAME as EXAM_TOOL_NAME
+from syllva.mcp.tools.exam import ExamContextTool
 
 
 class _ReadOnlyEngine:

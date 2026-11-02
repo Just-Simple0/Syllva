@@ -10,10 +10,10 @@ from typing import Any
 
 import pytest
 
-from uls.domain.approval_identity import UsageSlotIdentity, c5_usage_snapshot_json
-from uls.domain.errors import ProviderWriteNotAppliedError
-from uls.intake.usage_range import ValidatedRangeRequest, parse_usage_range_input
-from uls.state.sqlite import SQLiteStateStore
+from syllva.domain.approval_identity import UsageSlotIdentity, c5_usage_snapshot_json
+from syllva.domain.errors import ProviderWriteNotAppliedError
+from syllva.intake.usage_range import ValidatedRangeRequest, parse_usage_range_input
+from syllva.state.sqlite import SQLiteStateStore
 
 COURSE = "10000000-0000-0000-0000-000000000001"
 SESSION = "20000000-0000-0000-0000-000000000001"
@@ -129,8 +129,8 @@ def test_producer_owner_survives_restart_until_exact_outcome(tmp_path: Path, out
                 "material_app_id": "COMP319-M03", "usage_role": "Primary",
                 "start_page": 1, "end_page": 2, "verified": False}
     empty = c5_usage_snapshot_json([])
-    from uls.domain.approval_identity import build_material_usage_semantics, canonical_action_json
-    from uls.domain.page_range import PageRange
+    from syllva.domain.approval_identity import build_material_usage_semantics, canonical_action_json
+    from syllva.domain.page_range import PageRange
 
     semantics = build_material_usage_semantics(
         operation="create_usage", target_entity_id="MU:deterministic", session_id="COMP319-S05",
@@ -178,8 +178,8 @@ def test_producer_owner_survives_restart_until_exact_outcome(tmp_path: Path, out
 
 
 def test_opt_in_profile_preserves_legacy_and_does_not_expand_intake_write_authority() -> None:
-    from uls.adapters.notion.intake import InMemoryNotionWorker, NotionIntakeWriter, intake_schemas
-    from uls.domain.errors import PolicyDeniedError
+    from syllva.adapters.notion.intake import InMemoryNotionWorker, NotionIntakeWriter, intake_schemas
+    from syllva.domain.errors import PolicyDeniedError
 
     legacy = intake_schemas()
     extended = intake_schemas("c5-range-v1")
@@ -202,7 +202,7 @@ def test_opt_in_profile_preserves_legacy_and_does_not_expand_intake_write_author
 
 
 def test_sdk_normalization_keeps_request_observation_metadata() -> None:
-    from uls.adapters.notion.intake import _normalize_page
+    from syllva.adapters.notion.intake import _normalize_page
 
     page = {"id": REQUEST, "created_time": "2026-09-20T00:00:00Z",
             "last_edited_time": "2026-09-20T00:00:01Z", "created_by": {"id": COURSE, "type": "person"},
@@ -214,8 +214,8 @@ def test_sdk_normalization_keeps_request_observation_metadata() -> None:
 
 
 def test_semester_bridge_keeps_physical_and_application_relations_separate() -> None:
-    from uls.adapters.notion.intake import InMemoryNotionWorker
-    from uls.adapters.notion.usage_range import UsageRangeNotionBridge, UsageRangeSources
+    from syllva.adapters.notion.intake import InMemoryNotionWorker
+    from syllva.adapters.notion.usage_range import UsageRangeNotionBridge, UsageRangeSources
 
     ids = [f"00000000-0000-0000-0000-{number:012d}" for number in range(1, 8)]
     sources = UsageRangeSources("semester", REQUEST, "semester", ids[0], ids[1], ids[2],
@@ -242,7 +242,7 @@ def test_semester_bridge_keeps_physical_and_application_relations_separate() -> 
     assert not hasattr(bridge.graph_view(), "update")
     assert all(event[0] in {"list", "read"} for event in backend.events or [])
     backend.data_sources[ids[5]][0].pop("archived")
-    from uls.domain.errors import SourceUnavailableError
+    from syllva.domain.errors import SourceUnavailableError
     with pytest.raises(SourceUnavailableError, match="archive evidence"):
         bridge.list_approval_rows()
 
@@ -252,9 +252,9 @@ def test_human_range_preparation_validates_sources_without_model_or_provider_wri
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "fixtures"))
     from tests.fixtures.phase4 import ready_phase4
 
-    from uls.domain.errors import SourcePartialError
-    from uls.domain.page_range import PageRange
-    from uls.proposal.material_usage import MaterialUsageProposalProducer
+    from syllva.domain.errors import SourcePartialError
+    from syllva.domain.page_range import PageRange
+    from syllva.proposal.material_usage import MaterialUsageProposalProducer
 
     graph, backend, drive, resolver = ready_phase4()
     producer = MaterialUsageProposalProducer(graph_reader=graph, source_reader=drive,
@@ -279,11 +279,11 @@ def handler_fixture(tmp_path: Path) -> tuple[Any, Any, Any, Any]:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "fixtures"))
     from tests.fixtures.phase4 import ready_phase4
 
-    from uls.adapters.notion.intake import InMemoryNotionWorker
-    from uls.adapters.notion.usage_range import UsageRangeNotionBridge, UsageRangeSources
-    from uls.config.schema import UlsConfig
-    from uls.intake.coordinator import RequestCoordinator
-    from uls.intake.usage_range import UsageRangeHandler
+    from syllva.adapters.notion.intake import InMemoryNotionWorker
+    from syllva.adapters.notion.usage_range import UsageRangeNotionBridge, UsageRangeSources
+    from syllva.config.schema import SyllvaConfig
+    from syllva.intake.coordinator import RequestCoordinator
+    from syllva.intake.usage_range import UsageRangeHandler
 
     graph, _, drive, resolver = ready_phase4()
     ids = [f"00000000-0000-0000-0000-{number:012d}" for number in range(1, 8)]
@@ -303,7 +303,7 @@ def handler_fixture(tmp_path: Path) -> tuple[Any, Any, Any, Any]:
     bridge = UsageRangeNotionBridge(backend, sources)
     state = SQLiteStateStore(tmp_path / "handler.db")
     handler = UsageRangeHandler(state=state, bridge=bridge, graph_reader=bridge.graph_view(), writer=None,
-                                source_reader=drive, source_binding_resolver=resolver, config=UlsConfig(),
+                                source_reader=drive, source_binding_resolver=resolver, config=SyllvaConfig(),
                                 clock=lambda: now[0], sleep=lambda seconds: now.__setitem__(0, now[0] + timedelta(seconds=seconds)))
     coordinator = RequestCoordinator(workspace="semester", source_ids=(ids[0],), list_records=bridge.list_rows,
                                      handlers={}, clock=lambda: now[0])
@@ -311,7 +311,7 @@ def handler_fixture(tmp_path: Path) -> tuple[Any, Any, Any, Any]:
 
 
 def test_actual_handler_unknown_claim_freshness_and_unseen_competitor(tmp_path: Path) -> None:
-    from uls.intake.usage_range import UsageFreshnessError
+    from syllva.intake.usage_range import UsageFreshnessError
 
     handler, state, backend, coordinator = handler_fixture(tmp_path)
     snapshot = coordinator.snapshot()
@@ -347,17 +347,17 @@ def test_actual_handler_unknown_claim_freshness_and_unseen_competitor(tmp_path: 
 def test_sdk_shaped_create_outbox_and_human_approval_lifecycle(tmp_path: Path, boundary: str, operation: str) -> None:
     from types import SimpleNamespace
 
-    from uls.adapters.notion.base import ApprovalReader, HumanApprovalApplier
-    from uls.adapters.notion.guarded import GuardedNotionWriter
-    from uls.adapters.notion.intake import (
+    from syllva.adapters.notion.base import ApprovalReader, HumanApprovalApplier
+    from syllva.adapters.notion.guarded import GuardedNotionWriter
+    from syllva.adapters.notion.intake import (
         NotionAPIWorker,
         _normalize_properties,
         _wire_value,
         intake_schemas,
     )
-    from uls.adapters.notion.usage_range import UsageRangeNotionBridge
-    from uls.config.schema import UlsConfig
-    from uls.intake.coordinator import RequestBarrier
+    from syllva.adapters.notion.usage_range import UsageRangeNotionBridge
+    from syllva.config.schema import SyllvaConfig
+    from syllva.intake.coordinator import RequestBarrier
 
     handler, state, memory, coordinator = handler_fixture(tmp_path)
     sources = handler.bridge.sources
@@ -495,9 +495,9 @@ def test_sdk_shaped_create_outbox_and_human_approval_lifecycle(tmp_path: Path, b
     applier = HumanApprovalApplier(writer, usage_intent_state=state, request_freshness=handler,
                                    graph_reader=handler.graph_reader, source_reader=handler.producer.source_reader,
                                    source_binding_resolver=handler.producer.source_binding_resolver,
-                                   config=UlsConfig(), automation_queue_id=sources.automation_queue)
+                                   config=SyllvaConfig(), automation_queue_id=sources.automation_queue)
     if boundary in {"new_request_after_marker", "cancel_after_target"}:
-        from uls.domain.errors import PolicyViolation
+        from syllva.domain.errors import PolicyViolation
         try:
             refused = applier.apply(proposal_id)
         except PolicyViolation:
@@ -513,8 +513,8 @@ def test_sdk_shaped_create_outbox_and_human_approval_lifecycle(tmp_path: Path, b
     assert str(outcome.state) == "APPLIED", outcome
     assert usage["Verified"] is (operation == "CREATE" or boundary == "verified_update") and queue["Decision"] == "Approve"
     assert usage["Start Page"] == (1 if operation == "CREATE" else 2)
-    from uls.domain.approval_identity import canonical_semantics_from_queue, derive_proposal_id
-    from uls.domain.errors import PolicyViolation
+    from syllva.domain.approval_identity import canonical_semantics_from_queue, derive_proposal_id
+    from syllva.domain.errors import PolicyViolation
 
     legacy_id = derive_proposal_id(queue["Proposal Type"], canonical_semantics_from_queue(queue))
     queue.pop("Proposal Envelope")

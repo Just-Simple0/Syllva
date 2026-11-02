@@ -35,7 +35,7 @@ This page gives one place to check whether a feature or document describes what 
 | Feature | Status | Notes |
 | --- | --- | --- |
 | Local MCP transport | Available | Default `mcp.mode: local`. |
-| Remote MCP transport (bearer/OAuth, TLS) | Held / paused by default | Disabled by default (`remote_mcp.enabled: false`); `uls doctor` only checks its credentials when explicitly enabled. |
+| Remote MCP transport (bearer/OAuth, TLS) | Held / paused by default | Disabled by default (`remote_mcp.enabled: false`); `syllva doctor` only checks its credentials when explicitly enabled. |
 
 ## How to read a document's own status label
 

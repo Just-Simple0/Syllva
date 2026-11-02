@@ -9,15 +9,15 @@ from datetime import datetime, timezone
 import pytest
 from phase4 import phase4_applier_kwargs, phase4_proposal, ready_phase4
 
-from uls.adapters.notion.base import (
+from syllva.adapters.notion.base import (
     ApprovalReader,
     Decision,
     HumanApprovalApplier,
     QueueState,
     upsert_proposal,
 )
-from uls.domain.errors import PolicyViolation
-from uls.domain.source_ref import SourceFingerprint
+from syllva.domain.errors import PolicyViolation
+from syllva.domain.source_ref import SourceFingerprint
 
 
 def _approved(writer, proposal):

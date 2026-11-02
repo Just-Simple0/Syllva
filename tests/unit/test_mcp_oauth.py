@@ -9,8 +9,8 @@ from mcp.server.auth.provider import AuthorizationParams, AuthorizeError
 from mcp.shared.auth import OAuthClientInformationFull
 from pydantic import AnyUrl, TypeAdapter
 
-from uls.config.errors import ConfigurationError
-from uls.mcp.transports.oauth import (
+from syllva.config.errors import ConfigurationError
+from syllva.mcp.transports.oauth import (
     READ_SCOPE,
     GoogleOAuthBrokerProvider,
     OAuthStore,

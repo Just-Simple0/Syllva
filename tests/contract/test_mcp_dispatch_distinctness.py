@@ -17,9 +17,9 @@ import yaml
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
-import uls.cli.main as cli_main
-from uls.behavior import asset_root
-from uls.config.errors import ConfigurationError
+import syllva.cli.main as cli_main
+from syllva.behavior import asset_root
+from syllva.config.errors import ConfigurationError
 
 pytestmark = pytest.mark.contract
 

@@ -3,9 +3,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
 import pytest
 
-from uls.domain.errors import ContextExpiredError
-from uls.domain.source_ref import SourceFingerprint
-from uls.ephemeral.memory import MemoryEphemeralStore
+from syllva.domain.errors import ContextExpiredError
+from syllva.domain.source_ref import SourceFingerprint
+from syllva.ephemeral.memory import MemoryEphemeralStore
 
 
 def test_capability_allowlist_uses_numeric_locator_containment() -> None:

@@ -3,7 +3,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
 import hashlib
 
-from uls.orchestration.jobs import derive_job_key
+from syllva.orchestration.jobs import derive_job_key
 
 
 def test_job_key_matches_frozen_byte_layout() -> None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from uls.settings.canvas_checks import CanvasCheckError, CanvasResponse, open_canvas_connection
+from syllva.settings.canvas_checks import CanvasCheckError, CanvasResponse, open_canvas_connection
 
 pytestmark = pytest.mark.unit
 

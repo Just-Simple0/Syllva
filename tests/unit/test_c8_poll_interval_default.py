@@ -14,9 +14,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
 import pytest
 
-from uls.config.loader import load_config
-from uls.config.schema import WorkerCfg
-from uls.config.validation import validate_config
+from syllva.config.loader import load_config
+from syllva.config.schema import WorkerCfg
+from syllva.config.validation import validate_config
 
 pytestmark = pytest.mark.unit
 

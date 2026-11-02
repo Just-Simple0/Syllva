@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from uls.intake.classification import s2
-from uls.intake.classification.taxonomy import Kind
+from syllva.intake.classification import s2
+from syllva.intake.classification.taxonomy import Kind
 
 pytestmark = pytest.mark.unit
 

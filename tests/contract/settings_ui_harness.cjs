@@ -118,7 +118,7 @@ const overview = (steps, pendingOperations) => ({
   setup_ready: Boolean(steps) && steps.every((s) => s.state === "Ready"),
   readiness_funnel: {
     ai_client: "not_proven", ai_client_note: "requires human confirmation through actual AI client use",
-    retrieval_credentials: "not_checked_here", retrieval_credentials_note: "run uls doctor to check credential readiness",
+    retrieval_credentials: "not_checked_here", retrieval_credentials_note: "run syllva doctor to check credential readiness",
     source_archival: "not_started", text_extraction: "not_started",
   },
   worker_enabled: false,

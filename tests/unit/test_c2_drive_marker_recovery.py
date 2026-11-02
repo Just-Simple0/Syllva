@@ -6,13 +6,13 @@ search outcomes and never silently re-create, auto-pick among duplicates, or tru
 search as an empty result.
 
 A code audit (.review/c2-audit-findings.md) found ensure_marked_folder()
-(src/uls/adapters/drive/worker.py) already implemented the complete-zero/exactly-one/multiple/
+(src/syllva/adapters/drive/worker.py) already implemented the complete-zero/exactly-one/multiple/
 lookup-indeterminate branching correctly but had zero direct unit test coverage. An independent
 insane-review of the first draft of this file found a genuine production gap while reviewing that
 coverage: the exactly-one reuse branch only checked owned_by_me, skipping the same
 require_private_ownership() boundary (shared-drive, owner-only permission readback, public-sharing,
 edit/move capability) that the create path enforces via GoogleDriveWorkerAdapter._validate_private_metadata
-and that src/uls/worker.py and src/uls/intake/registry.py already apply for every other Drive
+and that src/syllva/worker.py and src/syllva/intake/registry.py already apply for every other Drive
 write-destination folder in this codebase. A marker folder that is technically owned_by_me=True but has
 since been shared to another user, moved to a shared drive, or made public could otherwise be silently
 reused without those checks. Fixed by calling require_private_ownership(item, ...) on the reused match
@@ -30,7 +30,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
 import pytest
 
-from uls.adapters.drive.worker import (
+from syllva.adapters.drive.worker import (
     DRIVE_FOLDER_MIME,
     DriveMetadata,
     DriveWorkerCapabilities,
@@ -39,7 +39,7 @@ from uls.adapters.drive.worker import (
     ensure_marked_folder,
     require_private_ownership,
 )
-from uls.domain.errors import (
+from syllva.domain.errors import (
     PolicyDeniedError,
     ProviderUnavailableError,
     SourcePartialError,
@@ -144,7 +144,7 @@ def test_one_match_with_wrong_mime_is_rejected_without_creating() -> None:
 def test_one_match_failing_any_private_ownership_check_is_rejected(overrides: dict[str, Any]) -> None:
     """The reuse path must apply the exact same require_private_ownership()
     boundary as every other Drive write-destination folder in this codebase
-    (src/uls/worker.py, src/uls/intake/registry.py) -- not just owned_by_me.
+    (src/syllva/worker.py, src/syllva/intake/registry.py) -- not just owned_by_me.
     A marker folder that is technically owned_by_me=True but has since been
     shared to a shared drive, lost owner-only status, been made public, or
     lost edit/move capability must never be silently reused."""

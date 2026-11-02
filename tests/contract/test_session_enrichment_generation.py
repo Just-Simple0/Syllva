@@ -14,12 +14,12 @@ from fake_llm import (
     session_result,
     ungrounded_result,
 )
-from uls.adapters.llm.base import LLMEnrichmentResult
-from uls.domain.enums import Explicitness, ProcessingStatus
-from uls.domain.errors import SourcePartialError
-from uls.domain.source_ref import SourceFingerprint, SourceRef
-from uls.enrichment.session import generate_session_enrichment
-from uls.normalization.transcript import normalize_transcript
+from syllva.adapters.llm.base import LLMEnrichmentResult
+from syllva.domain.enums import Explicitness, ProcessingStatus
+from syllva.domain.errors import SourcePartialError
+from syllva.domain.source_ref import SourceFingerprint, SourceRef
+from syllva.enrichment.session import generate_session_enrichment
+from syllva.normalization.transcript import normalize_transcript
 
 
 FP = SourceFingerprint(1, "transcript-v1")
@@ -226,7 +226,7 @@ def test_ungrounded_candidates_are_dropped_and_never_rescued_as_inferred() -> No
 def test_false_explicit_claim_without_quote_is_downgraded() -> None:
     bad = session_result(explicitness="EXPLICIT")
     # The frozen result is immutable, so construct a replacement explicitly.
-    from uls.adapters.llm.base import LLMEnrichmentResult
+    from syllva.adapters.llm.base import LLMEnrichmentResult
 
     replacement = LLMEnrichmentResult(
         output=bad.output,
@@ -265,7 +265,7 @@ def test_one_invalid_candidate_does_not_drop_a_valid_sibling() -> None:
         good_evidence["topics"][0],
         {"locator": "COMP319-S05:t99:59:59", "quote": "unsupported"},
     ]
-    from uls.adapters.llm.base import LLMEnrichmentResult
+    from syllva.adapters.llm.base import LLMEnrichmentResult
 
     result = _generate(
         LLMEnrichmentResult(

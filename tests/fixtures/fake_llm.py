@@ -6,7 +6,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from copy import deepcopy
 from typing import Any
 
-from uls.adapters.llm.base import LLMEnrichmentResult
+from syllva.adapters.llm.base import LLMEnrichmentResult
 
 
 class LLMTransientError(RuntimeError):

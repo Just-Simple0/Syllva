@@ -23,26 +23,26 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 from no_v2_state import NoV2State
 from phase4 import ready_phase4
 
-from uls.config.schema import RetrievalCfg, UlsConfig
-from uls.domain.errors import (
+from syllva.config.schema import RetrievalCfg, SyllvaConfig
+from syllva.domain.errors import (
     LocatorNotAllowedError,
     LocatorStaleError,
     SourcePartialError,
     SourceUnavailableError,
 )
-from uls.domain.source_ref import SourceFingerprint
-from uls.ephemeral.memory import MemoryEphemeralStore
-from uls.retrieval.engine import RetrievalEngine
+from syllva.domain.source_ref import SourceFingerprint
+from syllva.ephemeral.memory import MemoryEphemeralStore
+from syllva.retrieval.engine import RetrievalEngine
 
 
-def _engine(reader: Any, drive: Any, *, config: UlsConfig | None = None) -> RetrievalEngine:
+def _engine(reader: Any, drive: Any, *, config: SyllvaConfig | None = None) -> RetrievalEngine:
     _, _, _, resolver = ready_phase4(drive=drive)
     return RetrievalEngine(
         reader,
         drive,
         NoV2State(),
         MemoryEphemeralStore(),
-        config or UlsConfig(),
+        config or SyllvaConfig(),
         source_binding_resolver=resolver,
     )
 
@@ -148,7 +148,7 @@ def test_initial_session_transcript_read_rechecks_the_mutated_basis(mutation: st
         drive,
         NoV2State(),
         MemoryEphemeralStore(),
-        UlsConfig(),
+        SyllvaConfig(),
         source_binding_resolver=resolver,
     )
     _install_read_mutation(
@@ -182,7 +182,7 @@ def test_initial_direct_material_read_does_not_issue_mutated_evidence(mutation: 
         drive,
         NoV2State(),
         MemoryEphemeralStore(),
-        UlsConfig(),
+        SyllvaConfig(),
         source_binding_resolver=resolver,
     )
     _install_read_mutation(
@@ -222,7 +222,7 @@ def test_initial_usage_material_read_rechecks_every_authorization_basis(mutation
         drive,
         NoV2State(),
         MemoryEphemeralStore(),
-        UlsConfig(),
+        SyllvaConfig(),
         source_binding_resolver=resolver,
     )
     _install_read_mutation(
@@ -259,7 +259,7 @@ def test_initial_provisional_usage_revocation_does_not_leave_provisional_flags(
         drive,
         NoV2State(),
         MemoryEphemeralStore(),
-        UlsConfig(),
+        SyllvaConfig(),
         source_binding_resolver=resolver,
     )
     _install_read_mutation(
@@ -305,7 +305,7 @@ def test_mutated_usage_drops_only_that_overlapping_sibling(
         drive,
         NoV2State(),
         MemoryEphemeralStore(),
-        UlsConfig(),
+        SyllvaConfig(),
         source_binding_resolver=resolver,
     )
     _install_read_mutation(
@@ -346,7 +346,7 @@ def test_retain_current_evidence_preserves_a_sibling_when_one_check_raises() -> 
         drive,
         NoV2State(),
         MemoryEphemeralStore(),
-        UlsConfig(),
+        SyllvaConfig(),
         source_binding_resolver=resolver,
     )
     package = engine.get_session_context("COMP319-S05")
@@ -385,7 +385,7 @@ def test_retain_current_evidence_rejects_count_mismatch_as_structured_failure() 
         drive,
         NoV2State(),
         MemoryEphemeralStore(),
-        UlsConfig(),
+        SyllvaConfig(),
         source_binding_resolver=resolver,
     )
     package = engine.get_session_context("COMP319-S05")
@@ -407,7 +407,7 @@ def test_retain_current_evidence_rejects_same_length_provisional_misalignment() 
         drive,
         NoV2State(),
         MemoryEphemeralStore(),
-        UlsConfig(),
+        SyllvaConfig(),
         source_binding_resolver=resolver,
     )
     package = engine.get_session_context("COMP319-S05")
@@ -438,7 +438,7 @@ def test_budget_keeps_only_the_binding_for_the_returned_duplicate_locator() -> N
     sibling = deepcopy(target)
     sibling.update({"ID": "MU:sibling", "Start Page": 1, "End Page": 1, "Verified": True})
     reader.material_usage["COMP319-S05"] = [target, sibling]
-    config = UlsConfig(
+    config = SyllvaConfig(
         retrieval=RetrievalCfg(
             max_evidence_items=3,
             max_chars_per_item=4000,
@@ -493,7 +493,7 @@ def test_final_usage_body_read_rechecks_full_authorization_basis(
         drive,
         NoV2State(),
         MemoryEphemeralStore(),
-        UlsConfig(),
+        SyllvaConfig(),
         source_binding_resolver=resolver,
     )
     package = engine.get_session_context("COMP319-S05")
@@ -538,7 +538,7 @@ def test_final_direct_material_body_read_rechecks_graph_and_fingerprint(
         drive,
         NoV2State(),
         MemoryEphemeralStore(),
-        UlsConfig(),
+        SyllvaConfig(),
         source_binding_resolver=resolver,
     )
     package = engine.get_material_context("COMP319-M03")
@@ -573,7 +573,7 @@ def test_final_transcript_body_read_rechecks_graph_and_fingerprint(mutation: str
         drive,
         NoV2State(),
         MemoryEphemeralStore(),
-        UlsConfig(),
+        SyllvaConfig(),
         source_binding_resolver=resolver,
     )
     package = engine.get_session_context("COMP319-S05")
@@ -609,7 +609,7 @@ def test_navigation_only_pointer_change_during_initial_material_read_preserves_i
         drive,
         NoV2State(),
         MemoryEphemeralStore(),
-        UlsConfig(),
+        SyllvaConfig(),
         source_binding_resolver=resolver,
     )
 
@@ -639,7 +639,7 @@ def test_navigation_only_pointer_change_during_final_material_read_preserves_ide
         drive,
         NoV2State(),
         MemoryEphemeralStore(),
-        UlsConfig(),
+        SyllvaConfig(),
         source_binding_resolver=resolver,
     )
     package = engine.get_material_context("COMP319-M03")

@@ -22,7 +22,7 @@ Syllva 0.1.3은 베타입니다. 일부 설정만 된 시스템을 준비 완료
 - secret을 저장소, prompt, client instruction에 넣지 않기;
 - write/retrieval 활성화 전 정확한 Drive/Notion/GitHub identity 검증;
 - 필요한 경우 worker와 MCP credential 분리;
-- 활성화 전 `uls doctor`와 필요한 read probe 실행;
+- 활성화 전 `syllva doctor`와 필요한 read probe 실행;
 - LMS credential/connection gate 통과 전 scheduler paused 유지;
 - 불확실한 외부 write 결과를 자동 성공이 아니라 reconcile 대상으로 처리;
 - 사람이 소유하는 verification/scope 결정을 보존.

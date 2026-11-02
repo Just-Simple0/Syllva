@@ -9,12 +9,12 @@ import pytest
 import yaml
 from tests.contract._settings_support import write_config
 
-from uls.config.mutation import atomic_replace_config
-from uls.settings import composition, credential_stores
-from uls.settings.config_service import ConfigStore, SettingsServiceError
-from uls.settings.credential_roles import ROLES
-from uls.settings.fake_mode import services as fake_mode_services
-from uls.settings.journal import JournalStore
+from syllva.config.mutation import atomic_replace_config
+from syllva.settings import composition, credential_stores
+from syllva.settings.config_service import ConfigStore, SettingsServiceError
+from syllva.settings.credential_roles import ROLES
+from syllva.settings.fake_mode import services as fake_mode_services
+from syllva.settings.journal import JournalStore
 
 pytestmark = pytest.mark.contract
 
@@ -53,8 +53,8 @@ def test_fake_composition_connects_and_selects_without_any_real_provider(tmp_pat
         raise AssertionError("real provider or store was selected")
 
     monkeypatch.setattr(composition, "secrets_directory", forbidden)
-    monkeypatch.setattr("uls.settings.credential_stores.explicit_os_keyring", forbidden)
-    monkeypatch.setattr("uls.settings.provider_checks.LiveReadOnlyTransport.request", forbidden)
+    monkeypatch.setattr("syllva.settings.credential_stores.explicit_os_keyring", forbidden)
+    monkeypatch.setattr("syllva.settings.provider_checks.LiveReadOnlyTransport.request", forbidden)
     config = ConfigStore(write_config(tmp_path))
     journal = JournalStore(tmp_path / "workspace")
     credentials, canvas = composition.build_settings_services(
@@ -97,7 +97,7 @@ def test_standalone_fake_services_never_reads_configured_external_google_file(
         read_attempts.append(Path(path))
         raise AssertionError("standalone fake service read configured external credentials")
 
-    monkeypatch.setattr("uls.settings.credential_service.read_secure_file", forbidden_read)
+    monkeypatch.setattr("syllva.settings.credential_service.read_secure_file", forbidden_read)
     card = next(card for card in credentials.cards()["cards"] if card["role"] == "google-mcp")
     assert (card["state"], card["source"], card["managed"], card["storage_label"],
             card["can_test"], card["can_detach"]) == (
@@ -138,8 +138,8 @@ def test_standalone_fake_services_reads_relative_google_only_from_fixed_store(
     def forbidden_input_path_read(*args, **kwargs):
         raise AssertionError("standalone fake service read a supplied Google path")
 
-    monkeypatch.setattr("uls.settings.credential_stores.read_secure_file", track_fake_store_read)
-    monkeypatch.setattr("uls.settings.credential_service.read_secure_file", forbidden_input_path_read)
+    monkeypatch.setattr("syllva.settings.credential_stores.read_secure_file", track_fake_store_read)
+    monkeypatch.setattr("syllva.settings.credential_service.read_secure_file", forbidden_input_path_read)
     card = next(card for card in credentials.cards()["cards"] if card["role"] == role_slug)
     assert isinstance(credentials, composition._FakeCredentialService)
     assert (card["state"], card["source"], card["managed"], card["storage_label"],
@@ -168,8 +168,8 @@ def test_standalone_fake_services_ignores_environment_path_even_if_active_store(
     def forbidden(*args, **kwargs):
         raise AssertionError("standalone fake service read an environment-provided path")
 
-    monkeypatch.setattr("uls.settings.credential_stores.read_secure_file", forbidden)
-    monkeypatch.setattr("uls.settings.credential_service.read_secure_file", forbidden)
+    monkeypatch.setattr("syllva.settings.credential_stores.read_secure_file", forbidden)
+    monkeypatch.setattr("syllva.settings.credential_service.read_secure_file", forbidden)
     raw = config.load().raw
     assert credentials.effective(role, raw) is None
     card = next(card for card in credentials.cards()["cards"] if card["role"] == role.slug)
@@ -191,8 +191,8 @@ def test_fake_mode_does_not_read_configured_external_files_or_environment(tmp_pa
     def forbidden(*args, **kwargs):
         raise AssertionError("external secret file read")
 
-    monkeypatch.setattr("uls.settings.credential_service.read_secure_file", forbidden)
-    monkeypatch.setattr("uls.settings.credential_stores.read_secure_file", forbidden)
+    monkeypatch.setattr("syllva.settings.credential_service.read_secure_file", forbidden)
+    monkeypatch.setattr("syllva.settings.credential_stores.read_secure_file", forbidden)
     cards = credentials.cards()["cards"]
     assert not any(card["can_test"] for card in cards)
     assert credentials.effective(ROLES["notion-mcp"], config.load().raw) is None
@@ -227,8 +227,8 @@ def test_fake_composition_reads_relative_managed_google_from_fixed_fake_store(
     def forbidden_input_path_read(*args, **kwargs):
         raise AssertionError("fake composition read a supplied Google path")
 
-    monkeypatch.setattr("uls.settings.credential_stores.read_secure_file", track_fake_store_read)
-    monkeypatch.setattr("uls.settings.credential_service.read_secure_file", forbidden_input_path_read)
+    monkeypatch.setattr("syllva.settings.credential_stores.read_secure_file", track_fake_store_read)
+    monkeypatch.setattr("syllva.settings.credential_service.read_secure_file", forbidden_input_path_read)
     card = next(card for card in credentials.cards()["cards"] if card["role"] == role_slug)
     assert (card["state"], card["source"], card["managed"], card["storage_label"],
             card["can_test"], card["can_detach"]) == (
@@ -263,8 +263,8 @@ def test_fake_composition_reads_only_active_store_for_expanduser_dotdot_path(tmp
     def forbidden_input_path_read(*args, **kwargs):
         raise AssertionError("fake composition read a supplied Google path")
 
-    monkeypatch.setattr("uls.settings.credential_stores.read_secure_file", track_fake_store_read)
-    monkeypatch.setattr("uls.settings.credential_service.read_secure_file", forbidden_input_path_read)
+    monkeypatch.setattr("syllva.settings.credential_stores.read_secure_file", track_fake_store_read)
+    monkeypatch.setattr("syllva.settings.credential_service.read_secure_file", forbidden_input_path_read)
     card = next(card for card in credentials.cards()["cards"] if card["role"] == role.slug)
     assert (card["state"], card["source"], card["managed"], card["storage_label"],
             card["can_test"], card["can_detach"]) == (
@@ -291,8 +291,8 @@ def test_fake_composition_never_reads_environment_path_even_if_it_is_active_stor
     def forbidden(*args, **kwargs):
         raise AssertionError("fake composition read an environment-provided path")
 
-    monkeypatch.setattr("uls.settings.credential_stores.read_secure_file", forbidden)
-    monkeypatch.setattr("uls.settings.credential_service.read_secure_file", forbidden)
+    monkeypatch.setattr("syllva.settings.credential_stores.read_secure_file", forbidden)
+    monkeypatch.setattr("syllva.settings.credential_service.read_secure_file", forbidden)
     raw = config.load().raw
     assert credentials.effective(role, raw) is None
     card = next(card for card in credentials.cards()["cards"] if card["role"] == role.slug)
@@ -331,8 +331,8 @@ def test_fake_composition_excludes_nonactive_google_file_candidates(
     def forbidden(*args, **kwargs):
         raise AssertionError("fake composition read a nonactive Google candidate")
 
-    monkeypatch.setattr("uls.settings.credential_stores.read_secure_file", forbidden)
-    monkeypatch.setattr("uls.settings.credential_service.read_secure_file", forbidden)
+    monkeypatch.setattr("syllva.settings.credential_stores.read_secure_file", forbidden)
+    monkeypatch.setattr("syllva.settings.credential_service.read_secure_file", forbidden)
     card = next(card for card in credentials.cards()["cards"] if card["role"] == role.slug)
     assert (card["state"], card["source"], card["managed"], card["storage_label"],
             card["can_test"], card["can_detach"]) == (

@@ -1,0 +1,339 @@
+"""Bounded deterministic text-PDF extraction.
+
+This module extracts source text only.  It does not summarize, call an AI
+provider, or claim a scanned/encrypted document is complete.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from enum import Enum
+from typing import Any
+
+import yaml  # type: ignore[import-untyped]
+
+from syllva.domain.source_ref import SourceRef
+
+MATERIAL_SCHEMA = "uls.material.v1"
+
+
+class PDFContentStatus(str, Enum):
+    READY = "Ready"
+    PARTIAL = "Partial"
+    NEEDS_REVIEW = "Needs Review"
+    UNAVAILABLE = "Unavailable"
+    FAILED = "Failed"
+
+
+@dataclass(frozen=True)
+class NormalizedPDF:
+    schema: str
+    entity_id: str
+    course_key: str
+    source_ref: SourceRef
+    source_hash: str
+    source_version: int
+    processor_version: str
+    normalized_at: str
+    status: PDFContentStatus | str
+    page_count: int
+    text: str
+    extracted_pages: int
+    missing_pages: tuple[int, ...] = ()
+    reason: str | None = None
+    page_texts: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.schema != MATERIAL_SCHEMA:
+            raise ValueError(f"schema must be {MATERIAL_SCHEMA}")
+        if not isinstance(self.source_ref, SourceRef):
+            raise TypeError("source_ref must be a SourceRef")
+        if not isinstance(self.source_hash, str) or not self.source_hash:
+            raise ValueError("source_hash is required")
+        if isinstance(self.source_version, bool) or not isinstance(self.source_version, int) or self.source_version < 1:
+            raise ValueError("source_version must be positive")
+        if isinstance(self.page_count, bool) or not isinstance(self.page_count, int) or self.page_count < 0:
+            raise ValueError("page_count must be non-negative")
+        if isinstance(self.extracted_pages, bool) or not isinstance(self.extracted_pages, int) or not 0 <= self.extracted_pages <= self.page_count:
+            raise ValueError("extracted_pages is outside page count")
+        if self.page_texts and len(self.page_texts) != self.page_count:
+            raise ValueError("page_texts must contain one entry per PDF page")
+        if any(not isinstance(value, str) for value in self.page_texts):
+            raise TypeError("page_texts must contain strings")
+        object.__setattr__(self, "status", PDFContentStatus(self.status))
+
+    @property
+    def content_status(self) -> str:
+        return self.status.value if isinstance(self.status, PDFContentStatus) else str(self.status)
+
+    @property
+    def text_status(self) -> str:
+        return self.content_status
+
+    @property
+    def text_source(self) -> str:
+        return "PDF Extract" if self.extracted_pages else "Unavailable"
+
+    @property
+    def derivative_status(self) -> str:
+        """Return the lower-case status used by normalized retrieval metadata."""
+
+        status = PDFContentStatus(self.status)
+        return {
+            PDFContentStatus.READY: "ready",
+            PDFContentStatus.PARTIAL: "partial",
+            PDFContentStatus.NEEDS_REVIEW: "needs_review",
+            PDFContentStatus.UNAVAILABLE: "failed",
+            PDFContentStatus.FAILED: "failed",
+        }[status]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "entity_id": self.entity_id,
+            "course_key": self.course_key,
+            "source_ref": {
+                "provider": self.source_ref.provider,
+                "file_id": self.source_ref.file_id,
+                "web_url": self.source_ref.web_url,
+            },
+            "source_hash": self.source_hash,
+            "source_version": self.source_version,
+            "processor_version": self.processor_version,
+            "normalized_at": self.normalized_at,
+            "status": self.derivative_status,
+            "page_count": self.page_count,
+            "extracted_pages": self.extracted_pages,
+            "missing_pages": list(self.missing_pages),
+            "reason": self.reason,
+        }
+
+    def to_markdown(self) -> str:
+        front_matter = yaml.safe_dump(self.as_dict(), allow_unicode=True, sort_keys=False).rstrip("\n")
+        return f"---\n{front_matter}\n---\n{self._page_body()}"
+
+    def _page_body(self) -> str:
+        if self.page_texts:
+            pages: list[str] = []
+            for page_number, page_text in enumerate(self.page_texts, start=1):
+                marker = f"[[page:{page_number}]]"
+                pages.append(f"{marker}\n{page_text}" if page_text else marker)
+            return "\n\n".join(pages)
+        if self.text and self.page_count == 1 and self.extracted_pages == 1:
+            return f"[[page:1]]\n{self.text}"
+        return self.text
+
+    render = to_markdown
+    serialize = to_markdown
+
+
+def extract_pdf(
+    raw: bytes,
+    *,
+    entity_id: str,
+    course_key: str,
+    source_ref: SourceRef,
+    source_hash: str | None = None,
+    source_version: int = 1,
+    processor_version: str = "1.3.0",
+    max_bytes: int = 20_000_000,
+    max_pages: int = 2_000,
+    max_extracted_chars: int = 5_000_000,
+    now: datetime | str | None = None,
+) -> NormalizedPDF:
+    """Extract text from a bounded PDF, retaining explicit partial states.
+
+    ``max_bytes``, ``max_pages`` and ``max_extracted_chars`` bound the
+    *result*: how much input this function will open, how many pages it will
+    attempt to extract, and how much extracted text it will retain and
+    return.  Exceeding any of them converts the result to ``Needs Review`` or
+    ``Partial`` instead of ``Ready``.
+
+    These bounds are not a substitute for OS-level memory/CPU isolation of
+    the underlying PDF parser.  ``len(reader.pages)`` (used to compare
+    against ``max_pages``) can itself expand a large page tree before that
+    comparison runs, and a single ``page.extract_text()`` call is not
+    interrupted partway through, so a pathological single page can still
+    cost memory/CPU before the ``max_extracted_chars`` check discards its
+    output.  Callers that need a hard resource ceiling against adversarial
+    PDFs should run this function in a separate process with an OS-level
+    memory/CPU/time limit.
+    """
+
+    if not isinstance(raw, bytes):
+        raise TypeError("PDF content must be bytes")
+    digest = source_hash or "sha256:" + hashlib.sha256(raw).hexdigest()
+    normalized_at = _timestamp(now)
+    if len(raw) > max_bytes:
+        return _result(
+            entity_id=entity_id, course_key=course_key, source_ref=source_ref,
+            source_hash=digest, source_version=source_version, processor_version=processor_version,
+            normalized_at=normalized_at, status=PDFContentStatus.NEEDS_REVIEW,
+            reason="PDF exceeds the bounded extraction limit",
+        )
+    try:
+        from io import BytesIO
+
+        from pypdf import PdfReader
+
+        reader = PdfReader(BytesIO(raw), strict=False)
+        # ``len(reader.pages)`` can itself raise for a malformed or
+        # encrypted PDF whose object/page tree is only parsed lazily on
+        # first access -- constructing PdfReader successfully does not
+        # guarantee the page tree is readable.  This access must stay
+        # inside the same fail-closed try/except as construction, or such
+        # a PDF would raise an uncaught exception instead of converting to
+        # the intended Needs Review state.
+        pages = len(reader.pages)
+    except ImportError:
+        return _result(
+            entity_id=entity_id, course_key=course_key, source_ref=source_ref,
+            source_hash=digest, source_version=source_version, processor_version=processor_version,
+            normalized_at=normalized_at, status=PDFContentStatus.UNAVAILABLE,
+            reason="PDF extraction dependency is not installed",
+        )
+    except Exception:  # noqa: BLE001 - malformed/encrypted PDF is an honest extraction state
+        return _result(
+            entity_id=entity_id, course_key=course_key, source_ref=source_ref,
+            source_hash=digest, source_version=source_version, processor_version=processor_version,
+            normalized_at=normalized_at, status=PDFContentStatus.NEEDS_REVIEW,
+            reason="PDF cannot be opened or is encrypted",
+        )
+
+    # A pathological page tree (e.g. a compact but deeply repeated
+    # structure) can declare far more pages than the byte-size bound would
+    # suggest.  Reject before the per-page extraction loop starts so this
+    # function never attempts per-page text extraction across an unbounded
+    # number of pages.  ``len(reader.pages)`` above may itself have already
+    # expanded the page tree to determine ``pages``; this check bounds what
+    # extract_pdf does *after* that count is known, not that earlier cost.
+    if pages > max_pages:
+        return _result(
+            entity_id=entity_id, course_key=course_key, source_ref=source_ref,
+            source_hash=digest, source_version=source_version, processor_version=processor_version,
+            normalized_at=normalized_at, status=PDFContentStatus.NEEDS_REVIEW,
+            page_count=pages,
+            reason=f"PDF exceeds the bounded page-count limit ({max_pages} pages)",
+        )
+
+    extracted: list[str] = []
+    page_texts: list[str] = []
+    missing: list[int] = []
+    extracted_chars = 0
+    truncated_for_size = False
+    for index, page in enumerate(reader.pages, start=1):
+        if truncated_for_size:
+            # Once the output-size bound is hit, stop calling
+            # extract_text() on further pages; each remaining page is
+            # recorded as not extracted so the Partial/Needs Review status
+            # and page_texts length invariant both stay accurate.  This
+            # bounds further extraction attempts, not the cost already
+            # paid by the single extract_text() call that just triggered
+            # truncation below -- that one page's text was already fully
+            # produced by pypdf before this function measured its length.
+            missing.append(index)
+            page_texts.append("")
+            continue
+        try:
+            text = page.extract_text()
+        except Exception:  # noqa: BLE001 - one unreadable page makes extraction partial
+            text = None
+        if not isinstance(text, str) or not text.strip():
+            missing.append(index)
+            page_texts.append("")
+            continue
+        normalized_text = text.replace("\r\n", "\n").replace("\r", "\n").rstrip()
+        if extracted_chars + len(normalized_text) > max_extracted_chars:
+            missing.append(index)
+            page_texts.append("")
+            truncated_for_size = True
+            continue
+        extracted.append(normalized_text)
+        page_texts.append(normalized_text)
+        extracted_chars += len(normalized_text)
+    extracted_text = "\n\n".join(extracted)
+    if pages == 0:
+        status = PDFContentStatus.NEEDS_REVIEW
+        reason = "PDF has no pages"
+    elif truncated_for_size:
+        status = PDFContentStatus.PARTIAL if extracted else PDFContentStatus.NEEDS_REVIEW
+        reason = (
+            "text extraction stopped after exceeding the bounded output-size"
+            " limit; page(s) not extracted: " + ", ".join(map(str, missing))
+        )
+    elif missing:
+        status = PDFContentStatus.PARTIAL if extracted else PDFContentStatus.NEEDS_REVIEW
+        reason = "text could not be extracted for page(s): " + ", ".join(map(str, missing))
+    else:
+        status = PDFContentStatus.READY
+        reason = None
+    return _result(
+        entity_id=entity_id, course_key=course_key, source_ref=source_ref,
+        source_hash=digest, source_version=source_version, processor_version=processor_version,
+        normalized_at=normalized_at, status=status, page_count=pages,
+        text=extracted_text,
+        extracted_pages=len(extracted),
+        missing_pages=tuple(missing),
+        reason=reason,
+        page_texts=tuple(page_texts),
+    )
+
+
+normalize_pdf = extract_pdf
+normalize_material_pdf = extract_pdf
+
+
+def _result(
+    *,
+    entity_id: str,
+    course_key: str,
+    source_ref: SourceRef,
+    source_hash: str,
+    source_version: int,
+    processor_version: str,
+    normalized_at: str,
+    status: PDFContentStatus,
+    page_count: int = 0,
+    text: str = "",
+    extracted_pages: int = 0,
+    missing_pages: tuple[int, ...] = (),
+    reason: str | None = None,
+    page_texts: tuple[str, ...] = (),
+) -> NormalizedPDF:
+    return NormalizedPDF(
+        schema=MATERIAL_SCHEMA,
+        entity_id=entity_id,
+        course_key=course_key,
+        source_ref=source_ref,
+        source_hash=source_hash,
+        source_version=source_version,
+        processor_version=processor_version,
+        normalized_at=normalized_at,
+        status=status,
+        page_count=page_count,
+        text=text,
+        extracted_pages=extracted_pages,
+        missing_pages=missing_pages,
+        reason=reason,
+        page_texts=page_texts,
+    )
+
+
+def _timestamp(value: datetime | str | None) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, str) and value:
+        return value
+    return datetime.now(UTC).isoformat()
+
+
+__all__ = [
+    "MATERIAL_SCHEMA",
+    "NormalizedPDF",
+    "PDFContentStatus",
+    "extract_pdf",
+    "normalize_material_pdf",
+    "normalize_pdf",
+]

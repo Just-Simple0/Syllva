@@ -32,10 +32,10 @@ Drive semester upload location
 ## Worker commands
 
 ```bash
-uls sync --max-jobs 20
-uls process --max-jobs 20
-uls run --max-jobs 20
-uls jobs --limit 20
+syllva sync --max-jobs 20
+syllva process --max-jobs 20
+syllva run --max-jobs 20
+syllva jobs --limit 20
 ```
 
 - `sync` discovers/projects current work without processing it.

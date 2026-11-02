@@ -58,7 +58,7 @@ not overwrite an external source (`CREDENTIAL_SOURCE_EXTERNAL`).
 
 ## 3. Connect from Local Settings
 
-1. Run `uls setup` and open the Settings page.
+1. Run `syllva setup` and open the Settings page.
 2. For the connection you want (Retrieval or Worker), start the Google
    sign-in. Your browser opens Google's consent page.
 3. Approve exactly the permission shown. Google redirects back to a page on

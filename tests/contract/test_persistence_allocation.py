@@ -3,7 +3,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
 from concurrent.futures import ThreadPoolExecutor
 
-from uls.state.sqlite import SQLiteStateStore
+from syllva.state.sqlite import SQLiteStateStore
 
 
 COURSE_KEY = "2026-1_COMP319-002"

@@ -7,7 +7,7 @@ import pytest
 from _settings_support import FETCH, HOST, NAVIGATE, ORIGIN, make_harness, reviewed_apply
 from starlette.testclient import TestClient
 
-from uls.settings.security import BOOTSTRAP_TTL_SECONDS, SESSION_COOKIE
+from syllva.settings.security import BOOTSTRAP_TTL_SECONDS, SESSION_COOKIE
 
 pytestmark = pytest.mark.contract
 

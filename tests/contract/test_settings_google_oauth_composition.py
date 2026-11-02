@@ -17,8 +17,8 @@ import yaml
 from tests.contract._settings_support import FETCH, HOST, NAVIGATE, write_config
 from tests.contract.test_settings_credential_service import service
 
-from uls.settings import composition, google_oauth, launcher
-from uls.settings.security import SessionSecurity, new_path_prefix
+from syllva.settings import composition, google_oauth, launcher
+from syllva.settings.security import SessionSecurity, new_path_prefix
 
 pytestmark = pytest.mark.contract
 REPO = Path(__file__).resolve().parents[2]
@@ -81,7 +81,7 @@ def test_real_composition_without_browser_has_no_opener_and_begin_fails_closed(t
         s, s.config, authority="127.0.0.1:4321", prefix=new_path_prefix(), security=security, opener=None)
     assert oauth.opener is None
     assert security.consume_bootstrap(token)
-    from uls.settings.config_service import SettingsServiceError
+    from syllva.settings.config_service import SettingsServiceError
     with pytest.raises(SettingsServiceError) as error:
         oauth.begin("mcp", {"generation": s.config.load().generation, "replace": False})
     assert error.value.code == "BROWSER_REQUIRED"
@@ -145,7 +145,7 @@ def test_launcher_terminal_order_blocks_oauth_closes_barrier_and_drains_before_s
         await asyncio.sleep(0.05)
         assert events[:2] == ["commit-entered", "invalidate"]
         assert server.barrier._closed and security.events == []
-        from uls.settings.security import BarrierClosed
+        from syllva.settings.security import BarrierClosed
         with pytest.raises(BarrierClosed):
             async with server.barrier.mutation():
                 pass
@@ -246,7 +246,7 @@ def test_launcher_terminal_order_keeps_waiting_beyond_one_drain_window(tmp_path,
 class _Launch:
     def __init__(self, config: Path, runtime: Path, fake_root: Path) -> None:
         env = {**os.environ, launcher.RUNTIME_DIR_ENV: str(runtime), composition.FAKE_STORES_ENV: str(fake_root)}
-        args = [sys.executable, "-m", "uls.cli.main", "--config", str(config), "setup", "--no-browser"]
+        args = [sys.executable, "-m", "syllva.cli.main", "--config", str(config), "setup", "--no-browser"]
         self.runtime = runtime
         self.proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
         self.lines: queue.Queue[str] = queue.Queue()

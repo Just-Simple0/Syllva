@@ -12,9 +12,9 @@ from pathlib import Path
 import pytest
 from _settings_support import make_harness, reviewed_apply
 
-from uls.config.mutation import ConfigFileLock
-from uls.orchestration import locks
-from uls.settings.journal import (
+from syllva.config.mutation import ConfigFileLock
+from syllva.orchestration import locks
+from syllva.settings.journal import (
     ACTION_SCHEMAS,
     JournalError,
     JournalStore,
@@ -195,7 +195,7 @@ def test_existing_intent_resumes_only_from_its_persisted_pre_state(tmp_path):
 
 _WRITER = """
 import sys
-from uls.settings.journal import JournalStore
+from syllva.settings.journal import JournalStore
 journal = JournalStore(sys.argv[1])
 ids = []
 for index in range(15):
@@ -234,7 +234,7 @@ def test_concurrent_cross_process_writers_keep_every_record(tmp_path):
 
 _RESERVER = """
 import sys
-from uls.settings.journal import JournalStore
+from syllva.settings.journal import JournalStore
 journal = JournalStore(sys.argv[1])
 binding = {'provider': 'canvas', 'profile': 'default', 'role': 'token', 'store_locator': 'a',
            'staging_locator': 's', 'backup_locator': 'b', 'config_path': 'c', 'config_dir_id': '1:2'}
@@ -344,7 +344,7 @@ def _run_multi_store(journal, tmp_path, fault):
 _RECONCILE = """
 import hashlib, json, sys
 from pathlib import Path
-from uls.settings.journal import JournalStore, reconcile_operation
+from syllva.settings.journal import JournalStore, reconcile_operation
 journal = JournalStore(sys.argv[1])
 out = []
 for pending in journal.unresolved():

@@ -52,7 +52,7 @@ Keep `/Users/admin/.codex/safety/state_check.py`, personal hooks/configuration a
 ```text
 contracts/        model-neutral Behavior Contract (study-behavior.md)
 clients/          Claude Skills / ChatGPT Instructions projections
-src/uls/          Python core (domain, retrieval, mcp, adapters, state, ephemeral, ...)
+src/syllva/          Python core (domain, retrieval, mcp, adapters, state, ephemeral, ...)
 deployment/       macOS launchd / Windows Task Scheduler / remote-mcp
 scripts/          Behavior Contract hash and drift linting
 tests/            unit / contract / integration / e2e / fixtures

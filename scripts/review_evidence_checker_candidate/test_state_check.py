@@ -16,7 +16,7 @@ from unittest import mock
 
 HERE = Path(__file__).absolute().parent
 REPO = HERE.parents[2]
-SOURCE_PATH = "src/uls/settings/credential_roles.py"
+SOURCE_PATH = "src/syllva/settings/credential_roles.py"
 SYNTHETIC_SOURCE = b"# reviewed synthetic source fixture\n"
 
 
@@ -423,14 +423,14 @@ class PinnedSourceSmokeTests(unittest.TestCase):
                 rejected_paths = (
                     "src/.env",
                     "src/.env.local",
-                    "src/uls/settings/credential_shadow.py",
+                    "src/syllva/settings/credential_shadow.py",
                     "src/secret/credential_roles.py",
                     "src/private.key",
                     "src/credential.pem",
                     "/tmp/credential_roles.py",
-                    "../src/uls/settings/credential_roles.py",
-                    "C:/src/uls/settings/credential_roles.py",
-                    "src\\uls\\settings\\credential_roles.py",
+                    "../src/syllva/settings/credential_roles.py",
+                    "C:/src/syllva/settings/credential_roles.py",
+                    "src\\syllva\\settings\\credential_roles.py",
                     "src/\x00credential_roles.py",
                 )
                 with self.assertRaises(CANDIDATE.InvalidRecord):

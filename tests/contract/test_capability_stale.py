@@ -3,10 +3,10 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
 import pytest
 
-from uls.domain.errors import ContextExpiredError, LocatorNotAllowedError, LocatorStaleError
-from uls.domain.source_ref import SourceFingerprint
-from uls.ephemeral.memory import MemoryEphemeralStore
-from uls.retrieval.capabilities import CapabilityBinding, authorize_locator, issue_context_capability
+from syllva.domain.errors import ContextExpiredError, LocatorNotAllowedError, LocatorStaleError
+from syllva.domain.source_ref import SourceFingerprint
+from syllva.ephemeral.memory import MemoryEphemeralStore
+from syllva.retrieval.capabilities import CapabilityBinding, authorize_locator, issue_context_capability
 
 
 def test_capability_fingerprint_must_match_current_source() -> None:

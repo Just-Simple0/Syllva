@@ -11,17 +11,17 @@ from collections.abc import Iterable, Mapping
 from copy import deepcopy
 from typing import Any
 
-from uls.adapters.notion.base import (
+from syllva.adapters.notion.base import (
     AutomationActor,
     _create_phase4_queue_once,
     enforce_write_policy,
     find_alias_matches,
     normalize_alias,
 )
-from uls.adapters.notion.guarded import _SCHEMAS, GuardedNotionWriter, _validate_queue_transition
-from uls.domain.course_identity import relation_page_ids, resolve_course_relation
-from uls.domain.errors import PolicyViolation, ProviderWriteNotAppliedError
-from uls.enrichment.schemas import coerce_enrichment
+from syllva.adapters.notion.guarded import _SCHEMAS, GuardedNotionWriter, _validate_queue_transition
+from syllva.domain.course_identity import relation_page_ids, resolve_course_relation
+from syllva.domain.errors import PolicyViolation, ProviderWriteNotAppliedError
+from syllva.enrichment.schemas import coerce_enrichment
 
 COURSE_KEY = "2026-1_COMP319-002"
 COURSE_PAGE_ID = "course-page-1"
@@ -298,7 +298,7 @@ class FakeNotionWriter:
         ]
 
     def read_approval(self, proposal_id: str) -> dict[str, Any] | None:
-        from uls.adapters.notion.base import _unique_approval_row
+        from syllva.adapters.notion.base import _unique_approval_row
 
         return _unique_approval_row(self.find_approval_rows(proposal_id), proposal_id)
 
@@ -404,7 +404,7 @@ class FakeNotionWriter:
         )
         if logical == "automationqueue":
             row = self._queue_row(entity_id)
-            from uls.adapters.notion.base import (
+            from syllva.adapters.notion.base import (
                 _unique_approval_row,
                 _validate_phase4_queue_identity,
             )

@@ -12,16 +12,16 @@ from fake_drive import FakeDriveReader
 from fake_notion import COURSE_KEY, FakeNotionReader, _material
 from no_v2_state import NoV2State
 
-from uls.adapters.drive.binding import ValidatedSourceBindingResolver
-from uls.config.schema import RetrievalCfg, UlsConfig
-from uls.domain.errors import LocatorNotAllowedError, PolicyDeniedError
-from uls.domain.source_ref import SourceFingerprint, SourceRef
-from uls.enrichment.schemas import EnrichmentRecord
-from uls.ephemeral.memory import MemoryEphemeralStore
-from uls.normalization.transcript import normalize_transcript
-from uls.retrieval import tags
-from uls.retrieval.engine import RetrievalEngine
-from uls.retrieval.schemas import evidence_item_to_dict
+from syllva.adapters.drive.binding import ValidatedSourceBindingResolver
+from syllva.config.schema import RetrievalCfg, SyllvaConfig
+from syllva.domain.errors import LocatorNotAllowedError, PolicyDeniedError
+from syllva.domain.source_ref import SourceFingerprint, SourceRef
+from syllva.enrichment.schemas import EnrichmentRecord
+from syllva.ephemeral.memory import MemoryEphemeralStore
+from syllva.normalization.transcript import normalize_transcript
+from syllva.retrieval import tags
+from syllva.retrieval.engine import RetrievalEngine
+from syllva.retrieval.schemas import evidence_item_to_dict
 
 pytestmark = pytest.mark.contract
 
@@ -71,7 +71,7 @@ def _engine(*, lines=(CLEAN, "Merge sort splits recursively."), pages=(CLEAN, "Q
             "COMP319-S05": SourceFingerprint(1, "transcript-hash-v1"), "transcript-05": SourceFingerprint(1, "transcript-hash-v1"),
             "COMP319-M03": SourceFingerprint(1, "material-hash-v1"), "material-m03": SourceFingerprint(1, "material-hash-v1")})
     engine = RetrievalEngine(
-        notion, drive, NoV2State(), MemoryEphemeralStore(), UlsConfig(retrieval=RetrievalCfg()),
+        notion, drive, NoV2State(), MemoryEphemeralStore(), SyllvaConfig(retrieval=RetrievalCfg()),
         source_binding_resolver=ValidatedSourceBindingResolver(drive))
     return engine, drive
 
@@ -211,7 +211,7 @@ def test_signals_tied_to_assignment_text_are_withheld() -> None:
 # --- Exam / concept / verify ---------------------------------------------------------------------------
 
 def test_search_concept_and_verify_follow_the_policy() -> None:
-    from uls.retrieval.additional import search_concept
+    from syllva.retrieval.additional import search_concept
 
     engine, _ = _engine(lines=("Binary search is covered.", ASSIGNMENT))
     default = search_concept(engine, COURSE_KEY, "binary")
@@ -299,7 +299,7 @@ def test_assignment_opt_in_must_be_a_real_boolean(value) -> None:
 
 
 def test_a_binding_rejects_a_non_boolean_opt_in() -> None:
-    from uls.retrieval.schemas import CapabilityBinding
+    from syllva.retrieval.schemas import CapabilityBinding
 
     with pytest.raises(ValueError):
         CapabilityBinding("S1", None, "h", 1, "professor_transcript", assignment_opt_in="false")  # type: ignore[arg-type]

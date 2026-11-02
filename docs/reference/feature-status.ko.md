@@ -35,7 +35,7 @@
 | 기능 | 상태 | 비고 |
 | --- | --- | --- |
 | Local MCP transport | 현재 사용 가능 | 기본값 `mcp.mode: local`. |
-| Remote MCP transport(bearer/OAuth, TLS) | 운영 보류(기본 정지) | 기본값이 `remote_mcp.enabled: false`이며, 명시적으로 활성화했을 때만 `uls doctor`가 관련 credential을 검사합니다. |
+| Remote MCP transport(bearer/OAuth, TLS) | 운영 보류(기본 정지) | 기본값이 `remote_mcp.enabled: false`이며, 명시적으로 활성화했을 때만 `syllva doctor`가 관련 credential을 검사합니다. |
 
 ## 문서 자체의 상태 표시를 읽는 법
 

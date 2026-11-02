@@ -39,7 +39,7 @@ private secret storage에서 최소 32자의 random URL-safe token을 만들고 
 실행:
 
 ```bash
-uls --config /absolute/config.yaml mcp remote
+syllva --config /absolute/config.yaml mcp remote
 ```
 
 token 값은 config file, client instruction, command argument, log, PR/issue 본문에 나타나면 안 됩니다. 만료 후 새 credential로 restart하고 하나의 development bearer를 자동 영구 credential로 연장하지 않습니다.

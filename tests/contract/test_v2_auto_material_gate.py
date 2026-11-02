@@ -11,10 +11,10 @@ from pathlib import Path
 
 import pytest
 
-from uls.config.schema import UlsConfig
-from uls.domain.errors import EntityNotFoundError
-from uls.ephemeral.memory import MemoryEphemeralStore
-from uls.retrieval.engine import RetrievalEngine
+from syllva.config.schema import SyllvaConfig
+from syllva.domain.errors import EntityNotFoundError
+from syllva.ephemeral.memory import MemoryEphemeralStore
+from syllva.retrieval.engine import RetrievalEngine
 
 pytestmark = pytest.mark.contract
 
@@ -37,7 +37,7 @@ def _engine(auto_ids: set[str], *, gate: bool = False):
 
     reader, _, drive, resolver = ready_phase4()
     reader.material_usage["COMP319-S05"][0]["Verified"] = True  # a verified Usage exposes the Material
-    config = UlsConfig()
+    config = SyllvaConfig()
     config.retrieval.v2_exposure_gate = gate
     state = _State(auto_ids)
     engine = RetrievalEngine(reader, drive, state, MemoryEphemeralStore(), config, source_binding_resolver=resolver)
@@ -70,7 +70,7 @@ def test_a_capability_issued_before_the_material_was_hidden_is_revoked() -> None
     package = engine.get_session_context("COMP319-S05")
     assert _material_locators(package)
     state.auto_ids.add("COMP319-M03")  # the Material is (re)classified as an AUTO product afterwards
-    from uls.domain.errors import LocatorNotAllowedError
+    from syllva.domain.errors import LocatorNotAllowedError
 
     with pytest.raises(LocatorNotAllowedError):  # the capability no longer authorizes the hidden Material
         engine.get_source_chunk(package.context_id, _material_locators(package)[0])
@@ -83,7 +83,7 @@ class _StateWithoutMarker:
 def test_an_engine_without_usable_state_fails_closed_while_the_gate_is_off() -> None:
     # r4 R3: neither a state without the marker interface nor NO state proves that no v2 Material
     # exists — a disabled classification flag says nothing about Materials created earlier.
-    from uls.domain.errors import SourceUnavailableError
+    from syllva.domain.errors import SourceUnavailableError
 
     engine, _ = _engine(set())
     engine.state_store = _StateWithoutMarker()

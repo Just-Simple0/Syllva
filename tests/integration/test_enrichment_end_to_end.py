@@ -12,15 +12,15 @@ from fake_drive import FakeDriveReader
 from fake_llm import FakeLLMAdapter, material_result, session_result
 from fake_notion import COURSE_KEY, FakeNotionReader, FakeNotionWriter
 
-from uls.adapters.drive.binding import ValidatedSourceBindingResolver
-from uls.config.schema import UlsConfig
-from uls.domain.enums import ProcessingStatus
-from uls.domain.source_ref import SourceFingerprint, SourceRef
-from uls.enrichment.writer import EnrichmentWriter
-from uls.ephemeral.memory import MemoryEphemeralStore
-from uls.normalization.transcript import normalize_transcript
-from uls.retrieval.engine import RetrievalEngine
-from uls.state.sqlite import SQLiteStateStore
+from syllva.adapters.drive.binding import ValidatedSourceBindingResolver
+from syllva.config.schema import SyllvaConfig
+from syllva.domain.enums import ProcessingStatus
+from syllva.domain.source_ref import SourceFingerprint, SourceRef
+from syllva.enrichment.writer import EnrichmentWriter
+from syllva.ephemeral.memory import MemoryEphemeralStore
+from syllva.normalization.transcript import normalize_transcript
+from syllva.retrieval.engine import RetrievalEngine
+from syllva.state.sqlite import SQLiteStateStore
 
 FP1 = SourceFingerprint(1, "transcript-v1")
 FP2 = SourceFingerprint(2, "transcript-v2")
@@ -104,7 +104,7 @@ def _engine(reader, drive):
         drive,
         NoV2State(),
         MemoryEphemeralStore(),
-        UlsConfig(),
+        SyllvaConfig(),
         source_binding_resolver=ValidatedSourceBindingResolver(drive),
     )
 

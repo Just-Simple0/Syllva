@@ -2,11 +2,11 @@
 from types import SimpleNamespace
 from uuid import UUID
 
-from uls.adapters.notion.intake import InMemoryNotionWorker
-from uls.config.schema import SemesterWorkspaceCfg, UlsConfig
-from uls.intake.composition import install_usage_range
-from uls.intake.coordinator import RequestCoordinator
-from uls.state.sqlite import SQLiteStateStore
+from syllva.adapters.notion.intake import InMemoryNotionWorker
+from syllva.config.schema import SemesterWorkspaceCfg, SyllvaConfig
+from syllva.intake.composition import install_usage_range
+from syllva.intake.coordinator import RequestCoordinator
+from syllva.state.sqlite import SQLiteStateStore
 
 
 def test_ready_c5_composition_constructs_real_handler_and_runs_empty_barrier(tmp_path):
@@ -18,7 +18,7 @@ def test_ready_c5_composition_constructs_real_handler_and_runs_empty_barrier(tmp
         input_requests_data_source_id=sources[5], material_usage_data_source_id=sources[6],
         automation_queue_data_source_id=sources[7],
     )
-    config = UlsConfig()
+    config = SyllvaConfig()
     config.notion.semester_workspaces = [workspace]
     backend = InMemoryNotionWorker({source: [] for source in sources[1:]}, parent_page_id=sources[0])
     worker = SimpleNamespace(workspaces=[workspace], request_coordinators=[], request_extension_readiness={})
@@ -41,7 +41,7 @@ def test_ready_c5_composition_merges_with_preinstalled_workspace_coordinator(tmp
         input_requests_data_source_id=sources[5], material_usage_data_source_id=sources[6],
         automation_queue_data_source_id=sources[7],
     )
-    config = UlsConfig()
+    config = SyllvaConfig()
     config.notion.semester_workspaces = [workspace]
     backend = InMemoryNotionWorker({source: [] for source in sources[1:]}, parent_page_id=sources[0])
     local_source = 'uls-submit:2026-2'

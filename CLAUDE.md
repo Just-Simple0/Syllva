@@ -65,7 +65,7 @@
 ```text
 contracts/        model-neutral Behavior Contract (study-behavior.md)
 clients/          Claude Skills / ChatGPT Instructions 프로젝션
-src/uls/          Python 코어 (domain, retrieval, mcp, adapters, state, ephemeral, ...)
+src/syllva/          Python 코어 (domain, retrieval, mcp, adapters, state, ephemeral, ...)
 deployment/       macOS launchd / Windows Task Scheduler / remote-mcp
 scripts/          Behavior Contract 해시/드리프트 린트
 tests/            unit / contract / integration / e2e / fixtures

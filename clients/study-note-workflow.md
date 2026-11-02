@@ -44,7 +44,7 @@ write outcome as a confirmed failure and repeatedly create a replacement.
 
 ## Local operator entry
 
-The implementation exposes `uls --config /absolute/path/config.yaml study-notes
+The implementation exposes `syllva --config /absolute/path/config.yaml study-notes
 status` and a separate `study-notes local` stdio entry. Local launch resolves no
 provider write credentials. The primary worker must separately be configured and
 running to prepare evidence and publish drafts. Enabling the submission entry alone

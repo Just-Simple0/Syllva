@@ -11,15 +11,15 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures")
 from fake_drive import FakeDriveReader
 from fake_llm import FakeLLMAdapter, LLMPermanentError, session_result
 from fake_notion import FakeNotionReader, FakeNotionWriter
-from uls.domain.enums import ProcessingStatus
-from uls.domain.errors import SourceUnavailableError
-from uls.domain.source_ref import SourceFingerprint, SourceRef
-from uls.enrichment._common import EnrichmentSafetyError, EnrichmentTerminalizationError
-from uls.enrichment.schemas import EnrichmentRecord
-from uls.enrichment.writer import EnrichmentWriter
-from uls.normalization.transcript import normalize_transcript
-from uls.orchestration.retry import ErrorClass
-from uls.state.sqlite import SQLiteStateStore
+from syllva.domain.enums import ProcessingStatus
+from syllva.domain.errors import SourceUnavailableError
+from syllva.domain.source_ref import SourceFingerprint, SourceRef
+from syllva.enrichment._common import EnrichmentSafetyError, EnrichmentTerminalizationError
+from syllva.enrichment.schemas import EnrichmentRecord
+from syllva.enrichment.writer import EnrichmentWriter
+from syllva.normalization.transcript import normalize_transcript
+from syllva.orchestration.retry import ErrorClass
+from syllva.state.sqlite import SQLiteStateStore
 
 
 FP = SourceFingerprint(1, "h")

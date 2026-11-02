@@ -18,13 +18,13 @@ from phase4 import (
 )
 from tests.fixtures.no_v2_state import NoV2State
 
-from uls.adapters.drive.binding import ValidatedSourceBindingResolver
-from uls.adapters.notion.base import HumanApprovalApplier, QueueState, upsert_proposal
-from uls.config.schema import UlsConfig
-from uls.domain.source_ref import SourceFingerprint
-from uls.ephemeral.memory import MemoryEphemeralStore
-from uls.proposal.exam_scope import build_exam_scope_proposal
-from uls.retrieval.engine import RetrievalEngine
+from syllva.adapters.drive.binding import ValidatedSourceBindingResolver
+from syllva.adapters.notion.base import HumanApprovalApplier, QueueState, upsert_proposal
+from syllva.config.schema import SyllvaConfig
+from syllva.domain.source_ref import SourceFingerprint
+from syllva.ephemeral.memory import MemoryEphemeralStore
+from syllva.proposal.exam_scope import build_exam_scope_proposal
+from syllva.retrieval.engine import RetrievalEngine
 
 
 def test_activity_derivative_provenance_and_exam_approval_flow_use_provider_neutral_boundaries() -> None:
@@ -45,7 +45,7 @@ def test_activity_derivative_provenance_and_exam_approval_flow_use_provider_neut
         drive,
         NoV2State(),
         MemoryEphemeralStore(),
-        UlsConfig(),
+        SyllvaConfig(),
         source_binding_resolver=resolver,
     )
 
@@ -76,7 +76,7 @@ def test_activity_derivative_provenance_and_exam_approval_flow_use_provider_neut
         graph_reader=reader,
         source_reader=drive,
         source_binding_resolver=resolver,
-        config=UlsConfig(),
+        config=SyllvaConfig(),
     ).apply(proposal.proposal_id)
 
     assert result.state is QueueState.APPLIED

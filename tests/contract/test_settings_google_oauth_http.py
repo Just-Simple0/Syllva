@@ -9,10 +9,10 @@ from starlette.testclient import TestClient
 from tests.contract._settings_support import FETCH, HOST, NAVIGATE, ORIGIN, write_config
 from tests.contract.test_settings_credential_service import service
 
-from uls.settings.app import create_settings_app
-from uls.settings.credential_roles import ROLES
-from uls.settings.google_oauth import FakeGoogleOAuthProvider, GoogleOAuthFlowService
-from uls.settings.security import SESSION_COOKIE, SessionSecurity, new_path_prefix
+from syllva.settings.app import create_settings_app
+from syllva.settings.credential_roles import ROLES
+from syllva.settings.google_oauth import FakeGoogleOAuthProvider, GoogleOAuthFlowService
+from syllva.settings.security import SESSION_COOKIE, SessionSecurity, new_path_prefix
 
 pytestmark = pytest.mark.contract
 
@@ -239,7 +239,7 @@ def test_close_drains_a_committing_save_before_ending_the_session(http):
 
 def test_oauth_connection_test_errors_are_code_only_while_service_account_shape_is_unchanged(http):
     client, s, _provider, _oauth, headers, _prefix = http
-    from uls.config import google_oauth as oauth
+    from syllva.config import google_oauth as oauth
     info = {"type": "authorized_user", "client_id": CLIENT["client_id"], "client_secret": CLIENT["client_secret"],
             "refresh_token": "rt-x", "token_uri": oauth.TOKEN_URI, "scopes": [oauth.MCP_SCOPE]}  # wrong scope for worker
     s.stores.write(ROLES_WORKER, json.dumps(info, sort_keys=True, separators=(",", ":")).encode())
@@ -247,7 +247,7 @@ def test_oauth_connection_test_errors_are_code_only_while_service_account_shape_
     raw["google_worker_credentials_path"] = ROLES_WORKER.locator(s.stores.root)
     import yaml
 
-    from uls.config.mutation import atomic_replace_config
+    from syllva.config.mutation import atomic_replace_config
     atomic_replace_config(s.config.path, yaml.safe_dump(raw, sort_keys=False).encode())
     response = client.post("/api/v1/connections/google/worker/test", json={}, headers=headers)
     assert response.status_code == 409 and response.json() == {"error": {"code": "OAUTH_GRANT_MISMATCH"}}
@@ -276,8 +276,8 @@ def test_connection_test_response_shape_follows_the_checked_snapshot_type(http):
     client, s, _provider, _oauth, headers, _prefix = http
     import yaml
 
-    from uls.config import google_oauth as oauth
-    from uls.config.mutation import atomic_replace_config
+    from syllva.config import google_oauth as oauth
+    from syllva.config.mutation import atomic_replace_config
     raw = s.config.load().raw
     raw["google_worker_credentials_path"] = ROLES_WORKER.locator(s.stores.root)
     atomic_replace_config(s.config.path, yaml.safe_dump(raw, sort_keys=False).encode())
@@ -309,7 +309,7 @@ def test_connection_test_response_shape_follows_the_checked_snapshot_type(http):
 def test_close_waits_beyond_one_drain_window_until_the_committing_save_finishes(http, monkeypatch):
     import threading
 
-    from uls.settings import app as app_module
+    from syllva.settings import app as app_module
     monkeypatch.setattr(app_module, "CLOSE_MUTATION_DRAIN_SECONDS", 0.1)
     client, s, provider, oauth, headers, _prefix = http
     generation = s.config.load().generation

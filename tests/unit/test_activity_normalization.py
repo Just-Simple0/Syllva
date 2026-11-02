@@ -9,20 +9,20 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures")
 
 from phase4 import COURSE_KEY
 
-from uls.domain.enums import DerivativeStatus
-from uls.domain.errors import SourcePartialError
-from uls.domain.source_ref import SourceFingerprint, SourceRef
-from uls.normalization.activity import (
+from syllva.domain.enums import DerivativeStatus
+from syllva.domain.errors import SourcePartialError
+from syllva.domain.source_ref import SourceFingerprint, SourceRef
+from syllva.normalization.activity import (
     ACTIVITY_SCHEMA,
     ActivityFrontMatter,
     NormalizedActivity,
     normalize_activity_instructions,
 )
-from uls.normalization.validators import (
+from syllva.normalization.validators import (
     parse_activity_derivative,
     validate_normalized_activity,
 )
-from uls.retrieval.chunking import page_chunks
+from syllva.retrieval.chunking import page_chunks
 
 
 def _activity(*, status: DerivativeStatus | str = DerivativeStatus.READY) -> NormalizedActivity:

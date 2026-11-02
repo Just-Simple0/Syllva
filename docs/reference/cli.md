@@ -7,10 +7,10 @@ The `uls` console entry point is defined by the package. Most commands accept th
 ## Setup and diagnosis
 
 ```text
-uls init
-uls doctor
-uls status
-uls behavior lint
+syllva init
+syllva doctor
+syllva status
+syllva behavior lint
 ```
 
 - `init` — create missing local config/state scaffolding.
@@ -21,12 +21,12 @@ uls behavior lint
 ## Worker
 
 ```text
-uls sync [--max-jobs N]
-uls process [--max-jobs N]
-uls run [--max-jobs N]
-uls jobs [--limit N]
-uls retry <job-id>
-uls reprocess <entity-id>
+syllva sync [--max-jobs N]
+syllva process [--max-jobs N]
+syllva run [--max-jobs N]
+syllva jobs [--limit N]
+syllva retry <job-id>
+syllva reprocess <entity-id>
 ```
 
 - `sync` — discover/register/project work without processing the full queue.
@@ -41,9 +41,9 @@ Worker mutations share the local single-active-worker lock.
 ## MCP
 
 ```text
-uls mcp local
-uls mcp remote
-uls mcp status
+syllva mcp local
+syllva mcp remote
+syllva mcp status
 ```
 
 - `local` — stdio MCP server; stdout is protocol output.
@@ -55,8 +55,8 @@ uls mcp status
 Examples in this repository commonly use:
 
 ```bash
-uls --config /ABSOLUTE/PATH/config.yaml doctor
-uls --config /ABSOLUTE/PATH/config.yaml mcp local
+syllva --config /ABSOLUTE/PATH/config.yaml doctor
+syllva --config /ABSOLUTE/PATH/config.yaml mcp local
 ```
 
 Use absolute paths in client/scheduler registrations to avoid dependence on the launch process's working directory.

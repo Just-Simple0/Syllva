@@ -11,7 +11,7 @@ from tests.integration.test_intake_worker_preview import (
     _provider_schema_payloads,
 )
 
-from uls.adapters.notion.intake import (
+from syllva.adapters.notion.intake import (
     STATUS_GROUPS,
     NotionAPIWorker,
     NotionIntakeWriter,

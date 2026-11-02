@@ -16,7 +16,7 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
-from uls.config.loader import load_config_unvalidated
+from syllva.config.loader import load_config_unvalidated
 
 pytestmark = pytest.mark.unit
 

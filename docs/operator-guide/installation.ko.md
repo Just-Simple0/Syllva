@@ -38,15 +38,15 @@ pip install -e '.[dev,mcp,drive,notion,pdf]'
 ## 로컬 상태 초기화
 
 ```bash
-uls init
-uls doctor
-uls status
-uls behavior lint
+syllva init
+syllva doctor
+syllva status
+syllva behavior lint
 ```
 
-`uls init`은 없는 로컬 설정/상태 파일만 만듭니다. 실제 Notion workspace provisioning, Drive 감시, credential 등록, scheduler 활성화를 하지 않습니다.
+`syllva init`은 없는 로컬 설정/상태 파일만 만듭니다. 실제 Notion workspace provisioning, Drive 감시, credential 등록, scheduler 활성화를 하지 않습니다.
 
-선택한 기능에 필요한 provider ID와 credential을 아직 넣지 않았다면 `uls doctor`가 미완료 설정을 보고하는 것이 정상입니다.
+선택한 기능에 필요한 provider ID와 credential을 아직 넣지 않았다면 `syllva doctor`가 미완료 설정을 보고하는 것이 정상입니다.
 
 ## 저장소 검사
 

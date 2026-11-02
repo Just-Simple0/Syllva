@@ -11,8 +11,8 @@ from typing import Any, cast
 
 import pytest
 
-from uls.settings import canvas_checks as checks
-from uls.settings.canvas_checks import CanvasCheckError, CanvasResponse
+from syllva.settings import canvas_checks as checks
+from syllva.settings.canvas_checks import CanvasCheckError, CanvasResponse
 
 pytestmark = pytest.mark.contract
 

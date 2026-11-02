@@ -56,7 +56,7 @@ Provision a random URL-safe token of at least 32 characters through private secr
 Start:
 
 ```bash
-uls --config /absolute/config.yaml mcp remote
+syllva --config /absolute/config.yaml mcp remote
 ```
 
 Token values must not appear in config files, client instructions, command arguments, logs, or PR/issue text. Restart with a new credential after expiry; do not turn one development bearer into a silently perpetual credential.

@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from uls.domain.enums import FreshnessStatus, SourceAuthority
-from uls.domain.models import EvidenceItem, PageLocator
-from uls.domain.provenance import Provenance
-from uls.domain.source_ref import SourceFingerprint, SourceRef
-from uls.retrieval import engine as engine_module
-from uls.retrieval.engine import RetrievalEngine
-from uls.retrieval.schemas import CapabilityBinding
+from syllva.domain.enums import FreshnessStatus, SourceAuthority
+from syllva.domain.models import EvidenceItem, PageLocator
+from syllva.domain.provenance import Provenance
+from syllva.domain.source_ref import SourceFingerprint, SourceRef
+from syllva.retrieval import engine as engine_module
+from syllva.retrieval.engine import RetrievalEngine
+from syllva.retrieval.schemas import CapabilityBinding
 
 FP = SourceFingerprint(1, "sha256:v1")
 

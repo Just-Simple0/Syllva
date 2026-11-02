@@ -13,10 +13,10 @@ from types import MappingProxyType
 
 import pytest
 
-from uls.config._secure_file import write_secure_file
-from uls.config.credentials import CredentialResolver, GoogleCredentialPayload
-from uls.config.errors import ConfigurationError
-from uls.runtime import _load_google_credentials
+from syllva.config._secure_file import write_secure_file
+from syllva.config.credentials import CredentialResolver, GoogleCredentialPayload
+from syllva.config.errors import ConfigurationError
+from syllva.runtime import _load_google_credentials
 
 pytestmark = pytest.mark.unit
 

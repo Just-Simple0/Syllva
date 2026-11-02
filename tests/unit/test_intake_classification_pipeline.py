@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from uls.intake.classification import (
+from syllva.intake.classification import (
     CourseAliasIndex,
     HandlingMode,
     Kind,
@@ -17,7 +17,7 @@ from uls.intake.classification import (
     SemesterRange,
     build_calendar,
 )
-from uls.intake.classification.pipeline import (
+from syllva.intake.classification.pipeline import (
     BLOCK_CALENDAR,
     BLOCK_COURSE_UNRESOLVED,
     BLOCK_HANDLING,
@@ -161,7 +161,7 @@ def test_forbidden_formats_are_terminal_without_a_probe() -> None:
 def test_a_decomposed_hangul_transcript_name_is_classified_like_the_composed_one() -> None:
     import unicodedata
 
-    from uls.intake.classification.taxonomy import Kind, Origin
+    from syllva.intake.classification.taxonomy import Kind, Origin
 
     composed = "2026.09.10_알고리즘2_1주차.md"
     decomposed = unicodedata.normalize("NFD", composed)
@@ -177,11 +177,11 @@ def test_a_decomposed_hangul_transcript_name_is_classified_like_the_composed_one
 def test_decomposed_aliases_and_weeks_resolve() -> None:
     import unicodedata
 
-    from uls.intake.classification.rules import CourseAliasIndex, week_from_filename
+    from syllva.intake.classification.rules import CourseAliasIndex, week_from_filename
 
     index = CourseAliasIndex.build([("2026-2_LMS67535-001", [unicodedata.normalize("NFD", "알고리즘2")])])
     assert index.resolve("알고리즘2") == "2026-2_LMS67535-001"
     assert week_from_filename(unicodedata.normalize("NFD", "강의자료_4주차.pdf")) == 4
-    from uls.intake.classification.rules import week_from_module_name
+    from syllva.intake.classification.rules import week_from_module_name
 
     assert week_from_module_name(unicodedata.normalize("NFD", "4주차")) == week_from_module_name("4주차") == 4

@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from uls.intake.canvas_composition import install_canvas_observer
-from uls.settings.canvas_service import canvas_profile_id
+from syllva.intake.canvas_composition import install_canvas_observer
+from syllva.settings.canvas_service import canvas_profile_id
 
 pytestmark = pytest.mark.unit
 
@@ -78,11 +78,11 @@ def test_course_map_is_read_live_from_the_config() -> None:
 
 
 def test_unreadable_credential_yields_no_reader(monkeypatch) -> None:
-    import uls.intake.canvas_composition as composition
+    import syllva.intake.canvas_composition as composition
 
     class _Boom:
         def __init__(self, *_a, **_k):
             raise RuntimeError("no keychain")
 
-    monkeypatch.setattr("uls.settings.credential_stores.CredentialStores", _Boom)
+    monkeypatch.setattr("syllva.settings.credential_stores.CredentialStores", _Boom)
     assert composition._settings_token_reader("c" + "0" * 32)() is None

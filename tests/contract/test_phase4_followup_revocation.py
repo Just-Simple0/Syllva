@@ -8,12 +8,12 @@ from pathlib import Path
 import pytest
 from tests.fixtures.no_v2_state import NoV2State
 
-from uls.adapters.drive.binding import SourceBindingRecord
-from uls.config.schema import UlsConfig
-from uls.domain.errors import LocatorNotAllowedError, LocatorStaleError
-from uls.domain.source_ref import SourceRef
-from uls.ephemeral.memory import MemoryEphemeralStore
-from uls.retrieval.engine import RetrievalEngine
+from syllva.adapters.drive.binding import SourceBindingRecord
+from syllva.config.schema import SyllvaConfig
+from syllva.domain.errors import LocatorNotAllowedError, LocatorStaleError
+from syllva.domain.source_ref import SourceRef
+from syllva.ephemeral.memory import MemoryEphemeralStore
+from syllva.retrieval.engine import RetrievalEngine
 
 
 def _ready_context():
@@ -25,7 +25,7 @@ def _ready_context():
     reader, _, drive, resolver = ready_phase4()
     reader.material_usage["COMP319-S05"][0]["Verified"] = True
     engine = RetrievalEngine(
-        reader, drive, NoV2State(), MemoryEphemeralStore(), UlsConfig(),
+        reader, drive, NoV2State(), MemoryEphemeralStore(), SyllvaConfig(),
         source_binding_resolver=resolver,
     )
     return reader, drive, engine

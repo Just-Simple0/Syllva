@@ -11,18 +11,18 @@ import pytest
 import yaml
 from _settings_support import make_harness, reviewed_apply
 
-from uls.config.mutation import ConfigLockTimeout
-from uls.settings import config_service
-from uls.settings.config_service import ConfigStore, SettingsServiceError
-from uls.settings.journal import SimulatedCrash
+from syllva.config.mutation import ConfigLockTimeout
+from syllva.settings import config_service
+from syllva.settings.config_service import ConfigStore, SettingsServiceError
+from syllva.settings.journal import SimulatedCrash
 
 pytestmark = pytest.mark.contract
 
 _WORKER = """
 import json, sys, time
 from pathlib import Path
-from uls.settings.config_service import ConfigStore, SettingsServiceError
-from uls.settings.journal import JournalStore
+from syllva.settings.config_service import ConfigStore, SettingsServiceError
+from syllva.settings.journal import JournalStore
 config, workspace, generation, zone, go = sys.argv[1:6]
 store = ConfigStore(config)
 values = {'system.timezone': zone}
@@ -39,8 +39,8 @@ except SettingsServiceError as exc:
 
 _RECOVER = """
 import json, sys
-from uls.settings.config_service import ConfigStore, SettingsServiceError
-from uls.settings.journal import JournalStore
+from syllva.settings.config_service import ConfigStore, SettingsServiceError
+from syllva.settings.journal import JournalStore
 journal = JournalStore(sys.argv[1])
 results = []
 for pending in journal.unresolved():

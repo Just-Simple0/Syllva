@@ -12,14 +12,14 @@ from fake_notion import FakeNotionReader
 from no_v2_state import NoV2State
 from phase4 import COURSE_KEY, COURSE_PAGE_ID, exam_record
 
-from uls.adapters.drive.binding import SourceBindingRecord, ValidatedSourceBindingResolver
-from uls.config.schema import UlsConfig
-from uls.domain.academic import ExamRecord
-from uls.domain.errors import LocatorNotAllowedError, SourceUnavailableError
-from uls.domain.source_ref import SourceFingerprint, SourceRef
-from uls.ephemeral.memory import MemoryEphemeralStore
-from uls.normalization.transcript import normalize_transcript
-from uls.retrieval.engine import RetrievalEngine
+from syllva.adapters.drive.binding import SourceBindingRecord, ValidatedSourceBindingResolver
+from syllva.config.schema import SyllvaConfig
+from syllva.domain.academic import ExamRecord
+from syllva.domain.errors import LocatorNotAllowedError, SourceUnavailableError
+from syllva.domain.source_ref import SourceFingerprint, SourceRef
+from syllva.ephemeral.memory import MemoryEphemeralStore
+from syllva.normalization.transcript import normalize_transcript
+from syllva.retrieval.engine import RetrievalEngine
 
 
 def _session(session_id: str, number: int) -> dict[str, object]:
@@ -83,7 +83,7 @@ def _engine(*, included_sessions=None, confirmed=True, omit_included=False):
         drive,
         NoV2State(),
         MemoryEphemeralStore(),
-        UlsConfig(),
+        SyllvaConfig(),
         source_binding_resolver=ValidatedSourceBindingResolver(drive),
     )
     return engine, reader, drive

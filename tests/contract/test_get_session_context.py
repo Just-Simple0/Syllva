@@ -11,25 +11,25 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures")
 from fake_drive import FakeDriveReader
 from fake_notion import COURSE_KEY, FakeNotionReader
 
-from uls.adapters.drive.binding import ValidatedSourceBindingResolver
-from uls.adapters.notion.base import NotionReader
-from uls.config.schema import RetrievalCfg, UlsConfig
-from uls.domain.errors import (
+from syllva.adapters.drive.binding import ValidatedSourceBindingResolver
+from syllva.adapters.notion.base import NotionReader
+from syllva.config.schema import RetrievalCfg, SyllvaConfig
+from syllva.domain.errors import (
     ContextExpiredError,
     LocatorNotAllowedError,
     LocatorStaleError,
     SourcePartialError,
     SourceUnavailableError,
 )
-from uls.domain.models import ContextPackage, TimeLocator
-from uls.domain.source_ref import SourceFingerprint, SourceRef
-from uls.enrichment.schemas import EnrichmentRecord
-from uls.ephemeral.memory import MemoryEphemeralStore
-from uls.normalization.transcript import normalize_transcript
-from uls.retrieval.chunking import timestamp_chunks
-from uls.retrieval.engine import RetrievalEngine
-from uls.retrieval.freshness import revalidate_locator
-from uls.retrieval.schemas import evidence_item_to_dict
+from syllva.domain.models import ContextPackage, TimeLocator
+from syllva.domain.source_ref import SourceFingerprint, SourceRef
+from syllva.enrichment.schemas import EnrichmentRecord
+from syllva.ephemeral.memory import MemoryEphemeralStore
+from syllva.normalization.transcript import normalize_transcript
+from syllva.retrieval.chunking import timestamp_chunks
+from syllva.retrieval.engine import RetrievalEngine
+from syllva.retrieval.freshness import revalidate_locator
+from syllva.retrieval.schemas import evidence_item_to_dict
 
 
 def _transcript(hash_value: str = "transcript-hash-v1", version: int = 1):
@@ -73,7 +73,7 @@ def _engine(*, notion=None, drive=None, retrieval=None) -> RetrievalEngine:
         drive,
         NoV2State(),
         MemoryEphemeralStore(),
-        UlsConfig(retrieval=retrieval or RetrievalCfg()),
+        SyllvaConfig(retrieval=retrieval or RetrievalCfg()),
         source_binding_resolver=ValidatedSourceBindingResolver(drive),
     )
 

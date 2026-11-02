@@ -28,7 +28,7 @@ Drive에 파일이 보인다는 사실만으로 intake 설정과 준비가 끝�
 - source가 허용된 과목/수업/자료 범위 밖에 있음;
 - 해당 client profile의 실제 환경 검증이 완료되지 않음.
 
-이 문제를 해결하려고 private credential이나 전체 비공개 source 파일을 prompt에 붙여 넣지 마세요. 운영자에게 `uls doctor`, MCP 등록, source readiness를 확인해 달라고 요청하세요.
+이 문제를 해결하려고 private credential이나 전체 비공개 source 파일을 prompt에 붙여 넣지 마세요. 운영자에게 `syllva doctor`, MCP 등록, source readiness를 확인해 달라고 요청하세요.
 
 ## AI가 컨텍스트가 모호하다고 해요
 
@@ -40,4 +40,4 @@ client가 과목/수업/자료 후보를 보여주면 올바른 후보를 선택
 
 ## 운영자 도움이 필요해요
 
-보이는 status/error code와 영향을 받은 과목/수업/request identity만 전달하세요. secret은 보내지 않습니다. 운영자 진단은 [운영자 가이드](../operator-guide/README.ko.md)의 `uls doctor`, `uls status`, `uls jobs`부터 시작합니다.
+보이는 status/error code와 영향을 받은 과목/수업/request identity만 전달하세요. secret은 보내지 않습니다. 운영자 진단은 [운영자 가이드](../operator-guide/README.ko.md)의 `syllva doctor`, `syllva status`, `syllva jobs`부터 시작합니다.

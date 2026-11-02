@@ -9,7 +9,7 @@ Syllva MCP server는 읽기 전용 학업 검색 경계입니다. AI client에�
 절대 실행 경로와 config 경로를 사용합니다.
 
 ```bash
-codex mcp add uls -- /ABSOLUTE/PATH/uls-venv/bin/uls \
+codex mcp add uls -- /ABSOLUTE/PATH/uls-venv/bin/syllva \
   --config /ABSOLUTE/PATH/config.yaml mcp local
 ```
 
@@ -17,7 +17,7 @@ codex mcp add uls -- /ABSOLUTE/PATH/uls-venv/bin/uls \
 
 ```toml
 [mcp_servers.uls]
-command = "/ABSOLUTE/PATH/uls-venv/bin/uls"
+command = "/ABSOLUTE/PATH/uls-venv/bin/syllva"
 args = ["--config", "/ABSOLUTE/PATH/config.yaml", "mcp", "local"]
 ```
 
@@ -31,7 +31,7 @@ client가 실제로 실행하는 환경에서 executable/config path를 검증�
 {
   "mcpServers": {
     "uls": {
-      "command": "/ABSOLUTE/PATH/uls-venv/bin/uls",
+      "command": "/ABSOLUTE/PATH/uls-venv/bin/syllva",
       "args": ["--config", "/ABSOLUTE/PATH/config.yaml", "mcp", "local"]
     }
   }
@@ -50,7 +50,7 @@ web client가 로컬 checkout이나 local stdio config를 읽을 수 있다고 �
 
 [설정](configuration.ko.md)에 문서화된 read-only MCP credential 경계를 사용하세요. 편의를 위해 worker write credential로 MCP server를 실행하지 않습니다.
 
-`uls mcp local`은 stdout을 MCP protocol message용으로 예약합니다. 운영 log가 stdio protocol output을 오염시키지 않아야 합니다.
+`syllva mcp local`은 stdout을 MCP protocol message용으로 예약합니다. 운영 log가 stdio protocol output을 오염시키지 않아야 합니다.
 
 ## 검증
 

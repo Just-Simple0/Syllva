@@ -1,7 +1,7 @@
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
-from uls.state.sqlite import SQLiteStateStore
+from syllva.state.sqlite import SQLiteStateStore
 
 
 def test_migrations_are_safe_to_apply_repeatedly(tmp_path) -> None:

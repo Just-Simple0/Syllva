@@ -9,14 +9,14 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures")
 
 from fake_notion import COURSE_KEY, FakeNotionReader
 
-from uls.config.schema import UlsConfig
-from uls.domain.errors import EntityNotFoundError, InvalidCandidateError, ResolutionExpiredError
-from uls.ephemeral.memory import MemoryEphemeralStore
-from uls.retrieval.engine import RetrievalEngine
+from syllva.config.schema import SyllvaConfig
+from syllva.domain.errors import EntityNotFoundError, InvalidCandidateError, ResolutionExpiredError
+from syllva.ephemeral.memory import MemoryEphemeralStore
+from syllva.retrieval.engine import RetrievalEngine
 
 
 def _engine(notion: FakeNotionReader | None = None, *, ttl: int = 900) -> RetrievalEngine:
-    config = UlsConfig()
+    config = SyllvaConfig()
     config.retrieval.resolution_ttl_seconds = ttl
     return RetrievalEngine(notion or FakeNotionReader(), object(), NoV2State(), MemoryEphemeralStore(), config)
 

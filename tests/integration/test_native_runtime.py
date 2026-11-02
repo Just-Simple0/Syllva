@@ -7,16 +7,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from uls.adapters.drive.binding import ValidatedSourceBindingResolver
-from uls.adapters.drive.google import GoogleDriveReader
-from uls.adapters.notion.api import NotionAPIReader
-from uls.config.schema import CourseCfg, NotionCfg, UlsConfig
-from uls.domain.errors import LocatorStaleError, SourcePartialError, SourceUnavailableError
-from uls.ephemeral.memory import MemoryEphemeralStore
-from uls.retrieval.engine import RetrievalEngine
-from uls.state.reader import ReadOnlyState
-from uls.state.sqlite import SQLiteStateStore
-from uls.worker import NativeWorker
+from syllva.adapters.drive.binding import ValidatedSourceBindingResolver
+from syllva.adapters.drive.google import GoogleDriveReader
+from syllva.adapters.notion.api import NotionAPIReader
+from syllva.config.schema import CourseCfg, NotionCfg, SyllvaConfig
+from syllva.domain.errors import LocatorStaleError, SourcePartialError, SourceUnavailableError
+from syllva.ephemeral.memory import MemoryEphemeralStore
+from syllva.retrieval.engine import RetrievalEngine
+from syllva.state.reader import ReadOnlyState
+from syllva.state.sqlite import SQLiteStateStore
+from syllva.worker import NativeWorker
 
 pytestmark = pytest.mark.integration
 COURSE = '2026-1_COMP319-002'
@@ -197,7 +197,7 @@ class DriveService:
 
 
 def config():
-    cfg = UlsConfig(courses=[CourseCfg(course_key=COURSE, code='COMP319', section='002', semester='2026-1')])
+    cfg = SyllvaConfig(courses=[CourseCfg(course_key=COURSE, code='COMP319', section='002', semester='2026-1')])
     cfg.notion = NotionCfg(**{name: name.removesuffix('_db_id') + '-db' for name in NotionCfg.__dataclass_fields__})
     return cfg
 
@@ -267,7 +267,7 @@ def test_native_worker_publication_and_read_only_retrieval_roundtrip(tmp_path, m
         refreshed = engine.get_session_context(source.canonical_entity_id)
         assert refreshed.sources and 'CPU' in refreshed.sources[0].content
         # A completed enrichment record is not a canonical derivative binding.
-        from uls.orchestration.jobs import derive_job_key
+        from syllva.orchestration.jobs import derive_job_key
         digest = state.get_source_file('raw1').current_hash
         ai_job = state.create_job(derive_job_key('raw1', digest, 'enrich_session', '1.2.0'),
                                   operation='enrich_session', stage='enrichment',
@@ -282,7 +282,7 @@ def test_native_worker_publication_and_read_only_retrieval_roundtrip(tmp_path, m
         assert engine.get_session_context(source.canonical_entity_id).sources
         # The local reprocess command selects ingestion, even when enrichment
         # is the newest job for this entity.
-        import uls.cli.main as cli
+        import syllva.cli.main as cli
         monkeypatch.setattr(cli, '_config', lambda _: cfg)
         queued = cli.dispatch(SimpleNamespace(command='reprocess', config=None,
                                               entity_id=source.canonical_entity_id))

@@ -4,7 +4,7 @@
 # ── 표시 규칙 (config.yaml을 채울 때) ─────────────────────────────────────
 #   [비밀·직접]     비밀값. 본인이 직접 넣고, 커밋·채팅·스크린샷 금지.
 #   [직접]          본인 환경 값(ID·주소·날짜·계정 번호). 비밀 아님.
-#   [Settings 관리] `uls setup`(Settings 화면)이 쓰는 값. 손으로 고치지 않음.
+#   [Settings 관리] `syllva setup`(Settings 화면)이 쓰는 값. 손으로 고치지 않음.
 #   표시 없음       기본값 그대로 두면 됨.
 # 비밀값 대부분(Notion·Canvas·TypeSafe 토큰)은 이 파일이 아니라 OS 키체인에 있고,
 # 이 파일에는 "어디서 읽을지"(credentials: source)만 적습니다.
@@ -220,7 +220,7 @@ intake:
     #   67535: "2026-2_LMS67535-001"
     #
     # Canvas metadata observation (off by default).  Connect Canvas first in
-    # "uls setup" -> Connections -> Canvas LMS (address -> Test & connect -> token ->
+    # "syllva setup" -> Connections -> Canvas LMS (address -> Test & connect -> token ->
     # select courses -> Apply selection); the token stays in the OS keychain.
     canvas_observation_enabled: false
     # [직접] Must equal canvas.profile.origin that Settings wrote, e.g. "https://canvas.example.edu".

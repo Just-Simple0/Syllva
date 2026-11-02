@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-모든 client는 동일한 읽기 전용 MCP 도구와 서버가 강제하는 evidence scope를 사용합니다. 공통 학습 행동의 canonical 문서는 `contracts/study-behavior.md`입니다. 각 instruction/skill projection은 공통 contract와의 관계를 유지해야 하며 packaging 전 `uls behavior lint`가 통과해야 합니다.
+모든 client는 동일한 읽기 전용 MCP 도구와 서버가 강제하는 evidence scope를 사용합니다. 공통 학습 행동의 canonical 문서는 `contracts/study-behavior.md`입니다. 각 instruction/skill projection은 공통 contract와의 관계를 유지해야 하며 packaging 전 `syllva behavior lint`가 통과해야 합니다.
 
 Syllva 0.1.3은 베타입니다. 저장소에 client projection이나 config 예제가 있다는 것은 integration 형태가 존재한다는 뜻이며, 실제 최종 사용자 client의 live domain E2E가 자동으로 완료되었다는 뜻은 아닙니다.
 

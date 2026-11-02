@@ -16,12 +16,12 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from uls.config.credentials import ResolvedCredentials
-from uls.config.errors import ConfigurationError
-from uls.config.schema import UlsConfig
-from uls.mcp.server import ReadOnlyMCP
-from uls.mcp.transports.remote import BearerCredential, create_remote_app
-from uls.runtime import require_mcp_credentials
+from syllva.config.credentials import ResolvedCredentials
+from syllva.config.errors import ConfigurationError
+from syllva.config.schema import SyllvaConfig
+from syllva.mcp.server import ReadOnlyMCP
+from syllva.mcp.transports.remote import BearerCredential, create_remote_app
+from syllva.runtime import require_mcp_credentials
 
 pytestmark = pytest.mark.contract
 
@@ -65,7 +65,7 @@ def remote_fixture():
     pytest.importorskip('mcp')
     from test_get_activity_context import _engine
     engine, _, _ = _engine()
-    config = UlsConfig()
+    config = SyllvaConfig()
     config.remote_mcp = replace(config.remote_mcp, enabled=True, public_url='https://uls.example/mcp')
     now = [time.time()]
     credential = BearerCredential('test-only-' + 'a' * 40, now[0] + 600)
@@ -162,10 +162,10 @@ def test_remote_app_with_oidc_verifier_authenticates_health_and_mcp_tools():
     from starlette.testclient import TestClient
     from test_get_activity_context import _engine
 
-    from uls.mcp.transports.oidc import JwksKeyManager, OidcTokenVerifier
+    from syllva.mcp.transports.oidc import JwksKeyManager, OidcTokenVerifier
 
     engine, _, _ = _engine()
-    config = UlsConfig()
+    config = SyllvaConfig()
     config.remote_mcp = replace(config.remote_mcp, enabled=True, public_url='https://uls.example/mcp')
 
     priv = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -227,10 +227,10 @@ def test_remote_app_hybrid_prevents_jwt_downgrade_to_bearer():
     from starlette.testclient import TestClient
     from test_get_activity_context import _engine
 
-    from uls.mcp.transports.oidc import JwksKeyManager, OidcTokenVerifier
+    from syllva.mcp.transports.oidc import JwksKeyManager, OidcTokenVerifier
 
     engine, _, _ = _engine()
-    config = UlsConfig()
+    config = SyllvaConfig()
     config.remote_mcp = replace(config.remote_mcp, enabled=True, public_url='https://uls.example/mcp')
 
     bearer = BearerCredential('b' * 40, time.time() + 600)
@@ -258,16 +258,16 @@ def test_mcp_oauth_full_sdk_flow_resource_binding_and_refresh_replay(tmp_path, m
     from starlette.testclient import TestClient
     from test_get_activity_context import _engine
 
-    from uls.mcp.transports.oauth import (
+    from syllva.mcp.transports.oauth import (
         GoogleOAuthBrokerProvider,
         OAuthStore,
         canonical_public_identity,
     )
-    from uls.mcp.transports.remote import create_mcp_oauth_app
+    from syllva.mcp.transports.remote import create_mcp_oauth_app
 
     engine, _, _ = _engine()
     registry = ReadOnlyMCP(engine)
-    config = UlsConfig()
+    config = SyllvaConfig()
     config.system = replace(config.system, workspace_dir=str(tmp_path))
     config.remote_mcp = replace(
         config.remote_mcp,
@@ -716,15 +716,15 @@ def test_mcp_oauth_cloudflare_edge_accepts_only_loopback_http(tmp_path):
     from starlette.testclient import TestClient
     from test_get_activity_context import _engine
 
-    from uls.mcp.transports.oauth import (
+    from syllva.mcp.transports.oauth import (
         GoogleOAuthBrokerProvider,
         OAuthStore,
         canonical_public_identity,
     )
-    from uls.mcp.transports.remote import create_mcp_oauth_app
+    from syllva.mcp.transports.remote import create_mcp_oauth_app
 
     engine, _, _ = _engine()
-    config = UlsConfig()
+    config = SyllvaConfig()
     config.system = replace(config.system, workspace_dir=str(tmp_path))
     config.remote_mcp = replace(
         config.remote_mcp,
@@ -782,13 +782,13 @@ def test_dispatch_oidc_mode_never_resolves_remote_bearer_credentials(tmp_path, m
     """rev3 plan section 5.1: auth_mode=='oidc' must resolve zero
     REMOTE_MCP_SECRET / REMOTE_MCP_EXPIRES_AT credentials -- they must
     never even enter the CredentialResolver.resolve() input set for the
-    'uls mcp remote' dispatch path, matching the doctor()-side exclusion.
+    'syllva mcp remote' dispatch path, matching the doctor()-side exclusion.
     """
     import yaml
 
-    from uls.behavior import asset_root
-    from uls.cli.main import dispatch, initialize, parser
-    from uls.config.credentials import CredentialResolver
+    from syllva.behavior import asset_root
+    from syllva.cli.main import dispatch, initialize, parser
+    from syllva.config.credentials import CredentialResolver
 
     raw = yaml.safe_load((asset_root() / 'config.example.yaml').read_text(encoding='utf-8'))
     raw['system']['workspace_dir'] = 'state'
@@ -835,8 +835,8 @@ def test_dispatch_oidc_mode_never_resolves_remote_bearer_credentials(tmp_path, m
     def fake_read_only_mcp(engine):
         return _FakeRegistry(engine)
 
-    monkeypatch.setattr('uls.mcp.server.ReadOnlyMCP', fake_read_only_mcp)
-    monkeypatch.setattr('uls.cli.main.build_retrieval', lambda cfg, creds: object())
+    monkeypatch.setattr('syllva.mcp.server.ReadOnlyMCP', fake_read_only_mcp)
+    monkeypatch.setattr('syllva.cli.main.build_retrieval', lambda cfg, creds: object())
 
     captured_run_remote: dict = {}
 
@@ -844,7 +844,7 @@ def test_dispatch_oidc_mode_never_resolves_remote_bearer_credentials(tmp_path, m
         captured_run_remote['credential'] = credential
         captured_run_remote['oidc_verifier'] = oidc_verifier
 
-    monkeypatch.setattr('uls.mcp.transports.remote.run_remote', fake_run_remote)
+    monkeypatch.setattr('syllva.mcp.transports.remote.run_remote', fake_run_remote)
 
     args = parser().parse_args(['--config', str(cfg_path), 'mcp', 'remote'])
     dispatch(args)
@@ -858,9 +858,9 @@ def test_dispatch_oidc_mode_never_resolves_remote_bearer_credentials(tmp_path, m
 def test_dispatch_mcp_oauth_requires_google_secret_and_never_resolves_legacy_bearer(tmp_path, monkeypatch):
     import yaml
 
-    from uls.behavior import asset_root
-    from uls.cli.main import dispatch, initialize, parser
-    from uls.config.credentials import CredentialResolver, ResolvedCredentials
+    from syllva.behavior import asset_root
+    from syllva.cli.main import dispatch, initialize, parser
+    from syllva.config.credentials import CredentialResolver, ResolvedCredentials
 
     raw = yaml.safe_load((asset_root() / 'config.example.yaml').read_text(encoding='utf-8'))
     raw['system']['workspace_dir'] = str(tmp_path / 'state')
@@ -902,8 +902,8 @@ def test_dispatch_mcp_oauth_requires_google_secret_and_never_resolves_legacy_bea
         def __init__(self, engine):
             self.engine = engine
 
-    monkeypatch.setattr('uls.mcp.server.ReadOnlyMCP', _FakeRegistry)
-    monkeypatch.setattr('uls.cli.main.build_retrieval', lambda cfg, creds: object())
+    monkeypatch.setattr('syllva.mcp.server.ReadOnlyMCP', _FakeRegistry)
+    monkeypatch.setattr('syllva.cli.main.build_retrieval', lambda cfg, creds: object())
 
     captured_run_remote: dict = {}
 
@@ -914,7 +914,7 @@ def test_dispatch_mcp_oauth_requires_google_secret_and_never_resolves_legacy_bea
         captured_run_remote['oidc_verifier'] = oidc_verifier
         captured_run_remote['google_client_secret'] = google_client_secret
 
-    monkeypatch.setattr('uls.mcp.transports.remote.run_remote', fake_run_remote)
+    monkeypatch.setattr('syllva.mcp.transports.remote.run_remote', fake_run_remote)
 
     args = parser().parse_args(['--config', str(cfg_path), 'mcp', 'remote'])
     dispatch(args)

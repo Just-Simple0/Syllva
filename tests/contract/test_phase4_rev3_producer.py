@@ -12,10 +12,10 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures")
 
 from phase4 import ready_phase4
 
-from uls.adapters.drive.binding import SourceBindingRecord
-from uls.domain.errors import SourcePartialError, SourceUnavailableError
-from uls.domain.source_ref import SourceFingerprint, SourceRef
-from uls.proposal.material_usage import MaterialUsageProposalProducer
+from syllva.adapters.drive.binding import SourceBindingRecord
+from syllva.domain.errors import SourcePartialError, SourceUnavailableError
+from syllva.domain.source_ref import SourceFingerprint, SourceRef
+from syllva.proposal.material_usage import MaterialUsageProposalProducer
 
 
 class Proposer:
@@ -162,7 +162,7 @@ def test_exact_sibling_appearing_during_model_is_reconciled(verified, count) -> 
 
 
 def test_queue_failure_reports_orphan_and_retry_reuses_same_usage(monkeypatch) -> None:
-    import uls.proposal.material_usage as module
+    import syllva.proposal.material_usage as module
 
     fixture = ready_phase4()
     reader, writer, *_ = fixture
