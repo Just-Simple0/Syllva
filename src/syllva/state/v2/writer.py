@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
@@ -82,6 +82,20 @@ class StateWriter:
                 self._connection.execute("COMMIT")
             finally:
                 self._depth = 0
+
+    # -- reads inside the write transaction ------------------------------------
+
+    def query(self, sql: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:
+        """Read through the writer connection (consistent with an open transaction). SELECT only."""
+
+        if not sql.lstrip().upper().startswith(("SELECT", "WITH")):
+            raise PolicyViolation("StateWriter.query accepts SELECT statements only")
+        with self._lock:
+            return list(self._connection.execute(sql, tuple(params)).fetchall())
+
+    def query_one(self, sql: str, params: Sequence[Any] = ()) -> sqlite3.Row | None:
+        rows = self.query(sql, params)
+        return rows[0] if rows else None
 
     # -- generic writes -------------------------------------------------------
 

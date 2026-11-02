@@ -53,4 +53,18 @@ class GitHubRef:
     ref: str
 
 
-__all__ = ["GitHubRef", "SourceFingerprint", "SourceRef"]
+# v2 providers (implementation spec §4.1). v1.2 code still constructs
+# ``google_drive`` references until it is removed (R1b-6); v2 code must use
+# ``v2_source_ref`` so a legacy provider can never enter v2 state.
+V2_PROVIDERS = frozenset({"local", "canvas", "github"})
+
+
+def v2_source_ref(provider: str, file_id: str) -> SourceRef:
+    if provider not in V2_PROVIDERS:
+        raise ValueError(f"unsupported v2 provider: {provider!r}")
+    if not isinstance(file_id, str) or not file_id.strip() or any(c in file_id for c in "/\\\x00"):
+        raise ValueError("file_id must be a non-empty identifier without path separators")
+    return SourceRef(provider, file_id.strip())
+
+
+__all__ = ["V2_PROVIDERS", "GitHubRef", "SourceFingerprint", "SourceRef", "v2_source_ref"]
