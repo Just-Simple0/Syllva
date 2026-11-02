@@ -1,6 +1,6 @@
-# Syllva v2 — Implementation Specification (DRAFT rev 1)
+# Syllva v2 — Implementation Specification (DRAFT rev 2)
 
-상태: **초안 rev 1 — 사용자 승인 전, 구현 금지.** 승인되면 `syllva-v2-implementation-spec-frozen.md`로 동결한다.
+상태: **초안 rev 2 — 독립 검토(Fable, NO-GO) 조건 1~7 반영. 재검토 전, 구현 금지.** 승인되면 `syllva-v2-implementation-spec-frozen.md`로 동결한다.
 작성: 2026-11-02 · 권위: `syllva-v2-design-frozen.md` (rev 4, 동결). 이 문서는 설계서를 **구현 가능한 수준으로 구체화**할 뿐이며 설계서를 바꾸지 못한다. 충돌하면 설계서가 우선하고 이 문서를 고친다.
 
 표기: **MUST / MUST NOT / SHOULD**는 RFC 2119 의미다. `C-nn`은 설계서 §11 계약 테스트 ID, `D§n`은 설계서 절, `v1.2-IS§n`은 v1.2 구현 명세서 절이다.
@@ -42,11 +42,12 @@
 | `retrieval/` | **유지·개정** | 생성자에서 `notion_reader`/`drive_reader` 제거(§9). `chunking.py`, `context.py` 전략 확장(§8). `capabilities.py`는 턴 컨텍스트 allowlist로 용도 변경(§8.6). `github.py` 선택 어댑터로 격리 |
 | `state/` | **개정** | 마이그레이션 `001_initial.sql`은 폐기하고 `001_v2_initial.sql` 신규(§3.4). `SQLiteStateStore`를 Writer/Reader로 분리(§3.5). `classification_state.py`, `usage_range.py`는 §3.6 표대로 선별 |
 | `ephemeral/` | **유지** | 용도 변경(D§6.1, §8.6). 모델 `ResolutionHandle`, `ResolvedEntity`, `AllowedLocator`는 그대로 사용 |
-| `ingestion/`, `normalization/`, `enrichment/` | **유지·개정** | 입력은 로컬 blob. 출력은 로컬 파생 blob + SQLite. Drive 경로 제거. 정규화 ≠ 요약 불변식(I3) 유지 |
+| `ingestion/`, `normalization/` | **유지·개정** | 입력은 로컬 blob. 출력은 로컬 파생 blob + SQLite. Drive 경로 제거. 정규화 ≠ 요약 불변식(I3) 유지 |
+| `enrichment/` | **결정적 경로만 유지, LLM 경로 비활성** | `enrichment/{writer,session,_common,material}.py`는 `adapters/llm`을 통한 외부 LLM 호출 경로를 가진다. 이 경로는 설계서의 AI 경로(도구 없는 CLI 에이전트, 칩 기반 전송 고지)를 거치지 않는 **두 번째 AI 경로**이므로 v2에서 **비활성**(설정으로도 켤 수 없음)으로 둔다. AI가 필요한 enrichment는 R5에서 `agents/`+`prompt/` 경로로 흡수할지 결정한다(§16). 결정적(비-LLM) enrichment는 유지 |
 | `intake/` | **분할** | `classification/`(규칙, S2, 달력, 분류) 유지. 나머지(`worker.py` 6,116줄, `coordinator.py`, `requests.py`, `registry.py`, `attestation.py`, `composition.py`, `planner.py` 등 Notion 요청/receipt/intent 모델)는 **재작성**(§11). 재사용 가능한 순수 로직(`identity.py`, `suggestion_display.py`)은 추출 |
 | `adapters/notion/`, `adapters/drive/` | **삭제** (R1c 말) | 삭제 전까지 import 금지 린트(§13.5) |
 | `adapters/github/` | **선택 어댑터로 격리** | 기본 비활성 |
-| `adapters/llm/` | **개정** | TypeSafe/Jev `typesafe_choice.py`는 분류 S2 용도로 남기되 에이전트 어댑터(§7)와 별개. `structured.py`는 재사용 후보 |
+| `adapters/llm/` | **격리(비활성)** | TypeSafe/Jev `typesafe_choice.py`(분류 S2)와 `structured.py`는 v2에서 **호출하지 않는다**(§11.2). 코드는 R5 결정 전까지 유지하되 import 금지 목록(§13.5)에 둔다 |
 | `mcp/` | **선택 어댑터로 격리** | 기본 비활성, 외부 노출 없음, 코드 삭제 안 함(D§7.3). `mcp/transports/{oidc,oauth,remote}`는 R6 전까지 로드 금지 |
 | `study_notes/` | **폐기** (쓰기 MCP `submit_study_note_draft` 포함) | 순수 도메인 로직 중 재사용 가능한 것(`core.py`의 상태기계 일부)만 `ai_artifacts` 경로로 추출 |
 | `settings/` | **UI 서버의 출발점** | `security.py`(CSP, Host/Sec-Fetch-Site, CSRF), `launcher.py`(bootstrap 토큰), `app.py`(Starlette), `static/`을 v2 UI 서버로 확장. Notion/Drive 설정 카드는 제거 |
@@ -54,7 +55,7 @@
 | `cli/` | **개정** | `syllva` 명령. `init`, `doctor`, `status`, `run`(=Core 헤드리스 실행)은 유지. `mcp`, `study-notes`, `sync`, `process` 중 Notion/Drive 의존 명령은 제거 |
 | `orchestration/` | **유지** | `locks.py`(단일 워커 락) → §2.4의 DB 독점 락으로 확장. `jobs.py`, `retry.py`, `runner.py` 유지 |
 | `worker.py`, `runtime.py` | **재작성** | 컴포지션 루트. Notion/Drive 와이어링 제거 |
-| `behavior/` | **재작성** | Behavior Contract v4 = 프롬프트 템플릿 레지스트리(§8.2) |
+| `behavior.py` (단일 모듈) | **재작성** | Behavior Contract v4 = 프롬프트 템플릿 레지스트리(§8.2). 템플릿은 새 디렉터리 `src/syllva/prompt/templates/` |
 | `proposal/` | **유지·개정** | 제안/승인 라이프사이클(v1.2-IS§15.2)의 의미를 Human-Proof(§6)와 결합 |
 
 ### 1.2 신규 패키지
@@ -79,6 +80,8 @@ prompt: state를 import 금지 (ContextPackage만 입력)
 ```
 
 `agents`와 `prompt`가 DB/Reader에 닿지 않는다는 것은 구조적 불변식이다. import-linter 계약으로 CI에서 강제한다(C-02 보조).
+
+**점감(ratchet) 도입**: 현재 코드는 위 규칙을 이미 위반한다. 2026-11-02 확인된 목록: `retrieval/engine.py`(adapters.drive/notion/github), `retrieval/resolver.py`·`retrieval/_compat.py`(adapters.notion), `state/reader.py`(adapters.drive), `state/sqlite.py`·`state/classification_state.py`·`state/usage_range.py`(intake), `ingestion/discovery.py`(adapters.drive.worker), `enrichment/writer.py`(adapters.notion). R1b-1은 이 목록을 **허용 예외(ignore_imports)** 로 고정한 계약을 도입하고, 이후 PR은 예외를 **줄이기만** 할 수 있다(목록에 새 항목 추가 시 CI 실패). R1b 완료 시 예외 목록은 비어야 한다.
 
 ---
 
@@ -119,11 +122,11 @@ D§3.1과 같다: Shell(Tauri/Rust), Core(Python sidecar), Agent(질문 1건당 
 | C→S | `ready` | `port`, `bootstrap`, `core_version` | 기동 완료 |
 | C→S | `error` | `code`, `message` | 치명 오류 (`DB_LOCKED`, `MIGRATION_FAILED`, …) |
 | S→C | `gate.get` | `nonce_id` | 확인 다이얼로그에 표시할 정보 요청 |
-| C→S | `gate.view` | `nonce_id`, `summary`, `target_id`, `target_label`, `expires_at` | 표시용 요약 (§6.3) |
+| C→S | `gate.view` | `nonce_id`, `summary`, `target_id`, `target_label`, `source_ids[]`, `source_hash_prefixes[]`, `request_hash`, `expires_in_ms` | 표시용 요약 (§6.3) |
 | C→S | `gate.none` | `nonce_id`, `reason` | 없음/만료/이미 사용 |
 | S→C | `gate.confirm` | `nonce_id`, `mac_b64` | 사용자가 확인함. MAC은 §6.4 |
 | S→C | `gate.deny` | `nonce_id` | 사용자가 취소함 |
-| C→S | `gate.result` | `nonce_id`, `status` (`CONFIRMED`/`REJECTED`), `reason?` | 결과 |
+| C→S | `gate.result` | `nonce_id`, `status` (`COMMITTED`/`REJECTED`/`DENIED`/`EXPIRED`), `reason?` | 결과. Shell은 이를 `confirm_gate` Tauri 커맨드의 반환값으로 UI에 돌려준다 |
 | S→C | `shutdown` | `grace_ms` | 정상 종료 요청 |
 | C→S | `bye` | | 종료 직전 |
 | 양방향 | `ping`/`pong` | `seq` | 10초마다 Shell이 `ping`, Core는 `pong` |
@@ -136,6 +139,7 @@ Core는 `stdout`을 **프로토콜 전용**으로 쓴다. 일반 로그는 stder
 - **DB 독점 락**: 앱 데이터 디렉터리의 `db.lock` 파일에 **OS 수준 배타 락**을 건다(POSIX `fcntl.flock` / Windows `msvcrt.locking`, 현 `orchestration/locks.py`의 크로스플랫폼 프리미티브 재사용). 락을 쥔 프로세스만 SQLite 파일을 연다. Shell이 재시작되어 두 번째 Core가 떠도 락 획득에 실패하면 `DB_LOCKED`로 즉시 종료한다(C-20).
 - **Shell 비정상 종료**: Core는 stdin EOF로 위 규칙에 따라 종료한다. 사용자가 Core를 단독 실행(`syllva run`)하는 헤드리스 모드는 개발·CI용이며 Human-Proof가 **불가능**하다(§6.7).
 - **에이전트 자식**: 각 에이전트 프로세스는 Core의 프로세스 그룹/Job Object에 속하게 해 Core 종료 시 함께 종료한다(Windows: Job Object `KILL_ON_JOB_CLOSE`, POSIX: 새 프로세스 그룹 + `killpg`).
+- **stdio 비상속**: 에이전트 자식의 stdin/stdout/stderr는 **새 파이프**이며 Core의 Shell 프로토콜 파이프를 상속하지 않는다. POSIX `close_fds=True`, Windows는 `STARTUPINFO` 핸들 상속을 명시한 핸들 목록(`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`)으로 제한한다(C-20).
 
 ### 2.5 종료 코드
 
@@ -171,7 +175,7 @@ Core는 `stdout`을 **프로토콜 전용**으로 쓴다. 일반 로그는 stder
   backups/                   # online backup 결과
 ```
 
-- **에이전트 cwd는 `<data>` 밖**이다(D§5.2-6, C-08). `build_agent_launch`는 OS 임시 디렉터리(`tempfile.mkdtemp(prefix="syllva-agent-")`, 권한 0700)에 빈 디렉터리를 만들어 cwd로 쓰고 Run 종료 시 삭제한다. `<data>`·DB·blobs를 가리키는 경로, 심볼릭 링크, 환경변수가 없어야 하며, cwd의 `realpath`가 `<data>`의 하위도 상위도 아니어야 한다(C-08). 데이터 디렉터리가 임시 디렉터리 아래로 설정된 경우(`SYLLVA_DATA_DIR`) 기동을 거부한다.
+- **에이전트 cwd는 `<data>` 밖**이다(D§5.2-6, C-08). `build_agent_launch`는 OS 임시 디렉터리(`tempfile.mkdtemp(prefix="syllva-agent-")`, 권한 0700)에 빈 디렉터리를 만들어 cwd로 쓰고 Run 종료 시 삭제한다. `<data>`·DB·blobs를 가리키는 경로, 심볼릭 링크, 환경변수가 없어야 하며, cwd의 `realpath`가 `<data>`의 하위도 상위도 아니어야 한다(C-08).
 - 모든 경로 비교는 `os.path.realpath` + NFC 정규화 후 수행한다.
 
 ### 3.2 blob 저장소
@@ -226,6 +230,9 @@ class StateReader:   # mode=ro, 읽기 메서드만. 쓰기 SQL 실행 시 sqlit
 | **유지(컬럼 정리)** | `classification_records`, `intake_suggestions`(→ `review_items`로 개명 검토), `canvas_observations`, `canvas_classifications`, `recording_calendar`, `recording_calendar_current`, `recording_calendar_courses`, `chunk_tag_decisions`, `chunk_tag_attempts`, `document_tag_manifests`, `document_tag_bases`, `classification_cursors`, `classification_s2_cache`, `terminal_change_ledger`(용도 재검토) |
 | **폐기** | `request_receipts`, `provider_write_attempts`, `intake_plans`, `entity_reservations`(Notion 예약 모델), `session_source_bindings`, `intake_stage_events`, `study_note_heads`, `range_intent_heads`, `usage_proposal_outbox`, `range_intent_claims`, `usage_apply_guards`, `note_jobs`, `note_attempts`, `note_request_references`, `note_artifacts`, `range_request_receipts`, `range_producer_intents`, `range_producer_attempts`, `range_outbox_invalidations`, `range_producer_actions`, `auto_resolve_intents`, `auto_resolve_rollbacks`, `intake_request_generations`, `handover_records`, `canvas_drive_bindings`, `canvas_attachment_intents`(→ 로컬 적재 모델로 재설계), `v2_material_markers`, `ledger_markers`, `material_ai_kind_backfill`, `semester_registrations`, `intake_items`, `intake_observations` |
 | **재설계** | `jobs`, `processing_records`, `checkpoints`, `entity_allocations`(§3.7) — 개념 유지, 컬럼에서 provider 식별자 제거 |
+
+| **폐기 (study_notes)** | `client_requests`, `note_prepared_context`, `note_submission_grants`, `note_draft_submissions`, `note_reject_counters`, `note_operation_journal`, `note_drive_stage_receipts`, `note_folder_receipts`, `note_ai_block` (`study_notes/store.py`) |
+| **선택 어댑터 전용 (기본 미생성)** | `oauth_clients`, `oauth_codes`, `oauth_refresh_tokens`, `oauth_access_tokens` (`mcp/transports/oauth.py`) — 원격 MCP를 켜는 별도 개정 시 그 어댑터의 자체 마이그레이션으로 생성. `001_v2_initial.sql`에는 없음 |
 
 판정이 애매한 테이블은 R1c에서 해당 모듈을 새로 쓸 때 확정하고 이 표를 개정한다. 폐기 대상은 새 마이그레이션에 **존재하지 않으므로** 별도 DROP이 필요 없다.
 
@@ -297,7 +304,16 @@ CREATE TABLE material_usage (                    -- human-only 필드 포함
   verified_gate_id INTEGER REFERENCES human_gate_log(id),
   CHECK (verified = 0 OR verified_gate_id IS NOT NULL)   -- verified=1은 게이트 로그 없이는 불가
 );
-CREATE TABLE activities (...);                   -- 과제/활동: due_at, status, submitted_gate_id (동일 패턴)
+CREATE TABLE activities (
+  id INTEGER PRIMARY KEY, activity_id TEXT NOT NULL UNIQUE,
+  course_id INTEGER NOT NULL REFERENCES courses(id),
+  title TEXT NOT NULL, due_at TEXT,
+  submission_status TEXT NOT NULL DEFAULT 'NOT_SUBMITTED'
+    CHECK (submission_status IN ('NOT_SUBMITTED','SUBMITTED','LATE_SUBMITTED','EXCUSED')),
+  submission_gate_id INTEGER REFERENCES human_gate_log(id),
+  CHECK (submission_status = 'NOT_SUBMITTED' OR submission_gate_id IS NOT NULL),
+  created_at TEXT NOT NULL
+);   -- 상태가 바뀔 때마다 새 게이트가 필요하다: 트리거가 submission_gate_id 변경 없는 status 변경을 거부
 CREATE TABLE exams (
   id INTEGER PRIMARY KEY, exam_id TEXT NOT NULL UNIQUE,
   course_id INTEGER NOT NULL REFERENCES courses(id),
@@ -352,30 +368,34 @@ CREATE TABLE artifact_citations (
   PRIMARY KEY (artifact_id, ordinal)
 );
 
--- Human-Proof (§6)
-CREATE TABLE human_gate_nonces (
-  nonce_id      TEXT PRIMARY KEY,               -- 16B 난수 base64url
-  action        TEXT NOT NULL,
-  target_id     TEXT NOT NULL,
-  request_hash  TEXT NOT NULL,                  -- hex SHA-256 (§6.2)
-  summary       TEXT NOT NULL,
-  state         TEXT NOT NULL CHECK (state IN ('PENDING','CONFIRMED','COMMITTED','DENIED','EXPIRED','REJECTED')),
-  created_at    TEXT NOT NULL, expires_at TEXT NOT NULL
-);
+-- Human-Proof (§6). nonce는 DB에 저장하지 않는다(메모리 전용, §6.1).
 CREATE TABLE human_gate_log (
   id            INTEGER PRIMARY KEY,
-  action        TEXT NOT NULL, target_id TEXT NOT NULL,
-  request_hash  TEXT NOT NULL, nonce_id TEXT NOT NULL,
-  confirmed_at  TEXT NOT NULL, shell_version TEXT NOT NULL
+  action        TEXT NOT NULL,
+  target_kind   TEXT NOT NULL,                  -- 'material' | 'exam' | 'activity' | 'ai_artifact'
+  target_id     TEXT NOT NULL,
+  request_hash  TEXT NOT NULL,
+  nonce_id      TEXT NOT NULL UNIQUE,           -- 같은 nonce로 두 번 기록 불가
+  confirmed_at  TEXT NOT NULL,
+  shell_version TEXT NOT NULL
 );
+-- human-only 컬럼이 가리키는 게이트 로그가 같은 행위·대상인지 검사 (예: material_usage)
+CREATE TRIGGER material_usage_gate_match BEFORE UPDATE OF verified ON material_usage
+WHEN NEW.verified = 1 BEGIN
+  SELECT RAISE(ABORT, 'GATE_MISMATCH') WHERE NOT EXISTS (
+    SELECT 1 FROM human_gate_log g JOIN materials m ON m.id = NEW.material_id
+    WHERE g.id = NEW.verified_gate_id AND g.action = 'VERIFY_MATERIAL'
+      AND g.target_kind = 'material' AND g.target_id = m.material_id);
+END;
+-- exams.scope_confirmed, activities.submission_status, user_notes(채택)도 동일 패턴의 트리거를 가진다.
 
 CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL);
 ```
 
 핵심 설계점:
 
-- `verified`/`scope_confirmed`/`submitted`의 `CHECK`는 **DB 수준의 최후 방어선**이다: human-only 컬럼이 1이 되려면 `human_gate_log` 행 참조가 필요하다. (Writer가 우회되어도 로그 없는 승격은 SQL 제약으로 거부된다. 단 같은 DB 쓰기 권한을 가진 악성 프로세스는 로그 행도 만들 수 있으므로 D§5.6의 한계는 유지된다.)
-- `activities`, `jobs`, `processing_records`, `checkpoints`, `entity_allocations`의 DDL은 v1.2-IS §8의 필드 의미를 유지하고 provider 식별자 컬럼만 제거한다. 완전한 DDL은 R1b 구현 PR에서 `001_v2_initial.sql`로 작성하며, 그 PR이 이 절을 인용해 검토된다.
+- `verified`/`scope_confirmed`/`submission_status`의 `CHECK`와 **행위·대상 일치 트리거**는 **DB 수준의 최후 방어선**이다: human-only 컬럼이 1이 되려면 `human_gate_log` 행 참조가 필요하다. (Writer가 우회되어도 로그 없는 승격은 SQL 제약으로 거부된다. 단 같은 DB 쓰기 권한을 가진 악성 프로세스는 로그 행도 만들 수 있으므로 D§5.6의 한계는 유지된다.)
+- 테이블 생성 순서는 `human_gate_log`를 학업 개체 테이블보다 **먼저** 둔다(FK 참조 순서). `jobs`, `processing_records`, `checkpoints`, `entity_allocations`의 DDL은 v1.2-IS §8의 필드 의미를 유지하고 provider 식별자 컬럼만 제거한다. 완전한 DDL은 R1b 구현 PR에서 `001_v2_initial.sql`로 작성하며, 그 PR이 이 절을 인용해 검토된다.
 
 ---
 
@@ -438,7 +458,7 @@ CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, checksum TEXT NOT N
 |---|---|---|
 | `shell_secret` (32B) | Shell 프로세스 메모리 → Core 프로세스 메모리 | §2.2. 디스크·로그·환경변수 금지 |
 | UI 세션 | Core가 발급하는 세션 쿠키 + CSRF 토큰 | §10.2 |
-| `gate` 모듈 | Core | nonce 저장(`human_gate_nonces`), 검증, 커밋 |
+| `gate` 모듈 | Core | **메모리 전용** nonce 저장(Core 재시작 시 전부 소멸), 검증, 커밋 |
 | 네이티브 다이얼로그 | Shell (Rust) | Tauri `dialog` 플러그인을 **웹뷰 capability에 허용하지 않고** Rust 커맨드 내부에서만 호출 |
 
 ### 6.2 `request_hash`
@@ -463,39 +483,56 @@ request_hash = lowercase_hex( SHA-256( canonical_json(request_obj) ) )
 - `SET_SUBMISSION_STATUS`: `"{activity_id}|{current_status}|{updated_at}"`
 - `ADOPT_AI_ARTIFACT`: `"{artifact_id}|{body_blob_sha256}"`
 
-### 6.3 단계
+### 6.3 단계 (rev 2: 확인 즉시 커밋)
+
+nonce 레코드(메모리): `{nonce_id, ui_session_id, action, target_kind, target_id, params, target_fingerprint, summary, request_hash, state, deadline_monotonic}`. DB에 저장하지 않는다.
 
 ```
-(1) UI ──POST /api/gate/begin {action, target_id, params}──▶ Core
-        Core: 입력 검증 → summary 생성(§6.5) → request_obj 구성 → request_hash 계산
-              → nonce_id = base64url(16B random) 저장(PENDING, TTL 60s)
-        Core ──▶ UI: {nonce_id, expires_at}                      (요약 문자열은 UI에 돌려주지 않는다)
-(2) UI ──Tauri command confirm_gate(nonce_id)──▶ Shell
-        Shell ──{"t":"gate.get","nonce_id"}──▶ Core (stdio)
-        Core ──{"t":"gate.view", nonce_id, summary, target_id, target_label, expires_at}──▶ Shell
-(3) Shell: 네이티브 다이얼로그 표시 (summary, target_id, target_label, 취소/확인)
-        확인: mac = HMAC-SHA256(shell_secret, "syllva-gate-v1\0" ‖ nonce_id ‖ "\0" ‖ request_hash_hex)
-              Shell은 request_hash를 Core로부터 받은 적이 없으므로 gate.view에 request_hash_hex를 포함한다 (아래 6.3.1)
-        Shell ──{"t":"gate.confirm", nonce_id, mac_b64}──▶ Core
-        취소: {"t":"gate.deny", nonce_id}
-(4) Core: nonce 상태 PENDING + 미만료 + mac 일치 → CONFIRMED로 전이(CAS) → {"t":"gate.result", status:"CONFIRMED"}
-(5) UI ──POST /api/gate/commit {nonce_id}──▶ Core
-        Core: 상태 CONFIRMED 확인 → 대상 재검증(§6.4) → 단일 트랜잭션으로 쓰기 + human_gate_log 삽입
-              → nonce COMMITTED. 재검증 실패 → REJECTED(+대상 제안 SUPERSEDED)
+(1) UI ──POST /api/gate/begin {action, target_id, params}──▶ Core   (세션+CSRF)
+      Core: 세션당 PENDING nonce 최대 1개(이미 있으면 409 GATE_BUSY), 직전 거절/만료 후 2초 쿨다운
+            입력 검증 → target_fingerprint 조회 → summary 생성(§6.5) → request_hash 계산
+            → nonce 레코드 저장(PENDING, ui_session_id=현재 세션, TTL 60초, monotonic)
+      Core ──▶ UI: {nonce_id}                                     (요약·해시는 UI에 돌려주지 않는다)
+(2) UI ──Tauri command confirm_gate(nonce_id)──▶ Shell               (커맨드는 nonce_id 하나만 받음)
+      Shell ──{"t":"gate.get","nonce_id"}──▶ Core (stdio)
+      Core ──{"t":"gate.view", nonce_id, summary, target_id, target_label, source_ids[], source_hash_prefixes[], request_hash, expires_in_ms}──▶ Shell
+(3) Shell: 네이티브 다이얼로그(요약, target_id, 원본 식별자 source_ids + sha256 앞 12자, 남은 시간, 취소/확인)
+      확인: Shell ──{"t":"gate.confirm", nonce_id, mac_b64}──▶ Core     (MAC: §6.3.2)
+      취소: Shell ──{"t":"gate.deny", nonce_id}──▶ Core
+(4) Core: gate.confirm 수신 시 **같은 처리 안에서** §6.4의 검증을 모두 수행하고 통과하면 즉시 커밋(단일 DB 트랜잭션).
+      Core ──{"t":"gate.result", nonce_id, status}──▶ Shell ──(confirm_gate 반환값)──▶ UI
 ```
 
-#### 6.3.1 `gate.view`의 `request_hash`
+별도의 `/api/gate/commit`은 **없다**. CONFIRMED 중간 상태가 없으므로 "확인 후 다른 세션/재시작 후 커밋" 경로가 존재하지 않는다(rev 1의 결함 제거). UI는 `confirm_gate` 반환값으로 결과를 알고, 화면은 `GET /api/...`로 갱신한다.
 
-Shell이 MAC을 계산하려면 Shell이 `request_hash`를 알아야 한다. `gate.view`에 `"request_hash":"<hex>"`를 **포함**한다. Shell은 표시된 `summary`/`target_id`가 그 `request_hash`에 결속되어 있음을 직접 재계산해 확인하지 않는다(Core를 신뢰). 결속의 의미는 "이 MAC은 Core가 만든 특정 요청 해시에 대한 사용자 확인"이다. 사용자에게 보이는 텍스트와 해시의 일치는 Core가 책임진다(Core가 T1이며 신뢰 도메인 안). 웹뷰가 그 사이에 끼어들 수 없다는 것이 이 절차의 요점이다(UI는 `nonce_id`만 안다).
+#### 6.3.1 상태 기계
 
-### 6.4 커밋 시 검증 (D§5.1 (c)(d))
+`PENDING → COMMITTED | REJECTED | DENIED | EXPIRED`. 종단 상태 레코드는 결과 조회를 위해 메모리에 5분 유지 후 삭제. 설계서 C-17의 "APPLIED"는 이 문서의 `COMMITTED`와 같다.
 
-Core는 `commit` 요청에서 다음을 **모두** 확인하고 하나라도 실패하면 쓰지 않는다.
+#### 6.3.2 MAC
 
-1. UI 세션 유효, CSRF 일치, same-origin(§10.3).
-2. `human_gate_nonces[nonce_id].state == 'CONFIRMED'`, `now < expires_at`(확인 이후 커밋까지 TTL은 확인 시점부터 30초로 재설정하지 않고 **원래 `expires_at`을 넘지 못한다**), 그 `nonce_id`가 아직 `COMMITTED`가 아님.
-3. 저장된 `request_hash`를 **현재 상태로 다시 계산한 값과 비교**한다: 대상의 `target_fingerprint`와 `params`로 `request_obj`를 재구성(요약은 동일 함수로 재생성)해 해시가 같아야 한다. 다르면 `REJECTED(reason=TARGET_CHANGED)` 후 해당 제안/행위를 `SUPERSEDED`로 표시(v1.2-IS §15.2.2).
-4. 이미 적용된 동일 요청 재제출: `COMMITTED` → **idempotent 성공**(두 번째 쓰기 없음). `REJECTED`·`DENIED`·`EXPIRED` 재제출 → 거부(v1.2-IS §15.2.4, C-17).
+```
+mac = HMAC-SHA256(
+  key  = shell_secret,
+  data = b"syllva-gate-v1" || 0x00 || len32(nonce_id) || nonce_id_utf8 || len32(request_hash) || request_hash_hex_ascii
+)
+```
+
+`len32`는 빅엔디언 4바이트 길이. 도메인 분리 문자열과 길이 접두로 경계 혼동을 없앤다. 비교는 상수 시간(`hmac.compare_digest`).
+
+Shell은 `request_hash`를 재계산하지 않는다. 표시 텍스트와 해시의 결속은 Core(T1)가 책임지며, 웹뷰가 그 사이에 끼어들 수 없다는 것이 이 절차의 요점이다(웹뷰는 `nonce_id`만 안다).
+
+### 6.4 커밋 시 검증 (D§5.1 (a)(c)(d))
+
+`gate.confirm` 처리에서 다음을 **모두** 확인하고 하나라도 실패하면 쓰지 않는다.
+
+1. nonce 레코드가 존재하고 `state == PENDING`, `monotonic() < deadline`.
+2. `ui_session_id`의 세션이 **아직 유효**(로그아웃·만료·Core 재시작이면 레코드 자체가 없음). 즉 begin을 시작한 세션에 결속된다(D§5.1(a)).
+3. MAC 일치(§6.3.2).
+4. **현재 상태로 재계산**: 저장된 `params`로 `target_fingerprint`를 다시 조회하고 같은 함수로 `summary`를 재생성해 `request_hash`를 재계산한다. 저장값과 다르면 `REJECTED(TARGET_CHANGED)` + 해당 제안 `SUPERSEDED`(v1.2-IS §15.2.2).
+5. 상태 CAS(`PENDING → COMMITTED`)는 Core 내 락으로 보호해 동시 `gate.confirm` 2건 중 하나만 성공한다.
+
+재제출 의미(C-17): 같은 `nonce_id`로 `gate.confirm`이 다시 오면 — `COMMITTED`면 **idempotent 성공 응답**(두 번째 쓰기 없음), `REJECTED/DENIED/EXPIRED`면 거부. 같은 행위를 다시 하려면 새 `begin`이 필요하다. DB 수준에서는 `human_gate_log.nonce_id UNIQUE`가 이중 기록을 막는다.
 
 ### 6.5 액션별 `params`와 `summary`
 
@@ -511,26 +548,28 @@ Core는 `commit` 요청에서 다음을 **모두** 확인하고 하나라도 실
 ### 6.6 `StateWriter.commit_gate`
 
 ```python
-def commit_gate(self, nonce_id: str, *, now: datetime) -> GateCommitResult: ...
+def commit_gate(self, record: GateRecord, *, confirmed_at: datetime) -> GateCommitResult: ...
 ```
 
-내부적으로 `BEGIN IMMEDIATE`, 상태 전이(CONFIRMED→COMMITTED), 대상 UPDATE(human-only 컬럼 + `*_gate_id` 설정), `human_gate_log` 삽입을 한 트랜잭션에서 수행한다. `human_gate_log`에는 `action, target_id, request_hash, nonce_id, confirmed_at, shell_version`만 기록한다(요약·본문 제외).
+내부적으로 `BEGIN IMMEDIATE`, 대상 UPDATE(human-only 컬럼 + `*_gate_id` 설정), `human_gate_log` 삽입을 한 트랜잭션에서 수행한다. `human_gate_log`에는 `action, target_kind, target_id, request_hash, nonce_id, confirmed_at, shell_version`만 기록한다(요약·본문 제외). 메모리 상태 전이는 DB 커밋 성공 후에만 `COMMITTED`.
 
 ### 6.7 비대화형/헤드리스 모드
 
-`syllva run`(Shell 없음) 및 CI에서는 `shell_secret`이 없다. 이 모드에서 `gate/begin`은 `409 GATE_UNAVAILABLE`을 반환한다. 테스트는 `gate` 모듈에 **테스트 전용 shell 시뮬레이터**(같은 HMAC 구현)를 직접 주입해 프로토콜을 검증한다. 프로덕션 빌드에는 시뮬레이터 주입 경로가 없다(C-04: 시뮬레이터 import가 `tests/` 밖에 없음).
+`syllva run`(Shell 없음) 및 CI에서는 `shell_secret`이 없다. 이 모드에서 `gate/begin`은 `409 GATE_UNAVAILABLE`을 반환한다. Core가 `gate.confirm`과 커밋 사이에 크래시하면 DB 트랜잭션이 원자적이므로 쓰기는 전부 되거나 전혀 안 되며, 재시작 후 nonce는 없다(사용자는 다시 시도). 테스트는 `gate` 모듈에 **테스트 전용 shell 시뮬레이터**(같은 HMAC 구현)를 직접 주입해 프로토콜을 검증한다. 프로덕션 빌드에는 시뮬레이터 주입 경로가 없다(C-04: 시뮬레이터 import가 `tests/` 밖에 없음).
 
 ### 6.8 보안 요건 정리 (테스트 연결)
 
 | 요건 | 테스트 |
 |---|---|
-| UI 토큰만으로 `commit` 불가(CONFIRMED 아님) | C-04 |
-| nonce만으로 불가(UI 세션 없음) | C-04 |
+| UI 세션만으로 쓰기 불가(일반 API에 human-only 쓰기 없음, `gate.confirm`은 stdio로만) | C-04 |
+| 다른 UI 세션이 시작한 nonce 확인 불가, 세션 만료 후 확인 불가, Core 재시작 후 이전 nonce 없음 | C-04, C-05, C-20 |
+| 세션당 PENDING 1개·쿨다운(다이얼로그 스팸 제한) | C-05 |
+| 동시 confirm 2건 중 1건만 커밋 | C-05 |
 | 틀린 MAC 거부, 만료 거부, 재사용 거부 | C-05 |
 | 대상 지문 변경 → 거부 + SUPERSEDED | C-05, C-17 |
-| APPLIED 재제출 idempotent, REJECTED 재제출 거부 | C-17 |
+| COMMITTED(=APPLIED) 재제출 idempotent, REJECTED 재제출 거부, 게이트 로그와 대상 행위 불일치 시 트리거 거부 | C-17 |
 | 요약은 Core 생성, UI가 요약을 공급하는 필드가 API에 없음 | C-19 |
-| `shell_secret` 비노출 / Core 재시작 시 이전 nonce 무효 | C-20 |
+| `shell_secret` 비노출(로그·자식 env·자식 stdio·HTTP 응답) / Core 재시작 시 이전 nonce 무효. 크래시 덤프·메모리는 동일 사용자 위협 제외(D§5.6)로 시험 범위 밖 | C-20 |
 | Tauri capability에 `dialog` 플러그인 없음, 허용 커맨드 = `confirm_gate` + 창 제어 | C-19 (Shell 설정 검사) |
 
 ---
@@ -582,8 +621,10 @@ def build_agent_launch(adapter: AgentAdapter, turn: PromptTurn, *, run_id: str, 
 | A6 | `@파일` 멘션 확장 비활성 | `CLAUDE_CODE_DISABLE_FILE_MENTIONS=1` 계열 (env 허용 목록의 "CLI별 변수") |
 | A7 | 세션 비영속 | `--no-session-persistence` 계열 |
 | A8 | 최대 턴 1 | `--max-turns 1` |
-| A9 | 시스템 프롬프트는 CLI 플래그가 아니라 stdin 페이로드의 system 블록 | `--system-prompt`는 인자 길이 한계 때문에 파일/stdin 선호 |
+| A9 | 시스템 지시를 사용자 자료와 분리된 채널로 전달 | stream-json 입력에 system 블록이 없을 수 있다(검토 보고). 후보: `--system-prompt-file <run 임시 파일>`(cwd 밖, 0600, Run 종료 시 삭제) 또는 `--append-system-prompt`. **R4 확인** |
 | A10 | 업데이트·텔레메트리 비활성 가능 시 비활성 | 해당 환경변수 |
+
+**관리형 설정 감지 (D§5.2-2)**: OS의 관리형(MDM/엔터프라이즈) Claude Code 설정 위치(예: macOS `/Library/Application Support/ClaudeCode/`, Windows `C:\ProgramData\ClaudeCode\`, 정확한 경로는 R4에서 공식 문서로 확인)에 관리형 설정·훅이 존재하면 어댑터를 `DISABLED(MANAGED_SETTINGS)`로 둔다. 관리형 훅은 사용자 플래그로 끌 수 없을 수 있기 때문이다.
 
 **어댑터 적합성 판정은 A1~A10을 한 세트로 만족하는 플래그 조합이 있을 때만 `ENABLED`**이다. 만족하는 조합이 없으면 어댑터는 `DISABLED(reason)`이며 UI는 경로 B(내장 터미널, 라이브러리 접근 없음)만 제공한다. `CodexAdapter`는 공식 문서 재조사(D§12-1) 전까지 `DISABLED(reason="UNVERIFIED")`로 고정한다.
 
@@ -601,6 +642,8 @@ def build_agent_launch(adapter: AgentAdapter, turn: PromptTurn, *, run_id: str, 
 | 시작 이벤트 자체 | 첫 N초(기본 20) 안에 수신 | 턴 중단 |
 
 중단 시: 프로세스 트리 종료, **받은 응답 전부 폐기**(저장·표시 금지), 사용자에게 `ADAPTER_UNTRUSTED` 오류와 원인 코드만 표시. 시작 이벤트를 제공하지 않는 CLI/버전은 `DISABLED`.
+
+**한계(정직)**: CLI가 훅 이벤트를 스트림에 내보내지 않는 버전이면 "훅 0건" 단언은 공허하게 통과한다. 따라서 CLI 버전마다 R4 절차로 "훅이 있을 때 이벤트가 나온다"를 실제 CLI로 확인하고(합성 HOME에 무해한 훅을 넣어 이벤트 발생 확인), 확인된 버전 범위만 `ENABLED`로 둔다. `fake_agent_cli`는 Core 파서·중단 로직만 검증한다.
 
 사전 적합성 시험(합성 HOME 픽스처)은 어댑터 활성화 전과 **CLI 버전 변경 시** 실행하는 보조 수단이다. 실제 모델 호출 없이 가능한 범위(init 이벤트까지)로 제한한다.
 
@@ -639,15 +682,15 @@ def build_agent_launch(adapter: AgentAdapter, turn: PromptTurn, *, run_id: str, 
 
 - 형식: `E-` + 4자리 **소문자 hex**(`E-7f3a`). Run 시작 시 `secrets.token_hex(2)`로 생성, 충돌 시 재생성. Run마다 새로 만든다(C-22: 이전 Run의 id는 무효).
 - 매핑: `EvidenceMap { evidence_id → (EvidenceItem, locator, source_version_id, source_hash) }`. Run Context에 저장.
-- 한 Run의 evidence 수 상한 256(4자리 hex 충돌 확률 관리). 초과 시 id를 5자리로 확장하는 대신 Run을 나눈다(요약은 윈도우별 호출이므로 호출별로 부분 매핑을 쓰되 Run Context에 합집합을 둔다).
+- 한 Run의 evidence 수 상한 256(4자리 hex 충돌 확률 관리). 요약형 최대 16 윈도우 × 호출당 12 = 192 ≤ 256. 초과하면 Run을 나눈다(호출별 부분 매핑, Run Context는 합집합).
 
 ### 8.4 구분자와 이스케이프
 
 - **구분자**: Invocation마다 `<<<SYLLVA-{16자 난수 hex}>>>` 형태의 시작/종료 마커. 마커가 자료에 우연히/의도적으로 포함되면(문자열 검색) 즉시 새 난수로 재생성한다. 자료 본문은 마커 안쪽에만 둔다.
 - **자료 이스케이프** (조립 시 SOURCE 본문 가공, 의미 보존이 아닌 안전 우선):
-  - 줄 선두의 `/`, `@`, `!` → 앞에 `​`(제로폭 공백)를 넣어 CLI 파서가 명령/멘션/셸로 해석하지 못하게 한다. 이것은 심층 방어이며 1차 방어는 CLI 설정(A5, A6)이다.
-  - 본문 중 `E-` 뒤 4 hex 패턴(`/\bE-[0-9a-f]{4}\b/`)은 `E​-xxxx`로 바꾼다(evidence id 위조 방어).
-  - 구분자 접두 `<<<SYLLVA-` 등장 시 `<<​<SYLLVA-`.
+  - **모든** `@`(위치 무관, `@경로` 멘션은 공백 뒤 어디서나 인식될 수 있음)와 줄 선두의 `/`, `!` 앞에 `U+200B`(제로폭 공백)를 넣는다. 이것은 심층 방어이며 1차 방어는 CLI 설정(A5, A6)이다. 제로폭 공백이 실제로 CLI 파싱을 막는지는 **R4에서 실제 CLI로 확인**한다(막지 못하면 해당 문자를 전각 문자로 치환하는 대안).
+  - 본문 중 `E-` 뒤 4 hex 패턴(`/\bE-[0-9a-f]{4}\b/`)은 `E`·U+200B·`-xxxx`로 바꾼다(evidence id 위조 방어).
+  - 구분자 접두 `<<<SYLLVA-` 등장 시 `<<`·U+200B·`<SYLLVA-`.
   - 제어문자(탭·개행 제외) 제거, NUL 금지.
 - 이스케이프는 **표시용 원문을 바꾸지 않는다**. UI의 인용 열람은 DB의 원문 청크를 보여 준다(C-23 (a)).
 
@@ -672,7 +715,7 @@ def build_agent_launch(adapter: AgentAdapter, turn: PromptTurn, *, run_id: str, 
 `EphemeralStore`(`ephemeral/memory.py`)를 다음 용도로 재사용한다.
 
 - `create_context_capability(allowed_locators, caller_scope, ttl_seconds)` → Run 시작 시 `allowed_locators = EvidenceMap.locators` (현 구현은 `AllowedLocator(locator, source_hash, source_version)`를 가짐 — 그대로).
-- `authorize_locator(context_id, locator, caller_scope)` → 인용 검증 시 `valid` id의 locator가 여전히 허용되는지, 그리고 현재 `source_version`이 같은지 재확인(stale 방지, C-10).
+- `authorize_locator(context_id, locator, caller_scope)`(현 구현은 현재 지문이 없으면 fail-closed, `ephemeral/memory.py`) → 호출자는 **DB에서 조회한 현재 지문**(`source_versions`)을 함께 전달해야 한다. 인용 검증 시 `valid` id의 locator가 여전히 허용되는지, 그리고 현재 `source_version`이 같은지 재확인(stale 방지, C-10).
 - `caller_scope`: UI 세션 ID(다른 세션의 컨텍스트 사용 불가, C-11).
 - Core 재시작 시 모두 무효(v1.2-IS §9.5). UI는 같은 질문 재전송을 안내.
 
@@ -695,7 +738,7 @@ agent_text ──▶ 인용 파싱/검증(§8.5) ──▶ authorize_locator(각
 |---|---|---|
 | `max_prompt_chars` (자료 구역 합계) | 48,000 | 어댑터가 모델 컨텍스트에 맞춰 조정 가능 |
 | `max_chars_per_evidence` | 4,000 | 초과 시 청크를 분할 |
-| `max_evidence_per_invocation` | 24 | 4자리 hex id 관리(§8.3) |
+| `max_evidence_per_invocation` | 12 | `max_prompt_chars / max_chars_per_evidence` = 12와 정합 |
 | 예산 초과 처리 | 점수 순 절단 + `WARNING: PARTIAL_CONTEXT(used=n/total)` | 조용한 절단 금지, UI에 "일부만 사용됨" 표시(`Partial` 원칙) |
 
 #### 8.8.2 질의형(`chat`, 단일 질문)
@@ -709,7 +752,7 @@ agent_text ──▶ 인용 파싱/검증(§8.5) ──▶ authorize_locator(각
 
 - 대상: 세션/자료 단위 문서 전체. 청크를 locator 순서대로 **윈도우**(≤ `max_prompt_chars`/2)로 나눈다.
 - **Map**: 윈도우마다 1회 호출. 출력은 부분 요약 + 윈도우 내 evidence id 인용. Run Context에 윈도우의 evidence 매핑이 합집합으로 누적된다.
-- **Reduce**: 부분 요약들을 합치는 호출. 입력은 부분 요약 텍스트(인용 id 포함)와 **해당 id들의 locator 목록**만이며 원문 청크는 다시 넣지 않는다(또는 예산 내에서 핵심 인용 청크만). 출력의 인용 id는 Run Context 전체와 대조한다.
+- **Reduce**: 부분 요약들을 합치는 호출. 부분 요약은 AI 출력(비신뢰)이므로 reduce 프롬프트에는 별도 `PRIOR_OUTPUT` 구역으로 넣고 다음 규칙을 적용한다: (i) Core가 먼저 각 부분 요약의 인용을 §8.5로 검증해 **유효 id 토큰만 남기고** Run Context에 없는 id형 토큰은 `[무효 인용]`으로 치환한다, (ii) 유효 id는 이스케이프하지 않는다(reduce가 인용을 이어가야 하므로), (iii) 그 밖의 SOURCE 이스케이프 규칙은 부분 요약 텍스트에도 적용한다. 원문 청크는 다시 넣지 않거나 예산 내 핵심 인용 청크만 넣는다. 출력 인용은 Run Context 전체와 대조한다.
 - 호출 수 상한: 기본 윈도우 16개. 초과하면 계층적 reduce(2-단계) 또는 `PARTIAL` 표시와 함께 범위를 사용자에게 선택하게 한다(조용한 절단 금지).
 - 부분 실패(일부 윈도우 실패): 산출물은 `PARTIAL`로 표시하고 성공 윈도우 범위를 명시한다. 요약을 `COMPLETE`로 표시하지 않는다(I3).
 
@@ -747,7 +790,7 @@ class RetrievalService:
 ```
 
 - `notion_reader`, `drive_reader` 인자 **삭제**. `BlobReader`는 `library/`의 읽기 전용 blob 접근자. `github`은 선택.
-- `engine.py` 내 Notion/Drive 호출 45곳은 `StateReader` 질의와 `BlobReader` 호출로 대체한다. `_read_derived`/`_current_fingerprint`(현재 Drive 재다운로드 지문)는 DB의 `source_versions.source_hash`와 `derivatives` 조회로 대체 — **원본 재다운로드가 사라져** v1.2에서 지적된 20~40초 지연 문제가 구조적으로 없어진다. 단 blob 무결성은 읽을 때 SHA-256 재계산을 **선택 옵션**(`verify_on_read`, 기본 꺼짐; 정기 `scrub`에서 수행)으로 둔다.
+- `engine.py`의 Notion/Drive 결합(리더 참조 17줄, `notion|drive` 언급 20줄 — 2026-11-02 기준)은 `StateReader` 질의와 `BlobReader` 호출로 대체한다. `_read_derived`/`_current_fingerprint`(현재 Drive 재다운로드 지문)는 DB의 `source_versions.source_hash`와 `derivatives` 조회로 대체 — **원본 재다운로드가 사라져** v1.2에서 지적된 20~40초 지연 문제가 구조적으로 없어진다. 단 blob 무결성은 읽을 때 SHA-256 재계산을 **선택 옵션**(`verify_on_read`, 기본 꺼짐; 정기 `scrub`에서 수행)으로 둔다.
 - `get_context`/`get_*_context`의 반환은 `ContextPackage`(§4.3).
 
 ### 9.2 연산 의미 (D§7.1)
@@ -777,7 +820,7 @@ class RetrievalService:
 5. **개념 질의**(위 어디에도 걸리지 않음): `search_concept`로 위임하며 코스 컨텍스트가 필요하다고 UI에 알린다.
 6. 모호하면 항상 `ResolutionResult.ambiguous(candidates)`를 반환하고 **조용히 하나를 고르지 않는다**. 후보는 라벨(과목·세션/자료명)과 사유를 가진다.
 
-`tests/fixtures/resolve_queries.yaml`(C-14)은 최소 다음을 포함한다: `"TCP"`, `"Chapter 04"`, `"4주차"`, `"09.17"`, `"알고리즘2 중간고사 기출"`, 과목 별칭 한영 혼용, 오탈자 1글자, 존재하지 않는 질의(→ 없음), 모호 질의(→ 후보 ≥2). 각 항목은 기대 결과 유형(`resolved`/`ambiguous`/`none`)과 기대 개체를 갖는다.
+`tests/fixtures/resolve_queries.yaml`(C-14, **신규 작성**)은 최소 다음을 포함한다: `"TCP"`, `"Chapter 04"`, `"4주차"`, `"09.17"`, `"알고리즘2 중간고사 기출"`, 과목 별칭 한영 혼용, 오탈자 1글자, 존재하지 않는 질의(→ 없음), 모호 질의(→ 후보 ≥2). 각 항목은 기대 결과 유형(`resolved`/`ambiguous`/`none`)과 기대 개체를 갖는다.
 
 ---
 
@@ -790,7 +833,7 @@ class RetrievalService:
 
 ### 10.2 세션 수립
 
-1. 웹뷰가 `/bootstrap#<token>`을 로드. 정적 스크립트가 fragment를 읽어 `POST /api/session {bootstrap}`.
+1. 웹뷰가 `/bootstrap#<token>`을 로드. (v1.2 `settings/launcher.py`는 query string `?bootstrap=`을 쓴다. v2는 fragment로 **변경**한다. WebView2/WKWebView의 fragment 보존은 R2 스파이크에서 확인.) 정적 스크립트가 fragment를 읽어 `POST /api/session {bootstrap}`.
 2. Core는 bootstrap 토큰을 **1회만** 수락(수락 즉시 폐기, 만료 60초). 성공 시:
    - 세션 쿠키 `syllva_sid`: 256비트 난수, `HttpOnly; SameSite=Strict; Path=/` (HTTP 루프백이라 `Secure` 불가 — 한계로 인정, 루프백 한정 서버).
    - 응답 본문에 CSRF 토큰(256비트). 이후 모든 변경 요청은 `X-Syllva-CSRF` 헤더 필요.
@@ -812,12 +855,11 @@ class RetrievalService:
 | `POST /api/chat/runs/{id}/cancel` | 세션+CSRF | — | 취소 |
 | `GET /api/evidence/{run_id}/{evidence_id}` | 세션 | — | 인용 청크 열람 (`authorize_locator`) |
 | `POST /api/gate/begin` | 세션+CSRF | ✅ 시작 | §6.3 (1) |
-| `POST /api/gate/commit` | 세션+CSRF | ✅ 완료 | §6.3 (5) |
 | `GET /api/canvas/...` | 세션 | — | R3 |
 | `GET/PUT /api/settings/...` | 세션+CSRF | 일부 | Canvas 토큰 저장 등. 에이전트 on/off는 일반 설정(human-only 아님) |
 | `GET /healthz` | 없음 | — | `{"ok":true}` 외 정보 없음 |
 
-**없는 것(MUST NOT)**: `verified=true`, `scope_confirmed=true`, `submitted` 등을 직접 쓰는 일반 엔드포인트; 요약 문자열을 받는 엔드포인트(`gate/begin`은 `params`의 ID/열거형만 받는다); 에이전트가 호출할 별도 리스너.
+**없는 것(MUST NOT)**: 게이트 커밋 HTTP 엔드포인트(커밋은 stdio `gate.confirm`으로만), `verified=true`, `scope_confirmed=true`, `submitted` 등을 직접 쓰는 일반 엔드포인트; 요약 문자열을 받는 엔드포인트(`gate/begin`은 `params`의 ID/열거형만 받는다); 에이전트가 호출할 별도 리스너.
 
 ### 10.4 응답 헤더·CSP (C-18)
 
@@ -858,7 +900,7 @@ RECEIVED ──▶ CLASSIFYING ──▶ NEEDS_REVIEW ──▶ CONFIRMED ──
 RECEIVED ──▶ DUPLICATE (같은 sha256이 이미 READY)
 ```
 
-- **분류**: `intake/classification/pipeline.py`의 S0/S1(규칙)·S3(제안)·S4(결정적 태그)를 재사용. S2(외부 LLM 분류 Jev/TypeSafe)는 기존대로 설정 켜짐일 때만, 사용자 노출 최소화 규칙 유지.
+- **분류**: `intake/classification/pipeline.py`의 S0/S1(규칙)·S3(제안)·S4(결정적 태그)를 재사용. **S2(외부 LLM 분류 Jev/TypeSafe)는 v2에서 비활성**이다: 설계서의 AI 경로·전송 고지(D§5.6) 밖에서 자료 발췌를 외부로 보내는 경로이기 때문이다. S2 결과가 필요했던 경우는 `NEEDS_REVIEW`로 간다. 재도입은 R5에서 `agents/` 경로로 흡수하는 결정과 함께(§16).
 - **AUTO_CONFIRMED 조건**: 기존 P-B2의 장벽(과목 확정, 종류 결정, 달력 일치, 출처 확인 등) 중 로컬에서 의미가 남는 것만 유지: 과목 해석 완료 ∧ 종류 결정 ∧ (전사문이면 달력 일치) ∧ 중복 아님. 하나라도 미충족이면 `NEEDS_REVIEW`.
 - **NEEDS_REVIEW**: UI의 "확인 필요" 화면. 사용자는 한 화면에서 과목·종류·역할·주차/날짜를 확정(Notion 24칸 2단계 폐지). 제안이 하나뿐이면 기본 선택.
 - **CONFIRMED → PROCESSING**: 정규화(`normalization/`), 청크화, 파생 blob 생성, 태그. 실패는 `FAILED(code, message)`로 **원인 코드를 항상 저장**(handoff: 메시지 없는 FAILED 문제 해소). 부분 성공은 `PARTIAL` + 범위 표시.
@@ -917,7 +959,7 @@ Session ID는 **날짜순**으로 번호를 매긴다(handoff 후속 4). 확정 
 
 ### 13.5 임포트 린트
 
-- `import-linter` 계약: §1.3 의존 방향. `adapters.notion`, `adapters.drive` import 금지(R1b부터, 삭제 전까지).
+- `import-linter` 계약: §1.3 의존 방향. `adapters.notion`, `adapters.drive`, `adapters.llm` import 금지. 단 §1.3의 **점감 예외 목록**으로 시작하며 예외는 줄어들기만 한다.
 - 정적 검사 스크립트 `scripts/check_invariants.py`: C-03 쓰기 SQL, C-09 spawn, UI `innerHTML`, `print(` in core stdout, 비밀 이름 패턴 로그.
 
 ### 13.6 패키징 (R2, 스파이크)
@@ -930,18 +972,18 @@ Session ID는 **날짜순**으로 번호를 매긴다(handoff 후속 4). 확정 
 
 ## 14. 계약 테스트 상세 (D§11 → 파일·픽스처)
 
-위치 `tests/contract/v2/`. 마커 `@pytest.mark.contract`. 공통 픽스처: `fake_shell`(§6.7의 시뮬레이터), `fake_agent_cli`(§14.2), `tmp_data_dir`, `seeded_library`(courses/sessions/materials 샘플).
+위치 `tests/contract/v2/`. 마커 `@pytest.mark.contract`. 공통 픽스처: `fake_shell`(§6.7의 시뮬레이터), `fake_agent_cli`(§14.2), `tmp_data_dir`(pytest `tmp_path` 하위 — 에이전트 cwd는 별도 `tmp_path_factory` 디렉터리로 두어 상·하위 관계가 아님을 보장), `seeded_library`(courses/sessions/materials 샘플).
 
 | ID | 파일 | 핵심 단언 |
 |---|---|---|
 | C-01 | `test_agent_no_tools.py` | `build_agent_launch` 결과 argv/env/설정에 도구가 없음; MCP 구성 비어 있음; 저장소 어디에도 `submit_study_note_draft` 같은 에이전트 도달 가능 쓰기 서버가 없음(정적 검사) |
 | C-02 | `test_reader_read_only.py` | `StateReader`에 쓰기 SQL → `OperationalError`; `RetrievalService`가 `StateWriter`를 import하지 않음(import-linter) |
 | C-03 | `test_ownership_matrix.py` | §5.1 행렬 전 칸 파라미터화 테스트; `state/` 밖 쓰기 SQL 정적 검사 |
-| C-04 | `test_gate_auth.py` | UI 토큰만, nonce만, MAC 없이 각각 `commit` 거부 |
-| C-05 | `test_gate_nonce.py` | 재사용·만료·잘못된 MAC·request_hash 불일치·TARGET_CHANGED → SUPERSEDED |
+| C-04 | `test_gate_auth.py` | 일반 HTTP API로 human-only 쓰기 불가; 다른 세션이 시작한 nonce의 confirm 거부; 세션 만료 후 confirm 거부; 잘못된 MAC 거부 |
+| C-05 | `test_gate_nonce.py` | 재사용·만료(monotonic)·request_hash 불일치·TARGET_CHANGED → SUPERSEDED; 세션당 PENDING 1개·쿨다운; 동시 confirm 2건 중 1건만 커밋 |
 | C-06 | `test_ai_artifact_fingerprint.py` | 필수 필드 누락 거부; stale 산출물이 `get_*_context` factual evidence에서 제외 |
 | C-07 | `test_launch_env.py` | env 이름 allowlist만; 비밀 문자열(테스트용 센티널)이 argv/env/stdin system 블록/설정 파일에 없음 |
-| C-08 | `test_agent_cwd.py` | cwd가 OS 임시 하위 빈 디렉터리이고 `<data>`와 상·하위 관계가 아님, DB·blobs 경로 비포함, 심볼릭 링크 없음, 실행 후 삭제, `SYLLVA_DATA_DIR`가 임시 하위면 기동 거부 |
+| C-08 | `test_agent_cwd.py` | cwd가 빈 새 디렉터리이고 `realpath`가 `<data>`와 상·하위 관계가 아님(겹치면 실행 거부), DB·blobs 경로 비포함, 심볼릭 링크 없음, 실행 후 삭제 |
 | C-09 | `test_single_spawn_path.py` | Python AST 스캔 + Rust 소스 grep(`std::process`, `tokio::process`, `Command::new`가 허용된 파일 목록 외에 없음) |
 | C-10 | `test_citation_allowlist.py` | 패키지 밖 locator·만료 컨텍스트·이전 `source_version` locator 거부 |
 | C-11 | `test_run_context_lifetime.py` | TTL 만료, Core 재시작, 다른 세션 `caller_scope` 거부 |
@@ -950,16 +992,16 @@ Session ID는 **날짜순**으로 번호를 매긴다(handoff 후속 4). 확정 
 | C-14 | `test_resolve_queries.py` | `resolve_queries.yaml` 전수 |
 | C-15 | `test_template_manifest.py` | `behavior/manifest.json` 해시 일치 |
 | C-16 | CI 워크플로 | 매트릭스 실행; OS 비의존 테스트는 3개 OS 모두 통과 |
-| C-17 | `test_gate_replay.py` | APPLIED idempotent, REJECTED 재거부, 대상 변경 시 SUPERSEDED, 에이전트 경로로 자기 승인 불가 |
+| C-17 | `test_gate_replay.py` | COMMITTED(=APPLIED) 재제출 idempotent, REJECTED 재거부, 대상 변경 시 SUPERSEDED, 에이전트 경로로 자기 승인 불가, 게이트 로그-대상 불일치 트리거 거부, `nonce_id` 이중 기록 거부 |
 | C-18 | `test_ui_xss_and_csp.py` | 악성 payload(`<script>`, `<img onerror>`, `javascript:` 링크, 마커 구분자)가 DOM에 텍스트로만 들어감(jsdom/Playwright); CSP 헤더 기준선 |
-| C-19 | `test_gate_summary_binding.py` | `gate/begin`이 요약 입력 필드를 받지 않음; `gate.view` 요약이 `request_hash` 입력에 포함; Tauri 설정에 `dialog` 플러그인 없음 |
-| C-20 | `test_secret_and_lifecycle.py` | 센티널 `shell_secret`이 로그·덤프·자식 env·HTTP 응답에 없음; stdin EOF → Core 종료; 두 번째 Core는 `DB_LOCKED` |
+| C-19 | `test_gate_summary_binding.py` | `gate/begin`이 요약 입력 필드를 받지 않음; `gate.view` 요약·원본 식별자가 `request_hash` 입력에 포함; Tauri 설정에 `dialog` 플러그인 없음, `confirm_gate`가 `nonce_id` 외 인자를 받지 않음 |
+| C-20 | `test_secret_and_lifecycle.py` | 센티널 `shell_secret`이 로그·자식 env·자식 stdio·HTTP 응답에 없음; 에이전트 자식이 Core의 프로토콜 파이프를 상속하지 않음; stdin EOF → Core 종료; 두 번째 Core는 `DB_LOCKED`; 재시작 후 이전 nonce 없음 |
 | C-21 | `test_adapter_conformance.py` | `fake_agent_cli` 시나리오: 정상, init에 도구 포함, 훅 이벤트 발생, init 미수신 → 각각 정상/중단/중단/중단. 프롬프트의 `/x`·`@/etc/hosts`·`!ls`가 확장되지 않음(실제 CLI 스모크는 별도 `live` 마커). 트랜스크립트 미생성, stdin 전달 |
 | C-22 | `test_citation_validation.py` | 패키지 밖 id → 무효; 본문의 `E-xxxx` 이스케이프; id가 Run마다 다름 |
 | C-23 | `test_prompt_assembly.py` | system/자료 분리, 난수 구분자, 구분자 모방 이스케이프, 비밀·경로 비포함, 칩 외 자료 없음(카탈로그 off), 예산 준수 |
 | C-24 | `test_multiturn_independence.py` | 매 턴 새 프로세스, `HISTORY`에 evidence id 없음 |
 | C-25 | `test_chunk_strategy.py` | 요약형 문서 전체 커버, 예산 초과 시 `PARTIAL_CONTEXT` 표시, 질의형 any-term 점수, 무관 질의 폴백 제한 |
-| C-26 | `test_disclosure_and_logging.py` | payload evidence 집합 = 칩 집합; 로그 필터가 금지 키를 `<redacted>`로 치환; 응답·프롬프트 본문이 로그에 없음 |
+| C-26 | `test_disclosure_and_logging.py` | payload evidence 집합 = 칩 집합; 로그 필터가 금지 키를 `<redacted>`로 치환; 응답·프롬프트 본문이 로그에 없음; `adapters.llm`(S2·enrichment LLM)이 v2 런타임에서 호출되지 않음 |
 
 ### 14.1 정적 검사 실행
 
@@ -977,14 +1019,14 @@ Session ID는 **날짜순**으로 번호를 매긴다(handoff 후속 4). 확정 
 
 | PR | 내용 | 완료 기준 |
 |---|---|---|
-| R1b-1 | 계약 테스트 골격: C-02, C-03, C-12, C-13 작성(처음엔 xfail 목록 허용 안 함 — 현 코드에서 가능한 것은 통과, 아직 불가능한 것은 `skip(reason=…)`) + `check_invariants.py` + import-linter | 테스트 인프라 통과, 기준선 불변 |
+| R1b-1 | 계약 테스트 골격(`tests/contract/v2/`): 현 코드로 의미 있게 통과 가능한 것만 활성(예: C-13 바인딩, C-12 Partial 전이), 나머지는 `skip(reason="R1b-n에서 활성")`로 **목록화** + `check_invariants.py`(정적 검사) + import-linter **점감 예외 목록** 고정 | 전체 기준선 불변(새 실패 0), 정적 검사·린트 통과, 예외 목록 문서화 |
 | R1b-2 | `001_v2_initial.sql`, `StateWriter`/`StateReader`, 마이그레이션 러너, DB 독점 락, `library/` blob 저장소 | blob/DB 단위 테스트, WAL·락 테스트(3 OS CI) |
 | R1b-3 | `SourceRef` provider 확장, 도메인 정리, `ingestion`/`normalization`/`enrichment` 로컬 입력 | 정규화 단위 테스트(기존 중 유효한 것 재사용) |
 | R1b-4 | `RetrievalService` 생성자·호출 재작성, resolver(§9.3), C-14, C-10 | resolve_queries 통과, 엔진 단위 테스트 재작성 통과 |
 | R1b-5 | 청크 전략(§8.8), C-25 | 전략 테스트 통과 |
 | R1b-6 | `adapters/notion`, `adapters/drive`, `study_notes`, 구 `approval_identity` 삭제 준비(import 금지 → 삭제는 R1c) | 린트 통과 |
 
-완료: 전체 테스트(재작성 후) 통과, Windows·macOS·Linux CI 그린, **기존 126개 테스트 파일은 파일별로 재작성/폐기를 판정해 목록 문서화**(`docs/plans/v2-test-disposition.md`).
+완료: 전체 테스트(재작성 후) 통과, Windows·macOS·Linux CI 그린, import-linter 예외 목록 비움, **기존 테스트 파일 158개(unit 48/contract 91/integration 19; 그중 Notion·Drive를 참조하는 126개)를 파일별로 재작성/폐기 판정해 목록 문서화**(`docs/plans/v2-test-disposition.md`).
 
 ### R1c — 로컬 intake 워커
 
@@ -1018,5 +1060,7 @@ PR: `agents/`(§7), `prompt/`(§8), 적합성 스파이크(실제 Claude Code), 
 6. **`verify_on_read` 정책**: blob 읽기 시 해시 재검증 기본값(성능 측정 후).
 7. **윈도우 크기/호출 상한 튜닝**(§8.8.3): 실제 자료로 측정 후 조정.
 8. **GitHub 선택 어댑터** 활성화 UX.
-9. **v1.2 테스트 126개 파일 처분 목록**(R1b 완료 조건).
-10. 이 명세서(draft)는 승인 전 **독립 읽기 전용 검토 1회**(보안 경계: §2, §6, §7, §8, §10).
+9. **v1.2 테스트 파일 158개 처분 목록**(R1b 완료 조건).
+10. **enrichment·S2의 AI 경로**(§1.1, §11.2): v2에서 비활성. R5에서 `agents/`+`prompt/` 경로로 흡수할지(칩·전송 고지·매 실행 단언 적용) 결정.
+11. **R4 확인 항목 묶음**: A9 시스템 지시 전달 방식, 제로폭 공백 이스케이프의 실효성, 훅 이벤트가 스트림에 나오는 CLI 버전 범위, 관리형 설정 경로.
+12. rev 2는 Fable 재검토 후 동결한다.
