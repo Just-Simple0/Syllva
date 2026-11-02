@@ -13,11 +13,17 @@ Every INSERT/UPDATE outside migrations goes through ``StateWriter``:
 
 Identifiers are checked against the live schema before SQL is built, so table
 or column names can never come from data.
+
+Thread safety (spec §3.3): one ``StateWriter`` per connection
+(``Database.writer()`` returns the same instance). An ``RLock`` serialises every
+write and transaction; nesting is tracked per owning thread, so a thread never
+"joins" another thread's transaction.
 """
 
 from __future__ import annotations
 
 import sqlite3
+import threading
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -27,6 +33,7 @@ from syllva.domain.errors import PolicyViolation
 from syllva.state.v2.ownership import (
     ALLOWED,
     HUMAN_ONLY_COLUMNS,
+    IMMUTABLE_COLUMNS,
     INSERT_ONLY_OWNERS,
     SOURCE_MUTABLE_COLUMNS,
     UNWRITABLE_TABLES,
@@ -47,33 +54,49 @@ class StateWriter:
             raise ValueError("StateWriter needs an autocommit connection (isolation_level=None)")
         self._connection = connection
         self._columns: dict[str, frozenset[str]] = {}
+        self._lock = threading.RLock()
+        self._depth = 0  # transaction nesting; only touched while holding _lock
 
     # -- transactions ---------------------------------------------------------
 
     @contextmanager
     def transaction(self) -> Iterator[StateWriter]:
-        if self._connection.in_transaction:
-            yield self  # nested use joins the outer transaction
-            return
-        self._connection.execute("BEGIN IMMEDIATE")
-        try:
-            yield self
-        except BaseException:
-            self._connection.execute("ROLLBACK")
-            raise
-        self._connection.execute("COMMIT")
+        with self._lock:
+            if self._depth:
+                self._depth += 1  # nested use in the SAME thread joins the outer transaction
+                try:
+                    yield self
+                finally:
+                    self._depth -= 1
+                return
+            if self._connection.in_transaction:
+                raise RuntimeError("connection has a transaction not opened by StateWriter")
+            self._connection.execute("BEGIN IMMEDIATE")
+            self._depth = 1
+            try:
+                yield self
+            except BaseException:
+                self._connection.execute("ROLLBACK")
+                raise
+            else:
+                self._connection.execute("COMMIT")
+            finally:
+                self._depth = 0
 
     # -- generic writes -------------------------------------------------------
 
     def insert(self, owner: Owner, actor: Actor, table: str, values: Mapping[str, Any]) -> int:
         self._authorize(owner, actor, table, set(values), update=False)
+        if table == "materials" and values.get("processing_status", "PENDING") != "PENDING":
+            raise PolicyViolation("new materials start as PENDING; use transition_material_status()")
         columns = list(values)
         sql = (
             f"INSERT INTO {table} ({', '.join(columns)}) "  # identifiers validated in _authorize
             f"VALUES ({', '.join('?' for _ in columns)})"
         )
-        cursor = self._connection.execute(sql, [values[c] for c in columns])
-        return int(cursor.lastrowid or 0)
+        with self.transaction():
+            cursor = self._connection.execute(sql, [values[c] for c in columns])
+            return int(cursor.lastrowid or 0)
 
     def update(
         self,
@@ -83,9 +106,15 @@ class StateWriter:
         key: Mapping[str, Any],
         values: Mapping[str, Any],
     ) -> int:
-        if not key:
-            raise PolicyViolation("update needs a key")
+        if len(key) != 1:
+            raise PolicyViolation("update needs exactly one key column")
         self._authorize(owner, actor, table, set(values) | set(key), update=True, changed=set(values))
+        (key_column,) = key
+        if key_column not in self._unique_columns(table):
+            raise PolicyViolation(
+                "update key must be a primary key or UNIQUE column",
+                details={"table": table, "key": key_column},
+            )
         if table == "materials" and "processing_status" in values:
             raise PolicyViolation("use transition_material_status() for processing_status")
         with self.transaction():
@@ -123,6 +152,20 @@ class StateWriter:
             return old
 
     # -- checks -----------------------------------------------------------------
+
+    def _unique_columns(self, table: str) -> frozenset[str]:
+        """Single columns that identify at most one row (PK, rowid alias or single-column UNIQUE)."""
+
+        columns = {str(r[1]) for r in self._connection.execute("SELECT * FROM pragma_table_info(?)", (table,)) if r[5] == 1}
+        pk_count = sum(1 for r in self._connection.execute("SELECT * FROM pragma_table_info(?)", (table,)) if r[5] > 0)
+        if pk_count > 1:
+            columns = set()  # a composite primary key is not a single-column identifier
+        for index in self._connection.execute("SELECT name, \"unique\" FROM pragma_index_list(?)", (table,)):
+            if index[1]:
+                cols = [str(r[2]) for r in self._connection.execute("SELECT * FROM pragma_index_info(?)", (index[0],))]
+                if len(cols) == 1:
+                    columns.add(cols[0])
+        return frozenset(columns)
 
     def _table_columns(self, table: str) -> frozenset[str]:
         if table not in self._columns:
@@ -166,6 +209,12 @@ class StateWriter:
             )
         if "owner" in columns and update:
             raise PolicyViolation("owner labels are immutable", details={"table": table})
+        immutable = IMMUTABLE_COLUMNS.get(table, frozenset())
+        if update and changed is not None and changed & immutable:
+            raise PolicyViolation(
+                "identifiers are immutable after insert",
+                details={"table": table, "columns": sorted(changed & immutable)},
+            )
         if update and table_owner in INSERT_ONLY_OWNERS:
             allowed = SOURCE_MUTABLE_COLUMNS.get(table, frozenset())
             if table_owner is Owner.AI or not (changed or set()) <= allowed:

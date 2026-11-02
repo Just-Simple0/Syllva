@@ -27,7 +27,38 @@ WRITER_PRAGMAS = (
     "PRAGMA busy_timeout = 30000",
     "PRAGMA wal_autocheckpoint = 1000",
     "PRAGMA trusted_schema = OFF",
+    # REPLACE's implicit DELETE then fires DELETE triggers (append-only guards).
+    "PRAGMA recursive_triggers = ON",
 )
+
+
+# After migrations the writer connection may not change the schema (defence in depth
+# for the trigger guards; same-process code could remove the authorizer, design §5.6).
+_SCHEMA_ACTIONS = frozenset(
+    getattr(sqlite3, name)
+    for name in (
+        "SQLITE_ALTER_TABLE", "SQLITE_CREATE_INDEX", "SQLITE_CREATE_TABLE", "SQLITE_CREATE_TEMP_INDEX",
+        "SQLITE_CREATE_TEMP_TABLE", "SQLITE_CREATE_TEMP_TRIGGER", "SQLITE_CREATE_TEMP_VIEW",
+        "SQLITE_CREATE_TRIGGER", "SQLITE_CREATE_VIEW", "SQLITE_CREATE_VTABLE", "SQLITE_DROP_INDEX",
+        "SQLITE_DROP_TABLE", "SQLITE_DROP_TEMP_INDEX", "SQLITE_DROP_TEMP_TABLE", "SQLITE_DROP_TEMP_TRIGGER",
+        "SQLITE_DROP_TEMP_VIEW", "SQLITE_DROP_TRIGGER", "SQLITE_DROP_VIEW", "SQLITE_DROP_VTABLE", "SQLITE_ATTACH",
+        "SQLITE_DETACH",
+    )
+    if hasattr(sqlite3, name)
+)
+_LOCKED_PRAGMAS = frozenset({"writable_schema", "recursive_triggers", "foreign_keys", "trusted_schema", "query_only", "journal_mode"})
+
+
+def _schema_guard(action: int, arg1: str | None, arg2: str | None, db: str | None, source: str | None) -> int:
+    if action in _SCHEMA_ACTIONS:
+        return sqlite3.SQLITE_DENY
+    if action == sqlite3.SQLITE_PRAGMA and arg1 is not None and arg1.lower() in _LOCKED_PRAGMAS and arg2 is not None:
+        return sqlite3.SQLITE_DENY  # reading these is fine; changing them is not
+    return sqlite3.SQLITE_OK
+
+
+def lock_schema(conn: sqlite3.Connection) -> None:
+    conn.set_authorizer(_schema_guard)
 
 
 class DatabaseCorrupt(RuntimeError):
@@ -35,6 +66,11 @@ class DatabaseCorrupt(RuntimeError):
 
 
 def apply_pragmas(conn: sqlite3.Connection) -> None:
+    # Defensive mode (Python >= 3.12 exposes it) blocks writable_schema and other
+    # schema-corrupting statements on this connection.
+    defensive = getattr(sqlite3, "SQLITE_DBCONFIG_DEFENSIVE", None)
+    if defensive is not None and hasattr(conn, "setconfig"):
+        conn.setconfig(defensive, True)
     for pragma in WRITER_PRAGMAS:
         conn.execute(pragma)
     mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
@@ -49,9 +85,14 @@ class Database:
     connection: sqlite3.Connection
     applied_migrations: list[int] = field(default_factory=list)
     backup_path: Path | None = None
+    _writer: StateWriter | None = None
 
     def writer(self) -> StateWriter:
-        return StateWriter(self.connection)
+        """The single writer for this connection (its lock serialises all writes, spec §3.3)."""
+
+        if self._writer is None:
+            self._writer = StateWriter(self.connection)
+        return self._writer
 
     def reader(self) -> StateReader:
         return StateReader.open(self.layout.db_path)
@@ -103,6 +144,7 @@ def open_database(layout: DataLayout) -> Database:
                 stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
                 database.backup_path = database.backup(layout.backups_dir / f"state-{stamp}-pre-migration.sqlite3")
             database.applied_migrations = _migrate.migrate(conn)
+            lock_schema(conn)
             return database
         except BaseException:
             conn.close()

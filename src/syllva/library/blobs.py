@@ -107,7 +107,13 @@ class BlobStore:
                 raise BlobCorrupt("temporary blob changed while it was written")
             final.parent.mkdir(parents=True, exist_ok=True)
             _make_read_only(tmp_path)
-            os.replace(tmp_path, final)
+            try:
+                os.replace(tmp_path, final)
+            except OSError as exc:
+                if final.is_file():  # a concurrent writer stored the same content first
+                    _remove_quietly(tmp_path)
+                    return StoredBlob(key, size, created=False)
+                raise BlobError(f"could not store blob: {exc}") from exc
             _fsync_dir(final.parent)
             return StoredBlob(key, size, created=True)
         except BaseException:

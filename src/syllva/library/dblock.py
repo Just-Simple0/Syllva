@@ -12,6 +12,7 @@ a handle to it.
 
 from __future__ import annotations
 
+import errno
 import os
 import sys
 from pathlib import Path
@@ -23,6 +24,13 @@ class DatabaseLocked(RuntimeError):
     """Another process holds the database lock."""
 
     code = "DB_LOCKED"
+    exit_code = 3
+
+
+class DatabaseLockUnsupported(RuntimeError):
+    """The filesystem does not support the lock (e.g. some network shares)."""
+
+    code = "DB_LOCK_UNSUPPORTED"
     exit_code = 3
 
 
@@ -45,6 +53,10 @@ class DatabaseLock:
             _lock(fd)
         except OSError as exc:
             os.close(fd)
+            if getattr(errno, "ENOLCK", None) is not None and exc.errno == errno.ENOLCK:
+                raise DatabaseLockUnsupported(
+                    f"the data directory does not support file locks; use a local disk: {self.path}"
+                ) from exc
             raise DatabaseLocked(f"database lock is held by another process: {self.path}") from exc
         try:
             os.ftruncate(fd, 0)

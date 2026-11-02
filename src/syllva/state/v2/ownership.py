@@ -33,7 +33,6 @@ TABLE_OWNERS: dict[str, Owner] = {
     "artifact_bases": Owner.AI,
     "artifact_citations": Owner.AI,
     "user_notes": Owner.USER,
-    "user_edits": Owner.USER,
     "courses": Owner.CATALOG,
     "course_aliases": Owner.CATALOG,
     "sessions": Owner.CATALOG,
@@ -51,7 +50,20 @@ TABLE_OWNERS: dict[str, Owner] = {
 # Tables no generic write may touch: the Human-Proof audit trail is written only
 # by the gate commit path (R2), and schema bookkeeping only by the migrator.
 GATE_ONLY_TABLES = frozenset({"human_gate_log", "human_gate_uses"})
-UNWRITABLE_TABLES = GATE_ONLY_TABLES | {"schema_migrations"}
+# user_edits is written only by StateWriter itself when a USER row is edited.
+UNWRITABLE_TABLES = GATE_ONLY_TABLES | {"schema_migrations", "user_edits"}
+
+# Identifiers that gates and references point at; never updated after insert.
+IMMUTABLE_COLUMNS: dict[str, frozenset[str]] = {
+    "materials": frozenset({"material_id", "source_file_id"}),
+    "material_usage": frozenset({"material_id"}),
+    "exams": frozenset({"exam_id"}),
+    "activities": frozenset({"activity_id"}),
+    "user_notes": frozenset({"note_id"}),
+    "courses": frozenset({"course_key"}),
+    "sessions": frozenset({"session_id"}),
+    "source_files": frozenset({"source_id"}),
+}
 
 # Human-only columns (design §5.5). Only the gate commit path may set them.
 HUMAN_ONLY_COLUMNS: dict[str, frozenset[str]] = {

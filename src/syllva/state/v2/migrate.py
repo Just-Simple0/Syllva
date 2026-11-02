@@ -111,7 +111,7 @@ def migrate(conn: sqlite3.Connection, migrations: list[Migration] | None = None)
     todo = pending(conn, migrations)
     done: list[int] = []
     for migration in todo:
-        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("BEGIN IMMEDIATE")  # if this fails nothing is open; let it propagate
         try:
             for statement in split_statements(migration.sql):
                 conn.execute(statement)
@@ -121,7 +121,8 @@ def migrate(conn: sqlite3.Connection, migrations: list[Migration] | None = None)
             )
             conn.execute("COMMIT")
         except BaseException as exc:
-            conn.execute("ROLLBACK")
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
             if isinstance(exc, MigrationError):
                 raise
             raise MigrationError(f"migration {migration.name} failed: {exc}") from exc

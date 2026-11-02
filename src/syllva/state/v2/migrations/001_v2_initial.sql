@@ -127,6 +127,7 @@ BEGIN
     SELECT 1 FROM human_gate_log g JOIN materials m ON m.id = NEW.material_id
     WHERE g.id = NEW.verified_gate_id AND g.action = 'VERIFY_MATERIAL'
       AND g.target_kind = 'material' AND g.target_id = m.material_id);
+  SELECT RAISE(ABORT, 'GATE_REUSED') WHERE EXISTS (SELECT 1 FROM human_gate_uses WHERE gate_id = NEW.verified_gate_id);
   INSERT INTO human_gate_uses(gate_id, used_by) VALUES (NEW.verified_gate_id, 'material_usage:' || NEW.material_id);
 END;
 CREATE TRIGGER material_usage_gate_update BEFORE UPDATE OF verified, verified_gate_id ON material_usage
@@ -138,6 +139,7 @@ BEGIN
     SELECT 1 FROM human_gate_log g JOIN materials m ON m.id = NEW.material_id
     WHERE g.id = NEW.verified_gate_id AND g.action = 'VERIFY_MATERIAL'
       AND g.target_kind = 'material' AND g.target_id = m.material_id);
+  SELECT RAISE(ABORT, 'GATE_REUSED') WHERE EXISTS (SELECT 1 FROM human_gate_uses WHERE gate_id = NEW.verified_gate_id);
   INSERT INTO human_gate_uses(gate_id, used_by) VALUES (NEW.verified_gate_id, 'material_usage:' || NEW.material_id);
 END;
 
@@ -160,6 +162,7 @@ BEGIN
     SELECT 1 FROM human_gate_log g
     WHERE g.id = NEW.submission_gate_id AND g.action = 'SET_SUBMISSION_STATUS'
       AND g.target_kind = 'activity' AND g.target_id = NEW.activity_id);
+  SELECT RAISE(ABORT, 'GATE_REUSED') WHERE EXISTS (SELECT 1 FROM human_gate_uses WHERE gate_id = NEW.submission_gate_id);
   INSERT INTO human_gate_uses(gate_id, used_by) VALUES (NEW.submission_gate_id, 'activities:' || NEW.activity_id);
 END;
 -- Every change of submission status (including back to NOT_SUBMITTED) is a human action
@@ -173,6 +176,7 @@ BEGIN
     SELECT 1 FROM human_gate_log g
     WHERE g.id = NEW.submission_gate_id AND g.action = 'SET_SUBMISSION_STATUS'
       AND g.target_kind = 'activity' AND g.target_id = NEW.activity_id);
+  SELECT RAISE(ABORT, 'GATE_REUSED') WHERE EXISTS (SELECT 1 FROM human_gate_uses WHERE gate_id = NEW.submission_gate_id);
   INSERT INTO human_gate_uses(gate_id, used_by) VALUES (NEW.submission_gate_id, 'activities:' || NEW.activity_id);
 END;
 
@@ -194,6 +198,7 @@ BEGIN
     SELECT 1 FROM human_gate_log g
     WHERE g.id = NEW.scope_gate_id AND g.action = 'CONFIRM_EXAM_SCOPE'
       AND g.target_kind = 'exam' AND g.target_id = NEW.exam_id);
+  SELECT RAISE(ABORT, 'GATE_REUSED') WHERE EXISTS (SELECT 1 FROM human_gate_uses WHERE gate_id = NEW.scope_gate_id);
   INSERT INTO human_gate_uses(gate_id, used_by) VALUES (NEW.scope_gate_id, 'exams:' || NEW.exam_id);
 END;
 CREATE TRIGGER exams_gate_update BEFORE UPDATE OF scope_confirmed, scope_gate_id ON exams
@@ -205,6 +210,7 @@ BEGIN
     SELECT 1 FROM human_gate_log g
     WHERE g.id = NEW.scope_gate_id AND g.action = 'CONFIRM_EXAM_SCOPE'
       AND g.target_kind = 'exam' AND g.target_id = NEW.exam_id);
+  SELECT RAISE(ABORT, 'GATE_REUSED') WHERE EXISTS (SELECT 1 FROM human_gate_uses WHERE gate_id = NEW.scope_gate_id);
   INSERT INTO human_gate_uses(gate_id, used_by) VALUES (NEW.scope_gate_id, 'exams:' || NEW.exam_id);
 END;
 
@@ -322,6 +328,7 @@ BEGIN
     SELECT 1 FROM human_gate_log g JOIN ai_artifacts a ON a.id = NEW.adopted_from_artifact_id
     WHERE g.id = NEW.adopt_gate_id AND g.action = 'ADOPT_AI_ARTIFACT'
       AND g.target_kind = 'ai_artifact' AND g.target_id = a.artifact_id);
+  SELECT RAISE(ABORT, 'GATE_REUSED') WHERE EXISTS (SELECT 1 FROM human_gate_uses WHERE gate_id = NEW.adopt_gate_id);
   INSERT INTO human_gate_uses(gate_id, used_by) VALUES (NEW.adopt_gate_id, 'user_notes:' || NEW.note_id);
 END;
 -- Adoption provenance cannot be changed after the fact.
@@ -335,3 +342,30 @@ CREATE TABLE user_edits (
   previous_blob_sha256 TEXT REFERENCES blobs(sha256),
   edited_at TEXT NOT NULL
 );
+
+-- Gate targets are identified by these ids; they never change after insert, so a
+-- gate row for one target can never come to cover another (spec §3.7).
+CREATE TRIGGER materials_identity_immutable BEFORE UPDATE OF material_id ON materials
+WHEN NEW.material_id IS NOT OLD.material_id BEGIN SELECT RAISE(ABORT, 'IDENTITY_IMMUTABLE'); END;
+CREATE TRIGGER material_usage_identity_immutable BEFORE UPDATE OF material_id ON material_usage
+WHEN NEW.material_id IS NOT OLD.material_id BEGIN SELECT RAISE(ABORT, 'IDENTITY_IMMUTABLE'); END;
+CREATE TRIGGER exams_identity_immutable BEFORE UPDATE OF exam_id ON exams
+WHEN NEW.exam_id IS NOT OLD.exam_id BEGIN SELECT RAISE(ABORT, 'IDENTITY_IMMUTABLE'); END;
+CREATE TRIGGER activities_identity_immutable BEFORE UPDATE OF activity_id ON activities
+WHEN NEW.activity_id IS NOT OLD.activity_id BEGIN SELECT RAISE(ABORT, 'IDENTITY_IMMUTABLE'); END;
+CREATE TRIGGER user_notes_identity_immutable BEFORE UPDATE OF note_id ON user_notes
+WHEN NEW.note_id IS NOT OLD.note_id BEGIN SELECT RAISE(ABORT, 'IDENTITY_IMMUTABLE'); END;
+
+-- USER edit history is append-only (spec §5.1).
+CREATE TRIGGER user_edits_no_update BEFORE UPDATE ON user_edits
+BEGIN SELECT RAISE(ABORT, 'HISTORY_APPEND_ONLY'); END;
+CREATE TRIGGER user_edits_no_delete BEFORE DELETE ON user_edits
+BEGIN SELECT RAISE(ABORT, 'HISTORY_APPEND_ONLY'); END;
+
+-- A material's source never changes (new content arrives as a new source_version
+-- of the same source_file), so a verification cannot be carried to other content.
+CREATE TRIGGER materials_source_immutable BEFORE UPDATE OF source_file_id ON materials
+WHEN NEW.source_file_id IS NOT OLD.source_file_id BEGIN SELECT RAISE(ABORT, 'IDENTITY_IMMUTABLE'); END;
+-- New material rows start PENDING (also blocks REPLACE INTO materials ... 'READY').
+CREATE TRIGGER materials_insert_pending BEFORE INSERT ON materials
+WHEN NEW.processing_status <> 'PENDING' BEGIN SELECT RAISE(ABORT, 'NEW_MATERIAL_NOT_PENDING'); END;
