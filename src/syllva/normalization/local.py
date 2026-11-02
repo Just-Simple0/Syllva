@@ -9,8 +9,16 @@ deterministic normalizers (PDF, transcript), and stores two derivatives:
 
 Completeness follows the normalizer result exactly (design §2 I3): only a
 ``ready`` result is ``COMPLETE``; ``partial`` and ``needs_review`` are stored as
-``PARTIAL``; a failed/unavailable extraction stores nothing. Normalization is
-never summarisation: no model is involved here.
+``PARTIAL``; a failed/unavailable extraction, or one that yields no chunk at
+all (nothing to cite), stores nothing. Normalization is never summarisation:
+no model is involved here.
+
+Re-running is safe (spec §11.2): the derivative key is
+``(source_version, kind, schema_version, processor_version)``; when both
+derivatives exist they are returned without recomputation. ``normalized_at``
+defaults to the source version's ``created_at`` so the bytes are deterministic.
+A different ``entity_id``/``course_key`` for an already-normalized version needs
+a new ``processor_version`` (or schema version) to produce new derivatives.
 
 The caller owns the material state machine; ``NormalizeResult.status`` is the
 ``ProcessingStatus`` to transition to.
@@ -48,7 +56,7 @@ class NormalizeResult:
     completeness: str | None  # COMPLETE / PARTIAL / None when nothing was stored
     normalized_derivative_id: int | None
     chunks_derivative_id: int | None
-    chunk_count: int
+    chunk_count: int  # -1 when the derivatives already existed and were not recomputed
     reason: str | None = None
 
 
@@ -69,6 +77,22 @@ def chunks_payload(chunks: Sequence[DerivativeChunk]) -> bytes:
     return json.dumps({"schema": CHUNKS_SCHEMA, "chunks": rows}, ensure_ascii=False, sort_keys=True).encode("utf-8")
 
 
+def _existing(writer: StateWriter, source_version_id: int, schema_version: str, processor_version: str) -> NormalizeResult | None:
+    rows = writer.query(
+        "SELECT id, kind, completeness, blob_sha256 FROM derivatives "
+        "WHERE source_version_id = ? AND schema_version = ? AND processor_version = ?",
+        (source_version_id, schema_version, processor_version),
+    )
+    by_kind = {str(r["kind"]): r for r in rows}
+    if set(by_kind) != {"normalized", "chunks"}:
+        if by_kind:
+            raise NormalizeError("incomplete derivative set for this processor version; bump processor_version")
+        return None
+    completeness = str(by_kind["normalized"]["completeness"])
+    status = "READY" if completeness == "COMPLETE" else "PARTIAL"
+    return NormalizeResult(status, completeness, int(by_kind["normalized"]["id"]), int(by_kind["chunks"]["id"]), -1, "ALREADY_NORMALIZED")
+
+
 def normalize_source_version(
     writer: StateWriter,
     blobs: BlobStore,
@@ -81,14 +105,17 @@ def normalize_source_version(
     schema_version: str = "1",
     now: str | None = None,
 ) -> NormalizeResult:
-    stamp = now or _now()
     row = writer.query_one(
-        "SELECT v.source_version, v.source_hash, v.blob_sha256, f.source_id, f.provider "
+        "SELECT v.source_version, v.source_hash, v.blob_sha256, v.created_at, f.source_id, f.provider "
         "FROM source_versions v JOIN source_files f ON f.id = v.source_file_id WHERE v.id = ?",
         (source_version_id,),
     )
     if row is None:
         raise NormalizeError(f"unknown source version {source_version_id}")
+    existing = _existing(writer, source_version_id, schema_version, processor_version)
+    if existing is not None:
+        return existing
+    stamp = now or str(row["created_at"])  # deterministic: same inputs -> same derivative bytes
     raw = blobs.read_bytes(str(row["blob_sha256"]), verify=True)
     source_ref = v2_source_ref(str(row["provider"]), str(row["source_id"]))
     common = {
@@ -107,9 +134,17 @@ def normalize_source_version(
         derivative_status = pdf.derivative_status
         reason = pdf.reason
         markdown = pdf.to_markdown()
-        chunks = page_chunks(markdown, entity_id=entity_id) if derivative_status in ("ready", "partial") else []
+        chunks = []
+        if derivative_status != "failed":
+            try:
+                chunks = page_chunks(markdown, entity_id=entity_id)
+            except ValueError:
+                chunks = []  # no validated page index: nothing citable
     elif kind == "transcript":
-        transcript = normalize_transcript(raw, **common)  # type: ignore[arg-type]
+        try:
+            transcript = normalize_transcript(raw, **common)  # type: ignore[arg-type]
+        except UnicodeDecodeError:
+            return NormalizeResult("FAILED", None, None, None, 0, "TRANSCRIPT_NOT_UTF8")
         derivative_status = str(transcript.front_matter.status)
         markdown = transcript.to_markdown()
         chunks = timestamp_chunks(transcript, entity_id=entity_id)
@@ -119,6 +154,10 @@ def normalize_source_version(
     status = _STATUS.get(derivative_status.lower(), "FAILED")
     if status == "FAILED":
         return NormalizeResult(status, None, None, None, 0, reason)
+    if not any(chunk.content.strip() for chunk in chunks):
+        # Nothing citable was extracted (marker-only pages carry no SOURCE text) (e.g. unreadable or image-only PDF): store no
+        # derivative rather than an empty PARTIAL one; a person has to look at it.
+        return NormalizeResult("NEEDS_REVIEW", None, None, None, 0, reason or "NO_EXTRACTABLE_TEXT")
     completeness = "COMPLETE" if status == "READY" else "PARTIAL"
 
     normalized_blob = blobs.put_bytes(markdown.encode("utf-8"))
@@ -128,19 +167,6 @@ def normalize_source_version(
         for derivative_kind, stored in (("normalized", normalized_blob), ("chunks", chunks_blob)):
             if writer.query_one("SELECT 1 FROM blobs WHERE sha256 = ?", (stored.sha256,)) is None:
                 writer.insert(Owner.SOURCE, Actor.INGESTER, "blobs", {"sha256": stored.sha256, "size_bytes": stored.size_bytes, "created_at": stamp})
-            existing = writer.query_one(
-                "SELECT id, blob_sha256, completeness FROM derivatives "
-                "WHERE source_version_id = ? AND kind = ? AND schema_version = ? AND processor_version = ?",
-                (source_version_id, derivative_kind, schema_version, processor_version),
-            )
-            if existing is not None:
-                if existing["blob_sha256"] != stored.sha256 or existing["completeness"] != completeness:
-                    raise NormalizeError(
-                        "a derivative for this source version and processor version already exists with different "
-                        "content; bump processor_version for a new normalizer"
-                    )
-                derivative_ids.append(int(existing["id"]))
-                continue
             derivative_id = writer.insert(
                 Owner.SOURCE,
                 Actor.INGESTER,

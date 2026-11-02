@@ -14,6 +14,7 @@ import unicodedata
 import pytest
 from conftest import make_pdf_bytes
 
+from syllva.domain.models import parse_locator
 from syllva.domain.source_ref import V2_PROVIDERS, v2_source_ref
 from syllva.ingestion.local import IngestError, add_version, ingest_new
 from syllva.library.blobs import BlobCorrupt, BlobStore
@@ -127,30 +128,72 @@ def test_pdf_pages_become_page_chunks(v2_db: Database, blobs: BlobStore) -> None
     assert result.status == "READY" and result.completeness == "COMPLETE"
     chunks = _chunks(v2_db, blobs, result.chunks_derivative_id)  # type: ignore[arg-type]
     assert len(chunks) == 2 and "TCP three-way handshake" in str(chunks[0]["content"])
-    assert all("p" in str(c["locator"]) for c in chunks)
+    locators = [parse_locator(str(c["locator"])) for c in chunks]
+    assert [(loc.start_page, loc.end_page) for loc in locators] == [(1, 1), (2, 2)]  # type: ignore[union-attr]
 
 
 def test_pdf_with_a_textless_page_is_partial(v2_db: Database, blobs: BlobStore) -> None:
     pytest.importorskip("pypdf")
-    ingested = _ingest(v2_db, blobs, make_pdf_bytes(["page one", None]))
+    # note: avoid "page <word>" in text — the legacy page-marker index treats it as a marker (R1b-5)
+    ingested = _ingest(v2_db, blobs, make_pdf_bytes(["first slide", None]))
     result = _normalize(v2_db, blobs, ingested.source_version_id, "pdf")
     assert result.completeness == "PARTIAL" and result.status in {"PARTIAL", "NEEDS_REVIEW"}
 
 
-def test_unreadable_pdf_stores_nothing(v2_db: Database, blobs: BlobStore) -> None:
-    ingested = _ingest(v2_db, blobs, b"%PDF-1.4\nnot a pdf\n%%EOF")
+@pytest.mark.parametrize("raw", [b"%PDF-1.4\nnot a pdf\n%%EOF", b"", b"\x00\x01\x02"])
+def test_unreadable_pdf_stores_nothing(v2_db: Database, blobs: BlobStore, raw: bytes) -> None:
+    ingested = _ingest(v2_db, blobs, raw or b"%PDF-")
     result = _normalize(v2_db, blobs, ingested.source_version_id, "pdf")
     assert result.status in {"FAILED", "NEEDS_REVIEW"}
-    if result.status == "FAILED":
-        assert result.completeness is None
-        assert v2_db.connection.execute("SELECT count(*) FROM derivatives").fetchone()[0] == 0
+    assert result.completeness is None and result.normalized_derivative_id is None
+    assert v2_db.connection.execute("SELECT count(*) FROM derivatives").fetchone()[0] == 0
+
+
+def test_image_only_pdf_needs_review_and_stores_nothing(v2_db: Database, blobs: BlobStore) -> None:
+    pytest.importorskip("pypdf")
+    ingested = _ingest(v2_db, blobs, make_pdf_bytes([None, None]))
+    result = _normalize(v2_db, blobs, ingested.source_version_id, "pdf")
+    assert result.status == "NEEDS_REVIEW" and result.completeness is None
+    assert v2_db.connection.execute("SELECT count(*) FROM derivatives").fetchone()[0] == 0
+
+
+def test_non_utf8_transcript_fails_with_a_code(v2_db: Database, blobs: BlobStore) -> None:
+    ingested = _ingest(v2_db, blobs, "[00:00] 안녕하세요".encode("cp949"), "S03.txt")
+    result = _normalize(v2_db, blobs, ingested.source_version_id, "transcript")
+    assert (result.status, result.reason, result.completeness) == ("FAILED", "TRANSCRIPT_NOT_UTF8", None)
+
+
+def test_default_normalized_at_is_deterministic(tmp_path: object) -> None:
+    from pathlib import Path
+
+    from syllva.library.paths import layout
+    from syllva.state.v2.database import open_database
+
+    outputs = []
+    for run in ("a", "b"):
+        with open_database(layout(Path(str(tmp_path)) / run)) as db:
+            store = BlobStore(db.layout.blobs_dir, db.layout.tmp_dir)
+            ingested = ingest_new(db.writer(), store, io.BytesIO(TRANSCRIPT.encode()), display_name="S01.txt", now="2026-11-02T00:00:00+00:00")
+            result = normalize_source_version(
+                db.writer(), store, ingested.source_version_id, kind="transcript", entity_id="LMS1-S01", course_key="LMS1", processor_version="p1"
+            )
+            sha = db.connection.execute("SELECT blob_sha256 FROM derivatives WHERE id = ?", (result.normalized_derivative_id,)).fetchone()[0]
+            outputs.append(store.read_bytes(sha).decode().replace(ingested.source_id, "SRC"))
+    assert outputs[0] == outputs[1]
 
 
 def test_normalization_is_idempotent_per_processor_version(v2_db: Database, blobs: BlobStore) -> None:
     ingested = _ingest(v2_db, blobs, TRANSCRIPT.encode(), "S01.txt")
     first = _normalize(v2_db, blobs, ingested.source_version_id, "transcript")
-    again = _normalize(v2_db, blobs, ingested.source_version_id, "transcript")
+    files_after_first = sorted(p.name for p in v2_db.layout.blobs_dir.rglob("*") if p.is_file())
+    # a later re-run (different wall clock) returns the same derivatives and writes no new blobs
+    again = normalize_source_version(
+        v2_db.writer(), blobs, ingested.source_version_id, kind="transcript", entity_id="LMS1-S01",
+        course_key="LMS1", processor_version="p1", now="2030-01-01T00:00:00+00:00",
+    )
     assert (again.normalized_derivative_id, again.chunks_derivative_id) == (first.normalized_derivative_id, first.chunks_derivative_id)
+    assert again.reason == "ALREADY_NORMALIZED"
+    assert sorted(p.name for p in v2_db.layout.blobs_dir.rglob("*") if p.is_file()) == files_after_first
     newer = _normalize(v2_db, blobs, ingested.source_version_id, "transcript", processor="p2")
     assert newer.normalized_derivative_id != first.normalized_derivative_id
 
