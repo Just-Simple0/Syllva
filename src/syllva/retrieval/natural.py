@@ -21,7 +21,9 @@ Pipeline:
    "알고리즘 2강" means course "알고리즘" + session 2, not course "알고리즘2".
    When two matches overlap the longer one wins ("알고리즘2" over "알고리즘");
    separate mentions of different courses are kept as several courses.
-   One-letter typos are accepted only when the digits are identical;
+   One-letter typos are accepted only when the digits are identical.
+   Known limit: a course-name digit glued to a cue ("알고리즘2강") is read as the cue
+   ("알고리즘" + 2강); with a space ("알고리즘2 2강") both are understood;
 4. MATERIALS: kind words narrow hard; chapter numbers and title words are
    scored separately and, when they point at different materials, all of them
    are offered (conflicting cues are ambiguous, not a pick);
@@ -63,9 +65,9 @@ _INTENT_WORDS = frozenset(
 )
 _PARTICLES = ("이랑", "에서", "으로", "에게", "하고", "이나", "랑", "의", "을", "를", "은", "는", "이", "가", "에", "도", "로", "와", "과", "나")
 
-_WEEK_RES = (re.compile(r"(\d{1,2})\s*주\s*차"), re.compile(r"\bweek\s*(\d{1,2})\b"))
+_WEEK_RES = (re.compile(r"(?<!\d)(\d{1,2})\s*주\s*차"), re.compile(r"\bweek\s*(\d{1,2})\b"))
 _SESSION_RES = (
-    re.compile(r"(\d{1,2})\s*(?:강(?:의)?|회차|번째(?:\s*강의)?)(?![가-힣])"),
+    re.compile(r"(?<!\d)(\d{1,2})\s*(?:강(?:의)?|회차|번째(?:\s*강의)?)(?![가-힣])"),
     re.compile(r"(?<![a-z0-9])s(\d{1,2})(?![0-9])"),
 )
 _DATE_RES = (
@@ -74,7 +76,14 @@ _DATE_RES = (
     re.compile(r"(?<![\d/])(?P<m>\d{1,2})/(?P<d>\d{1,2})(?![\d/])"),
     re.compile(r"(?P<m>\d{1,2})\s*월\s*(?P<d>\d{1,2})\s*일"),
 )
-_CHAPTER_RE = re.compile(r"(?:chapter|chap|ch)\.?\s*0*(\d{1,3})|0*(\d{1,3})\s*장(?![가-힣])")
+# "ch" needs a word boundary on the left so course codes (MECH201, ARCH3) and words
+# (which 4, branch 3) are not chapters.
+_CHAPTER_RE = re.compile(r"(?<![a-z])(?:chapter|chap|ch)\.?\s*0*(\d{1,3})(?!\d)|(?<!\d)0*(\d{1,3})\s*장(?![가-힣])")
+# Chapter numbers a TITLE declares: explicit chapter words, or a leading number group
+# like "04_05 ..." / "Chapter 04_05". Other digits in a title (course names such as
+# 알고리즘2, session ids like S02, years) are NOT chapters.
+_TITLE_GROUP_RE = re.compile(r"(?<!\w)0*(\d{1,3})((?:_0*\d{1,3})+)(?!\d)")
+_EXTENSION_RE = re.compile(r"\.[a-z0-9]{2,5}$")
 _TOKEN_RE = re.compile(r"[0-9a-z가-힣]+")
 
 
@@ -91,6 +100,21 @@ def strip_particle(token: str) -> str:
         if len(token) > len(particle) + 1 and token.endswith(particle):
             return token[: -len(particle)]
     return token
+
+
+def title_chapters(title: str) -> set[int]:
+    text = norm(title)
+    found = {int(a or b) for a, b in _CHAPTER_RE.findall(text)}
+    for first, rest in _TITLE_GROUP_RE.findall(text):
+        found.add(int(first))
+        found.update(int(n) for n in re.findall(r"\d+", rest))
+    return found
+
+
+def title_text(title: str) -> str:
+    """Normalised title without its file extension (so 'pdf'/'txt' are not title words)."""
+
+    return _EXTENSION_RE.sub("", norm(title))
 
 
 def _digits(text: str) -> str:
@@ -255,6 +279,14 @@ class NaturalResolver:
 
         if kinds or cues.chapters or words:
             material_hits = self._match_materials(materials, course_ids, session_hits, kinds, cues.chapters, words)
+            if not material_hits and session_hits and words and not (kinds or cues.chapters):
+                # the title words point at materials of OTHER sessions: conflicting cues,
+                # offer the sessions and those materials instead of returning a session silently
+                elsewhere = self._match_materials(materials, course_ids, None, kinds, (), words)
+                if elsewhere:
+                    items = [("session", s.session_id, self._session_label(courses, s), r) for s, r in session_hits]
+                    items += [("material", m.material_id, self._material_label(courses, m), r) for m, r in elsewhere]
+                    return self._finish(items, course_key, force_choice=True)
             if material_hits:
                 return self._finish(
                     [("material", m.material_id, self._material_label(courses, m), r) for m, r in material_hits], course_key
@@ -395,14 +427,12 @@ class NaturalResolver:
             pool = [m for m in pool if m.kind in kinds]
         wanted = set(chapters)
 
-        def title_numbers(m: _Material) -> set[int]:
-            return {int(n) for n in re.findall(r"\d+", norm(m.title))}
-
         def title_words(m: _Material) -> list[str]:
-            title, flat = norm(m.title), compact(m.title)
+            title = title_text(m.title)
+            flat = compact(title)
             return [w for w in words if w in title or w in flat]
 
-        by_chapter = [m for m in pool if wanted & title_numbers(m)] if wanted else []
+        by_chapter = [m for m in pool if wanted & title_chapters(m.title)] if wanted else []
         scored = [(len(title_words(m)), m) for m in pool]
         top = max((score for score, _ in scored), default=0)
         by_words = [m for score, m in scored if top and score == top]
@@ -447,10 +477,12 @@ class NaturalResolver:
         course = courses.get(m.course_id)
         return f"{course.name if course else ''} · {m.title}"
 
-    def _finish(self, items: list[tuple[str, str, str, str]], course_key: str | None) -> NaturalResolution:
+    def _finish(
+        self, items: list[tuple[str, str, str, str]], course_key: str | None, *, force_choice: bool = False
+    ) -> NaturalResolution:
         if not items:
             return NaturalResolution("none", reason="NO_MATCH", course_key=course_key)
-        if len(items) == 1:
+        if len(items) == 1 and not force_choice:
             entity_type, entity_id, label, reason = items[0]
             return NaturalResolution(
                 "resolved", entity=ResolvedEntity(entity_type, entity_id, label, reason=reason), course_key=course_key
