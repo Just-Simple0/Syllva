@@ -20,14 +20,12 @@ DESIGN = Path(__file__).resolve().parents[3] / "syllva-v2-design-frozen.md"
 # id -> (spec §14 file, activating stage, what is still missing)
 PENDING: dict[str, tuple[str, str, str]] = {
     "C-01": ("test_agent_no_tools.py", "R4", "agents/ and build_agent_launch do not exist yet"),
-    "C-02": ("test_reader_read_only.py", "R1b-4", "RetrievalService must take StateReader only; reader half active in test_v2_reader_and_lock"),
     "C-04": ("test_gate_auth.py", "R2", "gate/ module and Shell protocol (§6)"),
     "C-05": ("test_gate_nonce.py", "R2", "gate/ module (§6.3-§6.4)"),
     "C-06": ("test_ai_artifact_fingerprint.py", "R4", "ai_artifacts pipeline (§8.7)"),
     "C-07": ("test_launch_env.py", "R4", "build_agent_launch env allowlist (§7.2)"),
     "C-08": ("test_agent_cwd.py", "R4", "agent cwd creation (§3.1, §7.1)"),
     "C-09": ("test_single_spawn_path.py", "R4", "launcher and Rust-side check; Python static part (any spawn outside agents/launcher.py) active in test_v2_static_invariants"),
-    "C-10": ("test_citation_allowlist.py", "R4", "Run Context and citation validation (§8.5-§8.6)"),
     "C-11": ("test_run_context_lifetime.py", "R4", "Run Context lifetime (§8.6)"),
     "C-13": ("test_no_public_exposure.py", "R2", "0.0.0.0 refusal and remote MCP not loaded; loopback bind active in test_v2_no_public_exposure"),
     "C-15": ("test_template_manifest.py", "R4", "prompt template manifest (§8.2)"),
@@ -51,6 +49,8 @@ ACTIVE: dict[str, str] = {
     "C-03": "test_v2_ownership_matrix.py",
     "C-12": "test_v2_normalization_not_summary.py",
     "C-14": "test_v2_resolve_queries.py",
+    "C-02": "test_v2_retrieval_service.py",
+    "C-10": "test_v2_retrieval_service.py",
 }
 
 
