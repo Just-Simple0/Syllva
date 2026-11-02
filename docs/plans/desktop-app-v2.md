@@ -47,10 +47,13 @@ rev 2 변경 요지: 독립 검토(Fable, 코드 대조)에서 human-only 증명
 ## 3. AI 대화 패널 (CLI 에이전트)
 
 - `AgentAdapter`: `start(session_context) / send / stream / stop`. 초기 구현은 Claude Code, Codex CLI. 설치·로그인 상태는 앱이 감지해 안내만 하고 대신 로그인하지 않는다. 비대화형 구조화 출력(`claude -p --output-format stream-json`, `codex exec --json`)을 기반으로 한다.
-- **R0 확인 필수 (공식 문서 근거 없이 구현 금지):**
-  1. 구독(Pro/Max, ChatGPT 플랜) 로그인으로 공식 바이너리를 **서드파티 앱이 서브프로세스로 구동**하는 것이 현재 약관상 허용되는가. (검토에서 "Anthropic이 Claude Code 외 하네스에서의 구독 OAuth를 제한했다"는 주장이 나왔으나 **미검증**.) 불허면 구독 경로는 "CLI 터미널을 UI 안에 임베드해 사용자가 직접 조작"하는 형태로 축소하거나 API 키 경로(C)를 주경로로 바꾼다.
-  2. Codex CLI의 네이티브 Windows 지원 수준(과거 실험적/WSL 권장).
-  3. 두 CLI의 `--mcp-config`류 옵션, 도구 제한 플래그, 샌드박스 모드의 현재 사양.
+- **R0 조사 결과 (2026-11-02, 공식 문서 직접 열람 여부 표시):**
+  1. **Claude Code — 조건부 허용 (VERIFIED, code.claude.com/docs/en/legal-and-compliance).** 사용자가 수정되지 않은 `claude` 바이너리에 자기 구독으로 로그인하는 것은 막지 않는다. 반면 Claude.ai 로그인을 앱에 내장하거나, 구독 자격증명으로 사용자 대신 요청을 중계하거나, 토큰·세션을 수집·저장하는 것은 **금지**다. 제품에서 Agent SDK를 쓰는 경우 API 키 인증을 쓰라고 명시한다. 따라서 앱은 **바이너리를 수정 없이 실행만 하고 로그인은 사용자가 CLI에서 직접** 하며 토큰을 읽거나 저장하지 않는다. `claude -p`/Agent SDK/서드파티 앱 사용은 구독 한도를 소모하며(2026-06-15 변경 일시 중단 공지), 정책이 다시 바뀔 수 있다. Commercial Terms 적용 여부와 "일반적·개인적 사용"에 해당하는지는 문구상 불명확해 **법무 확인 필요(UNVERIFIED)**.
+  2. **Codex CLI — 미확정 (UNVERIFIED).** 이 세션 네트워크가 `developers.openai.com`·`help.openai.com`을 허용하지 않아 공식 약관·`codex exec` 문서를 읽지 못했다. GitHub README의 "ChatGPT 계정 로그인 권장"만 확인. 제3자 앱의 구동 허용 여부, 비대화형 옵션, 네이티브 Windows 지원 수준(README는 PowerShell 설치, `docs/install.md`는 WSL2만 언급 — 불일치)은 도메인 허용 후 재조사한다. 그때까지 Codex는 경로 B(내장 터미널, 사용자가 조작) 또는 C(API 키)를 기본으로 하고 A는 보류.
+  3. **Claude Code 사양 (VERIFIED, cli-reference·mcp 문서):** `-p --output-format stream-json`, `--mcp-config`+`--strict-mcp-config`, `--tools ""`/`--disallowedTools`/`--restricted`(명령 도구 제거, 파일 도구는 작업 디렉터리로 제한), `--permission-mode`. MCP stdio 서버에는 설정의 `env`(`${VAR}` 확장)로 환경변수를 줄 수 있어 **에이전트 전용 capability 토큰 전달 경로로 쓸 수 있다.** 작업 디렉터리는 플래그가 아니라 서브프로세스 cwd로 지정.
+  4. **Windows:** Claude Code는 네이티브 지원이지만 **네이티브 Windows에서는 명령이 샌드박스 없이 실행**된다(샌드박스는 WSL2 한정). 따라서 Windows 격리는 도구 비활성+읽기 전용 MCP+경로 분리에 의존한다는 한계를 개정서에 명시한다.
+  5. 앱은 사용자에게 다음을 표시한다: 구독 한도가 소모된다는 점, 로그인은 각 CLI에서 직접 하며 앱은 토큰을 저장하지 않는다는 점, 네이티브 Windows에서 OS 샌드박스가 없다는 점, API 키 대체 경로.
+- **경로 결정:** Claude는 A(공식 바이너리 구동, 구독 로그인) 가능하되 B를 안전한 폴백으로, 제품 안에서 Agent SDK를 쓸 때만 C(API 키). Codex는 R0 재조사 전까지 B/C.
 - **에이전트 격리(R0 결정, R4로 미루지 않음):**
   - 에이전트에는 **MCP 도구만** 노출한다. Bash/Write/Edit/파일 읽기 도구는 끄고, 켜야 한다면 별도 승인 항목으로 개정서에 기록한다.
   - SQLite·라이브러리·세션 토큰·키체인 접근은 에이전트 작업 디렉터리 **밖**에 두고, 에이전트 프로세스에는 환경변수·파일·로그로 UI 세션 토큰을 절대 전달하지 않는다.
@@ -130,5 +133,5 @@ R0에서 CLAUDE.md의 "역할 분담/작업 파이프라인/리뷰 설정" 절�
 ## 10. 미결
 
 1. **R1a 내부 이름 변경(`uls` → `syllva`)을 R1 앞 단독 단계로 진행할지** — 브랜드 유지 결정에 따른 제안이며 사용자 확정 필요.
-2. CLI 구독 사용 약관 결과(R0).
-3. Codex CLI Windows 지원 수준(R0). 불충분하면 Windows의 Codex 지원은 후속으로 미룬다.
+2. Codex CLI 약관·`codex exec`·Windows 지원: 공식 문서 도메인(`developers.openai.com`, `help.openai.com`)을 세션 네트워크에서 허용한 뒤 재조사 필요. 그 전에는 Codex를 B/C로 둔다.
+3. Claude Code를 앱이 구동하는 형태가 Commercial Terms 대상인지 법무 확인.
