@@ -216,3 +216,19 @@ def test_material_source_is_immutable_through_the_writer(v2_db: Database) -> Non
     ids = seed_catalog(v2_db.connection)
     with pytest.raises(PolicyViolation, match="immutable"):
         v2_db.writer().update(Owner.CATALOG, Actor.UI_USER, "materials", {"id": ids["material"]}, {"source_file_id": 99})
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "WITH x AS (SELECT 1) DELETE FROM blob_refs",
+        "WITH x AS (SELECT 1) UPDATE courses SET name = 'x'",
+        "DELETE FROM courses",
+        "PRAGMA table_info(courses)",
+        "INSERT INTO courses(course_key, name, semester, created_at) VALUES ('k','n','s','t') RETURNING id",
+        "SELECT 1 RETURNING 1",
+    ],
+)
+def test_writer_query_is_read_only(v2_db: Database, sql: str) -> None:
+    with pytest.raises(PolicyViolation, match="plain SELECT"):
+        v2_db.writer().query(sql)

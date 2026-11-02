@@ -79,3 +79,64 @@ def gate(conn: sqlite3.Connection, action: str, target_kind: str, target_id: str
         "VALUES (?, ?, ?, ?, ?, ?, '0.0.0')",
         (action, target_kind, target_id, "a" * 64, nonce, NOW),
     ).lastrowid or 0
+
+
+# Copied from tests/unit/test_normalization_pdf.py: a real minimal text PDF without extra deps.
+def make_pdf_bytes(page_texts: list[str | None]) -> bytes:
+    """Build a minimal, real, multi-page text PDF without external deps.
+
+    Each entry becomes one page.  ``None`` produces a page with no text
+    content stream (extract_text() returns an empty string for it, same
+    as a scanned/image-only page).  This hand-built structure is real PDF
+    syntax parsed by pypdf, not a mock -- the tests below exercise the
+    actual PdfReader/extract_text() code path.
+    """
+
+    def content_stream(text: str | None) -> bytes:
+        if not text:
+            return b""
+        escaped = text.replace(chr(92), chr(92)*2).replace("(", chr(92)+"(").replace(")", chr(92)+")")
+        return f"BT /F1 12 Tf 10 700 Td ({escaped}) Tj ET".encode("latin-1")
+
+    n = len(page_texts)
+    catalog_num, pages_num, font_num = 1, 2, 3
+    page_nums = [4 + 2 * i for i in range(n)]
+    content_nums = [5 + 2 * i for i in range(n)]
+
+    obj_bodies: dict[int, bytes] = {
+        catalog_num: f"<< /Type /Catalog /Pages {pages_num} 0 R >>".encode(),
+        font_num: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    }
+    kids = " ".join(f"{pn} 0 R" for pn in page_nums)
+    obj_bodies[pages_num] = f"<< /Type /Pages /Kids [{kids}] /Count {n} >>".encode()
+    for i in range(n):
+        pn, cn = page_nums[i], content_nums[i]
+        obj_bodies[pn] = (
+            f"<< /Type /Page /Parent {pages_num} 0 R "
+            f"/Resources << /Font << /F1 {font_num} 0 R >> >> "
+            f"/MediaBox [0 0 612 792] /Contents {cn} 0 R >>"
+        ).encode()
+        stream_body = content_stream(page_texts[i])
+        obj_bodies[cn] = (
+            f"<< /Length {len(stream_body)} >>\nstream\n".encode()
+            + stream_body
+            + b"\nendstream"
+        )
+
+    buf = bytearray(b"%PDF-1.4\n")
+    offsets: dict[int, int] = {}
+    max_obj = max(obj_bodies)
+    for num in range(1, max_obj + 1):
+        offsets[num] = len(buf)
+        body = obj_bodies.get(num, b"<< >>")
+        buf += f"{num} 0 obj\n".encode() + body + b"\nendobj\n"
+    xref_offset = len(buf)
+    buf += f"xref\n0 {max_obj + 1}\n".encode()
+    buf += b"0000000000 65535 f \n"
+    for num in range(1, max_obj + 1):
+        buf += f"{offsets[num]:010d} 00000 n \n".encode()
+    buf += (
+        f"trailer\n<< /Size {max_obj + 1} /Root {catalog_num} 0 R >>\n"
+        f"startxref\n{xref_offset}\n%%EOF"
+    ).encode()
+    return bytes(buf)

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
@@ -82,6 +82,22 @@ class StateWriter:
                 self._connection.execute("COMMIT")
             finally:
                 self._depth = 0
+
+    # -- reads inside the write transaction ------------------------------------
+
+    def query(self, sql: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:
+        """Read through the writer connection (consistent with an open transaction). SELECT only."""
+
+        # Only a plain SELECT: a CTE may wrap DML (``WITH x AS (...) DELETE ...``), which the
+        # schema authorizer does not stop. sqlite3 executes a single statement per call.
+        if not sql.lstrip().upper().startswith("SELECT") or "RETURNING" in sql.upper():
+            raise PolicyViolation("StateWriter.query accepts a single plain SELECT statement only")
+        with self._lock:
+            return list(self._connection.execute(sql, tuple(params)).fetchall())
+
+    def query_one(self, sql: str, params: Sequence[Any] = ()) -> sqlite3.Row | None:
+        rows = self.query(sql, params)
+        return rows[0] if rows else None
 
     # -- generic writes -------------------------------------------------------
 
