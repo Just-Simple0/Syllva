@@ -30,7 +30,7 @@
 
 ## 삭제 순서와 import 금지
 
-- v2 모듈(`state.v2`, `library`, `ingestion.local`, `normalization.local`, `normalization.chunks`, `retrieval.natural`, `retrieval.ranking`, `retrieval.service`, `domain.source_ref`)은 삭제 예정 코드(`adapters.notion`, `adapters.drive`, `adapters.llm`, `study_notes`, 구 `domain.approval_identity`, v1.2 엔진·resolver·청크 분할기, v1.2 `state` 모듈들, `enrichment.writer`, `config.google_oauth`, `proposal`)와 바깥 계층(`intake`, `settings`, `cli`, `mcp`, `runtime`, `worker`)을 직접·간접 어느 경로로도 import하지 않는다(`pyproject.toml` `v2-no-legacy`, 예외 없음).
+- v2 모듈(`state.v2`, `library`, `ingestion.local`, `normalization.local`, `normalization.chunks`, `retrieval.natural`, `retrieval.ranking`, `retrieval.service`, `domain.source_ref`)은 삭제 예정 코드(`adapters.notion`, `adapters.drive`, `study_notes`, 구 `domain.approval_identity`, v1.2 엔진·resolver·청크 분할기, v1.2 `state` 모듈들, `enrichment.writer`, `config.google_oauth`, `proposal`), v2 런타임에서 금지된 외부 LLM 어댑터(`adapters.llm`, `no-external-llm-adapter`; 존폐는 R5에서 결정)와 바깥 계층(`intake`, `settings`, `cli`, `mcp`, `runtime`, `worker`)을 직접·간접 어느 경로로도 import하지 않는다(`pyproject.toml` `v2-no-legacy`, 예외 없음).
 - 실제 삭제는 R1c에서 로컬 intake 워커가 레거시 워커를 대체할 때 한다(명세서 §15 R1b-6 "import 금지 → 삭제는 R1c"). 그 PR에서 이 표의 `폐기`·`대체` 행과 해당 파일을 함께 지우고, `R1c 삭제 → Rn` 행은 파일만 지우며(행은 재작성 단계까지 유지), `core-no-outer-or-legacy` 등 기존 계약의 예외(`ignore_imports`)와 `scripts/invariants_baseline.json`의 기준선도 비운다(정오표 E19).
 
 ## 파일별 판정
