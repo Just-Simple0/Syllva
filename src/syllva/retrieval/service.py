@@ -24,11 +24,18 @@ Context assembly:
   text that was packaged — only for allowlisted locators that are still current
   (spec §8.6, C-10). A missing/corrupt blob drops that material with
   ``BLOB_UNAVAILABLE`` instead of failing the whole package.
+
+Lifetime rule: Core creates ONE ``RetrievalService`` per ``EphemeralStore`` and keeps
+it for the store's lifetime (the context->derivative binding lives here, next to the
+capabilities). Whether that binding moves into ``ContextCapability`` is decided with
+the Core wiring in R2. Within one source version and schema version the newest
+chunks derivative (highest id, i.e. the latest processor run) is used.
 """
 
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
@@ -111,6 +118,7 @@ class RetrievalService:
         self.resolver = NaturalResolver(reader, ephemeral, today=today, semester_starts=semester_starts)
         # context_id -> {material_id: chunks derivative id used for that package}
         self._context_derivatives: dict[str, dict[str, int]] = {}
+        self._lock = threading.Lock()
 
     # -- resolution -------------------------------------------------------------
 
@@ -167,7 +175,8 @@ class RetrievalService:
             raise LocatorNotAuthorized("locator is not in a current context capability", details={"cause": exc.code}) from exc
         if not allowed:
             raise LocatorNotAuthorized("locator is not in a current context capability")
-        derivative_id = self._context_derivatives.get(context_id, {}).get(source.material_id)
+        with self._lock:
+            derivative_id = self._context_derivatives.get(context_id, {}).get(source.material_id)
         if derivative_id is None:
             raise LocatorNotAuthorized("locator is not in a current context capability")
         try:
@@ -299,10 +308,11 @@ class RetrievalService:
             AllowedLocator(item.locator, item.fingerprint.source_hash, item.fingerprint.source_version) for item in selected
         ]
         capability = self.ephemeral.create_context_capability(list(allowed), caller_scope, self.context_ttl)
-        for stale_id in [c for c in self._context_derivatives if self.ephemeral.get_context_capability(c) is None]:
-            del self._context_derivatives[stale_id]
         packaged = {item.entity_id for item in selected}
-        self._context_derivatives[capability.context_id] = {m: d for m, d in used_derivatives.items() if m in packaged}
+        with self._lock:
+            for stale_id in [c for c in self._context_derivatives if self.ephemeral.get_context_capability(c) is None]:
+                del self._context_derivatives[stale_id]
+            self._context_derivatives[capability.context_id] = {m: d for m, d in used_derivatives.items() if m in packaged}
         return ContextPackage(
             entity=dict(entity),
             scope={"caller_scope_bound": True, "materials": [s.material_id for s in sources]},
