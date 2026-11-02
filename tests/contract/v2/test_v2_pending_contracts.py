@@ -27,7 +27,7 @@ PENDING: dict[str, tuple[str, str, str]] = {
     "C-06": ("test_ai_artifact_fingerprint.py", "R4", "ai_artifacts pipeline (§8.7)"),
     "C-07": ("test_launch_env.py", "R4", "build_agent_launch env allowlist (§7.2)"),
     "C-08": ("test_agent_cwd.py", "R4", "agent cwd creation (§3.1, §7.1)"),
-    "C-09": ("test_single_spawn_path.py", "R4", "launcher exists; static part active in test_v2_static_invariants"),
+    "C-09": ("test_single_spawn_path.py", "R4", "launcher and Rust-side check; Python static part (any spawn outside agents/launcher.py) active in test_v2_static_invariants"),
     "C-10": ("test_citation_allowlist.py", "R4", "Run Context and citation validation (§8.5-§8.6)"),
     "C-11": ("test_run_context_lifetime.py", "R4", "Run Context lifetime (§8.6)"),
     "C-12": ("test_normalization_not_summary.py", "R1b-2", "status transition function in domain/state (§3.7, §11.2)"),
@@ -48,12 +48,21 @@ PENDING: dict[str, tuple[str, str, str]] = {
 }
 
 
+# Contracts that are FULLY active. Moving an id here requires removing it from
+# PENDING and naming the test file that implements it (checked below).
+ACTIVE: dict[str, str] = {}
+
+
 def test_registry_covers_every_design_contract_id() -> None:
     design_ids = set(re.findall(r"^\| (C-\d{2}) \|", DESIGN.read_text(encoding="utf-8"), flags=re.MULTILINE))
     assert design_ids == {f"C-{n:02d}" for n in range(1, 27)}
-    assert set(PENDING) <= design_ids
-    # Every id is either pending here or fully active somewhere under tests/contract/v2.
-    assert design_ids - set(PENDING) == set()
+    assert not set(PENDING) & set(ACTIVE), "an id cannot be both pending and active"
+    assert set(PENDING) | set(ACTIVE) == design_ids, "every design contract id must be pending or active"
+    here = Path(__file__).resolve().parent
+    for contract_id, filename in ACTIVE.items():
+        test_file = here / filename
+        assert test_file.is_file(), f"{contract_id}: {filename} missing"
+        assert contract_id in test_file.read_text(encoding="utf-8"), f"{contract_id} not referenced in {filename}"
 
 
 @pytest.mark.parametrize("contract_id", sorted(PENDING))

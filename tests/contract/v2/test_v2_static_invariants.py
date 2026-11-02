@@ -59,36 +59,53 @@ def test_baseline_only_lists_known_rules_and_positive_counts() -> None:
         assert per_file and all(isinstance(n, int) and n > 0 for n in per_file.values())
 
 
-def test_no_agent_spawn_and_no_raw_html_in_real_tree() -> None:
+def test_no_process_spawn_and_no_raw_html_in_real_tree() -> None:
     findings = checker.collect(ROOT)
-    assert findings["agent-spawn"] == []
+    assert findings["process-spawn"] == []
     assert findings["ui-raw-html"] == []
-    assert findings["core-stdout-print"] == []
+    assert findings["core-stdout"] == []
 
 
 def test_import_linter_contracts_hold() -> None:
-    importlinter_cli = pytest.importorskip("importlinter.cli")
-    assert importlinter_cli.lint_imports(config_filename=str(ROOT / "pyproject.toml")) == 0
+    from importlinter.cli import lint_imports  # dev dependency: must not be skipped
+
+    assert lint_imports(config_filename=str(ROOT / "pyproject.toml")) == 0
 
 
 # --- detectors on synthetic trees -------------------------------------------
 
-def test_agent_spawn_detector_flags_cli_names_outside_launcher(tmp_path: Path) -> None:
+def test_process_spawn_detector_flags_every_spawn_outside_launcher(tmp_path: Path) -> None:
     root = _tree(
         tmp_path,
         {
             "src/syllva/ui/chat.py": "import subprocess\nsubprocess.run(['claude', '-p'])\n",
             "src/syllva/x/shell.py": "import os\nos.system('codex exec hi')\n",
             "src/syllva/y/aio.py": "import asyncio\nasync def f():\n    await asyncio.create_subprocess_exec('/usr/local/bin/claude')\n",
+            # aliases and variables must not bypass the rule
+            "src/syllva/a/alias.py": "import subprocess as sp\nsp.run([CLI])\n",
+            "src/syllva/a/fromimp.py": "from subprocess import run as go\ngo(argv)\n",
+            "src/syllva/a/which.py": "import shutil, subprocess\nexe = shutil.which('claude')\nsubprocess.Popen([exe])\n",
+            "src/syllva/a/loop.py": "async def f(loop):\n    await loop.subprocess_exec(proto, cmd)\n",
+            "src/syllva/a/osfrom.py": "from os import execvp\nexecvp(p, args)\n",
+            "src/syllva/a/dyn.py": "import importlib\nsp = importlib.import_module('subprocess')\n",
+            "src/syllva/a/pty_.py": "import pty\npty.spawn(cmd)\n",
+            # an unrelated call is fine, and the launcher is the one allowed place
+            "src/syllva/z/ok.py": "import webbrowser\nwebbrowser.open('http://127.0.0.1')\n",
             "src/syllva/agents/launcher.py": "import subprocess\nsubprocess.Popen(['claude'])\n",
-            "src/syllva/z/ok.py": "import subprocess\nsubprocess.run(['git', 'status'])\n",
         },
     )
     found = _rules(checker.collect(root))
-    assert sorted(found["agent-spawn"]) == [
-        ("src/syllva/ui/chat.py", 2),
-        ("src/syllva/x/shell.py", 2),
-        ("src/syllva/y/aio.py", 3),
+    assert sorted(path for path, _ in found["process-spawn"]) == [
+        "src/syllva/a/alias.py",
+        "src/syllva/a/dyn.py",
+        "src/syllva/a/fromimp.py",
+        "src/syllva/a/loop.py",
+        "src/syllva/a/osfrom.py",
+        "src/syllva/a/pty_.py",
+        "src/syllva/a/which.py",
+        "src/syllva/ui/chat.py",
+        "src/syllva/x/shell.py",
+        "src/syllva/y/aio.py",
     ]
 
 
@@ -98,11 +115,23 @@ def test_write_sql_detector_ignores_state_and_prose(tmp_path: Path) -> None:
         {
             "src/syllva/state/store.py": "Q = 'INSERT INTO t VALUES (1)'\n",
             "src/syllva/ui/bad.py": "Q = '''\n  UPDATE materials SET verified = 1 WHERE id = ?'''\nR = \"delete from t\"\n",
-            "src/syllva/ui/prose.py": "def f():\n    \"\"\"Delete one entry.\"\"\"\n    raise ValueError('update target is missing')\n",
+            "src/syllva/ui/prose.py": "def f():\n    \"\"\"Delete one entry.\"\"\"\n    raise ValueError('update target is missing')\n    x = 'with the update below'\n",
+            "src/syllva/ui/fstr.py": "q = f'UPDATE {table} SET a = 1'\n",
+            "src/syllva/ui/concat.py": "q = 'UPDATE ' + table + ' SET a = 1'\n",
+            "src/syllva/ui/cte.py": "q = 'WITH x AS (SELECT 1) INSERT INTO t SELECT * FROM x'\n",
+            "src/syllva/ui/comment.py": "q = '-- bump\\nDELETE FROM t'\n",
+            "src/syllva/ui/select.py": "q = 'SELECT * FROM t WHERE x = ?'\n",
         },
     )
     found = _rules(checker.collect(root))
-    assert sorted(found["write-sql-outside-state"]) == [("src/syllva/ui/bad.py", 1), ("src/syllva/ui/bad.py", 3)]
+    assert sorted(found["write-sql-outside-state"]) == [
+        ("src/syllva/ui/bad.py", 1),
+        ("src/syllva/ui/bad.py", 3),
+        ("src/syllva/ui/comment.py", 1),
+        ("src/syllva/ui/concat.py", 1),
+        ("src/syllva/ui/cte.py", 1),
+        ("src/syllva/ui/fstr.py", 1),
+    ]
 
 
 def test_ui_raw_html_detector(tmp_path: Path) -> None:
@@ -111,6 +140,8 @@ def test_ui_raw_html_detector(tmp_path: Path) -> None:
         {
             "src/syllva/ui/static/app.js": "el.textContent = x;\nel.innerHTML = x;\ndocument.write(x);\n",
             "src/syllva/settings/static/old.js": "node.insertAdjacentHTML('beforeend', s);\n",
+            "src/syllva/ui/static/more.js": "el['innerHTML'] = s;\nel.setHTML(s);\nr.createContextualFragment(s);\nnew DOMParser();\nf.srcdoc = s;\na.href = 'javascript:x()';\nbutton.onclick = handler;\n",
+            "src/syllva/ui/static/index.html": "<button onclick=\"go()\">x</button>\n<p>onboarding = fine</p>\n",
         },
     )
     found = _rules(checker.collect(root))
@@ -118,12 +149,38 @@ def test_ui_raw_html_detector(tmp_path: Path) -> None:
         ("src/syllva/settings/static/old.js", 1),
         ("src/syllva/ui/static/app.js", 2),
         ("src/syllva/ui/static/app.js", 3),
+        ("src/syllva/ui/static/index.html", 1),
+        ("src/syllva/ui/static/more.js", 1),
+        ("src/syllva/ui/static/more.js", 2),
+        ("src/syllva/ui/static/more.js", 3),
+        ("src/syllva/ui/static/more.js", 4),
+        ("src/syllva/ui/static/more.js", 5),
+        ("src/syllva/ui/static/more.js", 6),
     ]
 
 
 def test_core_stdout_detector(tmp_path: Path) -> None:
-    root = _tree(tmp_path, {"src/syllva/core/main.py": "print('ready')\n", "src/syllva/cli/x.py": "print('ok')\n"})
-    assert _rules(checker.collect(root)) == {"core-stdout-print": [("src/syllva/core/main.py", 1)]}
+    root = _tree(
+        tmp_path,
+        {
+            "src/syllva/core/main.py": "import sys\nprint('ready')\nsys.stdout.write('x')\nfrom sys import stdout as out\nout.write('y')\n",
+            "src/syllva/cli/x.py": "print('ok')\n",
+        },
+    )
+    assert _rules(checker.collect(root)) == {
+        "core-stdout": [("src/syllva/core/main.py", 2), ("src/syllva/core/main.py", 3), ("src/syllva/core/main.py", 5)]
+    }
+
+
+def test_bom_and_unparseable_files(tmp_path: Path) -> None:
+    root = _tree(tmp_path, {})
+    target = root / "src/syllva/ui/bom.py"
+    target.parent.mkdir(parents=True)
+    target.write_bytes("\ufeffQ = 'DELETE FROM t'\n".encode())
+    assert _rules(checker.collect(root)) == {"write-sql-outside-state": [("src/syllva/ui/bom.py", 1)]}
+    (root / "src/syllva/ui/broken.py").write_text("def (:\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="cannot parse src/syllva/ui/broken.py"):
+        checker.collect(root)
 
 
 # --- ratchet semantics -------------------------------------------------------

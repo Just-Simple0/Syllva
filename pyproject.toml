@@ -77,6 +77,11 @@ strict = true
 # violations that existed when the contracts were introduced (R1b-1). Entries may
 # only be removed; an entry that no longer matches fails the check, and a new
 # violation not listed here fails the check. The lists must be empty by end of R1b.
+# A PR that adds a violation AND the matching ignore entry is not caught by the
+# tool; such additions must be rejected in review.
+# Not yet expressible (packages do not exist): agents -/-> library/state,
+# prompt -/-> state, core layers -/-> ui/agents/shell (spec §1.3). They are added
+# when those packages are created (R2/R4). Rust-side spawn checks land with shell/ (R2).
 [tool.importlinter]
 root_package = "syllva"
 

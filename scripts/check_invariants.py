@@ -12,16 +12,30 @@ compared with ``scripts/invariants_baseline.json``, which is a RATCHET:
 ``--write-baseline`` refuses to raise any count unless ``--allow-increase`` is
 given (used once, when the rule set is introduced).
 
+Limit (by design of a ratchet): a pull request that raises a count AND edits
+the baseline by hand to match is not caught here. Baseline increases must be
+called out in the PR and rejected in review.
+
 Rules (design §11 test ids in brackets):
 
-* ``agent-spawn`` [C-09]: process-spawning calls whose literal arguments name an
-  agent CLI (``claude``, ``codex``) outside ``src/syllva/agents/launcher.py``.
-* ``write-sql-outside-state`` [C-03]: string literals that start with a SQL
-  write statement (INSERT/UPDATE/DELETE/REPLACE) outside ``src/syllva/state/``.
-* ``ui-raw-html`` [C-18]: ``innerHTML``/``outerHTML``/``insertAdjacentHTML``/
-  ``document.write`` in UI JavaScript.
-* ``core-stdout-print`` [spec §2.3]: ``print(`` in ``src/syllva/core/``, whose
-  stdout is reserved for the Shell protocol.
+* ``process-spawn`` [C-09]: ANY process-creating call (``subprocess.*``,
+  ``os.system/popen/exec*/spawn*/posix_spawn*/startfile``, asyncio/loop
+  ``subprocess_exec``/``subprocess_shell``/``create_subprocess_*``,
+  ``pty.spawn``) and any dynamic import of ``subprocess``/``pty``, outside
+  ``src/syllva/agents/launcher.py`` — regardless of arguments. Import aliases
+  (``import subprocess as sp``, ``from subprocess import run``) are resolved.
+  Not detected: access through ``getattr``/``globals()`` or ctypes; reviewed by hand.
+* ``write-sql-outside-state`` [C-03]: string literals (including the leading
+  piece of an f-string or concatenation) shaped like a SQL write statement —
+  INSERT INTO / REPLACE INTO / UPDATE … SET / DELETE FROM, also after leading
+  ``--`` comments or an upper-case ``WITH`` clause — outside ``src/syllva/state/``.
+  DDL is out of scope (schema lives in migrations).
+* ``ui-raw-html`` [C-18]: raw-HTML sinks in UI code: ``innerHTML``,
+  ``outerHTML``, ``insertAdjacentHTML``, ``document.write``, ``setHTML``,
+  ``createContextualFragment``, ``DOMParser``, ``srcdoc``, ``javascript:`` URLs,
+  and inline ``on*=`` handlers in HTML files.
+* ``core-stdout`` [spec §2.3]: ``print(`` and ``sys.stdout``/``sys.__stdout__``
+  writes in ``src/syllva/core/``, whose stdout is reserved for the Shell protocol.
 """
 
 from __future__ import annotations
@@ -39,30 +53,40 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src" / "syllva"
 BASELINE_PATH = ROOT / "scripts" / "invariants_baseline.json"
 
-AGENT_EXECUTABLES = frozenset({"claude", "codex", "claude.exe", "codex.exe", "claude.cmd", "codex.cmd"})
 AGENT_LAUNCHER = "src/syllva/agents/launcher.py"
-SPAWN_CALLS = frozenset(
+SPAWN_MODULES = frozenset({"subprocess", "pty"})
+OS_SPAWN_FUNCTIONS = frozenset(
     {
-        "subprocess.run", "subprocess.Popen", "subprocess.call", "subprocess.check_call",
-        "subprocess.check_output", "subprocess.getoutput", "subprocess.getstatusoutput",
-        "os.system", "os.popen", "os.execv", "os.execve", "os.execvp", "os.execvpe",
-        "os.execl", "os.execle", "os.execlp", "os.execlpe", "os.spawnv", "os.spawnve",
-        "os.spawnvp", "os.spawnvpe", "os.spawnl", "os.spawnle", "os.spawnlp", "os.spawnlpe",
-        "os.posix_spawn", "os.posix_spawnp", "os.startfile",
-        "asyncio.create_subprocess_exec", "asyncio.create_subprocess_shell", "pty.spawn",
+        "system", "popen", "execv", "execve", "execvp", "execvpe", "execl", "execle", "execlp",
+        "execlpe", "spawnv", "spawnve", "spawnvp", "spawnvpe", "spawnl", "spawnle", "spawnlp",
+        "spawnlpe", "posix_spawn", "posix_spawnp", "startfile",
     }
 )
+SPAWN_ATTRIBUTE_SUFFIXES = (
+    "create_subprocess_exec", "create_subprocess_shell", "subprocess_exec", "subprocess_shell",
+)
+DYNAMIC_IMPORTERS = frozenset({"importlib.import_module", "__import__", "import_module"})
+
 # Statement-shaped only: avoids prose like "Delete one entry" or "update target is missing".
-SQL_WRITE = re.compile(
-    r"^\s*(?:"
-    r"INSERT\s+(?:OR\s+\w+\s+)?INTO\s"
-    r"|REPLACE\s+INTO\s"
-    r"|UPDATE\s+(?:OR\s+\w+\s+)?[\w\"\.]+\s+SET\s"
-    r"|DELETE\s+FROM\s"
-    r")",
+_SQL_HEAD = (
+    r"(?:"
+    r"INSERT\s+(?:OR\s+\w+\s+)?INTO(?:\s|$)"
+    r"|REPLACE\s+INTO(?:\s|$)"
+    r"|UPDATE\s+(?:OR\s+\w+\s+)?(?:[\w\"\.]+\s+SET(?:\s|$)|$)"
+    r"|DELETE\s+FROM(?:\s|$)"
+    r")"
+)
+SQL_WRITE = re.compile(r"^\s*" + _SQL_HEAD, re.IGNORECASE)
+SQL_CTE_WRITE = re.compile(r"^\s*WITH\b.*?\b(?:INSERT|UPDATE|DELETE|REPLACE)\b", re.DOTALL)  # upper-case WITH only
+SQL_LEADING_COMMENTS = re.compile(r"^(?:\s*--[^\n]*\n)+")
+
+RAW_HTML = re.compile(
+    r"\b(?:innerHTML|outerHTML|insertAdjacentHTML|setHTML|createContextualFragment|DOMParser|srcdoc)\b"
+    r"|\bdocument\.write(?:ln)?\s*\("
+    r"|javascript:",
     re.IGNORECASE,
 )
-RAW_HTML = re.compile(r"\b(innerHTML|outerHTML|insertAdjacentHTML)\b|\bdocument\.write\s*\(")
+HTML_INLINE_HANDLER = re.compile(r"\son[a-z]+\s*=\s*[\"']", re.IGNORECASE)
 UI_JS_DIRS = ("src/syllva/settings/static", "src/syllva/ui/static", "shell/src")
 
 
@@ -84,6 +108,13 @@ def _python_files(root: Path) -> Iterator[Path]:
         yield from sorted(p for p in base.rglob("*.py") if "__pycache__" not in p.parts)
 
 
+def _parse(path: Path, rel: str) -> ast.Module:
+    try:
+        return ast.parse(path.read_text(encoding="utf-8-sig"), filename=rel)
+    except (SyntaxError, UnicodeDecodeError) as exc:
+        raise SystemExit(f"check_invariants: cannot parse {rel}: {exc}") from exc
+
+
 def _dotted(node: ast.AST) -> str | None:
     if isinstance(node, ast.Name):
         return node.id
@@ -93,36 +124,65 @@ def _dotted(node: ast.AST) -> str | None:
     return None
 
 
-def _string_literals(node: ast.AST) -> Iterator[str]:
-    for child in ast.walk(node):
-        if isinstance(child, ast.Constant) and isinstance(child.value, str):
-            yield child.value
+def _import_aliases(tree: ast.Module) -> dict[str, str]:
+    """Map local names to the fully qualified module/attribute they refer to."""
+
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                local = alias.asname or alias.name.split(".")[0]
+                aliases[local] = alias.name if alias.asname else alias.name.split(".")[0]
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            for alias in node.names:
+                aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return aliases
 
 
-def _names_agent(value: str) -> bool:
-    for token in re.split(r"[\s/\\]+", value.strip()):
-        if token.lower() in AGENT_EXECUTABLES:
-            return True
-    return False
+def _qualify(name: str, aliases: dict[str, str]) -> str:
+    head, _, rest = name.partition(".")
+    if head in aliases:
+        return aliases[head] + (f".{rest}" if rest else "")
+    return name
 
 
-def check_agent_spawn(root: Path) -> list[Finding]:
+def _is_spawn(qualified: str) -> bool:
+    module, _, attr = qualified.rpartition(".")
+    if module in SPAWN_MODULES or qualified.split(".")[0] in SPAWN_MODULES:
+        return True
+    if module == "os" and attr in OS_SPAWN_FUNCTIONS:
+        return True
+    return qualified.endswith(SPAWN_ATTRIBUTE_SUFFIXES)
+
+
+def check_process_spawn(root: Path) -> list[Finding]:
     findings: list[Finding] = []
     for path in _python_files(root):
         rel = _rel(path, root)
         if rel == AGENT_LAUNCHER:
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        tree = _parse(path, rel)
+        aliases = _import_aliases(tree)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
             name = _dotted(node.func)
-            if name is None or (name not in SPAWN_CALLS and not name.endswith(("create_subprocess_exec", "create_subprocess_shell"))):
+            if name is None:
                 continue
-            arguments = [*node.args, *(kw.value for kw in node.keywords)]
-            if any(_names_agent(text) for arg in arguments for text in _string_literals(arg)):
-                findings.append(Finding("agent-spawn", rel, node.lineno, name))
+            qualified = _qualify(name, aliases)
+            if _is_spawn(qualified):
+                findings.append(Finding("process-spawn", rel, node.lineno, qualified))
+            elif qualified in DYNAMIC_IMPORTERS and any(
+                isinstance(arg, ast.Constant) and isinstance(arg.value, str) and arg.value.split(".")[0] in SPAWN_MODULES
+                for arg in node.args
+            ):
+                findings.append(Finding("process-spawn", rel, node.lineno, f"{qualified}(dynamic)"))
     return findings
+
+
+def _sql_write(text: str) -> bool:
+    body = SQL_LEADING_COMMENTS.sub("", text, count=1)
+    return bool(SQL_WRITE.match(body) or SQL_CTE_WRITE.match(body))
 
 
 def check_write_sql(root: Path) -> list[Finding]:
@@ -131,10 +191,19 @@ def check_write_sql(root: Path) -> list[Finding]:
         rel = _rel(path, root)
         if rel.startswith("src/syllva/state/"):
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        tree = _parse(path, rel)
+        seen: set[int] = set()
         for node in ast.walk(tree):
-            if isinstance(node, ast.Constant) and isinstance(node.value, str) and SQL_WRITE.match(node.value):
-                findings.append(Finding("write-sql-outside-state", rel, node.lineno, node.value.strip().split()[0].upper()))
+            text: str | None = None
+            if isinstance(node, ast.JoinedStr) and node.values:
+                first = node.values[0]
+                if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                    text = first.value
+                    seen.add(id(first))
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in seen:
+                text = node.value
+            if text is not None and _sql_write(text):
+                findings.append(Finding("write-sql-outside-state", rel, node.lineno, text.strip().split()[0].upper()))
     return findings
 
 
@@ -147,9 +216,13 @@ def check_ui_raw_html(root: Path) -> list[Finding]:
         for path in sorted(base.rglob("*")):
             if path.suffix not in {".js", ".mjs", ".ts", ".html"} or "node_modules" in path.parts:
                 continue
-            for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            rel = _rel(path, root)
+            for lineno, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), start=1):
                 for match in RAW_HTML.finditer(line):
-                    findings.append(Finding("ui-raw-html", _rel(path, root), lineno, match.group(0)))
+                    findings.append(Finding("ui-raw-html", rel, lineno, match.group(0)))
+                if path.suffix == ".html":
+                    for match in HTML_INLINE_HANDLER.finditer(line):
+                        findings.append(Finding("ui-raw-html", rel, lineno, match.group(0).strip()))
     return findings
 
 
@@ -160,18 +233,25 @@ def check_core_stdout(root: Path) -> list[Finding]:
         return findings
     for path in sorted(p for p in base.rglob("*.py") if "__pycache__" not in p.parts):
         rel = _rel(path, root)
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        tree = _parse(path, rel)
+        aliases = _import_aliases(tree)
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and _dotted(node.func) == "print":
-                findings.append(Finding("core-stdout-print", rel, node.lineno, "print"))
+            if not isinstance(node, ast.Call):
+                continue
+            name = _dotted(node.func)
+            qualified = _qualify(name, aliases) if name else None
+            if qualified in {"print", "builtins.print"} or (
+                qualified and qualified.startswith(("sys.stdout.", "sys.__stdout__."))
+            ):
+                findings.append(Finding("core-stdout", rel, node.lineno, qualified))
     return findings
 
 
 RULES = {
-    "agent-spawn": check_agent_spawn,
+    "process-spawn": check_process_spawn,
     "write-sql-outside-state": check_write_sql,
     "ui-raw-html": check_ui_raw_html,
-    "core-stdout-print": check_core_stdout,
+    "core-stdout": check_core_stdout,
 }
 
 
