@@ -28,10 +28,11 @@ def test_bundled_migrations_are_contiguous_and_split_trigger_bodies_intact() -> 
 
 def test_migrate_applies_once_and_records_checksums() -> None:
     conn = _conn()
-    assert migrate.migrate(conn) == [1]
+    bundled = migrate.bundled_migrations()
+    assert migrate.migrate(conn) == [m.version for m in bundled]
     assert migrate.migrate(conn) == []
-    (version, checksum), = conn.execute("SELECT version, checksum FROM schema_migrations").fetchall()
-    assert version == 1 and checksum == migrate.bundled_migrations()[0].checksum
+    recorded = conn.execute("SELECT version, checksum FROM schema_migrations ORDER BY version").fetchall()
+    assert [tuple(r) for r in recorded] == [(m.version, m.checksum) for m in bundled]
 
 
 def test_changed_applied_migration_refuses_startup() -> None:
@@ -70,22 +71,24 @@ def test_open_database_sets_pragmas(tmp_path: Path) -> None:
         assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert conn.execute("PRAGMA trusted_schema").fetchone()[0] == 0
-        assert db.applied_migrations == [1]
+        assert db.applied_migrations == [m.version for m in migrate.bundled_migrations()]
 
 
 def test_backup_is_taken_before_migrating_an_existing_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     data = layout(tmp_path / "d")
     with open_database(data) as db:
         assert db.backup_path is None  # fresh database: nothing to back up
-    extra = migrate.Migration(2, "002_extra.sql", "CREATE TABLE extra(x);\n")
     original = migrate.bundled_migrations
+    shipped = [m.version for m in original()]
+    nxt = shipped[-1] + 1
+    extra = migrate.Migration(nxt, f"{nxt:03d}_extra.sql", "CREATE TABLE extra(x);\n")
     monkeypatch.setattr(migrate, "bundled_migrations", lambda: [*original(), extra])
     with open_database(data) as db:
-        assert db.applied_migrations == [2]
+        assert db.applied_migrations == [nxt]
         assert db.backup_path is not None and db.backup_path.is_file()
         backup = sqlite3.connect(db.backup_path)
         try:
-            assert [r[0] for r in backup.execute("SELECT version FROM schema_migrations")] == [1]
+            assert [r[0] for r in backup.execute("SELECT version FROM schema_migrations ORDER BY version")] == shipped
         finally:
             backup.close()
 
