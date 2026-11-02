@@ -163,6 +163,27 @@ source_modules = ["syllva.library"]
 forbidden_modules = ["syllva.state"]
 
 [[tool.importlinter.contracts]]
+id = "v2-no-legacy"
+name = "v2 modules never import code scheduled for deletion in R1c (no exceptions)"
+type = "forbidden"
+source_modules = [
+    "syllva.state.v2", "syllva.library",
+    "syllva.ingestion.local", "syllva.normalization.local", "syllva.normalization.chunks",
+    "syllva.retrieval.natural", "syllva.retrieval.ranking", "syllva.retrieval.service",
+    "syllva.domain.source_ref",
+]
+forbidden_modules = [
+    "syllva.adapters.notion", "syllva.adapters.drive", "syllva.study_notes", "syllva.domain.approval_identity",
+    "syllva.retrieval.engine", "syllva.retrieval.resolver", "syllva.retrieval._compat", "syllva.retrieval.chunking",
+    "syllva.state.sqlite", "syllva.state.reader", "syllva.state.base", "syllva.state.models",
+    "syllva.state.classification_state", "syllva.state.usage_range", "syllva.proposal",
+    "syllva.enrichment.writer", "syllva.adapters.llm", "syllva.config.google_oauth",
+    # outer layers: v2 core composes upward, never imports them
+    "syllva.intake", "syllva.settings", "syllva.cli", "syllva.mcp", "syllva.runtime", "syllva.worker",
+]
+allow_indirect_imports = false
+
+[[tool.importlinter.contracts]]
 id = "v2-retrieval-clean"
 name = "v2 retrieval modules do not depend on legacy providers or the v1.2 engine (no exceptions)"
 type = "forbidden"
