@@ -33,13 +33,14 @@ from __future__ import annotations
 import json
 import re
 import secrets
+import sqlite3
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import PurePath
 from typing import Any, BinaryIO, cast
 
-from syllva.domain.errors import SyllvaError
+from syllva.domain.errors import PolicyViolation, SyllvaError
 from syllva.ingestion.local import ingest_new, nfc
 from syllva.intake.classification.calendar import MatchStatus
 from syllva.intake.classification.pipeline import (
@@ -48,8 +49,8 @@ from syllva.intake.classification.pipeline import (
     SourceProbe,
     classify_upload_item,
 )
-from syllva.intake.classification.rules import CourseAliasIndex
-from syllva.intake.classification.taxonomy import HandlingMode, Kind
+from syllva.intake.classification.rules import TRANSCRIPT_RULE_MIME, CourseAliasIndex
+from syllva.intake.classification.taxonomy import HandlingMode, Kind, handling_mode
 from syllva.library.blobs import BlobStore, BlobTooLarge
 from syllva.normalization.local import normalize_source_version
 from syllva.state.v2.ownership import Actor, Owner
@@ -165,12 +166,17 @@ class LocalIntake:
                     display_name=name, mime_type=mime_type, now=stamp,
                 )
                 values = {**base, "source_version_id": ingested.source_version_id, "size_bytes": ingested.size_bytes}
-                if not ingested.created:
+                live = None if ingested.created else self.writer.query_one(
+                    "SELECT candidate_id FROM intake_candidates WHERE source_version_id = ? "
+                    "AND state NOT IN ('DUPLICATE','DISMISSED')",
+                    (ingested.source_version_id,),
+                )
+                if not ingested.created and live is not None:
                     values.update(
                         state="DUPLICATE", reason_code="DUPLICATE_CONTENT", duplicate_of_source_id=ingested.duplicate_of,
                         reason_message="the same bytes are already in the library",
                     )
-                else:
+                else:  # new bytes, or bytes whose earlier candidate was dismissed: open a fresh one
                     values["state"] = "RECEIVED"
                 self.writer.insert(Owner.CATALOG, Actor.INGESTER, "intake_candidates", values)
         except (_TooLarge, BlobTooLarge):
@@ -199,24 +205,31 @@ class LocalIntake:
         )
         assert row is not None
         hint = (current.suggestion or {}).get("course_hint")
-        with self.blobs.open(str(row["blob_sha256"])) as handle:
-            head = handle.read(_PROBE_HEAD)
-        outcome = classify_upload_item(
-            name=str(row["display_name"]),
-            mime_type=row["mime_type"],
-            from_upload_folder=True,
-            explicit_course_key=hint if isinstance(hint, str) and self._course(hint) is not None else None,
-            origin=None,
-            alias_index=self._alias_index(),
-            semester=None,
-            calendar=None,  # recording calendar import is a later R1c slice; transcripts wait for the user
-            probe=SourceProbe(head, complete=int(row["size_bytes"] or 0) <= _PROBE_HEAD),
-        )
-        suggestion = {**outcome.suggestion_fields(), **({"course_hint": hint} if hint else {})}
-        suggestion["blockers"] = list(self._auto_blockers(outcome))
+        try:
+            with self.blobs.open(str(row["blob_sha256"])) as handle:
+                head = handle.read(_PROBE_HEAD)
+            outcome = classify_upload_item(
+                name=str(row["display_name"]),
+                mime_type=row["mime_type"],
+                from_upload_folder=True,
+                explicit_course_key=hint if isinstance(hint, str) and self._course(hint) is not None else None,
+                origin=None,
+                alias_index=self._alias_index(),
+                semester=None,
+                calendar=None,  # recording calendar import is a later R1c slice; transcripts wait for the user
+                probe=SourceProbe(head, complete=int(row["size_bytes"] or 0) <= _PROBE_HEAD),
+            )
+            suggestion: dict[str, Any] = {**outcome.suggestion_fields(), **({"course_hint": hint} if hint else {})}
+            suggestion["blockers"] = list(self._auto_blockers(outcome, hint))
+        except (PolicyViolation, sqlite3.Error):
+            raise  # an invariant breach or a broken database is not a property of the file
+        except Exception as exc:  # noqa: BLE001 - one unreadable file must not stall the worker (review of PR #46)
+            outcome = None
+            suggestion = {"blockers": ["CLASSIFY_ERROR"], "error": f"{type(exc).__name__}: {exc}"[:500],
+                          **({"course_hint": hint} if hint else {})}
         payload = json.dumps(suggestion, ensure_ascii=False, sort_keys=True, default=str)
         with self.writer.transaction():
-            if suggestion["blockers"]:
+            if suggestion["blockers"] or outcome is None:
                 self.writer.transition_intake_state(
                     Actor.INGESTER, candidate_id, "NEEDS_REVIEW", values={"suggestion_json": payload}, now=stamp
                 )
@@ -229,14 +242,18 @@ class LocalIntake:
                 )
         return self.get(candidate_id)
 
-    def _auto_blockers(self, outcome: ClassificationOutcome) -> tuple[str, ...]:
+    def _auto_blockers(self, outcome: ClassificationOutcome, hint: object = None) -> tuple[str, ...]:
         blockers: list[str] = []
+        if isinstance(hint, str) and self._course(hint) is None:
+            blockers.append("COURSE_HINT_UNKNOWN")
         if outcome.kind is None:
-            return ("KIND_UNDECIDED",)
+            return (*blockers, "KIND_UNDECIDED")
         if outcome.kind is Kind.UNSUPPORTED:
-            return ("KIND_UNSUPPORTED",)
+            return (*blockers, "KIND_UNSUPPORTED")
         if outcome.course_key is None or self._course(outcome.course_key) is None:
             blockers.append("COURSE_UNRESOLVED")
+        elif not self._code_ok(outcome.course_key):
+            blockers.append("COURSE_CODE_INVALID")  # ids cannot be formed; the user fixes the course first
         if outcome.handling is not HandlingMode.NORMALIZE:
             blockers.append("NOT_NORMALIZABLE")
         if outcome.kind is Kind.TRANSCRIPT and (outcome.calendar is None or outcome.calendar.status is not MatchStatus.MATCHED):
@@ -269,6 +286,8 @@ class LocalIntake:
             raise IntakeError("unknown kind", details={"kind": kind}) from None
         if parsed is Kind.UNSUPPORTED:
             raise IntakeError("an unsupported file cannot be confirmed as a material")
+        if not self._normalizable(candidate_id, parsed):
+            raise IntakeError("this file cannot be processed as that kind", details={"kind": kind})
         if session_id is not None and new_session_held_on is not None:
             raise IntakeError("choose an existing session or a new one, not both")
         if new_session_held_on is not None:
@@ -333,6 +352,8 @@ class LocalIntake:
                 entity_id=material_id, course_key=str(row["course_key"]), processor_version=self.config.processor_version,
             )
             status, reason, message = result.status, result.reason, None
+        except (PolicyViolation, sqlite3.Error):
+            raise  # invariant breach / broken database: loud, and recover() requeues the candidate
         except Exception as exc:  # noqa: BLE001 - recorded with its class; the worker keeps going (§11.2: always a cause)
             status, reason, message = "FAILED", "PROCESSING_ERROR", f"{type(exc).__name__}: {exc}"[:500]
         if status in ("READY", "PARTIAL"):
@@ -349,7 +370,7 @@ class LocalIntake:
             if final == "FAILED" or reason:
                 values = {"reason_code": reason, "reason_message": message}
             self.writer.transition_intake_state(Actor.INGESTER, candidate_id, final, values=values, now=stamp)
-            self._job_finish(job_id, final if final != "FAILED" else "FAILED", reason, stamp)
+            self._job_finish(job_id, final, reason, stamp)
         return self.get(candidate_id)
 
     def run_pending(self, *, now: str | None = None) -> list[Candidate]:
@@ -377,6 +398,23 @@ class LocalIntake:
 
     # -- internals --------------------------------------------------------------------------
 
+    def _normalizable(self, candidate_id: str, kind: Kind) -> bool:
+        row = self.writer.query_one(
+            "SELECT c.display_name, c.mime_type, c.size_bytes, v.blob_sha256 FROM intake_candidates c "
+            "JOIN source_versions v ON v.id = c.source_version_id WHERE c.candidate_id = ?",
+            (candidate_id,),
+        )
+        if row is None:
+            raise IntakeError("unknown intake candidate", details={"candidate_id": candidate_id})
+        with self.blobs.open(str(row["blob_sha256"])) as handle:
+            head = handle.read(_PROBE_HEAD)
+        name = str(row["display_name"])
+        mime = row["mime_type"] or ("application/pdf" if name.lower().endswith(".pdf") else TRANSCRIPT_RULE_MIME)
+        extension = name.rsplit(".", 1)[1].lower() if "." in name else None
+        return handling_mode(
+            kind, mime_type=mime, extension=extension, head=head, payload_complete=int(row["size_bytes"] or 0) <= _PROBE_HEAD
+        ) is HandlingMode.NORMALIZE
+
     def _course(self, course_key: str) -> Any:
         return self.writer.query_one("SELECT id, course_key, code FROM courses WHERE course_key = ?", (course_key,))
 
@@ -389,6 +427,10 @@ class LocalIntake:
         for row in self.writer.query("SELECT c.course_key, a.alias_nfc FROM course_aliases a JOIN courses c ON c.id = a.course_id"):
             entries.setdefault(str(row["course_key"]), set()).add(str(row["alias_nfc"]))
         return CourseAliasIndex.build(entries.items())
+
+    def _code_ok(self, course_key: str) -> bool:
+        course = self._course(course_key)
+        return course is not None and bool(_CODE_RE.fullmatch(str(course["code"] or course["course_key"])))
 
     def _code(self, course_key: str) -> tuple[int, str]:
         course = self._course(course_key)

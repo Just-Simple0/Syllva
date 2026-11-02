@@ -70,7 +70,7 @@ def test_illegal_transition_is_refused_by_the_schema(intake: LocalIntake, v2_db:
 
 
 def test_failure_states_need_a_cause(v2_db: Database) -> None:
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(sqlite3.IntegrityError, match="reason_code"):
         v2_db.connection.execute(
             "INSERT INTO intake_candidates(candidate_id, channel, display_name, state, created_at, updated_at) "
             "VALUES ('INT-x', 'USER_DROP', 'a.exe', 'UNSUPPORTED', ?, ?)",
@@ -228,3 +228,84 @@ def test_receive_is_atomic(intake: LocalIntake, v2_db: Database, monkeypatch: py
     monkeypatch.undo()
     assert v2_db.connection.execute("SELECT count(*) FROM source_files").fetchone()[0] == 0
     assert _drop(intake, TRANSCRIPT.encode(), "a.txt").state == "RECEIVED"  # not a DUPLICATE of an orphan
+
+
+# --- review of PR #46 ------------------------------------------------------------------
+
+
+def test_a_course_that_cannot_form_ids_sends_the_file_to_review_and_the_worker_goes_on(intake: LocalIntake, v2_db: Database) -> None:
+    pytest.importorskip("pypdf")
+    v2_db.connection.execute(
+        "INSERT INTO courses(course_key, name, code, semester, created_at) VALUES ('2026-2_cs-101', 'x', NULL, '2026-2', ?)", (NOW,)
+    )
+    bad = _drop(intake, make_pdf_bytes(["Lec text"]), "Lec.1 intro.pdf", course_hint="2026-2_cs-101")
+    good = _drop(intake, TRANSCRIPT.encode(), "b.txt")
+    intake.run_pending(now=NOW)
+    first = intake.get(bad.candidate_id)
+    assert first.state == "NEEDS_REVIEW" and "COURSE_CODE_INVALID" in (first.suggestion or {})["blockers"]
+    assert intake.get(good.candidate_id).state == "NEEDS_REVIEW"
+
+
+def test_an_unreadable_blob_goes_to_review_with_a_cause(intake: LocalIntake) -> None:
+    candidate = _drop(intake, TRANSCRIPT.encode(), "gone.txt")
+    sha = intake.writer.query_one(
+        "SELECT v.blob_sha256 FROM intake_candidates c JOIN source_versions v ON v.id = c.source_version_id WHERE c.candidate_id = ?",
+        (candidate.candidate_id,),
+    )["blob_sha256"]  # type: ignore[index]
+    path = intake.blobs.path_for(str(sha))
+    path.chmod(0o600)
+    path.unlink()
+    result = intake.classify(candidate.candidate_id, now=NOW)
+    assert result.state == "NEEDS_REVIEW" and (result.suggestion or {})["blockers"] == ["CLASSIFY_ERROR"]
+
+
+def test_unknown_course_hint_is_said(intake: LocalIntake) -> None:
+    result = intake.classify(_drop(intake, TRANSCRIPT.encode(), "h.txt", course_hint="NOPE").candidate_id, now=NOW)
+    assert "COURSE_HINT_UNKNOWN" in (result.suggestion or {})["blockers"]
+
+
+def test_dismissed_bytes_can_be_dropped_again(intake: LocalIntake) -> None:
+    first = intake.classify(_drop(intake, TRANSCRIPT.encode(), "a.txt").candidate_id, now=NOW)
+    intake.dismiss(first.candidate_id, now=NOW)
+    again = _drop(intake, TRANSCRIPT.encode(), "a.txt")
+    assert again.state == "RECEIVED" and again.source_id == first.source_id
+    third = _drop(intake, TRANSCRIPT.encode(), "a again.txt")
+    assert third.state == "DUPLICATE"  # one live candidate per stored version
+
+
+def test_kind_must_fit_the_file(intake: LocalIntake) -> None:
+    c = intake.classify(_drop(intake, TRANSCRIPT.encode(), "k.txt").candidate_id, now=NOW)
+    with pytest.raises(IntakeError):
+        intake.confirm(c.candidate_id, course_key="NET", kind="RECORDING", now=NOW)
+    assert intake.get(c.candidate_id).state == "NEEDS_REVIEW"
+
+
+def test_crash_during_classification_is_recovered(intake: LocalIntake) -> None:
+    c = _drop(intake, TRANSCRIPT.encode(), "c.txt")
+    intake.writer.transition_intake_state(Actor.INGESTER, c.candidate_id, "CLASSIFYING", now=NOW)  # then the process dies
+    assert intake.recover(now=NOW) == 1 and intake.get(c.candidate_id).state == "RECEIVED"
+    assert intake.classify(c.candidate_id, now=NOW).state == "NEEDS_REVIEW"
+
+
+def test_user_cannot_drive_processing(intake: LocalIntake) -> None:
+    c = intake.classify(_drop(intake, TRANSCRIPT.encode(), "u.txt").candidate_id, now=NOW)
+    intake.confirm(c.candidate_id, course_key="NET", kind="TRANSCRIPT", new_session_held_on="2026-09-01", now=NOW)
+    with pytest.raises(PolicyViolation):
+        intake.writer.transition_intake_state(Actor.UI_USER, c.candidate_id, "PROCESSING")
+
+
+@pytest.mark.parametrize("verb", ["UPDATE OR REPLACE", "UPDATE OR IGNORE"])
+def test_conflict_clauses_do_not_bypass_the_state_machine(intake: LocalIntake, v2_db: Database, verb: str) -> None:
+    """Errata E7 regression class: conflict clauses must not skip the trigger."""
+
+    c = _drop(intake, TRANSCRIPT.encode(), "r.txt")
+    with pytest.raises(sqlite3.IntegrityError, match="INTAKE_TRANSITION"):
+        v2_db.connection.execute(f"{verb} intake_candidates SET state = 'READY' WHERE candidate_id = ?", (c.candidate_id,))
+    with pytest.raises(sqlite3.IntegrityError):
+        v2_db.connection.execute(
+            "INSERT OR REPLACE INTO intake_candidates(candidate_id, channel, display_name, state, source_version_id, "
+            "created_at, updated_at) SELECT candidate_id, channel, display_name, 'READY', source_version_id, created_at, "
+            "updated_at FROM intake_candidates WHERE candidate_id = ?",
+            (c.candidate_id,),
+        )
+    assert intake.get(c.candidate_id).state == "RECEIVED"
