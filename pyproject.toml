@@ -184,6 +184,22 @@ forbidden_modules = [
 allow_indirect_imports = false
 
 [[tool.importlinter.contracts]]
+id = "v2-intake-clean"
+name = "v2 intake reuses only the pure classifier, never the legacy worker or providers (no exceptions)"
+type = "forbidden"
+source_modules = ["syllva.intake.v2"]
+forbidden_modules = [
+    "syllva.intake.worker", "syllva.intake.composition", "syllva.intake.coordinator", "syllva.intake.registry",
+    "syllva.intake.planner", "syllva.intake.requests", "syllva.intake.attestation", "syllva.intake.usage_range",
+    "syllva.intake.study_note_composition", "syllva.intake.canvas_attachments", "syllva.intake.canvas_observer",
+    "syllva.intake.canvas_composition", "syllva.intake.classification.s2",
+    "syllva.adapters", "syllva.study_notes", "syllva.settings", "syllva.mcp", "syllva.cli", "syllva.proposal",
+    "syllva.retrieval.engine", "syllva.retrieval.chunking", "syllva.state.sqlite", "syllva.state.reader",
+    "syllva.domain.approval_identity", "syllva.enrichment",
+]
+allow_indirect_imports = false
+
+[[tool.importlinter.contracts]]
 id = "v2-retrieval-clean"
 name = "v2 retrieval modules do not depend on legacy providers or the v1.2 engine (no exceptions)"
 type = "forbidden"

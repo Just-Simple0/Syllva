@@ -40,6 +40,7 @@ TABLE_OWNERS: dict[str, Owner] = {
     "material_usage": Owner.CATALOG,
     "activities": Owner.CATALOG,
     "exams": Owner.CATALOG,
+    "intake_candidates": Owner.CATALOG,  # intake review queue (spec §11): ingester + the user's confirmation
     "blob_refs": Owner.SYSTEM,
     "jobs": Owner.SYSTEM,
     "processing_records": Owner.SYSTEM,
@@ -63,6 +64,7 @@ IMMUTABLE_COLUMNS: dict[str, frozenset[str]] = {
     "courses": frozenset({"course_key"}),
     "sessions": frozenset({"session_id"}),
     "source_files": frozenset({"source_id"}),
+    "intake_candidates": frozenset({"candidate_id", "channel", "source_version_id", "size_bytes"}),
 }
 
 # Human-only columns (design §5.5). Only the gate commit path may set them.
@@ -113,6 +115,30 @@ STATUS_TRANSITIONS: dict[str, frozenset[str]] = {
     "NEEDS_REVIEW": frozenset({"PENDING", "FAILED"}),
     "FAILED": frozenset({"PENDING"}),
 }
+
+
+# Intake candidate states (spec §11.2). The schema holds the same pairs in the
+# read-only intake_state_transitions table and rejects any other change; this copy
+# lets the writer refuse early with a clear error. A contract test keeps them equal.
+INTAKE_TRANSITIONS: dict[str, frozenset[str]] = {
+    "RECEIVED": frozenset({"CLASSIFYING"}),
+    "CLASSIFYING": frozenset({"NEEDS_REVIEW", "AUTO_CONFIRMED", "RECEIVED"}),
+    "NEEDS_REVIEW": frozenset({"CONFIRMED", "DISMISSED"}),
+    "AUTO_CONFIRMED": frozenset({"PROCESSING", "QUEUED"}),
+    "CONFIRMED": frozenset({"PROCESSING", "QUEUED"}),
+    "QUEUED": frozenset({"PROCESSING"}),
+    "PROCESSING": frozenset({"READY", "PARTIAL", "FAILED", "QUEUED"}),
+    "READY": frozenset({"QUEUED"}),
+    "PARTIAL": frozenset({"QUEUED"}),
+    "FAILED": frozenset({"QUEUED"}),
+    "DUPLICATE": frozenset({"DISMISSED"}),
+    "UNSUPPORTED": frozenset({"DISMISSED"}),
+    "DISMISSED": frozenset(),
+}
+INTAKE_INITIAL_STATES = frozenset({"RECEIVED", "DUPLICATE", "UNSUPPORTED"})
+# The user confirms (NEEDS_REVIEW -> CONFIRMED) and dismisses; everything else is processing.
+INTAKE_USER_TRANSITIONS = frozenset({("NEEDS_REVIEW", "CONFIRMED"), ("NEEDS_REVIEW", "DISMISSED"),
+                                     ("DUPLICATE", "DISMISSED"), ("UNSUPPORTED", "DISMISSED")})
 
 
 def can_transition(old: str, new: str) -> bool:

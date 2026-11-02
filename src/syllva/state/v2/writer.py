@@ -35,6 +35,9 @@ from syllva.state.v2.ownership import (
     HUMAN_ONLY_COLUMNS,
     IMMUTABLE_COLUMNS,
     INSERT_ONLY_OWNERS,
+    INTAKE_INITIAL_STATES,
+    INTAKE_TRANSITIONS,
+    INTAKE_USER_TRANSITIONS,
     SOURCE_MUTABLE_COLUMNS,
     UNWRITABLE_TABLES,
     Actor,
@@ -83,6 +86,12 @@ class StateWriter:
             finally:
                 self._depth = 0
 
+    @property
+    def in_transaction(self) -> bool:
+        """True while a StateWriter transaction is open on this connection."""
+
+        return self._depth > 0 or self._connection.in_transaction
+
     # -- reads inside the write transaction ------------------------------------
 
     def query(self, sql: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:
@@ -105,6 +114,8 @@ class StateWriter:
         self._authorize(owner, actor, table, set(values), update=False)
         if table == "materials" and values.get("processing_status", "PENDING") != "PENDING":
             raise PolicyViolation("new materials start as PENDING; use transition_material_status()")
+        if table == "intake_candidates" and "state" in values and values["state"] not in INTAKE_INITIAL_STATES:
+            raise PolicyViolation("a new intake candidate starts as RECEIVED, DUPLICATE or UNSUPPORTED")
         columns = list(values)
         sql = (
             f"INSERT INTO {table} ({', '.join(columns)}) "  # identifiers validated in _authorize
@@ -133,6 +144,8 @@ class StateWriter:
             )
         if table == "materials" and "processing_status" in values:
             raise PolicyViolation("use transition_material_status() for processing_status")
+        if table == "intake_candidates" and "state" in values:
+            raise PolicyViolation("use transition_intake_state() for intake state")
         with self.transaction():
             if owner is Owner.USER:
                 self._record_user_edits(table, key)
@@ -164,6 +177,51 @@ class StateWriter:
                 )
             self._connection.execute(
                 "UPDATE materials SET processing_status = ? WHERE material_id = ?", (new_status, material_id)
+            )
+            return old
+
+    def transition_intake_state(
+        self,
+        actor: Actor,
+        candidate_id: str,
+        new_state: str,
+        *,
+        values: Mapping[str, Any] | None = None,
+        now: str | None = None,
+    ) -> str:
+        """Move an intake candidate through the §11.2 state machine (also enforced by the schema).
+
+        ``values`` are other columns written in the same statement (reason, material, suggestion).
+        Only the user confirms or dismisses; every other transition is processing (INGESTER).
+        """
+
+        extra = dict(values or {})
+        if "state" in extra:
+            raise PolicyViolation("state is the transition target, not a value")
+        self._authorize(
+            Owner.CATALOG, actor, "intake_candidates", {"state", "updated_at", *extra}, update=True,
+            changed={"state", "updated_at", *extra},
+        )
+        with self.transaction():
+            row = self._connection.execute(
+                "SELECT state FROM intake_candidates WHERE candidate_id = ?", (candidate_id,)
+            ).fetchone()
+            if row is None:
+                raise PolicyViolation("unknown intake candidate", details={"candidate_id": candidate_id})
+            old = str(row[0])
+            if new_state not in INTAKE_TRANSITIONS.get(old, frozenset()):
+                raise PolicyViolation("intake transition not allowed", details={"from": old, "to": new_state})
+            by_user = (old, new_state) in INTAKE_USER_TRANSITIONS
+            if by_user and actor is not Actor.UI_USER and actor is not Actor.SYSTEM_MIGRATION:
+                raise PolicyViolation("only the user confirms or dismisses", details={"from": old, "to": new_state})
+            if not by_user and actor is Actor.UI_USER:
+                raise PolicyViolation("processing transitions are not user actions", details={"from": old, "to": new_state})
+            extra["state"] = new_state
+            extra["updated_at"] = now or _now()
+            assignments = ", ".join(f"{c} = ?" for c in extra)
+            self._connection.execute(
+                f"UPDATE intake_candidates SET {assignments} WHERE candidate_id = ?",  # identifiers validated
+                [*extra.values(), candidate_id],
             )
             return old
 
