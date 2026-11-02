@@ -194,3 +194,46 @@ def test_scoring_is_deterministic_and_zero_without_overlap() -> None:
     scores = score_texts("tcp handshake", texts)
     assert scores[1] == 0.0 and scores[0] > scores[2] > 0
     assert score_texts("", texts) == [0.0, 0.0, 0.0]
+
+
+# --- R1b-5 review follow-ups -------------------------------------------------------
+
+
+def test_short_korean_terms_and_particles_match() -> None:
+    texts = ["힙 정렬은 완전 이진 트리를 쓴다", "큐는 선입선출", "스택은 후입선출"]
+    scores = score_texts("힙 정렬", texts)
+    assert scores[0] > 0 and scores[1] == scores[2] == 0
+    scores = score_texts("큐의 특징", texts)
+    assert scores[1] > 0 and scores[0] == scores[2] == 0
+
+
+def test_every_window_says_whether_its_set_is_complete(lib: Library) -> None:
+    lib.material("LMS1-M01", _transcript([f"part {n} " + "y" * 3000 for n in range(6)]))
+    partial = lib.service().get_material_windows("LMS1-M01", caller_scope=SCOPE, window_chars=4000, max_windows=2)
+    markers = [next(w for w in window.warnings if w["code"] == "WINDOW") for window in partial.windows]
+    assert all(m["set_complete"] is False and m["windows_needed"] == 6 for m in markers)
+    whole = lib.service().get_material_windows("LMS1-M01", caller_scope=SCOPE)
+    assert whole.complete
+    assert all(next(w for w in win.warnings if w["code"] == "WINDOW")["set_complete"] for win in whole.windows)
+
+
+def test_no_evidence_is_said_not_implied(lib: Library) -> None:
+    lib.material("LMS1-M01", "[00:00] a\n", normalize=False)
+    result = lib.service().get_material_windows("LMS1-M01", caller_scope=SCOPE)
+    assert not result.windows and not result.complete
+    assert {"code": "NO_EVIDENCE"} in result.warnings
+
+
+def test_window_is_capped_at_the_prompt_budget(lib: Library) -> None:
+    lib.material("LMS1-M01", "[00:00] a\n")
+    with pytest.raises(ValueError):
+        lib.service().get_material_windows("LMS1-M01", caller_scope=SCOPE, window_chars=10**6)
+
+
+def test_serialized_evidence_keeps_parts(lib: Library) -> None:
+    from syllva.retrieval.schemas import evidence_item_to_dict
+
+    lib.material("LMS1-M01", _transcript(["x" * 5000, "short"]))
+    package = lib.service().get_material_context("LMS1-M01", caller_scope=SCOPE)
+    rows = [evidence_item_to_dict(item) for item in package.sources]
+    assert [(r.get("part"), r.get("parts")) for r in rows] == [(1, 2), (2, 2), (None, None)]

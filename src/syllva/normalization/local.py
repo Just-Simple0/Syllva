@@ -35,14 +35,20 @@ from typing import Literal
 
 from syllva.domain.source_ref import v2_source_ref
 from syllva.library.blobs import BlobStore
-from syllva.normalization.chunks import DEFAULT_MAX_CHARS, Chunk, pdf_chunks, transcript_chunks
+from syllva.normalization.chunks import (
+    CHUNKS_SCHEMA,
+    CHUNKS_SCHEMA_VERSION,
+    DEFAULT_MAX_CHARS,
+    Chunk,
+    pdf_chunks,
+    transcript_chunks,
+)
 from syllva.normalization.pdf import extract_pdf
 from syllva.normalization.transcript import normalize_transcript
 from syllva.state.v2.ownership import Actor, Owner
 from syllva.state.v2.writer import StateWriter
 
 SourceKind = Literal["pdf", "transcript"]
-CHUNKS_SCHEMA = "syllva.chunks.v2"  # v2: rows carry part/parts (errata E14)
 _STATUS = {"ready": "READY", "partial": "PARTIAL", "needs_review": "NEEDS_REVIEW", "failed": "FAILED"}
 
 
@@ -103,7 +109,7 @@ def normalize_source_version(
     entity_id: str,
     course_key: str,
     processor_version: str,
-    schema_version: str = "2",
+    schema_version: str = CHUNKS_SCHEMA_VERSION,
     max_chunk_chars: int = DEFAULT_MAX_CHARS,
     now: str | None = None,
 ) -> NormalizeResult:
