@@ -27,7 +27,7 @@ class DatabaseLocked(RuntimeError):
     exit_code = 3
 
 
-class DatabaseLockUnsupported(RuntimeError):
+class DatabaseLockUnsupported(DatabaseLocked):
     """The filesystem does not support the lock (e.g. some network shares)."""
 
     code = "DB_LOCK_UNSUPPORTED"

@@ -3,6 +3,10 @@
 ``open_database`` is the only way Core gets a database: it takes the exclusive
 OS lock first, then opens one writer connection with the mandated PRAGMAs,
 runs ``quick_check``, backs up before pending migrations, and migrates.
+
+After migrating, an SQLite authorizer denies schema changes on the writer
+connection. This also denies VACUUM, ANALYZE and ``PRAGMA optimize``; a future
+maintenance/GC step must lift the authorizer explicitly and reinstall it.
 """
 
 from __future__ import annotations
