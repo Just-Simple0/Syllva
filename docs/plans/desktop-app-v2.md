@@ -110,7 +110,7 @@ R0에서 CLAUDE.md의 "역할 분담/작업 파이프라인/리뷰 설정" 절�
 | 단계 | 내용 | 완료 기준 |
 |---|---|---|
 | **R0** | v2 개정서(§4 표·human-proof 모델·에이전트 격리·도구 없는 에이전트·컨텍스트 조립·freshness 지문), **CLI 약관·사양 확인(§3)**, CLAUDE.md 운영 절 교체, 계약 테스트 목록, 독립 읽기 전용 검토 1회 | 사용자 승인 |
-| **R1a** | 내부 이름 정리 `uls` → `syllva`(모듈·CLI·MCP 도구명, `uls` 명령은 별칭 유지). 동작 불변, 단독 커밋 | 전체 테스트 동일 통과 |
+| **R1a** | 내부 이름 정리 `uls` → `syllva`(모듈·CLI·배포 이름·클래스명, `uls` 명령은 별칭 유지. 해시 고정 문자열·ID 접두사·MCP 도구명·헤더·`~/.uls`는 R1b로 이관). 동작 불변, 단독 커밋 | 전체 테스트 동일 통과 |
 | **R1b** | 로컬 저장소(SQLite WAL·콘텐츠 해시 파일) + 단일 코어 서비스 + `RetrievalEngine`을 Notion/Drive 리더 없이 구성(생성자·45개 호출 지점·`state/sqlite.py`의 `drive_*`/`notion_*` 컬럼과 분기 정리). 새 마이그레이션 | **개정된 계약 테스트(명세 §50 재작성) + 재작성된 fixture 통과.** 기존 테스트 126개 파일은 재작성·폐기를 파일별로 판정. Win/macOS CI |
 | **R1c** | **로컬 intake 워커**: 분류기(재사용)와 새 로컬 큐/영수증/복구 모델. `intake/worker.py`(6,116줄)와 `adapters/notion/intake.py`는 단순화가 아닌 재작성 | 로컬에서 파일 투입 → 분류 → 적재 e2e |
 | **R2** | HTML UI 골격(라이브러리·분류 확인·수정/삭제/복원·자연어 검색) + Tauri 셸 + 두 OS 서명·번들 검증(PyInstaller 공증/hardened runtime, `keyring`·`pypdf` 네이티브, Windows 코드서명, 업데이트 서명키) + 네이티브 확인(human-proof) | 앱에서 파일 투입 → 검색 e2e, 질의 목록 통과 |

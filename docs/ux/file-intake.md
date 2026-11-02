@@ -538,6 +538,6 @@ USER 소유 `내 일정과 할 일`을 제공하고 기존 기록은 별도 연�
 - [Notion 연결된 데이터베이스](https://www.notion.com/help/guides/using-linked-databases): 같은 원본을 여러 페이지에서 필터링해 표시한다(2026-09-13 확인).
 - [Frozen design](../../university-learning-system-v1.2-design-frozen.md): §6–10, §15–18.
 - [Frozen implementation specification](../../university-learning-system-v1.2-implementation-spec-frozen.md): §14의 개체/관계/사람 승인 필드.
-- [Native worker](../../src/uls/worker.py): `load_sources`, `NativeWorker.sync`, `TranscriptNotionWriter`.
+- [Native worker](../../src/syllva/worker.py): `load_sources`, `NativeWorker.sync`, `TranscriptNotionWriter`.
 - [운영 안내](../../deployment/README.md), [source 등록 예제](../../deployment/sources.example.json).
 - [실제 전사 시연과 학습 노트의 범위](../plans/live-transcript-20260306.md).

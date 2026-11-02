@@ -70,7 +70,7 @@ REPLACEMENT_FAILED_MESSAGE = (
 )
 PLATFORM_UNSUPPORTED_MESSAGE = (
     "Local Settings is not available on Windows yet. Your settings were not changed.\n"
-    "Edit config.yaml and use the uls commands instead."
+    "Edit config.yaml and use the syllva commands instead."
 )
 WEB_EXTRA_MISSING_MESSAGE = (
     "Local Settings needs its optional web components, which are not installed.\n"
