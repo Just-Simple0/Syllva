@@ -203,8 +203,30 @@ def test_short_korean_terms_and_particles_match() -> None:
     texts = ["힙 정렬은 완전 이진 트리를 쓴다", "큐는 선입선출", "스택은 후입선출"]
     scores = score_texts("힙 정렬", texts)
     assert scores[0] > 0 and scores[1] == scores[2] == 0
-    scores = score_texts("큐의 특징", texts)
+    scores = score_texts("큐 특징", texts)  # a one-syllable query term matches "큐는"
     assert scores[1] > 0 and scores[0] == scores[2] == 0
+
+
+@pytest.mark.parametrize(
+    ("query", "text"),
+    [("정의", "어느 정도 알려진 사실"), ("강도", "오늘 강의 자료"), ("하나", "정렬을 하는 방법"),
+     ("속도", "그 속이 비었다"), ("이 문제", "이 방법은 빠르다"), ("결과", "결국 끝났다")],
+)
+def test_two_syllable_words_are_not_read_as_stem_plus_particle(query: str, text: str) -> None:
+    """Review of PR #44: unrelated words sharing a first syllable must score 0 (-> LOW_RELEVANCE)."""
+
+    assert score_texts(query, [text, "무관한 다른 문장"]) == [0.0, 0.0]
+
+
+def test_particle_on_the_query_gives_no_extra_credit() -> None:
+    first, second = score_texts("TCP는", ["TCP는 프로토콜", "TCP 프로토콜"])
+    assert first == second > 0
+
+
+def test_unrelated_korean_query_reaches_low_relevance(lib: Library) -> None:
+    lib.material("LMS1-M01", _transcript(["오늘 강의 자료", "어느 정도 알려진 사실", "정렬을 하는 방법", "그 속이 비었다", "a", "b"]))
+    package = lib.service().get_material_context("LMS1-M01", caller_scope=SCOPE, query="정의")
+    assert "LOW_RELEVANCE" in [w["code"] for w in package.warnings]
 
 
 def test_every_window_says_whether_its_set_is_complete(lib: Library) -> None:

@@ -63,7 +63,7 @@ _INTENT_WORDS = frozenset(
     {"정리", "정리해줘", "설명", "설명해줘", "요약", "요약해줘", "알려줘", "알려", "summarize", "summary",
      "explain", "explanation", "please", "강의", "자료", "보여줘", "찾아줘", "뭐야", "뭐였지", "내용"}
 )
-_PARTICLES = ("이랑", "에서", "으로", "에게", "하고", "이나", "랑", "의", "을", "를", "은", "는", "이", "가", "에", "도", "로", "와", "과", "나")
+PARTICLES = ("이랑", "에서", "으로", "에게", "하고", "이나", "랑", "의", "을", "를", "은", "는", "이", "가", "에", "도", "로", "와", "과", "나")
 
 _WEEK_RES = (re.compile(r"(?<!\d)(\d{1,2})\s*주\s*차"), re.compile(r"\bweek\s*(\d{1,2})\b"))
 _SESSION_RES = (
@@ -96,7 +96,7 @@ def compact(text: str) -> str:
 
 
 def strip_particle(token: str) -> str:
-    for particle in _PARTICLES:
+    for particle in PARTICLES:
         if len(token) > len(particle) + 1 and token.endswith(particle):
             return token[: -len(particle)]
     return token
