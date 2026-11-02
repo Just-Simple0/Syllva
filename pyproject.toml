@@ -91,7 +91,7 @@ name = "Core modules do not import outer layers or legacy providers"
 type = "forbidden"
 source_modules = [
     "syllva.domain", "syllva.ingestion", "syllva.normalization", "syllva.enrichment",
-    "syllva.retrieval", "syllva.state", "syllva.ephemeral",
+    "syllva.retrieval", "syllva.state", "syllva.ephemeral", "syllva.library",
 ]
 forbidden_modules = [
     "syllva.settings", "syllva.mcp", "syllva.cli", "syllva.study_notes",
@@ -143,3 +143,21 @@ ignore_imports = [
     "syllva.intake.worker -> syllva.adapters.llm.typesafe_choice",
     "syllva.runtime -> syllva.adapters.llm.typesafe_choice",
 ]
+
+[[tool.importlinter.contracts]]
+id = "v2-storage-clean"
+name = "v2 storage (state.v2, library) has no legacy or upper-layer dependencies (no exceptions)"
+type = "forbidden"
+source_modules = ["syllva.state.v2", "syllva.library"]
+forbidden_modules = [
+    "syllva.adapters", "syllva.intake", "syllva.retrieval", "syllva.settings", "syllva.mcp",
+    "syllva.cli", "syllva.study_notes", "syllva.runtime", "syllva.worker", "syllva.enrichment",
+    "syllva.ingestion", "syllva.normalization", "syllva.proposal", "syllva.orchestration",
+]
+
+[[tool.importlinter.contracts]]
+id = "library-below-state"
+name = "library does not import state (state.v2.database composes library, not the reverse)"
+type = "forbidden"
+source_modules = ["syllva.library"]
+forbidden_modules = ["syllva.state"]
