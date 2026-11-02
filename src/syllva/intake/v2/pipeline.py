@@ -385,6 +385,10 @@ class LocalIntake:
                 self.writer.transition_intake_state(
                     Actor.UI_USER, candidate_id, "CONFIRMED", values={"material_id": int(target["id"])}, now=stamp
                 )
+                # the material has no current evidence until the new version is processed: say so (I3/I5)
+                current = self.writer.query_one("SELECT processing_status FROM materials WHERE id = ?", (int(target["id"]),))
+                if current is not None and current["processing_status"] != "PENDING":
+                    self.writer.transition_material_status(Actor.INGESTER, material_id, "PENDING")
         except (_TooLarge, BlobTooLarge):
             raise IntakeError("the file is too large", details={"max_bytes": self.config.max_bytes}) from None
         except IngestError as exc:
@@ -467,7 +471,10 @@ class LocalIntake:
 
         done: list[Candidate] = []
         for candidate_id in self._ids("RECEIVED"):
-            self.classify(candidate_id, now=now)
+            if self.writer.query_one(
+                "SELECT 1 FROM intake_candidates WHERE candidate_id = ? AND replaces_material IS NOT NULL", (candidate_id,)
+            ) is None:  # replacements are confirmed by the replace action, never classified
+                self.classify(candidate_id, now=now)
         for candidate_id in self._ids("AUTO_CONFIRMED", "CONFIRMED", "QUEUED"):
             done.append(self.process(candidate_id, now=now))
         return done
