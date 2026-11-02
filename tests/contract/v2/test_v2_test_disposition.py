@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[3]
 DOC = ROOT / "docs" / "plans" / "v2-test-disposition.md"
 TESTS = ROOT / "tests"
 VERDICTS = {"유지", "재작성", "대체", "폐기", "보류"}
+DELETED_FIRST = "R1c 삭제 →"  # rewrite pending: file removed in R1c, row kept until its rewrite stage
 ROW = re.compile(r"^\| `tests/([^`]+)` \| (\S+) \| ([^|]*) \| ([^|]*) \|$", re.MULTILINE)
 V2_NATIVE = re.compile(r"^- `tests/(unit/test_v2_[a-z_]+\.py)`$", re.MULTILINE)
 SPEC_IDS = set(
@@ -35,7 +36,9 @@ def _rows() -> list[tuple[str, str, str, str]]:
 
 
 def test_table_matches_the_file_system() -> None:
-    listed = [row[0] for row in _rows()]
+    rows = _rows()
+    listed = [row[0] for row in rows]
+    may_be_gone = {row[0] for row in rows if row[2].strip().startswith(DELETED_FIRST)}
     assert len(listed) == len(set(listed)), "a file is listed twice"
     native = set(V2_NATIVE.findall(_doc()))
     on_disk = {
@@ -44,10 +47,9 @@ def test_table_matches_the_file_system() -> None:
         if not path.relative_to(TESTS).as_posix().startswith("contract/v2/")
     }
     assert native <= on_disk, f"v2-native entries without a file: {sorted(native - on_disk)}"
-    assert set(listed) == on_disk - native, {
-        "unlisted": sorted(on_disk - native - set(listed)),
-        "listed but gone": sorted(set(listed) - on_disk),
-    }
+    unlisted = sorted(on_disk - native - set(listed))
+    gone = sorted(set(listed) - on_disk - may_be_gone)
+    assert not unlisted and not gone, {"unlisted": unlisted, "listed but gone": gone}
 
 
 def test_every_row_has_a_known_verdict_and_a_target() -> None:
@@ -57,7 +59,10 @@ def test_every_row_has_a_known_verdict_and_a_target() -> None:
         if verdict in ("재작성", "대체", "보류"):
             assert target.strip() not in ("", "—"), f"{path}: {verdict} needs a target stage or replacement"
         if verdict == "재작성":
-            assert re.match(r"R\d", target.strip()), f"{path}: rewrite target must name a roadmap stage"
+            stage = target.strip().removeprefix(DELETED_FIRST).strip()
+            assert re.match(r"R\d", stage), f"{path}: rewrite target must name a roadmap stage"
+        if target.strip().startswith(DELETED_FIRST):
+            assert verdict == "재작성", f"{path}: only a pending rewrite may outlive its file"
         if verdict == "대체":
             ids = set(re.findall(r"C-\d{2}", target))
             files = re.findall(r"`(test_v2_[a-z_]+\.py)`", target)

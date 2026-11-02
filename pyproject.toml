@@ -175,7 +175,11 @@ source_modules = [
 forbidden_modules = [
     "syllva.adapters.notion", "syllva.adapters.drive", "syllva.study_notes", "syllva.domain.approval_identity",
     "syllva.retrieval.engine", "syllva.retrieval.resolver", "syllva.retrieval._compat", "syllva.retrieval.chunking",
-    "syllva.state.sqlite", "syllva.state.reader", "syllva.intake.worker", "syllva.proposal",
+    "syllva.state.sqlite", "syllva.state.reader", "syllva.state.base", "syllva.state.models",
+    "syllva.state.classification_state", "syllva.state.usage_range", "syllva.proposal",
+    "syllva.enrichment.writer", "syllva.adapters.llm", "syllva.config.google_oauth",
+    # outer layers: v2 core composes upward, never imports them
+    "syllva.intake", "syllva.settings", "syllva.cli", "syllva.mcp", "syllva.runtime", "syllva.worker",
 ]
 allow_indirect_imports = false
 

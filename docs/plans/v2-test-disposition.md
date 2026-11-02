@@ -9,8 +9,8 @@
 
 | 판정 | 뜻 |
 |---|---|
-| 유지 | v2에서 유지되는 모듈(정규화, EphemeralStore, locator, 락·보안 파일 프리미티브)을 그대로 검사한다. 파일을 옮기거나 단언을 v2 모듈로 바꾸는 정도만 필요 |
-| 재작성 | 불변식·동작 의미는 v2에도 있다. 해당 단계에서 v2 구현 위에 새로 쓰고 레거시 파일은 그때 지운다 |
+| 유지 | v2에서 유지되는 모듈(정규화, EphemeralStore와 그 위의 `retrieval.capabilities` allowlist 관리 — 설계서 §1 EphemeralStore 행·§6.1, locator, 락·보안 파일 프리미티브)을 그대로 검사한다. 파일을 옮기거나 단언을 v2 모듈로 바꾸는 정도만 필요 |
+| 재작성 | 불변식·동작 의미는 v2에도 있다. 해당 단계에서 v2 구현 위에 새로 쓴다. 레거시 파일은 대개 그때 지우지만, R1c에서 지울 모듈을 (직접 또는 테스트 헬퍼를 거쳐) import하는 파일은 R1c에서 먼저 지우고 행은 남긴다: 대상 칸이 `R1c 삭제 → Rn`인 행(16개)이며, 파일이 없어도 표 대조 테스트가 허용하는 유일한 경우다 |
 | 대체 | 같은 불변식을 v2 계약 테스트(C-xx) 또는 v2 테스트 파일이 이미(또는 표시된 단계에서) 고정한다. 레거시 파일은 대응 코드와 함께 삭제 |
 | 폐기 | 기능 자체가 v2에서 없어진다(Notion, Drive, Google OAuth, `study_notes`, 외부 LLM 보조 분류, provider 쓰기 복구) |
 | 보류 | 선택 기능(MCP 어댑터, GitHub 어댑터, 원격 MCP)이다. 기본 비활성이며 어댑터 작업 때 다시 판정 |
@@ -21,24 +21,24 @@
 |---|---|
 | 유지 | 17 |
 | 재작성 | 70 |
-| 대체 | 23 |
-| 폐기 | 41 |
+| 대체 | 24 |
+| 폐기 | 40 |
 | 보류 | 7 |
 | **합계** | **158** (unit 48 · contract 91 · integration 19) |
 
-재작성 70개의 단계: R1c 28 · R2 8 · R3 23 · R5 11. 대체 23개 중 Human-Proof(C-04·C-05·C-17, R2)로 대체되는 것이 13개다. 집계는 `test_v2_test_disposition.py`가 표에서 다시 계산해 대조한다.
+재작성 70개의 단계: R1c 28 · R2 8 · R3 23 · R5 11. 대체 24개 중 Human-Proof(C-04·C-05·C-17, R2)로 대체되는 것이 14개다. 집계는 `test_v2_test_disposition.py`가 표에서 다시 계산해 대조한다.
 
 ## 삭제 순서와 import 금지
 
-- v2 모듈(`state.v2`, `library`, `ingestion.local`, `normalization.local`, `normalization.chunks`, `retrieval.natural`, `retrieval.ranking`, `retrieval.service`, `domain.source_ref`)은 삭제 예정 코드(`adapters.notion`, `adapters.drive`, `study_notes`, 구 `domain.approval_identity`, v1.2 엔진·resolver·청크 분할기, `state.sqlite`/`state.reader`, `intake.worker`, `proposal`)를 직접·간접 어느 경로로도 import하지 않는다(`pyproject.toml` `v2-no-legacy`, 예외 없음).
-- 실제 삭제는 R1c에서 로컬 intake 워커가 레거시 워커를 대체할 때 한다(명세서 §15 R1b-6 "import 금지 → 삭제는 R1c"). 그 PR에서 이 표의 `폐기`·`대체` 행과 해당 파일을 함께 지우고, `core-no-outer-or-legacy` 등 기존 계약의 예외(`ignore_imports`)와 `scripts/invariants_baseline.json`의 기준선도 비운다(정오표 E19).
+- v2 모듈(`state.v2`, `library`, `ingestion.local`, `normalization.local`, `normalization.chunks`, `retrieval.natural`, `retrieval.ranking`, `retrieval.service`, `domain.source_ref`)은 삭제 예정 코드(`adapters.notion`, `adapters.drive`, `adapters.llm`, `study_notes`, 구 `domain.approval_identity`, v1.2 엔진·resolver·청크 분할기, v1.2 `state` 모듈들, `enrichment.writer`, `config.google_oauth`, `proposal`)와 바깥 계층(`intake`, `settings`, `cli`, `mcp`, `runtime`, `worker`)을 직접·간접 어느 경로로도 import하지 않는다(`pyproject.toml` `v2-no-legacy`, 예외 없음).
+- 실제 삭제는 R1c에서 로컬 intake 워커가 레거시 워커를 대체할 때 한다(명세서 §15 R1b-6 "import 금지 → 삭제는 R1c"). 그 PR에서 이 표의 `폐기`·`대체` 행과 해당 파일을 함께 지우고, `R1c 삭제 → Rn` 행은 파일만 지우며(행은 재작성 단계까지 유지), `core-no-outer-or-legacy` 등 기존 계약의 예외(`ignore_imports`)와 `scripts/invariants_baseline.json`의 기준선도 비운다(정오표 E19).
 
 ## 파일별 판정
 
 | 파일 | 판정 | 대상 단계·대체 | 근거 |
 |---|---|---|---|
 | `tests/contract/test_additional_tools.py` | 보류 | 선택 MCP 어댑터 | MCP 서버 도구 목록. 어댑터 재도입 시 C-01·C-13 기준으로 재작성 |
-| `tests/contract/test_automation_queue_lifecycle.py` | 폐기 | — | Notion 자동화 큐 |
+| `tests/contract/test_automation_queue_lifecycle.py` | 대체 | C-17 (R2) | Notion 자동화 큐 구현. 적용 재제출 idempotent·거부 후 적용 불가·원본 변경 시 SUPERSEDED 의미는 C-17(설계서 §1 "Proposal·Approval 라이프사이클 — 의미 유지") |
 | `tests/contract/test_behavior_contract_exam_activity.py` | 대체 | C-15·C-23 (R4) | Behavior Contract v3 → v4 프롬프트 템플릿 |
 | `tests/contract/test_c5_haa.py` | 대체 | C-04·C-05·C-17 (R2 Human-Proof) | Notion HAA 마커 승인 경로. 사용 범위 의미는 R2에서 v2 게이트 위에 재작성 |
 | `tests/contract/test_c5_state_preconditions.py` | 대체 | C-04·C-05·C-17 (R2 Human-Proof) | 승인 채택 전제조건(SQLite v1.2) |
@@ -47,19 +47,19 @@
 | `tests/contract/test_doctor_credential_resolver.py` | 폐기 | — | Notion/Google 자격증명 doctor 진단. 설정 진단은 R2에서 새로 정의 |
 | `tests/contract/test_doctor_purpose_scoped_diagnostics.py` | 폐기 | — | 같은 이유 |
 | `tests/contract/test_domain_contract_conformance.py` | 재작성 | R1c | `state.sqlite` → `state.v2` |
-| `tests/contract/test_enrichment_commit_ordering.py` | 재작성 | R5 (C-06) | Notion 커밋 순서 → `ai_artifacts` 저장 순서 |
-| `tests/contract/test_enrichment_completeness_states.py` | 재작성 | R5 (C-06, C-12) | AI 산출물 완전성 상태 |
-| `tests/contract/test_enrichment_input_gates.py` | 재작성 | R5 (C-06) | 입력 게이트(Partial·stale 입력 거부) |
-| `tests/contract/test_enrichment_metadata_trust.py` | 재작성 | R5 (C-06) | 산출물 메타데이터 신뢰 경계(I2) |
+| `tests/contract/test_enrichment_commit_ordering.py` | 재작성 | R1c 삭제 → R5 (C-06) | Notion 커밋 순서 → `ai_artifacts` 저장 순서 |
+| `tests/contract/test_enrichment_completeness_states.py` | 재작성 | R1c 삭제 → R5 (C-06, C-12) | AI 산출물 완전성 상태 |
+| `tests/contract/test_enrichment_input_gates.py` | 재작성 | R1c 삭제 → R5 (C-06) | 입력 게이트(Partial·stale 입력 거부) |
+| `tests/contract/test_enrichment_metadata_trust.py` | 재작성 | R1c 삭제 → R5 (C-06) | 산출물 메타데이터 신뢰 경계(I2) |
 | `tests/contract/test_ephemeral_capability.py` | 유지 | — | EphemeralStore(유지) |
 | `tests/contract/test_ephemeral_resolution.py` | 유지 | — | EphemeralStore 해석 선택(유지) |
 | `tests/contract/test_ephemeral_restart.py` | 유지 | — | 재시작 시 휘발(C-11과 정합) |
 | `tests/contract/test_error_taxonomy_mapping.py` | 재작성 | R1c | 오류 분류·재시도 매핑(Notion/Drive fake 제거) |
 | `tests/contract/test_exam_scope_identity.py` | 대체 | C-04·C-05·C-17 (R2 Human-Proof) | `Scope Confirmed` human-only. 시험 범위 식별 의미는 R5 |
-| `tests/contract/test_exam_scope_lifecycle.py` | 재작성 | R5 (+C-04·C-05) | 시험 범위 제안·확정 수명주기 |
-| `tests/contract/test_get_activity_context.py` | 재작성 | R3 (E13) | `get_activity_context`를 `RetrievalService` 연산으로 |
-| `tests/contract/test_get_exam_context.py` | 재작성 | R5 (E13) | `get_exam_context`를 `RetrievalService` 연산으로 |
-| `tests/contract/test_get_session_context.py` | 대체 | C-02·C-10·C-25 | v1.2 엔진 세션 컨텍스트 → `test_v2_retrieval_service.py`, `test_v2_chunk_strategy.py` |
+| `tests/contract/test_exam_scope_lifecycle.py` | 재작성 | R1c 삭제 → R5 (+C-04·C-05) | 시험 범위 제안·확정 수명주기 |
+| `tests/contract/test_get_activity_context.py` | 재작성 | R1c 삭제 → R3 (E13) | `get_activity_context`를 `RetrievalService` 연산으로 |
+| `tests/contract/test_get_exam_context.py` | 재작성 | R1c 삭제 → R5 (E13) | `get_exam_context`를 `RetrievalService` 연산으로 |
+| `tests/contract/test_get_session_context.py` | 대체 | C-02·C-10·C-25, C-06 (R5) | 원본·파생물 버전 단언은 `test_v2_retrieval_service.py`·`test_v2_chunk_strategy.py`가 고정. stale enrichment 제외(I5)는 C-06(R5), `Verified` 미확인 사용 제외·비불리언 거부는 R3(과제)·R5(요약)에서 Human-Proof 승격 값 기준으로 재작성 |
 | `tests/contract/test_github_retrieval.py` | 보류 | 선택 GitHub 어댑터 | 정확한 ref만 증거(설계서 §1 선택 기능, 기본 꺼짐) |
 | `tests/contract/test_human_gate_self_approval.py` | 대체 | C-04·C-05·C-17 (R2 Human-Proof) | 설계서 §1 처분표에 명시된 대체 |
 | `tests/contract/test_human_gate_writes.py` | 대체 | C-04·C-05·C-17 (R2 Human-Proof) | Notion human-gate 쓰기 |
@@ -71,7 +71,7 @@
 | `tests/contract/test_mcp_dispatch_distinctness.py` | 보류 | 선택 MCP 어댑터 | 워커/MCP 자격증명 분리(신뢰 도메인 분리로 대체 예정) |
 | `tests/contract/test_mcp_exam_activity_serialization.py` | 보류 | 선택 MCP 어댑터 | MCP 직렬화 |
 | `tests/contract/test_mcp_runtime.py` | 보류 | 선택 MCP 어댑터 (C-01, C-13) | MCP 전송·read-only 경계 |
-| `tests/contract/test_pd_assignment_filter.py` | 재작성 | R3 | 과제 정책 필터(fail-closed) |
+| `tests/contract/test_pd_assignment_filter.py` | 재작성 | R1c 삭제 → R3 | 과제 정책 필터(fail-closed) |
 | `tests/contract/test_persistence_allocation.py` | 재작성 | R1c | v1.2 SQLite id 할당 → v2 스키마 |
 | `tests/contract/test_persistence_jobkey.py` | 재작성 | R1c | 잡 키 영속 |
 | `tests/contract/test_persistence_migration.py` | 대체 | `test_v2_state_migrate.py` | v2 마이그레이션 러너로 대체 |
@@ -129,11 +129,11 @@
 | `tests/contract/test_v2_auto_material_gate.py` | 재작성 | R1c | 자동 분류 자료 노출 게이트 → `NEEDS_REVIEW`/확인 필요 상태 |
 | `tests/contract/test_worker_cli.py` | 재작성 | R1c | 워커 CLI → 로컬 intake 워커 |
 | `tests/integration/test_c5_composition.py` | 대체 | C-04·C-05·C-17 (R2 Human-Proof) | 사용 범위 확장 조립(Notion) |
-| `tests/integration/test_enrichment_end_to_end.py` | 재작성 | R5 | 적재→요약→검색 e2e |
-| `tests/integration/test_exam_activity_end_to_end.py` | 재작성 | R5 | 시험·활동 e2e |
-| `tests/integration/test_intake_worker_canvas_attachments.py` | 재작성 | R3 | Canvas 첨부 다운로드(Drive 바인딩 제거) |
-| `tests/integration/test_intake_worker_canvas_auto_calendar.py` | 재작성 | R3 | Canvas 자료 자동 계획 |
-| `tests/integration/test_intake_worker_canvas_observation.py` | 재작성 | R3 | Canvas 메타데이터 관찰 |
+| `tests/integration/test_enrichment_end_to_end.py` | 재작성 | R1c 삭제 → R5 | 적재→요약→검색 e2e |
+| `tests/integration/test_exam_activity_end_to_end.py` | 재작성 | R1c 삭제 → R5 | 시험·활동 e2e |
+| `tests/integration/test_intake_worker_canvas_attachments.py` | 재작성 | R1c 삭제 → R3 | Canvas 첨부 다운로드(Drive 바인딩 제거) |
+| `tests/integration/test_intake_worker_canvas_auto_calendar.py` | 재작성 | R1c 삭제 → R3 | Canvas 자료 자동 계획 |
+| `tests/integration/test_intake_worker_canvas_observation.py` | 재작성 | R1c 삭제 → R3 | Canvas 메타데이터 관찰 |
 | `tests/integration/test_intake_worker_classification_pb1.py` | 재작성 | R1c | S0/S1 분류(분류기 재사용, Notion 요청 제거) |
 | `tests/integration/test_intake_worker_classification_pb2a.py` | 재작성 | R1c | AUTO 계획 단계 A |
 | `tests/integration/test_intake_worker_classification_pb2b.py` | 재작성 | R1c | AUTO 승격·실행 |
@@ -142,7 +142,7 @@
 | `tests/integration/test_intake_worker_classification_pc2.py` | 폐기 | — | S2 외부 LLM 분류(`no-external-llm-adapter`) |
 | `tests/integration/test_intake_worker_classification_profile.py` | 폐기 | — | Notion 스키마 프로필 |
 | `tests/integration/test_intake_worker_preview.py` | 재작성 | R1c | 워커 미리보기 경로 |
-| `tests/integration/test_native_runtime.py` | 재작성 | R2 | Core sidecar e2e(인메모리 엔드포인트) |
+| `tests/integration/test_native_runtime.py` | 재작성 | R1c 삭제 → R2 | Core sidecar e2e(인메모리 엔드포인트) |
 | `tests/integration/test_notion_classification_profiles.py` | 폐기 | — | Notion |
 | `tests/integration/test_notion_modern_schema.py` | 폐기 | — | Notion |
 | `tests/integration/test_study_note_composition.py` | 폐기 | — | `study_notes` 쓰기 MCP(설계서 §1 폐기) |
@@ -157,10 +157,10 @@
 | `tests/unit/test_c4_route_intake_gate.py` | 재작성 | R1c | 과목/종류 fail-closed 게이트 |
 | `tests/unit/test_c5_range_intent_state.py` | 대체 | C-04·C-05·C-17 (R2 Human-Proof) | 사용 범위 의도 상태(구 `approval_identity`) |
 | `tests/unit/test_c8_poll_interval_default.py` | 재작성 | R1c | 폴링 기본값(설정 재정의) |
-| `tests/unit/test_canvas_attachments.py` | 재작성 | R3 | Canvas 첨부 → 로컬 blob(Drive 제거) |
+| `tests/unit/test_canvas_attachments.py` | 재작성 | R1c 삭제 → R3 | Canvas 첨부 → 로컬 blob(Drive 제거) |
 | `tests/unit/test_canvas_composition.py` | 재작성 | R3 | Canvas 관찰자 조립 |
 | `tests/unit/test_canvas_download.py` | 유지 | R3에서 배치 이동 | 토큰이 Canvas 원점을 벗어나지 않음(I9) |
-| `tests/unit/test_canvas_observer.py` | 재작성 | R3 | Canvas 메타데이터 관찰(`state.sqlite` → v2) |
+| `tests/unit/test_canvas_observer.py` | 재작성 | R1c 삭제 → R3 | Canvas 메타데이터 관찰(`state.sqlite` → v2) |
 | `tests/unit/test_capability_manager_purge.py` | 유지 | — | capability 만료 정리 |
 | `tests/unit/test_classification_state.py` | 재작성 | R1c | 분류 원장 → v2 스키마 |
 | `tests/unit/test_config_loader_credentials.py` | 재작성 | R3 (I9) | 자격증명 설정 절 |
