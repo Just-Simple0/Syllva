@@ -86,6 +86,12 @@ class StateWriter:
             finally:
                 self._depth = 0
 
+    @property
+    def in_transaction(self) -> bool:
+        """True while a StateWriter transaction is open on this connection."""
+
+        return self._depth > 0 or self._connection.in_transaction
+
     # -- reads inside the write transaction ------------------------------------
 
     def query(self, sql: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:

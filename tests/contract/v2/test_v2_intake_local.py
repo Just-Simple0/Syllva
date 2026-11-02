@@ -343,3 +343,10 @@ def test_any_refusal_during_automatic_confirmation_rolls_back_to_review(intake: 
     c = intake.classify(_drop(intake, make_pdf_bytes(["Lec text"]), "Lec.2 x.pdf", course_hint="NET", mime_type="application/pdf").candidate_id, now=NOW)
     assert c.state == "NEEDS_REVIEW" and (c.suggestion or {})["blockers"] == ["INTAKE_INVALID"]
     assert v2_db.connection.execute("SELECT count(*) FROM materials").fetchone()[0] == 0  # rolled back
+
+
+def test_steps_refuse_to_run_inside_a_callers_transaction(intake: LocalIntake) -> None:
+    c = _drop(intake, TRANSCRIPT.encode(), "t.txt")
+    with intake.writer.transaction(), pytest.raises(RuntimeError, match="own their transactions"):
+        intake.classify(c.candidate_id, now=NOW)
+    assert intake.get(c.candidate_id).state == "RECEIVED"

@@ -197,6 +197,7 @@ class LocalIntake:
     # -- CLASSIFYING ----------------------------------------------------------------------
 
     def classify(self, candidate_id: str, *, now: str | None = None) -> Candidate:
+        self._own_transactions()
         stamp = now or _now()
         current = self.get(candidate_id)
         if current.state != "RECEIVED":
@@ -342,6 +343,7 @@ class LocalIntake:
     # -- PROCESSING -------------------------------------------------------------------------
 
     def process(self, candidate_id: str, *, now: str | None = None) -> Candidate:
+        self._own_transactions()
         stamp = now or _now()
         row = self.writer.query_one(
             "SELECT c.state, c.display_name, c.source_version_id, c.attempt_count, m.material_id, m.processing_status, "
@@ -413,6 +415,12 @@ class LocalIntake:
         return count
 
     # -- internals --------------------------------------------------------------------------
+
+    def _own_transactions(self) -> None:
+        # classify/process commit step by step and roll a refused automatic confirmation back on
+        # its own; inside a caller's transaction (nesting joins it) that guarantee would not hold.
+        if self.writer.in_transaction:
+            raise RuntimeError("intake steps own their transactions; do not call them inside writer.transaction()")
 
     def _normalizable(self, candidate_id: str, kind: Kind) -> bool:
         row = self.writer.query_one(
