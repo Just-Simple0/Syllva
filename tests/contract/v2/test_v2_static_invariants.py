@@ -89,13 +89,17 @@ def test_process_spawn_detector_flags_every_spawn_outside_launcher(tmp_path: Pat
             "src/syllva/a/osfrom.py": "from os import execvp\nexecvp(p, args)\n",
             "src/syllva/a/dyn.py": "import importlib\nsp = importlib.import_module('subprocess')\n",
             "src/syllva/a/pty_.py": "import pty\npty.spawn(cmd)\n",
+            # bound references, subclassing and keyword dynamic imports are caught at the import site
+            "src/syllva/b/bound.py": "import subprocess\nfn = subprocess.run\n",
+            "src/syllva/b/subclass.py": "from subprocess import Popen\nclass P(Popen):\n    pass\n",
+            "src/syllva/b/kwdyn.py": "from importlib import import_module\nm = import_module(name='subprocess')\n",
             # an unrelated call is fine, and the launcher is the one allowed place
             "src/syllva/z/ok.py": "import webbrowser\nwebbrowser.open('http://127.0.0.1')\n",
             "src/syllva/agents/launcher.py": "import subprocess\nsubprocess.Popen(['claude'])\n",
         },
     )
     found = _rules(checker.collect(root))
-    assert sorted(path for path, _ in found["process-spawn"]) == [
+    assert sorted({path for path, _ in found["process-spawn"]}) == [
         "src/syllva/a/alias.py",
         "src/syllva/a/dyn.py",
         "src/syllva/a/fromimp.py",
@@ -103,6 +107,9 @@ def test_process_spawn_detector_flags_every_spawn_outside_launcher(tmp_path: Pat
         "src/syllva/a/osfrom.py",
         "src/syllva/a/pty_.py",
         "src/syllva/a/which.py",
+        "src/syllva/b/bound.py",
+        "src/syllva/b/kwdyn.py",
+        "src/syllva/b/subclass.py",
         "src/syllva/ui/chat.py",
         "src/syllva/x/shell.py",
         "src/syllva/y/aio.py",

@@ -24,12 +24,18 @@ Rules (design §11 test ids in brackets):
   ``pty.spawn``) and any dynamic import of ``subprocess``/``pty``, outside
   ``src/syllva/agents/launcher.py`` — regardless of arguments. Import aliases
   (``import subprocess as sp``, ``from subprocess import run``) are resolved.
-  Not detected: access through ``getattr``/``globals()`` or ctypes; reviewed by hand.
+  Importing ``subprocess``/``pty`` at all outside the launcher is also a finding,
+  which closes bound references (``fn = subprocess.run``), subclassing
+  (``class P(subprocess.Popen)``) and ``sys.modules`` lookups at the import site.
+  Not detected: names built at runtime (``"sub" + "process"``), ``getattr``/
+  ``globals()``, ctypes, ``os.fork``, ``multiprocessing``; reviewed by hand.
 * ``write-sql-outside-state`` [C-03]: string literals (including the leading
   piece of an f-string or concatenation) shaped like a SQL write statement —
   INSERT INTO / REPLACE INTO / UPDATE … SET / DELETE FROM, also after leading
   ``--`` comments or an upper-case ``WITH`` clause — outside ``src/syllva/state/``.
-  DDL is out of scope (schema lives in migrations).
+  DDL is out of scope (schema lives in migrations). Prose that happens to read
+  like a statement (``"update status set to ready"``) can match; such a hit is
+  rare and visible in the baseline diff.
 * ``ui-raw-html`` [C-18]: raw-HTML sinks in UI code: ``innerHTML``,
   ``outerHTML``, ``insertAdjacentHTML``, ``document.write``, ``setHTML``,
   ``createContextualFragment``, ``DOMParser``, ``srcdoc``, ``javascript:`` URLs,
@@ -164,6 +170,15 @@ def check_process_spawn(root: Path) -> list[Finding]:
         tree = _parse(path, rel)
         aliases = _import_aliases(tree)
         for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.split(".")[0] in SPAWN_MODULES:
+                        findings.append(Finding("process-spawn", rel, node.lineno, f"import {alias.name}"))
+                continue
+            if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                if node.module.split(".")[0] in SPAWN_MODULES:
+                    findings.append(Finding("process-spawn", rel, node.lineno, f"from {node.module} import"))
+                continue
             if not isinstance(node, ast.Call):
                 continue
             name = _dotted(node.func)
@@ -174,7 +189,7 @@ def check_process_spawn(root: Path) -> list[Finding]:
                 findings.append(Finding("process-spawn", rel, node.lineno, qualified))
             elif qualified in DYNAMIC_IMPORTERS and any(
                 isinstance(arg, ast.Constant) and isinstance(arg.value, str) and arg.value.split(".")[0] in SPAWN_MODULES
-                for arg in node.args
+                for arg in [*node.args, *(kw.value for kw in node.keywords)]
             ):
                 findings.append(Finding("process-spawn", rel, node.lineno, f"{qualified}(dynamic)"))
     return findings
