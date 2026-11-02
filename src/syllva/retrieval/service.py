@@ -67,14 +67,13 @@ from syllva.domain.source_ref import SourceFingerprint, v2_source_ref
 from syllva.ephemeral.base import EphemeralStore
 from syllva.ephemeral.models import AllowedLocator, ResolvedEntity
 from syllva.library.blobs import BlobError, BlobStore
+from syllva.normalization.chunks import CHUNKS_SCHEMA, CHUNKS_SCHEMA_VERSION
 from syllva.retrieval.natural import NaturalResolution, NaturalResolver
 from syllva.retrieval.ranking import score_texts
 from syllva.retrieval.schemas import RetrievalBudget
 from syllva.state.v2.reader import StateReader
 
 PROTOCOL_VERSION = "2.0"
-CHUNKS_SCHEMA = "syllva.chunks.v2"
-CHUNKS_SCHEMA_VERSION = "2"  # derivatives.schema_version understood by this service
 LOW_RELEVANCE_LEAD = 4  # §8.8.2: chunks used when no chunk matches the query
 DEFAULT_MAX_WINDOWS = 16  # §8.8.3
 
@@ -405,8 +404,9 @@ class RetrievalService:
         if max_windows <= 0:
             raise ValueError("max_windows must be positive")
         chars = window_chars or self.budget.max_total_chars
-        if chars < self.budget.max_chars_per_item:
-            raise ValueError("window_chars must hold at least one full chunk (max_chars_per_item)")
+        if not self.budget.max_chars_per_item <= chars <= self.budget.max_total_chars:
+            # §8.8.3: a window is at most max_prompt_chars/2 (= max_total_chars) and holds a full chunk
+            raise ValueError("window_chars must be between max_chars_per_item and max_total_chars")
         candidates, warnings, used_derivatives = self._collect(sources)
         fitting = self._fitting(candidates, warnings)
         groups: list[list[EvidenceItem]] = []
@@ -425,18 +425,24 @@ class RetrievalService:
             })
         if used < len(candidates):
             warnings.append({"code": "PARTIAL_CONTEXT", "used": used, "total": len(candidates)})
+        if not covered:
+            warnings.append({"code": "NO_EVIDENCE"})
+        complete = bool(covered) and used == len(candidates) and not any(
+            w["code"] in ("PARTIAL_SOURCE", "BLOB_UNAVAILABLE", "STALE_DERIVATIVE", "NOT_NORMALIZED", "LOCATOR_ENTITY_MISMATCH")
+            for w in warnings
+        )
         source_warnings = [w for w in warnings if w.get("material_id")]
         packages = []
         for index, group in enumerate(covered, start=1):
             materials = {item.entity_id for item in group}
-            window_warnings = [{"code": "WINDOW", "index": index, "count": len(covered)}]
+            # every window says whether the SET it belongs to is complete, so one window alone
+            # is never mistaken for full coverage
+            window_warnings: list[dict[str, Any]] = [{
+                "code": "WINDOW", "index": index, "count": len(covered), "windows_needed": len(groups), "set_complete": complete,
+            }]
             window_warnings += [w for w in source_warnings if w["material_id"] in materials and w["code"] == "PARTIAL_SOURCE"]
             packages.append(self._issue(entity, sources, group, window_warnings, used_derivatives, caller_scope))
-        complete = used == len(candidates) and not any(
-            w["code"] in ("PARTIAL_SOURCE", "BLOB_UNAVAILABLE", "STALE_DERIVATIVE", "NOT_NORMALIZED", "LOCATOR_ENTITY_MISMATCH")
-            for w in warnings
-        )
-        return ContextWindows(dict(entity), tuple(packages), tuple(warnings), complete and bool(packages))
+        return ContextWindows(dict(entity), tuple(packages), tuple(warnings), complete)
 
     @staticmethod
     def _require_scope(caller_scope: str) -> None:

@@ -29,6 +29,8 @@ from syllva.normalization.pdf import NormalizedPDF
 from syllva.normalization.schemas import NormalizedTranscript, TimestampMark
 
 DEFAULT_MAX_CHARS = 4000
+CHUNKS_SCHEMA = "syllva.chunks.v2"  # rows carry part/parts (errata E16)
+CHUNKS_SCHEMA_VERSION = "2"  # derivatives.schema_version of chunk derivatives
 _BOUNDARIES = (re.compile(r"\n\s*\n"), re.compile(r"\n"), re.compile(r"(?<=[.!?。])\s+"))
 
 

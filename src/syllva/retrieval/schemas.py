@@ -196,6 +196,10 @@ def evidence_item_to_dict(item: EvidenceItem) -> dict[str, Any]:
         "usage_policy": getattr(item, "usage_policy", "NORMAL"),
         "assignment_decision": getattr(item, "assignment_decision", "NO"),
     }
+    parts = getattr(item, "parts", 1)
+    if parts > 1:  # v2 split chunk (errata E16): (locator, part) names the text; single-part output unchanged
+        result["part"] = item.part
+        result["parts"] = parts
     constraint = getattr(item, "constraint_metadata", None)
     if constraint is not None:
         result["constraint_metadata"] = _value(constraint)
