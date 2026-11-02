@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 from tests.integration.test_intake_worker_preview import SEMESTER, _NotionClient
 
-from uls.adapters.notion.intake import (
+from syllva.adapters.notion.intake import (
     AUTO_RESOLVED_STATUS,
     FILE_KINDS,
     INTAKE_SCHEMAS,
@@ -18,7 +18,7 @@ from uls.adapters.notion.intake import (
     intake_schemas,
     intake_status_groups,
 )
-from uls.intake.classification import FILE_KINDS_V2, MATERIAL_ROLES_V2, Kind, Origin
+from syllva.intake.classification import FILE_KINDS_V2, MATERIAL_ROLES_V2, Kind, Origin
 
 pytestmark = pytest.mark.integration
 
@@ -164,7 +164,7 @@ def test_initial_draft_may_carry_suggestions_but_no_user_values() -> None:
     writer._validate("input_request", {**base, "Suggested Kind": "LECTURE_SLIDES", "Suggested Week": 3,
                                         "Suggestion Source": "rule:P3:lecture"},
                      is_create=True, allow_user_defaults=False)
-    from uls.domain.errors import PolicyDeniedError
+    from syllva.domain.errors import PolicyDeniedError
     with pytest.raises(PolicyDeniedError):
         writer._validate("input_request", {**base, "Kind": "LECTURE_SLIDES"},
                          is_create=True, allow_user_defaults=False)

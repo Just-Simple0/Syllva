@@ -5,13 +5,13 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from uls.adapters.drive.binding import (
+from syllva.adapters.drive.binding import (
     ActivityInstructionBinding,
     InMemorySourceBindingBackend,
     SourceBindingRecord,
 )
-from uls.domain.errors import SourceUnavailableError
-from uls.domain.source_ref import SourceFingerprint, SourceRef
+from syllva.domain.errors import SourceUnavailableError
+from syllva.domain.source_ref import SourceFingerprint, SourceRef
 
 
 class FakeDriveReader:

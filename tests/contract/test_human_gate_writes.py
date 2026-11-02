@@ -10,7 +10,7 @@ import pytest
 
 from fake_notion import FakeNotionAdapter
 from phase4 import phase4_applier_kwargs, phase4_proposal, ready_phase4
-from uls.adapters.notion.base import (
+from syllva.adapters.notion.base import (
     AUTOMATION_QUEUE,
     ApprovalReader,
     Decision,
@@ -22,8 +22,8 @@ from uls.adapters.notion.base import (
     mark_proposal_superseded,
     upsert_proposal,
 )
-from uls.domain.enums import AutomationActor
-from uls.domain.errors import PolicyViolation
+from syllva.domain.enums import AutomationActor
+from syllva.domain.errors import PolicyViolation
 
 
 def test_automation_human_only_fields_and_queue_states_are_denied() -> None:

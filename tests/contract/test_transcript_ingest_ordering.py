@@ -9,12 +9,12 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures")
 
 from fake_drive import FakeDriveWriter
 from fake_notion import FakeNotionReader, FakeNotionWriter
-from uls.domain.enums import ProcessingStatus
-from uls.domain.errors import SourceUnavailableError
-from uls.domain.source_ref import SourceRef
-from uls.ingestion.transcript_ingest import ingest_transcript
-from uls.orchestration.jobs import derive_job_key
-from uls.state.sqlite import SQLiteStateStore
+from syllva.domain.enums import ProcessingStatus
+from syllva.domain.errors import SourceUnavailableError
+from syllva.domain.source_ref import SourceRef
+from syllva.ingestion.transcript_ingest import ingest_transcript
+from syllva.orchestration.jobs import derive_job_key
+from syllva.state.sqlite import SQLiteStateStore
 
 
 class RecordingState:

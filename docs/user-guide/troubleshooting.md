@@ -28,7 +28,7 @@ Possible causes include:
 - the source is outside the authorized course/session/material range;
 - the client profile has not completed live validation in your environment.
 
-Do not solve this by pasting private credentials or entire private source files into a prompt. Ask the operator to check `uls doctor`, MCP registration, and source readiness.
+Do not solve this by pasting private credentials or entire private source files into a prompt. Ask the operator to check `syllva doctor`, MCP registration, and source readiness.
 
 ## The AI says context is ambiguous
 
@@ -40,4 +40,4 @@ An empty view can simply mean that no real records have been added. Do not creat
 
 ## I need operator help
 
-Give the operator the visible status/error code and the affected course/session/request identity. Do not send secrets. Operator diagnostics begin with `uls doctor`, `uls status`, and `uls jobs` as described in the [Operator Guide](../operator-guide/README.md).
+Give the operator the visible status/error code and the affected course/session/request identity. Do not send secrets. Operator diagnostics begin with `syllva doctor`, `syllva status`, and `syllva jobs` as described in the [Operator Guide](../operator-guide/README.md).

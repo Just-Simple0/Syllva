@@ -5,12 +5,12 @@ from types import MappingProxyType, SimpleNamespace
 
 import pytest
 
-from uls.config import google_oauth as oauth
-from uls.config.credentials import GoogleCredentialPayload
-from uls.config.errors import ConfigurationError
-from uls.intake.attestation import ReconnectRequiredError, WorkerEntryAttestation
-from uls.intake.identity import provider_binding_id
-from uls.runtime import (
+from syllva.config import google_oauth as oauth
+from syllva.config.credentials import GoogleCredentialPayload
+from syllva.config.errors import ConfigurationError
+from syllva.intake.attestation import ReconnectRequiredError, WorkerEntryAttestation
+from syllva.intake.identity import provider_binding_id
+from syllva.runtime import (
     BoundedTokenRequest,
     GoogleOAuthWorkerAttestor,
     _load_google_credentials,
@@ -148,7 +148,7 @@ def test_oauth_sdk_build_failures_become_reconnect_without_diagnostics(fake_goog
     def broken(name, version, credentials, cache_discovery):
         raise RuntimeError("discovery failed; bearer=synthetic-access")
     monkeypatch.setattr(googleapiclient.discovery, "build", broken)
-    from uls.runtime import google_service
+    from syllva.runtime import google_service
     with pytest.raises(ReconnectRequiredError) as error:
         google_service(_payload(_oauth_info(oauth.MCP_SCOPE)), read_only=True, oauth_client=CLIENT)
     assert "synthetic-access" not in str(error.value)
@@ -226,8 +226,8 @@ def test_bound_refresh_serializes_per_credential_and_verifies_each_grant(fake_go
 
 @pytest.mark.parametrize("fault", ["grant", "client", "invalid_grant"])
 def test_refresh_rejection_after_issuance_revokes_the_current_entry_proof(fake_google, fault):
-    from uls.adapters.drive.worker import GoogleDriveWorkerAdapter
-    from uls.intake.attestation import attestation_matches
+    from syllva.adapters.drive.worker import GoogleDriveWorkerAdapter
+    from syllva.intake.attestation import attestation_matches
 
     service, _binding, attestor = google_worker_runtime(_payload(_oauth_info()), oauth_client=CLIENT)
     credentials = fake_google.created[-1]
@@ -262,7 +262,7 @@ def test_oauth_sdk_import_and_rebind_failures_are_fixed_codes(fake_google, monke
     import sys
 
     monkeypatch.setitem(sys.modules, "googleapiclient.discovery", None)  # import fails
-    from uls.runtime import _build_drive, google_service
+    from syllva.runtime import _build_drive, google_service
     with pytest.raises(ReconnectRequiredError):
         _build_drive(object(), oauth=True)
     with pytest.raises(ImportError):
@@ -332,11 +332,11 @@ def test_mcp_read_only_load_proves_exact_grant_and_client(fake_google):
 def test_google_worker_service_refuses_oauth_payload_and_legacy_worker_refuses_before_effects(fake_google, tmp_path):
     with pytest.raises(ReconnectRequiredError):
         google_worker_service(_payload(_oauth_info()), oauth_client=CLIENT)
-    from uls.config.credentials import ResolvedCredentials
-    from uls.config.schema import UlsConfig
-    from uls.worker import build_worker
+    from syllva.config.credentials import ResolvedCredentials
+    from syllva.config.schema import SyllvaConfig
+    from syllva.worker import build_worker
 
-    config = UlsConfig()
+    config = SyllvaConfig()
     config.system.workspace_dir = str(tmp_path)
     config.google_oauth = CLIENT
     credentials = ResolvedCredentials(
@@ -440,7 +440,7 @@ def test_attestor_requires_configured_client_and_same_account():
 
 
 def test_account_change_at_attest_entry_revokes_the_previous_proof():
-    from uls.intake.attestation import attestation_matches
+    from syllva.intake.attestation import attestation_matches
 
     _credentials, service, attestor = _attestor()
     attestor.bind()

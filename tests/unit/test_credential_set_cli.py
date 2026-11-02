@@ -1,4 +1,4 @@
-"""Regression tests for the interactive "uls credential set NAME" command
+"""Regression tests for the interactive "syllva credential set NAME" command
 (docs/plans/credential-secret-file-launcher.md rev5 section 2.6/7.6/8.6/8.7/8.8).
 
 Every test asserts the raw secret value never appears anywhere in the
@@ -15,17 +15,17 @@ from pathlib import Path
 import pytest
 import yaml
 
-from uls.behavior import asset_root
-from uls.cli import credential_set
-from uls.cli.main import _config, initialize
-from uls.config._secure_file import read_secure_file
+from syllva.behavior import asset_root
+from syllva.cli import credential_set
+from syllva.cli.main import _config, initialize
+from syllva.config._secure_file import read_secure_file
 
 pytestmark = pytest.mark.unit
 
 
 @pytest.fixture(autouse=True)
 def fake_external_credential_state(monkeypatch):
-    from uls.settings.credential_stores import FakeKeyring
+    from syllva.settings.credential_stores import FakeKeyring
 
     backend = FakeKeyring()
     monkeypatch.setattr(credential_set, "explicit_os_keyring", lambda platform=None: backend)
@@ -51,7 +51,7 @@ def _point_file_bindings_at(monkeypatch, tmp_path):
         return tmp_path / "secrets" / filename
 
     monkeypatch.setattr(credential_set, "secret_file_path", fake_secret_file_path)
-    import uls.config.credentials as credentials_module
+    import syllva.config.credentials as credentials_module
 
     monkeypatch.setattr(credentials_module, "secret_file_path", fake_secret_file_path)
     return fake_secret_file_path
@@ -292,10 +292,10 @@ def test_notion_cli_holds_pair_locks_across_prompt_without_writing_reservation(t
     config_path, config = _write_config(tmp_path, credentials_yaml="NOTION_WORKER_TOKEN:\n  source: file\n")
     _point_file_bindings_at(monkeypatch, tmp_path)
     _force_tty(monkeypatch)
-    from uls.settings.config_service import ConfigStore
-    from uls.settings.credential_admission import credential_pair_admission
-    from uls.settings.credential_roles import ROLES
-    from uls.settings.journal import JournalStore, OperationInProgress
+    from syllva.settings.config_service import ConfigStore
+    from syllva.settings.credential_admission import credential_pair_admission
+    from syllva.settings.credential_roles import ROLES
+    from syllva.settings.journal import JournalStore, OperationInProgress
 
     store = ConfigStore(config_path)
     root = credential_set.secret_file_path("settings_state.key").parent
@@ -434,7 +434,7 @@ def test_notion_cli_aborts_if_config_changes_during_prompt(tmp_path, monkeypatch
     _force_tty(monkeypatch)
     import yaml
 
-    from uls.config.mutation import atomic_replace_config
+    from syllva.config.mutation import atomic_replace_config
 
     calls = 0
 
@@ -498,7 +498,7 @@ def test_notion_cli_requires_exact_keyring_readback(fake_external_credential_sta
 
 
 def _inject_secure_file_oserror(monkeypatch, target: Path, errnum: int, *, max_failures: int | None = None):
-    import uls.config._secure_file as secure_file
+    import syllva.config._secure_file as secure_file
 
     expected_parent = target.parent.stat()
     real_open = os.open
@@ -522,8 +522,8 @@ def _inject_secure_file_oserror(monkeypatch, target: Path, errnum: int, *, max_f
 def test_cli_secure_file_absence_requires_real_enoent_cause(tmp_path, missing_kind):
     import errno
 
-    from uls.config.errors import ConfigurationError
-    from uls.settings.credential_roles import ROLES
+    from syllva.config.errors import ConfigurationError
+    from syllva.settings.credential_roles import ROLES
 
     root = tmp_path / "secrets"
     if missing_kind == "file":
@@ -546,7 +546,7 @@ def test_notion_cli_unreadable_undeclared_file_peer_fails_before_keyring_write(
 ):
     import errno
 
-    from uls.config.errors import ConfigurationError
+    from syllva.config.errors import ConfigurationError
 
     backend = fake_external_credential_state
     config_path, config = _write_config(tmp_path, credentials_yaml="NOTION_MCP_TOKEN:\n  source: keyring\n")
@@ -623,7 +623,7 @@ def test_notion_cli_compares_valid_utf8_file_peer_bytes_without_reencoding(
 def test_cli_unreadable_existing_file_requires_confirmation_and_refusal_preserves_target(tmp_path, monkeypatch):
     import errno
 
-    from uls.config.errors import ConfigurationError
+    from syllva.config.errors import ConfigurationError
 
     config_path, config = _write_config(tmp_path, credentials_yaml="REMOTE_MCP_SECRET:\n  source: file\n")
     target_path = _point_file_bindings_at(monkeypatch, tmp_path)("remote_mcp_secret.secret")

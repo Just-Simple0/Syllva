@@ -31,8 +31,8 @@ import yaml
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
-from uls.behavior import asset_root
-from uls.cli.main import _config, doctor, initialize
+from syllva.behavior import asset_root
+from syllva.cli.main import _config, doctor, initialize
 
 pytestmark = pytest.mark.contract
 
@@ -107,7 +107,7 @@ def test_doctor_diagnoses_credentials_exactly_once(
     config = _write_config(tmp_path, worker_enabled=False)
     _set_mcp_credentials(monkeypatch, tmp_path)
 
-    import uls.cli.main as cli_main
+    import syllva.cli.main as cli_main
 
     call_count = []
     original_diagnose = cli_main.CredentialResolver.diagnose

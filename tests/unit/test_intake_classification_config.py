@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from uls.config.loader import load_config_unvalidated
+from syllva.config.loader import load_config_unvalidated
 
 pytestmark = pytest.mark.unit
 

@@ -10,19 +10,19 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures")
 from no_v2_state import NoV2State
 from phase4 import phase4_applier_kwargs, ready_phase4
 
-from uls.adapters.notion.base import (
+from syllva.adapters.notion.base import (
     ApprovalReader,
     Decision,
     HumanApprovalApplier,
     QueueState,
 )
-from uls.adapters.notion.guarded import GuardedNotionWriter
-from uls.config.schema import UlsConfig
-from uls.domain.errors import LocatorNotAllowedError
-from uls.domain.models import serialize_locator
-from uls.ephemeral.memory import MemoryEphemeralStore
-from uls.proposal.material_usage import MaterialUsageProposalProducer
-from uls.retrieval.engine import RetrievalEngine
+from syllva.adapters.notion.guarded import GuardedNotionWriter
+from syllva.config.schema import SyllvaConfig
+from syllva.domain.errors import LocatorNotAllowedError
+from syllva.domain.models import serialize_locator
+from syllva.ephemeral.memory import MemoryEphemeralStore
+from syllva.proposal.material_usage import MaterialUsageProposalProducer
+from syllva.retrieval.engine import RetrievalEngine
 
 
 @pytest.mark.parametrize("operation", ["create_usage", "update_range"])
@@ -48,7 +48,7 @@ def test_guarded_producer_approval_and_replay(operation, reuse):
     writer = GuardedNotionWriter(backend)
     producer = MaterialUsageProposalProducer(
         reader, drive, writer, Proposer(),
-        source_binding_resolver=resolver, config=UlsConfig(),
+        source_binding_resolver=resolver, config=SyllvaConfig(),
     )
     result = producer.propose("COMP319-S05")
     assert len(result.proposals) == 1
@@ -99,7 +99,7 @@ def test_guarded_approval_refreshes_same_engine_capability() -> None:
         drive,
         NoV2State(),
         MemoryEphemeralStore(),
-        UlsConfig(),
+        SyllvaConfig(),
         source_binding_resolver=resolver,
     )
 
@@ -124,7 +124,7 @@ def test_guarded_approval_refreshes_same_engine_capability() -> None:
         writer,
         Proposer(),
         source_binding_resolver=resolver,
-        config=UlsConfig(),
+        config=SyllvaConfig(),
     )
     result = producer.propose("COMP319-S05")
     assert len(result.proposals) == 1

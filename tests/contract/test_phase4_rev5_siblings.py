@@ -21,15 +21,15 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 from no_v2_state import NoV2State
 from phase4 import phase4_applier_kwargs, phase4_proposal, ready_phase4
 
-from uls.adapters.notion.base import HumanApprovalApplier, QueueState, upsert_proposal
-from uls.adapters.notion.guarded import GuardedNotionWriter
-from uls.config.schema import UlsConfig
-from uls.domain.errors import LocatorNotAllowedError
-from uls.domain.page_range import PageRange
-from uls.ephemeral.memory import MemoryEphemeralStore
-from uls.proposal.material_usage import MaterialUsageProposalProducer
-from uls.retrieval.engine import RetrievalEngine
-from uls.retrieval.scope import (
+from syllva.adapters.notion.base import HumanApprovalApplier, QueueState, upsert_proposal
+from syllva.adapters.notion.guarded import GuardedNotionWriter
+from syllva.config.schema import SyllvaConfig
+from syllva.domain.errors import LocatorNotAllowedError
+from syllva.domain.page_range import PageRange
+from syllva.ephemeral.memory import MemoryEphemeralStore
+from syllva.proposal.material_usage import MaterialUsageProposalProducer
+from syllva.retrieval.engine import RetrievalEngine
+from syllva.retrieval.scope import (
     material_usage_identity,
     material_usage_identity_counts,
     material_usage_scopes,
@@ -93,7 +93,7 @@ def _producer(fixture: tuple[Any, ...], candidate: dict[str, Any]) -> MaterialUs
         writer,
         Proposer(),
         source_binding_resolver=resolver,
-        config=UlsConfig(),
+        config=SyllvaConfig(),
     )
 
 
@@ -136,7 +136,7 @@ def _engine(reader: Any, drive: Any, resolver: Any) -> RetrievalEngine:
         drive,
         NoV2State(),
         MemoryEphemeralStore(),
-        UlsConfig(),
+        SyllvaConfig(),
         source_binding_resolver=resolver,
     )
 

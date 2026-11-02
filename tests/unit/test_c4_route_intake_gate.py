@@ -1,11 +1,11 @@
 """C4 regression: the real production course/kind fail-closed gate.
 
-Earlier drafts of this test targeted uls.intake.planner.route_intake(), but an
+Earlier drafts of this test targeted syllva.intake.planner.route_intake(), but an
 independent insane-review found that function has zero production callers.
 The actual production fail-closed gate for "no source registration before
 Course/kind are explicitly confirmed" is validate_request_input()
-(src/uls/intake/requests.py), invoked from
-IntakeWorker._claim_request_unlocked() (src/uls/intake/worker.py) before a
+(src/syllva/intake/requests.py), invoked from
+IntakeWorker._claim_request_unlocked() (src/syllva/intake/worker.py) before a
 job is ever enqueued for _reserve_session/_reserve_material.
 
 This test also locks a structural invariant: RequestInput (the type
@@ -13,7 +13,7 @@ validate_request_input operates on) has no observed_kind field at all, so a
 classifier confidence hint can never reach this gate even in principle -- it
 is not merely filtered by logic, it does not exist on the type. observed_kind
 only exists on IntakeItem and is written to a separate read-only "Observed
-Kind" Notion property (src/uls/intake/worker.py) as a user-facing suggestion;
+Kind" Notion property (src/syllva/intake/worker.py) as a user-facing suggestion;
 it never flows into the submitted request's "kind" field that
 validate_request_input checks.
 """
@@ -24,8 +24,8 @@ import dataclasses
 
 import pytest
 
-from uls.intake.models import RequestInput, RequestType
-from uls.intake.requests import validate_request_input
+from syllva.intake.models import RequestInput, RequestType
+from syllva.intake.requests import validate_request_input
 
 pytestmark = pytest.mark.unit
 

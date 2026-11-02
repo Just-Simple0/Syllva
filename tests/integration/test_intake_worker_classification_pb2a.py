@@ -12,8 +12,8 @@ from tests.integration.test_intake_worker_classification_pb1 import CANVAS_TEST_
 from tests.integration.test_intake_worker_classification_profile import _rewire
 from tests.integration.test_intake_worker_preview import COURSE_KEYS, _assign_request, _system
 
-from uls.intake.classification import RecordingEntry, SemesterRange, build_calendar
-from uls.intake.worker import IntakeReconcileRequired
+from syllva.intake.classification import RecordingEntry, SemesterRange, build_calendar
+from syllva.intake.worker import IntakeReconcileRequired
 
 pytestmark = pytest.mark.integration
 
@@ -22,7 +22,7 @@ pytestmark = pytest.mark.integration
 def _no_promotion(monkeypatch):
     """P-B2a behaviour is tested in isolation from the P-B2b promotion (own test module)."""
 
-    from uls.intake.worker import IntakeWorker
+    from syllva.intake.worker import IntakeWorker
 
     monkeypatch.setattr(IntakeWorker, "_promote_ready_plans", lambda self: None)
 
@@ -113,7 +113,7 @@ def test_material_from_a_proven_binding_in_a_course_folder_is_auto_eligible(tmp_
         drive.files[system["source_id"]] = replace(meta, parents=("synthetic-course-upload-1",))
         from tests.integration.test_intake_worker_preview import _privacy
 
-        from uls.adapters.drive.worker import DRIVE_FOLDER_MIME, DriveMetadata
+        from syllva.adapters.drive.worker import DRIVE_FOLDER_MIME, DriveMetadata
         drive.files["synthetic-course-upload-1"] = DriveMetadata(
             file_id="synthetic-course-upload-1", name="upload", mime_type=DRIVE_FOLDER_MIME,
             parents=("synthetic-course-1",), modified_time="2026-09-13T10:00:00Z", size=0, md5_checksum=None,
@@ -122,9 +122,9 @@ def test_material_from_a_proven_binding_in_a_course_folder_is_auto_eligible(tmp_
         registry.optional_course_upload_folder_ids[COURSE] = "synthetic-course-upload-1"
         system["config"].intake.classification.canvas_course_map = {67535: COURSE}
         # The worker resolves its workspaces at construction: rebuild it on the new layout.
-        from uls.config.credentials import ResolvedCredentials
-        from uls.intake.identity import provider_binding_id
-        from uls.runtime import build_intake_worker
+        from syllva.config.credentials import ResolvedCredentials
+        from syllva.intake.identity import provider_binding_id
+        from syllva.runtime import build_intake_worker
         system["worker"] = build_intake_worker(
             system["config"], ResolvedCredentials({}), state=system["state"], drive=drive, notion=system["notion"],
             provider_account_binding_id=provider_binding_id("google_drive", "synthetic-owner", "synthetic-oauth"),
@@ -218,7 +218,7 @@ def test_human_touched_draft_supersedes_the_auto_plan(tmp_path: Path) -> None:
 
 
 def test_pending_intent_recovery_paths(tmp_path: Path) -> None:
-    from uls.adapters.notion.intake import InMemoryNotionWorker
+    from syllva.adapters.notion.intake import InMemoryNotionWorker
 
     # Simulate a crash between the Notion write and the local commit by making the
     # readback vanish: the intent stays PENDING, the key is barred, and the item is
@@ -1062,15 +1062,15 @@ def test_preflight_rechecks_alias_and_canvas_provenance(tmp_path: Path) -> None:
         drive.files[system["source_id"]] = replace(drive.files[system["source_id"]], parents=("synthetic-course-upload-1",))
         from tests.integration.test_intake_worker_preview import _privacy
 
-        from uls.adapters.drive.worker import DRIVE_FOLDER_MIME, DriveMetadata
+        from syllva.adapters.drive.worker import DRIVE_FOLDER_MIME, DriveMetadata
         drive.files["synthetic-course-upload-1"] = DriveMetadata(
             file_id="synthetic-course-upload-1", name="upload", mime_type=DRIVE_FOLDER_MIME,
             parents=("synthetic-course-1",), modified_time="2026-09-13T10:00:00Z", size=0, md5_checksum=None, **_privacy())
         system["config"].google_drive.semester_registries[0].optional_course_upload_folder_ids[COURSE] = "synthetic-course-upload-1"
         system["config"].intake.classification.canvas_course_map = {67535: COURSE}
-        from uls.config.credentials import ResolvedCredentials
-        from uls.intake.identity import provider_binding_id
-        from uls.runtime import build_intake_worker
+        from syllva.config.credentials import ResolvedCredentials
+        from syllva.intake.identity import provider_binding_id
+        from syllva.runtime import build_intake_worker
         system["worker"] = build_intake_worker(
             system["config"], ResolvedCredentials({}), state=state, drive=drive, notion=system["notion"],
             provider_account_binding_id=provider_binding_id("google_drive", "synthetic-owner", "synthetic-oauth"),
@@ -1183,15 +1183,15 @@ def test_canvas_course_must_match_the_classified_course(tmp_path: Path) -> None:
             drive.files[system["source_id"]] = replace(drive.files[system["source_id"]], parents=("synthetic-course-upload-1",))
             from tests.integration.test_intake_worker_preview import _privacy
 
-            from uls.adapters.drive.worker import DRIVE_FOLDER_MIME, DriveMetadata
+            from syllva.adapters.drive.worker import DRIVE_FOLDER_MIME, DriveMetadata
             drive.files["synthetic-course-upload-1"] = DriveMetadata(
                 file_id="synthetic-course-upload-1", name="upload", mime_type=DRIVE_FOLDER_MIME,
                 parents=("synthetic-course-1",), modified_time="2026-09-13T10:00:00Z", size=0, md5_checksum=None, **_privacy())
             system["config"].google_drive.semester_registries[0].optional_course_upload_folder_ids[COURSE] = "synthetic-course-upload-1"
             system["config"].intake.classification.canvas_course_map = mapping
-            from uls.config.credentials import ResolvedCredentials
-            from uls.intake.identity import provider_binding_id
-            from uls.runtime import build_intake_worker
+            from syllva.config.credentials import ResolvedCredentials
+            from syllva.intake.identity import provider_binding_id
+            from syllva.runtime import build_intake_worker
             system["worker"] = build_intake_worker(
                 system["config"], ResolvedCredentials({}), state=state, drive=drive, notion=system["notion"],
                 provider_account_binding_id=provider_binding_id("google_drive", "synthetic-owner", "synthetic-oauth"),
@@ -1449,7 +1449,7 @@ def test_a_rejected_direct_claim_leaves_the_auto_plan_alone(tmp_path: Path) -> N
 
 
 def test_provider_exceptions_converge_to_the_unknown_outcome_contract(tmp_path: Path) -> None:
-    from uls.adapters.notion.intake import ProviderUnavailableError
+    from syllva.adapters.notion.intake import ProviderUnavailableError
 
     # (a) the write landed, then the readback raises.
     system_cm, system = _pre_v2_draft(tmp_path / "readback")
@@ -2442,7 +2442,7 @@ def test_session_date_end_must_be_a_full_iso_value(tmp_path: Path) -> None:
 
 def test_an_unreadable_first_human_check_parks_the_plan(tmp_path: Path) -> None:
     # r16 R1: the very first Draft readback raises; the unverified AUTO plan must not survive.
-    from uls.adapters.notion.intake import ProviderUnavailableError
+    from syllva.adapters.notion.intake import ProviderUnavailableError
 
     system_cm, system = _pre_v2_draft(tmp_path)
     try:
@@ -2471,7 +2471,7 @@ def test_an_unreadable_first_human_check_parks_the_plan(tmp_path: Path) -> None:
 
 def test_an_unreadable_closed_sibling_stops_the_next_closure(tmp_path: Path) -> None:
     # r17 H1: after the first Draft is closed, re-reading it for the second closure fails.
-    from uls.adapters.notion.intake import ProviderUnavailableError
+    from syllva.adapters.notion.intake import ProviderUnavailableError
 
     system_cm, system = _pre_v2_draft(tmp_path)
     try:

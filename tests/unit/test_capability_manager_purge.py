@@ -22,12 +22,12 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
-from uls.domain.errors import ContextExpiredError, PolicyDeniedError
-from uls.domain.models import PageLocator
-from uls.domain.source_ref import SourceRef
-from uls.ephemeral.memory import MemoryEphemeralStore
-from uls.retrieval.capabilities import CapabilityManager
-from uls.retrieval.schemas import CapabilityBinding
+from syllva.domain.errors import ContextExpiredError, PolicyDeniedError
+from syllva.domain.models import PageLocator
+from syllva.domain.source_ref import SourceRef
+from syllva.ephemeral.memory import MemoryEphemeralStore
+from syllva.retrieval.capabilities import CapabilityManager
+from syllva.retrieval.schemas import CapabilityBinding
 
 
 class _FakeClock:

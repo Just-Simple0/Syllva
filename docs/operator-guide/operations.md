@@ -7,20 +7,20 @@
 Start with:
 
 ```bash
-uls doctor
-uls status
-uls jobs --limit 20
+syllva doctor
+syllva status
+syllva jobs --limit 20
 ```
 
 Then run bounded work deliberately:
 
 ```bash
-uls sync --max-jobs 20
-uls process --max-jobs 20
-uls run --max-jobs 20
+syllva sync --max-jobs 20
+syllva process --max-jobs 20
+syllva run --max-jobs 20
 ```
 
-Use `uls retry <job-id>` only after you understand why the job failed. `uls reprocess <entity-id>` is an explicit operator action and should not be used to hide uncertain external state.
+Use `syllva retry <job-id>` only after you understand why the job failed. `syllva reprocess <entity-id>` is an explicit operator action and should not be used to hide uncertain external state.
 
 ## Single active worker
 
@@ -35,7 +35,7 @@ The repository includes:
 - `deployment/macos/com.syllva.uls.plist`
 - `deployment/windows/uls-task.xml`
 
-Edit absolute paths and validate manual `uls run` behavior before registering a scheduler. Scheduled processes may not inherit your interactive shell environment, so credential availability must be handled deliberately through private OS/service mechanisms.
+Edit absolute paths and validate manual `syllva run` behavior before registering a scheduler. Scheduled processes may not inherit your interactive shell environment, so credential availability must be handled deliberately through private OS/service mechanisms.
 
 Do not enable the optional LMS schedule until its separate gates pass.
 
@@ -54,7 +54,7 @@ Do not assume copying only the main SQLite file while WAL writes are active is a
 1. Stop worker schedulers and MCP processes.
 2. Preserve the current state as a separate recovery copy.
 3. Restore the selected config/state together.
-4. Run `uls status` and `uls doctor`.
+4. Run `syllva status` and `syllva doctor`.
 5. Perform a bounded source/context smoke check.
 6. Reconcile Drive/Notion against the restored local provenance before enabling automation.
 

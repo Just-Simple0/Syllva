@@ -7,14 +7,14 @@ import os
 
 import pytest
 
-from uls.config._secure_file import (
+from syllva.config._secure_file import (
     _WINDOWS_ADMIN_ACCESS_MASK,
     _WINDOWS_USER_ACCESS_MASK,
     MAX_SECRET_BYTES,
     read_secure_file,
     write_secure_file,
 )
-from uls.config.errors import ConfigurationError
+from syllva.config.errors import ConfigurationError
 
 pytestmark = pytest.mark.unit
 
@@ -47,7 +47,7 @@ def _assert_windows_raw_canonical_acl(path):
     import ctypes
     from ctypes import wintypes
 
-    from uls.config._secure_file import (
+    from syllva.config._secure_file import (
         _windows_current_user_sid,
         _windows_default_owner_sid,
         _windows_is_reparse_point,
@@ -198,7 +198,7 @@ def test_write_failure_never_leaves_a_temp_file_behind(tmp_path, monkeypatch):
     directory = _secrets_dir(tmp_path)
     path = directory / "boom.secret"
 
-    import uls.config._secure_file as secure_file_module
+    import syllva.config._secure_file as secure_file_module
 
     if os.name == "nt":
         import ctypes
@@ -373,7 +373,7 @@ def test_windows_dacl_round_trip_and_tampered_mask_rejected(tmp_path):
     import ctypes
     from ctypes import wintypes
 
-    from uls.config._secure_file import (
+    from syllva.config._secure_file import (
         _windows_current_user_sid,
     )
 
@@ -456,7 +456,7 @@ def test_windows_dacl_frees_prior_sid_when_later_conversion_fails(monkeypatch, t
     import ctypes
     from ctypes import wintypes
 
-    import uls.config._secure_file as secure_file_module
+    import syllva.config._secure_file as secure_file_module
 
     real_windll = ctypes.WinDLL
     attempted_sids = []
@@ -529,7 +529,7 @@ def test_windows_dacl_frees_prior_sid_when_later_conversion_fails(monkeypatch, t
 def test_windows_default_owner_sid_returns_valid_sid():
     import re
 
-    from uls.config._secure_file import _windows_default_owner_sid
+    from syllva.config._secure_file import _windows_default_owner_sid
 
     sid = _windows_default_owner_sid()
     assert isinstance(sid, str)

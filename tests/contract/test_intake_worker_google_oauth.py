@@ -10,12 +10,12 @@ from typing import Any
 import pytest
 from tests.integration.test_intake_worker_preview import _assign_request, _system
 
-from uls.adapters.drive.worker import GoogleDriveWorkerAdapter
-from uls.domain.errors import SourceUnavailableError
-from uls.intake.attestation import ReconnectRequiredError, StaticAttestor, WorkerEntryAttestation
-from uls.intake.identity import provider_binding_id
-from uls.intake.worker import IntakeWorker
-from uls.runtime import build_intake_worker
+from syllva.adapters.drive.worker import GoogleDriveWorkerAdapter
+from syllva.domain.errors import SourceUnavailableError
+from syllva.intake.attestation import ReconnectRequiredError, StaticAttestor, WorkerEntryAttestation
+from syllva.intake.identity import provider_binding_id
+from syllva.intake.worker import IntakeWorker
+from syllva.runtime import build_intake_worker
 
 pytestmark = pytest.mark.contract
 
@@ -123,7 +123,7 @@ def test_service_account_worker_without_attestor_is_unchanged(tmp_path: Path) ->
 def test_build_intake_worker_runs_startup_gate_once_for_installers(tmp_path: Path) -> None:
     with _system(tmp_path) as harness:
         attestor = StaticAttestor()
-        from uls.config.credentials import ResolvedCredentials
+        from syllva.config.credentials import ResolvedCredentials
 
         worker = build_intake_worker(
             harness["config"], ResolvedCredentials({}), state=harness["state"], drive=harness["drive"],
@@ -291,7 +291,7 @@ def test_real_adapter_and_worker_share_one_attestor_and_fail_closed_with_zero_ef
         assert state.acquire_local_worker_lock() is True
         state.release_local_worker_lock()
         # Startup gate through the composition root with the same failing attestor.
-        from uls.config.credentials import ResolvedCredentials
+        from syllva.config.credentials import ResolvedCredentials
         with pytest.raises(ReconnectRequiredError):
             build_intake_worker(harness["config"], ResolvedCredentials({}), state=state, drive=adapter,
                                 notion=harness["notion"], provider_account_binding_id=provider_binding_id("google_drive", "o", "a"),
@@ -302,7 +302,7 @@ def test_real_adapter_and_worker_share_one_attestor_and_fail_closed_with_zero_ef
 def test_second_entry_cannot_refresh_the_shared_credential_while_one_entry_runs(tmp_path: Path) -> None:
     import threading
 
-    from uls.domain.errors import ProviderUnavailableError
+    from syllva.domain.errors import ProviderUnavailableError
 
     with _system(tmp_path) as harness:
         attestor = StaticAttestor()
@@ -340,7 +340,7 @@ def test_second_entry_cannot_refresh_the_shared_credential_while_one_entry_runs(
 
 def test_cold_start_with_rejected_attestation_creates_no_local_state(tmp_path: Path) -> None:
     with _system(tmp_path) as harness:
-        from uls.config.credentials import ResolvedCredentials
+        from syllva.config.credentials import ResolvedCredentials
         config = copy.deepcopy(harness["config"])
         config.system.workspace_dir = str(tmp_path / "cold")
         with pytest.raises(ReconnectRequiredError):
@@ -373,7 +373,7 @@ def test_positive_entry_propagates_one_attestation_to_adapter_context_and_instal
                 seen.append(("list_folder", self.current.generation if self.current else None))
                 return inner.list_folder(folder_id)
         drive = _ContextDrive(inner)
-        from uls.config.credentials import ResolvedCredentials
+        from syllva.config.credentials import ResolvedCredentials
         worker = build_intake_worker(
             harness["config"], ResolvedCredentials({}), state=harness["state"], drive=drive, notion=harness["notion"],
             provider_account_binding_id=provider_binding_id("google_drive", "o", "a"), semester="2026-2",
@@ -579,8 +579,8 @@ def test_real_after_publish_callback_runs_inside_the_tick_attestation(tmp_path: 
     """O1 (r9): the real RequestCoordinator.after_publish wiring, not a spy, runs under the entry context."""
     import contextlib
 
-    from uls.intake.composition import merge_request_handler
-    from uls.intake.coordinator import RequestCoordinator
+    from syllva.intake.composition import merge_request_handler
+    from syllva.intake.coordinator import RequestCoordinator
 
     with _system(tmp_path) as harness:
         attestor = StaticAttestor()
@@ -638,8 +638,8 @@ def test_service_account_live_composition_without_google_oauth_installs_no_attes
     import googleapiclient.discovery
     import notion_client
 
-    from uls.adapters.notion.intake import NotionAPIWorker
-    from uls.config.credentials import GoogleCredentialPayload, ResolvedCredentials
+    from syllva.adapters.notion.intake import NotionAPIWorker
+    from syllva.config.credentials import GoogleCredentialPayload, ResolvedCredentials
 
     sa = {"type": "service_account", "client_email": "synthetic@example.iam", "private_key_id": "k",
           "private_key": "synthetic-key", "project_id": "p", "client_id": "synthetic-sa-client"}
@@ -713,7 +713,7 @@ def test_native_download_bound_is_enforced_before_an_oversized_chunk_is_buffered
     """P-B1 r3 O1: a single oversized response, multi-chunk growth past the bound and a short
     response are all refused; nothing beyond the bound is ever buffered."""
 
-    from uls.domain.errors import SourcePartialError, SourceUnavailableError
+    from syllva.domain.errors import SourcePartialError, SourceUnavailableError
 
     attestor = StaticAttestor()
     service = _MutationService()

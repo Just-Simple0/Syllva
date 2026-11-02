@@ -11,8 +11,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures")
 from fake_notion import FakeNotionAdapter, FakeNotionReader
 from phase4 import COURSE_KEY, COURSE_PAGE_ID, exam_record
 
-from uls.adapters.notion.base import ProposalType, upsert_proposal
-from uls.domain.approval_identity import (
+from syllva.adapters.notion.base import ProposalType, upsert_proposal
+from syllva.domain.approval_identity import (
     EXAM_SCOPE_APPROVAL_ACTION_SCHEMA,
     build_exam_scope_semantics,
     canonical_action_json,
@@ -20,8 +20,8 @@ from uls.domain.approval_identity import (
     canonical_semantics_from_queue,
     derive_proposal_id,
 )
-from uls.domain.errors import PolicyViolation
-from uls.proposal.exam_scope import build_exam_scope_proposal
+from syllva.domain.errors import PolicyViolation
+from syllva.proposal.exam_scope import build_exam_scope_proposal
 
 COURSE = {"relation_page_id": COURSE_PAGE_ID, "course_key": COURSE_KEY}
 

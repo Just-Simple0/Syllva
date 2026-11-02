@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from uls.adapters.notion.base import ApprovalReader, HumanApprovalApplier, upsert_proposal
-from uls.domain.errors import PolicyViolation
+from syllva.adapters.notion.base import ApprovalReader, HumanApprovalApplier, upsert_proposal
+from syllva.domain.errors import PolicyViolation
 
 
 @pytest.mark.parametrize("change", ["reject", "duplicate", "type", "content", "delete"])
@@ -69,7 +69,7 @@ def test_dependency_read_cannot_outlive_the_target_basis(change: str) -> None:
         sys.path.insert(0, fixture_path)
     from phase4 import phase4_applier_kwargs, phase4_proposal, ready_phase4
 
-    from uls.domain.source_ref import SourceFingerprint
+    from syllva.domain.source_ref import SourceFingerprint
     reader, writer, drive, resolver = ready_phase4()
     proposal = phase4_proposal(reader)
     pid = proposal["Proposal ID"]

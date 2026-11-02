@@ -3,8 +3,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
 import pytest
 
-from uls.domain.errors import LocatorParseError
-from uls.domain.models import is_contained, parse_locator
+from syllva.domain.errors import LocatorParseError
+from syllva.domain.models import is_contained, parse_locator
 
 
 @pytest.mark.parametrize(

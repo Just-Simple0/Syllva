@@ -6,8 +6,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'contract'))
 
 from test_get_activity_context import _engine
 
-from uls.mcp.server import ReadOnlyMCP
-from uls.mcp.transports.local import run_local
+from syllva.mcp.server import ReadOnlyMCP
+from syllva.mcp.transports.local import run_local
 
 if __name__ == '__main__':
     engine, _, _ = _engine()

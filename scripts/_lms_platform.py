@@ -218,7 +218,7 @@ def sync_directory(path: Path) -> None:
 def try_lock_exclusive(fd: int) -> bool:
     """Acquire a non-blocking exclusive advisory lock on the descriptor.
 
-    Mirrors src/uls/orchestration/locks.py cross-platform lock primitive
+    Mirrors src/syllva/orchestration/locks.py cross-platform lock primitive
     so the LMS apply-lock module does not need a bare, Windows-incompatible
     import fcntl at module scope.
     """

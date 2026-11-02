@@ -14,8 +14,8 @@ from tests.integration.test_intake_worker_canvas_attachments import CANVAS_COURS
 from tests.integration.test_intake_worker_classification_pb2a import COURSE
 from tests.integration.test_intake_worker_preview import _pdf_bytes, _system
 
-from uls.intake.canvas_attachments import AttachmentCandidate
-from uls.intake.classification import SemesterRange, build_calendar
+from syllva.intake.canvas_attachments import AttachmentCandidate
+from syllva.intake.classification import SemesterRange, build_calendar
 
 pytestmark = pytest.mark.integration
 

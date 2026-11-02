@@ -5,8 +5,8 @@ import json
 
 import pytest
 
-from uls.adapters.llm import typesafe_choice as tc
-from uls.adapters.llm.typesafe_choice import (
+from syllva.adapters.llm import typesafe_choice as tc
+from syllva.adapters.llm.typesafe_choice import (
     ChoiceQuestion,
     ClassifierError,
     HttpsTransport,
@@ -15,7 +15,7 @@ from uls.adapters.llm.typesafe_choice import (
     TypesafeChoiceClient,
     resolve_typesafe_key,
 )
-from uls.config.credentials import ALLOWED_SOURCES, KEYRING_BINDINGS, CredentialResolver
+from syllva.config.credentials import ALLOWED_SOURCES, KEYRING_BINDINGS, CredentialResolver
 
 pytestmark = pytest.mark.unit
 

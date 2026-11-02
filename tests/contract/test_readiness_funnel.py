@@ -30,12 +30,12 @@ import yaml
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
-from uls.behavior import asset_root
-from uls.cli.main import _config, _readiness_funnel, initialize, status
-from uls.orchestration.jobs import derive_job_key
-from uls.runtime import state_path
-from uls.state.reader import parse_derivative_ref
-from uls.state.sqlite import SQLiteStateStore
+from syllva.behavior import asset_root
+from syllva.cli.main import _config, _readiness_funnel, initialize, status
+from syllva.orchestration.jobs import derive_job_key
+from syllva.runtime import state_path
+from syllva.state.reader import parse_derivative_ref
+from syllva.state.sqlite import SQLiteStateStore
 
 pytestmark = pytest.mark.contract
 

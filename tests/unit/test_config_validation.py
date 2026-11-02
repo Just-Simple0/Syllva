@@ -3,9 +3,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
 import pytest
 
-from uls.config.errors import ConfigurationError
-from uls.config.loader import load_config, load_config_unvalidated, load_secrets
-from uls.config.validation import validate_config
+from syllva.config.errors import ConfigurationError
+from syllva.config.loader import load_config, load_config_unvalidated, load_secrets
+from syllva.config.validation import validate_config
 
 
 def test_valid_example_shape_loads_and_validates(tmp_path, monkeypatch) -> None:
@@ -228,8 +228,8 @@ courses:
 def test_oidc_issuer_with_trailing_slash_is_rejected_at_config_load(tmp_path) -> None:
     """The validator must mirror JwksKeyManager's trailing-slash rejection
     exactly. Otherwise a trailing-slash issuer could load as "valid"
-    config and be reported ready by 'uls doctor' (which never constructs
-    a JwksKeyManager without --live), while the actual 'uls mcp remote'
+    config and be reported ready by 'syllva doctor' (which never constructs
+    a JwksKeyManager without --live), while the actual 'syllva mcp remote'
     dispatch path unconditionally builds one and fails immediately --
     a doctor/runtime readiness divergence.
     """

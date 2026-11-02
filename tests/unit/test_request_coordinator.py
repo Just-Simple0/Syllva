@@ -4,7 +4,7 @@ from uuid import UUID
 
 import pytest
 
-from uls.intake.coordinator import RequestCoordinator
+from syllva.intake.coordinator import RequestCoordinator
 
 
 def row(number, created="2026-09-20T00:00:00Z"):
@@ -95,7 +95,7 @@ def test_claim_failure_blocks_otherwise_successful_handler():
 
 
 def test_composition_merges_local_inbox_before_provider_approval():
-    from uls.intake.composition import merge_request_handler
+    from syllva.intake.composition import merge_request_handler
 
     events = []
     original = coordinator(
@@ -120,7 +120,7 @@ def test_composition_merges_local_inbox_before_provider_approval():
 
 
 def test_composition_merges_provider_after_local_inbox_and_keeps_approval():
-    from uls.intake.composition import merge_request_handler
+    from syllva.intake.composition import merge_request_handler
 
     events = []
     original = coordinator(
@@ -146,7 +146,7 @@ def test_composition_merges_provider_after_local_inbox_and_keeps_approval():
 
 
 def test_merged_workspace_source_failure_blocks_handlers_and_approval():
-    from uls.intake.composition import merge_request_handler
+    from syllva.intake.composition import merge_request_handler
 
     events = []
     original = coordinator(

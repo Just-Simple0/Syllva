@@ -16,14 +16,14 @@ from tests.contract.test_phase4_rev6_recovery import (
     _restore_old_target,
 )
 
-from uls.adapters.notion import base
-from uls.adapters.notion.base import (
+from syllva.adapters.notion import base
+from syllva.adapters.notion.base import (
     _PHASE4_APPLY_MARKER_PREFIX,
     QueueState,
     _phase4_apply_marker_text,
 )
-from uls.domain.approval_identity import canonical_semantics_from_queue
-from uls.domain.errors import PolicyViolation
+from syllva.domain.approval_identity import canonical_semantics_from_queue
+from syllva.domain.errors import PolicyViolation
 
 
 def _marker_payload(writer, proposal):

@@ -11,7 +11,7 @@ import pytest
 
 pytestmark = pytest.mark.contract
 
-STATIC = Path(__file__).resolve().parents[2] / "src" / "uls" / "settings" / "static"
+STATIC = Path(__file__).resolve().parents[2] / "src" / "syllva" / "settings" / "static"
 HARNESS = Path(__file__).with_name("settings_ui_harness.cjs")
 NODE = shutil.which("node")
 

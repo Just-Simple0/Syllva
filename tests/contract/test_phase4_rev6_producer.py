@@ -12,10 +12,10 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures")
 
 from phase4 import ready_phase4
 
-from uls.adapters.drive.binding import SourceBindingRecord
-from uls.domain.errors import SourcePartialError, SourceUnavailableError
-from uls.domain.source_ref import SourceFingerprint, SourceRef
-from uls.proposal.material_usage import MaterialUsageProposalProducer
+from syllva.adapters.drive.binding import SourceBindingRecord
+from syllva.domain.errors import SourcePartialError, SourceUnavailableError
+from syllva.domain.source_ref import SourceFingerprint, SourceRef
+from syllva.proposal.material_usage import MaterialUsageProposalProducer
 
 
 class Proposer:

@@ -12,7 +12,7 @@ from tests.integration.test_intake_worker_preview import (
     _system,
 )
 
-from uls.intake.worker import RequestTerminalError
+from syllva.intake.worker import RequestTerminalError
 
 pytestmark = pytest.mark.integration
 
@@ -269,7 +269,7 @@ def test_disabling_classification_stops_projecting_stored_classification(tmp_pat
 def test_incomplete_recording_collection_keeps_the_calendar_ambiguous(tmp_path: Path) -> None:
     from datetime import date
 
-    from uls.intake.classification import SemesterRange, build_calendar
+    from syllva.intake.classification import SemesterRange, build_calendar
 
     with _system(tmp_path, name=TRANSCRIPT_NAME) as system:
         _enable(system)
@@ -313,7 +313,7 @@ def test_multi_intake_file_details_is_rejected_before_the_matrix_gate(tmp_path: 
 
 
 def test_suggestion_flags_survive_ticks_and_restart(tmp_path: Path) -> None:
-    from uls.state.sqlite import SQLiteStateStore
+    from syllva.state.sqlite import SQLiteStateStore
 
     # O2: written_to_notion stays set across ticks and the follow-up draft; the first draft is never rewritten.
     with _system(tmp_path, name=TRANSCRIPT_NAME) as system:

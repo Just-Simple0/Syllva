@@ -8,8 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import uls.orchestration.locks as locks_module
-from uls.orchestration.locks import LocalWorkerLock
+import syllva.orchestration.locks as locks_module
+from syllva.orchestration.locks import LocalWorkerLock
 
 
 def test_stale_recovery_does_not_unlink_a_replaced_lock_instance(tmp_path) -> None:

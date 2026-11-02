@@ -11,7 +11,7 @@ Syllva uses explicit configuration and process-environment credentials. The runt
 3. Fail closed when a provider ID, relation, parent, or permission cannot be verified.
 4. Do not make the worker and read-only MCP share credentials merely for convenience.
 
-Start from `config.example.yaml` or the files created by `uls init`.
+Start from `config.example.yaml` or the files created by `syllva init`.
 
 ## Credential boundaries
 
@@ -95,7 +95,7 @@ be returned.
 retrieval remains available from transcript evidence and reports Material Usage
 as unavailable; it does not treat the missing source as a verified empty
 database. Semester-scoped Exam and Activity retrieval is unavailable until
-explicit mappings exist. `uls doctor --live` probes a Course from the
+explicit mappings exist. `syllva doctor --live` probes a Course from the
 selected semester when this lane is enabled.
 
 To return to the frozen v1.2 path, use `notion_lane: legacy_global` with an
@@ -110,9 +110,9 @@ empty `semester`.
 After each material configuration change:
 
 ```bash
-uls doctor
-uls status
-uls behavior lint
+syllva doctor
+syllva status
+syllva behavior lint
 ```
 
-Use `uls doctor --live` only when you intentionally want read-only live provider probes and have supplied the required credentials. A successful probe does not by itself validate an end-user AI client.
+Use `syllva doctor --live` only when you intentionally want read-only live provider probes and have supplied the required credentials. A successful probe does not by itself validate an end-user AI client.

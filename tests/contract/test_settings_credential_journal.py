@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from uls.config.mutation import ConfigFileLock
-from uls.settings.journal import (
+from syllva.config.mutation import ConfigFileLock
+from syllva.settings.journal import (
     ABSENT_STATE,
     ACTION_SCHEMAS,
     NOT_APPLIED,
@@ -740,7 +740,7 @@ def test_run_effect_on_an_alternate_branch_intent_without_the_operation_lock_tou
 
 _HOLDER = """
 import sys, time
-from uls.settings.journal import JournalStore
+from syllva.settings.journal import JournalStore
 journal = JournalStore(sys.argv[1])
 with journal.operation(sys.argv[2]):
     print('held', flush=True)
@@ -752,7 +752,7 @@ def test_a_lockless_switch_cannot_overwrite_a_record_held_by_another_process(tmp
     import subprocess
     import sys
 
-    from uls.settings import journal as journal_module
+    from syllva.settings import journal as journal_module
 
     journal = JournalStore(tmp_path)
     with pytest.raises(SimulatedCrash):

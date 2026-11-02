@@ -32,10 +32,10 @@ Drive 학기 업로드 위치
 ## Worker 명령
 
 ```bash
-uls sync --max-jobs 20
-uls process --max-jobs 20
-uls run --max-jobs 20
-uls jobs --limit 20
+syllva sync --max-jobs 20
+syllva process --max-jobs 20
+syllva run --max-jobs 20
+syllva jobs --limit 20
 ```
 
 - `sync`: 현재 작업을 발견/projection하지만 처리하지 않습니다.

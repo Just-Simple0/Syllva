@@ -18,20 +18,20 @@ from phase4 import (
     exam_record,
 )
 
-from uls.adapters.drive.binding import ValidatedSourceBindingResolver
-from uls.adapters.notion.base import (
+from syllva.adapters.drive.binding import ValidatedSourceBindingResolver
+from syllva.adapters.notion.base import (
     _PHASE4_APPLY_MARKER_PREFIX,
     HumanApprovalApplier,
     QueueState,
     enforce_write_policy,
     upsert_proposal,
 )
-from uls.config.schema import UlsConfig
-from uls.domain.academic import ExamRecord
-from uls.domain.course_identity import validate_course_record
-from uls.domain.enums import AutomationActor
-from uls.domain.errors import PolicyViolation
-from uls.proposal.exam_scope import build_exam_scope_proposal
+from syllva.config.schema import SyllvaConfig
+from syllva.domain.academic import ExamRecord
+from syllva.domain.course_identity import validate_course_record
+from syllva.domain.enums import AutomationActor
+from syllva.domain.errors import PolicyViolation
+from syllva.proposal.exam_scope import build_exam_scope_proposal
 
 COURSE = {"relation_page_id": COURSE_PAGE_ID, "course_key": COURSE_KEY}
 
@@ -90,7 +90,7 @@ def _apply(reader, writer, drive, resolver, proposal):
         graph_reader=reader,
         source_reader=drive,
         source_binding_resolver=resolver,
-        config=UlsConfig(),
+        config=SyllvaConfig(),
     ).apply(proposal.proposal_id)
 
 
@@ -461,7 +461,7 @@ def test_exam_current_queue_row_owns_lifecycle_and_audit_aliases() -> None:
         graph_reader=reader,
         source_reader=drive,
         source_binding_resolver=resolver,
-        config=UlsConfig(),
+        config=SyllvaConfig(),
     )
 
     _proposal_id, current = applier._read_current(
@@ -592,7 +592,7 @@ def test_malformed_relation_during_effect_observed_recovery_never_becomes_applie
         graph_reader=reader,
         source_reader=drive,
         source_binding_resolver=resolver,
-        config=UlsConfig(),
+        config=SyllvaConfig(),
     )
     real_mark = applier._phase4_mark_effect_observed
 

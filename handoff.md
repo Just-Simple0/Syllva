@@ -542,7 +542,7 @@ GUI-3 Gemini 리뷰는 ultra를 요청했지만 실제 runtime은 `gemini-3.8-fl
 loader의 기존 TRY004 18건은 검사 명령에서만 제외했다. 코드나 suppression을 추가하지 않았다.
 RUF100 제외는 TRY004를 제외한 검사에서 기존 noqa가 unused로 판정되는 것을 피하기 위해서다.
 
-가짜 화면을 다시 실행하려면 저장소 루트에서 `.venv/bin/python -m uls.settings.demo`를 사용한다.
+가짜 화면을 다시 실행하려면 저장소 루트에서 `.venv/bin/python -m syllva.settings.demo`를 사용한다.
 매번 `/tmp/syllva-settings-demo-*` 아래 새 설정·workspace·가짜 저장소를 생성하고 bootstrap URL을 출력한다.
 실제 비밀을 넣지 않는다. fake JSON은 검증용 값만 사용한다. `--no-browser` 경로이며,
 fake-mode launcher는 임시 루트 밖의 config/workspace/runtime이나 자동 브라우저 실행을 거부한다.

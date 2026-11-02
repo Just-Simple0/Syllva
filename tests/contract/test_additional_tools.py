@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from uls.domain.errors import EntityNotFoundError, LocatorNotAllowedError
-from uls.mcp.server import ReadOnlyMCP
+from syllva.domain.errors import EntityNotFoundError, LocatorNotAllowedError
+from syllva.mcp.server import ReadOnlyMCP
 
 pytestmark = pytest.mark.contract
 

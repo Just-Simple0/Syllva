@@ -12,12 +12,12 @@ from tests.contract.test_phase4_rev6_recovery import (
 )
 from tests.fixtures.phase4 import COURSE_PAGE_ID
 
-from uls.adapters.drive.binding import SourceBindingRecord
-from uls.adapters.notion.base import (
+from syllva.adapters.drive.binding import SourceBindingRecord
+from syllva.adapters.notion.base import (
     _PHASE4_APPLY_MARKER_PREFIX,
     QueueState,
 )
-from uls.domain.source_ref import SourceFingerprint, SourceRef
+from syllva.domain.source_ref import SourceFingerprint, SourceRef
 
 
 def _is_effect_observed_marker(patch) -> bool:

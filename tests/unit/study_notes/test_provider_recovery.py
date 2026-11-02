@@ -2,11 +2,11 @@ from copy import deepcopy
 
 import pytest
 
-from uls.adapters.drive.worker import DriveMetadata, DriveWorkerCapabilities
-from uls.domain.errors import ProviderWriteNotAppliedError
-from uls.study_notes.drive import StageAmbiguousError, StudyNoteDriveStaging
-from uls.study_notes.notion import BlockCreateAmbiguousError, StudyNoteAIBlockBridge
-from uls.study_notes.store import DifferentPayloadReplayError, StudyNoteStore
+from syllva.adapters.drive.worker import DriveMetadata, DriveWorkerCapabilities
+from syllva.domain.errors import ProviderWriteNotAppliedError
+from syllva.study_notes.drive import StageAmbiguousError, StudyNoteDriveStaging
+from syllva.study_notes.notion import BlockCreateAmbiguousError, StudyNoteAIBlockBridge
+from syllva.study_notes.store import DifferentPayloadReplayError, StudyNoteStore
 
 _PRIVATE = {
     "owned_by_me": True,

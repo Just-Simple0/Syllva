@@ -8,9 +8,9 @@ from typing import Any
 
 import pytest
 
-from uls.adapters.drive.worker import InMemoryDriveWorker
-from uls.domain.errors import ProviderUnavailableError
-from uls.intake.canvas_attachments import (
+from syllva.adapters.drive.worker import InMemoryDriveWorker
+from syllva.domain.errors import ProviderUnavailableError
+from syllva.intake.canvas_attachments import (
     AttachmentCandidate,
     CanvasAttachmentFetcher,
     FetchReport,
@@ -19,8 +19,8 @@ from uls.intake.canvas_attachments import (
     is_attachment_marker,
     marker_for,
 )
-from uls.settings.canvas_checks import CanvasCheckError
-from uls.state.sqlite import SQLiteStateStore
+from syllva.settings.canvas_checks import CanvasCheckError
+from syllva.state.sqlite import SQLiteStateStore
 
 pytestmark = pytest.mark.unit
 
@@ -296,7 +296,7 @@ def test_the_drive_create_failure_is_not_counted_as_a_binding(tmp_path) -> None:
 
 
 def test_marker_files_without_a_binding_are_hidden_from_discovery(tmp_path) -> None:
-    from uls.ingestion.discovery import _unbound_canvas_attachment
+    from syllva.ingestion.discovery import _unbound_canvas_attachment
 
     h = Harness(tmp_path, {"11": ("lecture-a.pdf", PDF_A)})
     h.drive.drop_next_create_response = True
@@ -313,8 +313,8 @@ def test_marker_files_without_a_binding_are_hidden_from_discovery(tmp_path) -> N
 def _observer(tmp_path, reader, *, collect: bool):
     from datetime import date
 
-    from uls.intake.canvas_observer import CanvasObserver
-    from uls.intake.classification.calendar import SemesterRange
+    from syllva.intake.canvas_observer import CanvasObserver
+    from syllva.intake.classification.calendar import SemesterRange
 
     state = SQLiteStateStore(tmp_path / "obs.sqlite3")
 
@@ -366,7 +366,7 @@ def test_an_incomplete_observation_hands_over_no_candidates(tmp_path) -> None:
 
 
 def _pdf_probe():
-    from uls.intake.classification.pipeline import SourceProbe
+    from syllva.intake.classification.pipeline import SourceProbe
 
     return SourceProbe(b"%PDF-1.4 slides", True)
 
@@ -374,7 +374,7 @@ def _pdf_probe():
 def test_a_proven_canvas_binding_supplies_course_and_module_week() -> None:
     from tests.unit.test_intake_classification_pipeline import _classify
 
-    from uls.intake.classification.taxonomy import Origin
+    from syllva.intake.classification.taxonomy import Origin
 
     outcome = _classify("Chapter 03-Address.pdf", mime_type="application/pdf", origin=Origin.PROFESSOR_SOURCE,
                         canvas_course_key="2026-2_LMS67535-001", canvas_week=3, probe=_pdf_probe())
@@ -385,8 +385,8 @@ def test_a_proven_canvas_binding_supplies_course_and_module_week() -> None:
 def test_a_conflicting_file_name_week_is_not_chosen_automatically() -> None:
     from tests.unit.test_intake_classification_pipeline import _classify
 
-    from uls.intake.classification.pipeline import BLOCK_WEEK_CONFLICT
-    from uls.intake.classification.taxonomy import Origin
+    from syllva.intake.classification.pipeline import BLOCK_WEEK_CONFLICT
+    from syllva.intake.classification.taxonomy import Origin
 
     outcome = _classify("강의계획서_4주차.pdf", mime_type="application/pdf", origin=Origin.PROFESSOR_SOURCE,
                         canvas_course_key="2026-2_LMS67535-001", canvas_week=3, probe=_pdf_probe())
@@ -511,8 +511,8 @@ def test_switching_downloads_off_and_on_never_bumps_a_revision(tmp_path) -> None
     """H-PE3-01: ON -> OFF -> ON with unchanged attachments keeps the observation revision."""
     from datetime import date
 
-    from uls.intake.canvas_observer import CanvasObserver
-    from uls.intake.classification.calendar import SemesterRange
+    from syllva.intake.canvas_observer import CanvasObserver
+    from syllva.intake.classification.calendar import SemesterRange
 
     reader = _reader()
     state = SQLiteStateStore(tmp_path / "toggle.sqlite3")
@@ -538,7 +538,7 @@ def test_switching_downloads_off_and_on_never_bumps_a_revision(tmp_path) -> None
 
 def test_an_announcement_attachment_without_name_or_size_costs_no_request(tmp_path) -> None:
     """R-PEI-01."""
-    from uls.intake.canvas_attachments import candidate_from_announcement
+    from syllva.intake.canvas_attachments import candidate_from_announcement
 
     h = Harness(tmp_path, {"11": ("lecture-a.pdf", PDF_A)})
     candidate = candidate_from_announcement({"id": 11}, "900", 1)

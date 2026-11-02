@@ -20,8 +20,8 @@ import yaml
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
-from uls.behavior import asset_root
-from uls.cli.main import _config, doctor, initialize
+from syllva.behavior import asset_root
+from syllva.cli.main import _config, doctor, initialize
 
 pytestmark = pytest.mark.contract
 

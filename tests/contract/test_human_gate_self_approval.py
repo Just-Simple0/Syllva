@@ -10,7 +10,7 @@ import pytest
 from fake_notion import FakeNotionAdapter
 from phase4 import phase4_applier_kwargs, phase4_proposal, ready_phase4
 
-from uls.adapters.notion.base import (
+from syllva.adapters.notion.base import (
     AUTOMATION_QUEUE,
     Decision,
     HumanApprovalApplier,
@@ -19,7 +19,7 @@ from uls.adapters.notion.base import (
     enforce_write_policy,
     upsert_proposal,
 )
-from uls.domain.errors import PolicyViolation
+from syllva.domain.errors import PolicyViolation
 
 
 def _approved_phase4():

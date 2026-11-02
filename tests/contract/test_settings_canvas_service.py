@@ -11,14 +11,14 @@ from typing import Any
 import pytest
 import yaml  # type: ignore[import-untyped]
 
-from uls.settings.canvas_checks import CanvasCheckError
-from uls.settings.canvas_service import CanvasService, canvas_lease_binding, canvas_profile_id
-from uls.settings.config_service import ConfigStore, SettingsServiceError
-from uls.settings.credential_roles import canvas_role
-from uls.settings.credential_service import CredentialService
-from uls.settings.credential_stores import CredentialStores, FakeKeyring
-from uls.settings.journal import JournalStore, SimulatedCrash
-from uls.settings.provider_checks import FakeProviderTransport, ProviderChecks
+from syllva.settings.canvas_checks import CanvasCheckError
+from syllva.settings.canvas_service import CanvasService, canvas_lease_binding, canvas_profile_id
+from syllva.settings.config_service import ConfigStore, SettingsServiceError
+from syllva.settings.credential_roles import canvas_role
+from syllva.settings.credential_service import CredentialService
+from syllva.settings.credential_stores import CredentialStores, FakeKeyring
+from syllva.settings.journal import JournalStore, SimulatedCrash
+from syllva.settings.provider_checks import FakeProviderTransport, ProviderChecks
 
 pytestmark = pytest.mark.contract
 ORIGIN = "https://canvas.example.edu"
@@ -47,8 +47,8 @@ def test_saved_canvas_readiness_matches_service_validation_without_io(
     import socket
     from dataclasses import replace
 
-    from uls.settings import canvas_checks, canvas_service
-    from uls.settings.status import setup_steps
+    from syllva.settings import canvas_checks, canvas_service
+    from syllva.settings.status import setup_steps
 
     h = make_harness(tmp_path)
     loaded = h.config.load()
@@ -114,7 +114,7 @@ def test_saved_canvas_readiness_matches_service_validation_without_io(
 
 
 def test_shared_canvas_validators_preserve_valid_metadata_without_service_construction() -> None:
-    from uls.settings.canvas_service import validated_canvas_profile, validated_canvas_registry
+    from syllva.settings.canvas_service import validated_canvas_profile, validated_canvas_registry
 
     canvas = _saved_canvas_metadata()
     assert validated_canvas_profile({"canvas": canvas}) == canvas["profile"]
@@ -688,7 +688,7 @@ def test_discovery_total_deadline_includes_account_verification(
     h = make_harness(tmp_path)
     h.connect()
     clock = [100.0]
-    monkeypatch.setattr("uls.settings.canvas_service.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("syllva.settings.canvas_service.time.monotonic", lambda: clock[0])
 
     def delayed_verify(origin: str, token: str) -> dict[str, str]:
         clock[0] += 9
@@ -754,8 +754,8 @@ def test_default_service_network_helpers_integrate_through_fake_boundary(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import json
 
-    from uls.settings import canvas_checks
-    from uls.settings.canvas_checks import CanvasResponse
+    from syllva.settings import canvas_checks
+    from syllva.settings.canvas_checks import CanvasResponse
 
     h = make_harness(tmp_path)
     h.connect()
@@ -797,7 +797,7 @@ def test_malformed_lease_and_policy_change_fail_closed_without_affecting_readine
     h.select()
     h.service.renew(h.generation)
     with monkeypatch.context() as scoped:
-        scoped.setattr("uls.settings.canvas_service.RESOURCE_POLICY", "metadata-policy-v2")
+        scoped.setattr("syllva.settings.canvas_service.RESOURCE_POLICY", "metadata-policy-v2")
         assert h.service.snapshot()["lease"]["state"] == "needs_renewal"
         assert h.service.snapshot()["state"] == "ready"
     raw = h.config.load().raw

@@ -6,18 +6,18 @@ from uuid import uuid4
 
 import pytest
 
-from uls.adapters.drive.worker import DRIVE_FOLDER_MIME, DriveMetadata, InMemoryDriveWorker
-from uls.intake.coordinator import RequestCoordinator
-from uls.state.sqlite import SQLiteStateStore
-from uls.study_notes.config import StudyNoteConfig
-from uls.study_notes.core import StudyNoteSubmissionCore
-from uls.study_notes.drive import StudyNoteDriveStaging
-from uls.study_notes.evidence import MaterialUsageEvidence
-from uls.study_notes.handler import NoteAuthorityChanged, StudyNoteHandler
-from uls.study_notes.identity import PROVISIONAL_SELECTED, TRANSCRIPT_ONLY
-from uls.study_notes.notion import StudyNoteAIBlockBridge
-from uls.study_notes.retrieval_adapter import RetrievalEngineEvidenceAdapter
-from uls.study_notes.store import StudyNoteStore
+from syllva.adapters.drive.worker import DRIVE_FOLDER_MIME, DriveMetadata, InMemoryDriveWorker
+from syllva.intake.coordinator import RequestCoordinator
+from syllva.state.sqlite import SQLiteStateStore
+from syllva.study_notes.config import StudyNoteConfig
+from syllva.study_notes.core import StudyNoteSubmissionCore
+from syllva.study_notes.drive import StudyNoteDriveStaging
+from syllva.study_notes.evidence import MaterialUsageEvidence
+from syllva.study_notes.handler import NoteAuthorityChanged, StudyNoteHandler
+from syllva.study_notes.identity import PROVISIONAL_SELECTED, TRANSCRIPT_ONLY
+from syllva.study_notes.notion import StudyNoteAIBlockBridge
+from syllva.study_notes.retrieval_adapter import RetrievalEngineEvidenceAdapter
+from syllva.study_notes.store import StudyNoteStore
 
 
 class Blocks:

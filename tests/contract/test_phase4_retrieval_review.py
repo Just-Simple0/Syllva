@@ -13,35 +13,35 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 from no_v2_state import NoV2State
 from phase4 import ready_phase4
 
-from uls.adapters.drive.binding import ValidatedSourceBindingResolver
-from uls.config.schema import UlsConfig
-from uls.config.validation import validate_config
-from uls.domain.course_identity import course_key_of, validate_course_record
-from uls.domain.errors import LocatorNotAllowedError, SourcePartialError, SourceUnavailableError
-from uls.domain.models import PageLocator
-from uls.domain.page_range import PageRangeStatus, parse_page_range
-from uls.ephemeral.memory import MemoryEphemeralStore
-from uls.retrieval.chunking import page_marker_index
-from uls.retrieval.engine import RetrievalEngine
-from uls.retrieval.freshness import revalidate_locator
-from uls.retrieval.resolver import SessionResolver
-from uls.retrieval.scope import material_usage_scopes, usage_app_id
+from syllva.adapters.drive.binding import ValidatedSourceBindingResolver
+from syllva.config.schema import SyllvaConfig
+from syllva.config.validation import validate_config
+from syllva.domain.course_identity import course_key_of, validate_course_record
+from syllva.domain.errors import LocatorNotAllowedError, SourcePartialError, SourceUnavailableError
+from syllva.domain.models import PageLocator
+from syllva.domain.page_range import PageRangeStatus, parse_page_range
+from syllva.ephemeral.memory import MemoryEphemeralStore
+from syllva.retrieval.chunking import page_marker_index
+from syllva.retrieval.engine import RetrievalEngine
+from syllva.retrieval.freshness import revalidate_locator
+from syllva.retrieval.resolver import SessionResolver
+from syllva.retrieval.scope import material_usage_scopes, usage_app_id
 
 
-def _engine(reader, drive, *, config: UlsConfig | None = None) -> RetrievalEngine:
+def _engine(reader, drive, *, config: SyllvaConfig | None = None) -> RetrievalEngine:
     return RetrievalEngine(
         reader,
         drive,
         NoV2State(),
         MemoryEphemeralStore(),
-        config or UlsConfig(),
+        config or SyllvaConfig(),
         source_binding_resolver=ValidatedSourceBindingResolver(drive),
     )
 
 
 def test_source_binding_resolver_is_explicit_and_never_made_from_drive() -> None:
     reader, _, drive, _ = ready_phase4()
-    engine = RetrievalEngine(reader, drive, NoV2State(), MemoryEphemeralStore(), UlsConfig())
+    engine = RetrievalEngine(reader, drive, NoV2State(), MemoryEphemeralStore(), SyllvaConfig())
 
     with pytest.raises(SourceUnavailableError):
         engine.get_session_context("COMP319-S05")
@@ -240,7 +240,7 @@ def test_material_type_mapping_labels_direct_supplemental_material_without_promo
 
 
 def test_malformed_material_type_mapping_is_a_structured_config_problem() -> None:
-    config = UlsConfig()
+    config = SyllvaConfig()
     config.retrieval.material_type_source_class = {"Lecture Slides": []}  # type: ignore[assignment]
     problems = validate_config(config)
     assert any("material_type_source_class values" in problem for problem in problems)

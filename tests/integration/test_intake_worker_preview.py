@@ -14,33 +14,33 @@ import pytest
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
-import uls.cli.main as cli_main
-from uls.adapters.drive.binding import ValidatedSourceBindingResolver
-from uls.adapters.drive.worker import DRIVE_FOLDER_MIME, DriveMetadata, InMemoryDriveWorker
-from uls.adapters.notion.intake import (
+import syllva.cli.main as cli_main
+from syllva.adapters.drive.binding import ValidatedSourceBindingResolver
+from syllva.adapters.drive.worker import DRIVE_FOLDER_MIME, DriveMetadata, InMemoryDriveWorker
+from syllva.adapters.notion.intake import (
     INTAKE_SCHEMAS,
     STATUS_GROUPS,
     InMemoryNotionWorker,
     NotionAPIWorker,
     NotionIntakeWriter,
 )
-from uls.config.credentials import ResolvedCredentials
-from uls.config.schema import (
+from syllva.config.credentials import ResolvedCredentials
+from syllva.config.schema import (
     CourseCfg,
     CourseStaticFolderCfg,
     SemesterRegistryCfg,
     SemesterWorkspaceCfg,
-    UlsConfig,
+    SyllvaConfig,
 )
-from uls.domain.errors import PolicyDeniedError, ProviderUnavailableError, SourceUnavailableError
-from uls.intake.identity import derivative_marker, provider_binding_id
-from uls.intake.models import RequestType
-from uls.intake.registry import StaticLayoutReconcileRequired
-from uls.intake.worker import INTAKE_DERIVATIVE_OPERATION, IntakeReconcileRequired
-from uls.retrieval.chunking import derivative_parts, page_chunks
-from uls.runtime import build_intake_worker
-from uls.state.reader import ReadOnlyState
-from uls.state.sqlite import SQLiteStateStore
+from syllva.domain.errors import PolicyDeniedError, ProviderUnavailableError, SourceUnavailableError
+from syllva.intake.identity import derivative_marker, provider_binding_id
+from syllva.intake.models import RequestType
+from syllva.intake.registry import StaticLayoutReconcileRequired
+from syllva.intake.worker import INTAKE_DERIVATIVE_OPERATION, IntakeReconcileRequired
+from syllva.retrieval.chunking import derivative_parts, page_chunks
+from syllva.runtime import build_intake_worker
+from syllva.state.reader import ReadOnlyState
+from syllva.state.sqlite import SQLiteStateStore
 
 SEMESTER = "2026-2"
 COURSE_KEYS = tuple(f"{SEMESTER}_TEST{101 + index}-001" for index in range(5))
@@ -102,7 +102,7 @@ def _system(
     mime_type: str = "text/markdown",
     duplicate: bool = False,
 ) -> Iterator[dict[str, Any]]:
-    config = UlsConfig()
+    config = SyllvaConfig()
     config.system.workspace_dir = str(tmp_path)
     config.behavior_contract.path = str(Path("contracts/study-behavior.md").resolve())
     config.google_drive.university_root_id = "synthetic-school"
@@ -590,7 +590,7 @@ def test_partial_pdf_keeps_empty_page_locator_and_retrieves_later_page(tmp_path:
         chunks = page_chunks(derivative, entity_id=material["ID"])
         assert [chunk.locator.start_page for chunk in chunks] == [1, 2, 3]
         assert chunks[1].content == ""
-        from uls.retrieval.chunking import select_chunks
+        from syllva.retrieval.chunking import select_chunks
 
         page_three = select_chunks(chunks, "Page three source text")
         assert [chunk.locator.start_page for chunk in page_three] == [3]
@@ -694,13 +694,13 @@ def test_cli_routes_preview_commands_to_one_bounded_run(
         state = SimpleNamespace(close=lambda: calls.append({"closed": True}))
 
     config = SimpleNamespace(worker=SimpleNamespace(enabled=True), credentials={})
-    from uls.config._secure_file import write_secure_file
+    from syllva.config._secure_file import write_secure_file
     worker_file = tmp_path / "worker.json"
     write_secure_file(worker_file, b"{}")
     monkeypatch.setenv("GOOGLE_WORKER_CREDENTIALS_FILE", str(worker_file))
     monkeypatch.setenv("NOTION_WORKER_TOKEN", "worker-token")
     monkeypatch.setattr(cli_main, "_config", lambda _: config)
-    monkeypatch.setattr("uls.worker.build_worker", lambda _config, _credentials: _Worker())
+    monkeypatch.setattr("syllva.worker.build_worker", lambda _config, _credentials: _Worker())
     result = cli_main.dispatch(Namespace(command=command, config=Path("config.yaml"), max_jobs=7))
     assert result["status"] == "ok"
     assert calls == [{"sync": sync, "process": process, "max_jobs": 7}, {"closed": True}]
@@ -739,7 +739,7 @@ def test_request_extensions_share_worker_lock_and_sync_never_publishes(tmp_path:
 
 
 def test_incomplete_c5_configuration_does_not_disable_legacy_intake(tmp_path: Path) -> None:
-    from uls.intake.composition import install_usage_range
+    from syllva.intake.composition import install_usage_range
 
     with _system(tmp_path) as system:
         system["config"].notion.semester_workspaces[0].material_usage_data_source_id = "usage-only"

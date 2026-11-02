@@ -9,15 +9,15 @@ import pytest
 from tests.contract._settings_support import FakeClock, write_config
 from tests.contract.test_settings_credential_service import service
 
-from uls.config import google_oauth as oauth
-from uls.settings.config_service import SettingsServiceError
-from uls.settings.credential_roles import ROLES
-from uls.settings.google_oauth import (
+from syllva.config import google_oauth as oauth
+from syllva.settings.config_service import SettingsServiceError
+from syllva.settings.credential_roles import ROLES
+from syllva.settings.google_oauth import (
     FLOW_TTL_SECONDS,
     FakeGoogleOAuthProvider,
     GoogleOAuthFlowService,
 )
-from uls.settings.security import SessionSecurity
+from syllva.settings.security import SessionSecurity
 
 pytestmark = pytest.mark.contract
 
@@ -235,7 +235,7 @@ class _Conn:
 
 
 def test_bounded_https_transport_boundaries_are_fixed_codes():
-    from uls.settings.google_oauth import (
+    from syllva.settings.google_oauth import (
         GoogleAccountReader,
         GoogleGrantVerifier,
         GoogleTokenExchanger,

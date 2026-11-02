@@ -38,15 +38,15 @@ The `pdf` extra is required for PDF preview/text extraction paths. Optional prov
 ## Initialize local state
 
 ```bash
-uls init
-uls doctor
-uls status
-uls behavior lint
+syllva init
+syllva doctor
+syllva status
+syllva behavior lint
 ```
 
-`uls init` creates only missing local configuration/state files. It does not provision a live Notion workspace, watch Drive, enroll credentials, or enable a scheduler.
+`syllva init` creates only missing local configuration/state files. It does not provision a live Notion workspace, watch Drive, enroll credentials, or enable a scheduler.
 
-`uls doctor` is expected to report incomplete configuration until the provider IDs and credentials needed by your selected features are supplied.
+`syllva doctor` is expected to report incomplete configuration until the provider IDs and credentials needed by your selected features are supplied.
 
 ## Repository checks
 

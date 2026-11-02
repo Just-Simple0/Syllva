@@ -13,10 +13,10 @@ def test_submission_protocol_persists_replays_and_keeps_search_separate(tmp_path
     script = tmp_path / 'submission_server.py'
     script.write_text('''
 import sys
-from uls.config.schema import UlsConfig
-from uls.runtime import build_study_note_submission_server
-from uls.mcp.transports.local import run_local
-config = UlsConfig()
+from syllva.config.schema import SyllvaConfig
+from syllva.runtime import build_study_note_submission_server
+from syllva.mcp.transports.local import run_local
+config = SyllvaConfig()
 config.system.workspace_dir = sys.argv[1]
 config.study_notes.enabled = True
 server = build_study_note_submission_server(config)
@@ -77,9 +77,9 @@ def test_real_retrieval_adapter_supplies_transcript_text_without_usage_reads(mon
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / 'contract'))
     from test_get_activity_context import _engine
 
-    from uls.study_notes.evidence import assemble_evidence
-    from uls.study_notes.identity import TRANSCRIPT_ONLY
-    from uls.study_notes.retrieval_adapter import RetrievalEngineEvidenceAdapter
+    from syllva.study_notes.evidence import assemble_evidence
+    from syllva.study_notes.identity import TRANSCRIPT_ONLY
+    from syllva.study_notes.retrieval_adapter import RetrievalEngineEvidenceAdapter
 
     engine, notion, _ = _engine()
 
@@ -101,9 +101,9 @@ def test_real_retrieval_budget_keeps_partial_and_changes_manifest(monkeypatch):
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / 'contract'))
     from test_get_activity_context import _engine
 
-    from uls.study_notes.evidence import assemble_evidence
-    from uls.study_notes.identity import TRANSCRIPT_ONLY
-    from uls.study_notes.retrieval_adapter import RetrievalEngineEvidenceAdapter
+    from syllva.study_notes.evidence import assemble_evidence
+    from syllva.study_notes.identity import TRANSCRIPT_ONLY
+    from syllva.study_notes.retrieval_adapter import RetrievalEngineEvidenceAdapter
 
     engine, _, _ = _engine()
     kwargs = {'session_id': 'COMP319-S05', 'evidence_mode': TRANSCRIPT_ONLY}
@@ -119,9 +119,9 @@ def test_real_retrieval_preserves_usage_scope_physical_identity_and_unread_membe
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / 'contract'))
     from test_get_activity_context import _engine
 
-    from uls.study_notes.evidence import assemble_evidence
-    from uls.study_notes.identity import CONFIRMED_LECTURE, PROVISIONAL_SELECTED
-    from uls.study_notes.retrieval_adapter import RetrievalEngineEvidenceAdapter
+    from syllva.study_notes.evidence import assemble_evidence
+    from syllva.study_notes.identity import CONFIRMED_LECTURE, PROVISIONAL_SELECTED
+    from syllva.study_notes.retrieval_adapter import RetrievalEngineEvidenceAdapter
 
     physical_id = '10000000-0000-0000-0000-000000000042'
     usage = {'id': physical_id, 'ID': 'USAGE-03', 'Session': 'COMP319-S05',
@@ -148,9 +148,9 @@ def test_real_retrieval_preserves_usage_scope_physical_identity_and_unread_membe
 def test_registered_note_destination_rejects_folder_moved_outside_course(monkeypatch):
     from dataclasses import replace
 
-    from uls.adapters.drive.worker import DRIVE_FOLDER_MIME, DriveMetadata, InMemoryDriveWorker
-    from uls.intake.study_note_composition import StudyNoteSessionBindings
-    from uls.study_notes.handler import NoteAuthorityChanged
+    from syllva.adapters.drive.worker import DRIVE_FOLDER_MIME, DriveMetadata, InMemoryDriveWorker
+    from syllva.intake.study_note_composition import StudyNoteSessionBindings
+    from syllva.study_notes.handler import NoteAuthorityChanged
 
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / 'contract'))
     from test_get_activity_context import _engine
@@ -180,7 +180,7 @@ def test_c6_factory_activates_without_c5_queue(tmp_path, monkeypatch):
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parent))
     from test_intake_worker_preview import _system
 
-    from uls.intake.study_note_composition import install_study_notes
+    from syllva.intake.study_note_composition import install_study_notes
 
     with _system(tmp_path) as system:
         worker = system['worker']

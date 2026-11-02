@@ -1,6 +1,6 @@
 import sys, pathlib; sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
-from uls.adapters.notion.base import find_alias_matches, normalize_alias, parse_aliases
+from syllva.adapters.notion.base import find_alias_matches, normalize_alias, parse_aliases
 
 
 def test_parse_aliases_preserves_case_and_trims_pieces() -> None:

@@ -13,9 +13,9 @@ from typing import Any, cast
 
 import pytest
 
-from uls.adapters.notion.base import ApprovalReader, HumanApprovalApplier, NotionAdapter, QueueState
-from uls.adapters.notion.guarded import GuardedNotionWriter
-from uls.domain.approval_identity import (
+from syllva.adapters.notion.base import ApprovalReader, HumanApprovalApplier, NotionAdapter, QueueState
+from syllva.adapters.notion.guarded import GuardedNotionWriter
+from syllva.domain.approval_identity import (
     build_usage_proposal_envelope,
     c5_usage_snapshot_json,
     canonical_action_json,
@@ -26,9 +26,9 @@ from uls.domain.approval_identity import (
     parse_c5_usage_snapshot,
     prove_c5_usage_outcome,
 )
-from uls.domain.errors import PolicyViolation, ProviderWriteNotAppliedError
-from uls.domain.page_range import PageRange
-from uls.state.sqlite import _INTAKE_SCHEMA, SQLiteStateStore
+from syllva.domain.errors import PolicyViolation, ProviderWriteNotAppliedError
+from syllva.domain.page_range import PageRange
+from syllva.state.sqlite import _INTAKE_SCHEMA, SQLiteStateStore
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "fixtures"))
 from tests.fixtures.phase4 import phase4_proposal, ready_phase4
@@ -338,7 +338,7 @@ def test_owner_cas_non_expiry_and_restart(tmp_path: Path, monkeypatch: pytest.Mo
     state.mark_apply_mutating(invocation_token=token)
     state.close()
     reopened = SQLiteStateStore(tmp_path / "state.db")
-    monkeypatch.setattr("uls.state.sqlite._utc_now", lambda: datetime(2099, 1, 1, tzinfo=UTC).isoformat())
+    monkeypatch.setattr("syllva.state.sqlite._utc_now", lambda: datetime(2099, 1, 1, tzinfo=UTC).isoformat())
     assert reopened.acquire_apply_lease(**args) is None
     assert not reopened.release_apply_lease(usage_slot_key=slot, generation=1, invocation_token=token)
     with pytest.raises(ValueError, match="ownership"):
@@ -615,7 +615,7 @@ def test_published_invalid_outbox_never_grants_dispatch_or_owner(tmp_path: Path,
 def test_internal_arm_preread_failure_releases_held_without_any_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
 ) -> None:
-    from uls.adapters.notion import base
+    from syllva.adapters.notion import base
 
     path = tmp_path / "state.db"
     _, writer, state, slot, pid, applier = setup_v2(path)
@@ -726,7 +726,7 @@ def test_final_guarded_marker_boundary_distinguishes_reads_from_backend_attempt(
 def test_final_marker_read_preserves_legitimate_terminal_transition(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, terminal: QueueState,
 ) -> None:
-    from uls.adapters.notion.base import _mark_proposal_terminal
+    from syllva.adapters.notion.base import _mark_proposal_terminal
 
     path = tmp_path / "state.db"
     _, writer, state, slot, pid, applier = setup_v2(path)
@@ -822,7 +822,7 @@ def test_short_marker_backend_never_dispatches(tmp_path: Path, monkeypatch: pyte
 def test_marker_lifecycle_final_read_preserves_terminal_reason(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transition: str, terminal: QueueState | None,
 ) -> None:
-    from uls.adapters.notion.base import _mark_proposal_terminal
+    from syllva.adapters.notion.base import _mark_proposal_terminal
 
     path = tmp_path / "state.db"
     _, writer, state, slot, pid, applier = setup_v2(path)
@@ -885,7 +885,7 @@ def test_marker_lifecycle_final_read_preserves_terminal_reason(
 
 @pytest.mark.parametrize("signature_kind", ["three", "four", "args", "kwargs"])
 def test_strict_marker_signature_preserves_full_payload(signature_kind: str) -> None:
-    from uls.adapters.notion.base import _prepare_supported_call
+    from syllva.adapters.notion.base import _prepare_supported_call
 
     payload = ("db", "entity", {"Last Error": "marker"}, "actor")
     received: list[tuple[Any, ...]] = []

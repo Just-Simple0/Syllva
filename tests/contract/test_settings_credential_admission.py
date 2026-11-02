@@ -10,17 +10,17 @@ import pytest
 import yaml
 from tests.contract.test_settings_credential_service import crash, service
 
-import uls.settings.credential_admission as admission_module
-from uls.config.mutation import atomic_replace_config
-from uls.settings.config_service import SettingsServiceError
-from uls.settings.credential_admission import (
+import syllva.settings.credential_admission as admission_module
+from syllva.config.mutation import atomic_replace_config
+from syllva.settings.config_service import SettingsServiceError
+from syllva.settings.credential_admission import (
     CredentialPairAdmission,
     credential_admission,
     credential_pair_admission,
     credential_pair_recovery_admission,
 )
-from uls.settings.credential_roles import ROLES
-from uls.settings.journal import JournalOperation, OperationInProgress, SimulatedCrash
+from syllva.settings.credential_roles import ROLES
+from syllva.settings.journal import JournalOperation, OperationInProgress, SimulatedCrash
 
 pytestmark = pytest.mark.contract
 
@@ -147,10 +147,10 @@ def test_pair_reservation_without_journal_remains_blocked_after_writer_process_e
     script.write_text(
         """from pathlib import Path
 import sys
-from uls.settings.config_service import ConfigStore
-from uls.settings.credential_admission import credential_pair_admission
-from uls.settings.credential_roles import ROLES
-from uls.settings.journal import JournalStore
+from syllva.settings.config_service import ConfigStore
+from syllva.settings.credential_admission import credential_pair_admission
+from syllva.settings.credential_roles import ROLES
+from syllva.settings.journal import JournalStore
 
 config = ConfigStore(Path(sys.argv[1]))
 root = Path(sys.argv[2])
@@ -188,10 +188,10 @@ def test_pair_reservation_survives_abrupt_writer_process_death(tmp_path):
         """import os
 import sys
 from pathlib import Path
-from uls.settings.config_service import ConfigStore
-from uls.settings.credential_admission import credential_pair_admission
-from uls.settings.credential_roles import ROLES
-from uls.settings.journal import JournalStore
+from syllva.settings.config_service import ConfigStore
+from syllva.settings.credential_admission import credential_pair_admission
+from syllva.settings.credential_roles import ROLES
+from syllva.settings.journal import JournalStore
 
 config = ConfigStore(Path(sys.argv[1]))
 root = Path(sys.argv[2])
@@ -513,8 +513,8 @@ def _create_terminal_reservation(s, role, phase, monkeypatch):
 
 @pytest.mark.parametrize("phase", ["complete", "resolved_without_change", "completed_then_superseded"])
 def test_terminal_recovery_parses_under_lock_and_releases_exact_reservation_once(tmp_path, monkeypatch, phase):
-    from uls.config.mutation import ConfigFileLock
-    from uls.settings.config_service import ConfigStore
+    from syllva.config.mutation import ConfigFileLock
+    from syllva.settings.config_service import ConfigStore
 
     s = service(tmp_path)
     role = ROLES["notion-mcp"]
@@ -1271,7 +1271,7 @@ def test_pairless_all_absent_recovery_after_physical_unlink_before_fsync(tmp_pat
 
 
 def test_pairless_commit_requires_fsync_before_one_context_exact_release(tmp_path):
-    from uls.config.mutation import ConfigFileLock
+    from syllva.config.mutation import ConfigFileLock
 
     s = service(tmp_path)
     role = ROLES["notion-mcp"]
@@ -1322,7 +1322,7 @@ def test_pairless_commit_requires_fsync_before_one_context_exact_release(tmp_pat
 
 
 def test_pairless_fsync_failure_does_not_arm_release_and_fresh_recovery_succeeds(tmp_path, monkeypatch):
-    from uls.config.mutation import ConfigFileLock
+    from syllva.config.mutation import ConfigFileLock
 
     s = service(tmp_path)
     role = ROLES["notion-mcp"]
@@ -1360,7 +1360,7 @@ def test_pairless_fsync_failure_does_not_arm_release_and_fresh_recovery_succeeds
 
 
 def test_pairless_release_cannot_consume_arm_after_service_locks_are_released(tmp_path):
-    from uls.config.mutation import ConfigFileLock
+    from syllva.config.mutation import ConfigFileLock
 
     s = service(tmp_path)
     role = ROLES["notion-mcp"]
@@ -1419,7 +1419,7 @@ def test_pairless_all_absent_parse_failure_keeps_release_unarmed_and_reenters(tm
 
 
 def test_pairless_absent_to_present_snapshot_drift_blocks_before_cleanup(tmp_path):
-    from uls.config.mutation import ConfigFileLock
+    from syllva.config.mutation import ConfigFileLock
 
     s = service(tmp_path)
     role = ROLES["notion-mcp"]
@@ -1452,7 +1452,7 @@ def test_pairless_absent_to_present_snapshot_drift_blocks_before_cleanup(tmp_pat
 
 
 def test_pairless_state_combination_invariant_rejects_before_first_mutation(tmp_path, monkeypatch):
-    from uls.config.mutation import ConfigFileLock
+    from syllva.config.mutation import ConfigFileLock
 
     s = service(tmp_path)
     role = ROLES["notion-mcp"]
@@ -1519,7 +1519,7 @@ def test_pairless_all_absent_rejects_unrecognized_same_pair_marker(tmp_path):
 
 
 def test_pairless_unrecognized_marker_appearing_after_snapshot_blocks_commit(tmp_path):
-    from uls.config.mutation import ConfigFileLock
+    from syllva.config.mutation import ConfigFileLock
 
     s = service(tmp_path)
     role = ROLES["notion-mcp"]

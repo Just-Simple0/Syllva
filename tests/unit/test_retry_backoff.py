@@ -1,7 +1,7 @@
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
-from uls.orchestration.retry import (
+from syllva.orchestration.retry import (
     DEFAULT_MAX_ATTEMPTS,
     ErrorClass,
     is_retryable,
@@ -11,7 +11,7 @@ from uls.orchestration.retry import (
 
 
 def test_backoff_is_bounded_and_retry_after_wins(monkeypatch) -> None:
-    monkeypatch.setattr("uls.orchestration.retry.random.uniform", lambda _low, _high: 0.0)
+    monkeypatch.setattr("syllva.orchestration.retry.random.uniform", lambda _low, _high: 0.0)
     assert next_backoff(1, base=1.0, cap=5.0) == 1.0
     assert next_backoff(2, base=1.0, cap=5.0) == 2.0
     assert next_backoff(10, base=1.0, cap=5.0) == 5.0

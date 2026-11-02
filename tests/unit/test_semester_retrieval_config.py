@@ -1,22 +1,22 @@
-from uls.cli.main import _live_retrieval_probe_course_key
-from uls.config.schema import (
+from syllva.cli.main import _live_retrieval_probe_course_key
+from syllva.config.schema import (
     BehaviorContractCfg,
     CourseCfg,
     CourseStaticFolderCfg,
     SemesterRegistryCfg,
     SemesterWorkspaceCfg,
-    UlsConfig,
+    SyllvaConfig,
 )
-from uls.config.validation import validate_config
-from uls.runtime import _retrieval_notion_sources
+from syllva.config.validation import validate_config
+from syllva.runtime import _retrieval_notion_sources
 
 COURSE = "2026-2_COMP322-001"
 
 
-def _config(tmp_path) -> UlsConfig:
+def _config(tmp_path) -> SyllvaConfig:
     contract = tmp_path / "study-behavior.md"
     contract.write_text("# contract\n", encoding="utf-8")
-    cfg = UlsConfig(
+    cfg = SyllvaConfig(
         behavior_contract=BehaviorContractCfg(path=str(contract)),
         courses=[
             CourseCfg(

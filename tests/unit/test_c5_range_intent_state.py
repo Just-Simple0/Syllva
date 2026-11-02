@@ -9,7 +9,7 @@ from typing import Any, NotRequired, TypedDict, Unpack
 
 import pytest
 
-from uls.domain.approval_identity import (
+from syllva.domain.approval_identity import (
     build_material_usage_semantics,
     build_usage_proposal_envelope,
     canonical_action_json,
@@ -20,10 +20,10 @@ from uls.domain.approval_identity import (
     derive_usage_slot_key,
     parse_usage_proposal_envelope,
 )
-from uls.domain.errors import ProposalConflictError
-from uls.domain.page_range import PageRange
-from uls.state.models import ProviderWriteAttempt, RangeIntentHead
-from uls.state.sqlite import SQLiteStateStore
+from syllva.domain.errors import ProposalConflictError
+from syllva.domain.page_range import PageRange
+from syllva.state.models import ProviderWriteAttempt, RangeIntentHead
+from syllva.state.sqlite import SQLiteStateStore
 
 pytestmark = pytest.mark.unit
 

@@ -15,12 +15,12 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures")
 from phase4 import COURSE_KEY, phase4_applier_kwargs, phase4_proposal, ready_phase4
 from no_v2_state import NoV2State
 
-from uls.adapters.notion.base import HumanApprovalApplier, QueueState, upsert_proposal
-from uls.adapters.notion.guarded import GuardedNotionWriter
-from uls.config.schema import UlsConfig
-from uls.domain.errors import EntityNotFoundError, LocatorNotAllowedError, SourceUnavailableError
-from uls.ephemeral.memory import MemoryEphemeralStore
-from uls.retrieval.engine import RetrievalEngine
+from syllva.adapters.notion.base import HumanApprovalApplier, QueueState, upsert_proposal
+from syllva.adapters.notion.guarded import GuardedNotionWriter
+from syllva.config.schema import SyllvaConfig
+from syllva.domain.errors import EntityNotFoundError, LocatorNotAllowedError, SourceUnavailableError
+from syllva.ephemeral.memory import MemoryEphemeralStore
+from syllva.retrieval.engine import RetrievalEngine
 
 
 def _engine(reader: Any, drive: Any, resolver: Any) -> RetrievalEngine:
@@ -29,7 +29,7 @@ def _engine(reader: Any, drive: Any, resolver: Any) -> RetrievalEngine:
         drive,
         NoV2State(),
         MemoryEphemeralStore(),
-        UlsConfig(),
+        SyllvaConfig(),
         source_binding_resolver=resolver,
     )
 

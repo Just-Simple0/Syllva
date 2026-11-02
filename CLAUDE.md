@@ -4,97 +4,106 @@
 
 ## 프로젝트 개요
 
-**University Learning System (ULS) v1.2** — 개인 학업 지식·검색 시스템.
+**Syllva v2** — 로컬 우선 학업 지식·검색 데스크탑 앱. (v1.2 "University Learning System, MCP 중심" 계보의 후속. 내부 패키지는 `syllva`, v1.2 시절 이름 `uls`는 CLI 별칭으로만 남음.)
 
-- **아키텍처:** Model-agnostic · MCP-centered · Local-primary · Single-active-worker · Cross-platform
-- **핵심 언어:** Python 3
-- **핵심 원칙:** ULS가 어떤 컨텍스트가 허용/관련되는지 결정하고, AI 클라이언트는 ULS가 제공한 컨텍스트 위에서 추론한다.
+- **아키텍처:** Local-primary · Tauri 셸 + Python Core(sidecar) · HTML UI · Windows/macOS 동시(모바일은 후속) · Single-active-worker
+- **저장소:** 로컬 라이브러리(콘텐츠 해시 blob) + SQLite. Notion·Drive는 제거됨. GitHub 소스 어댑터는 선택 기능.
+- **AI:** 공식 CLI 에이전트(Claude Code, Codex CLI)를 앱이 서브프로세스로 구동하되 **도구는 0개**. Core가 자료를 골라 프롬프트에 넣고, 에이전트는 텍스트만 반환한다. MCP는 필수가 아니며 선택 어댑터(기본 비활성).
+- **핵심 언어:** Python 3 (Core), Rust/Tauri (Shell), HTML/JS (UI)
+- **핵심 원칙:** Syllva Core가 어떤 컨텍스트가 허용/관련되는지 결정해 프롬프트로 직접 제공하고, 에이전트는 그 컨텍스트 위에서만 추론한다. 사람이 해야 하는 판단은 에이전트가 도달할 수 없는 경로로만 기록된다.
 
-권위 있는 문서(코드가 충돌하면 아래 설계서가 우선한다):
+## 권위 문서
 
-- `university-learning-system-v1.2-design-frozen.md` (설계서, frozen)
-- `university-learning-system-v1.2-implementation-spec-frozen.md` (구현 명세서, frozen)
+우선순위(위가 우선):
 
-## 역할 분담 (Agent Roles)
+1. `syllva-v2-design-frozen.md` — v2 설계서 (FROZEN, 2026-11-02 승인). 위반하는 변경은 **개정(revision)** 을 요구한다.
+2. `syllva-v2-implementation-spec-frozen.md` — v2 구현 명세서 (FROZEN, 2026-11-02). 계약 테스트 C-01~C-26의 파일·단언(§14)과 단계별 PR 분해(§15)가 여기 있다.
+3. `university-learning-system-v1.2-design-frozen.md`, `university-learning-system-v1.2-implementation-spec-frozen.md` — v1.2 동결 문서. v2 설계서 §1 처분표에서 **유지**로 표시된 부분만 유효하고, 대체·삭제된 부분(Notion/Drive, MCP 경계, Behavior Contract v3 등)은 역사 기록이다.
+4. `docs/plans/desktop-app-v2.md` — 전환 계획(로드맵 R0~R6). 설계서와 충돌하면 설계서가 우선.
 
-| 단계 | 담당 | 모델 / 도구 |
-|---|---|---|
-| **총괄 / 관리 (Oversight & Management)** | 현재 Codex 총괄 | **현재 주 에이전트** |
-| **계획 초안** | Sonnet | **Claude Sonnet 5 (high)** |
-| **개발 / 구현 (Development & Implementation)** | Codex | **Codex Luna (max)** |
-| **리뷰 (Review)** | 이중 리뷰 | **insane-review (Pro, 불가 시 승인된 최신/매우 높음)** + **AGY Gemini 3.8 Flash (high)** |
+## 작업 방식
 
-운영 원칙:
+과거의 다중 에이전트 역할 분담과 이중 외부 리뷰 파이프라인(Codex 구현 + insane-review + AGY Gemini)은 폐지되었다(2026-11-02 사용자 결정). 이전 문안은 git 이력(`ff5f7ea` 이전)에 있다.
 
-- **총괄/관리(현재 주 에이전트):** 요구사항 해석, 작업 분해, 계약(설계/명세) 준수 판단, 최종 통합·머지 결정. Phase 4~8은 2026-09-08 사용자 승인에 따라 이 역할로 진행하며, 아래 기존 파이프라인의 Opus 표기는 이 총괄 역할로 해석한다. Sonnet 5가 계획 초안을 작성한다.
-- **개발/구현(Codex Luna max):** 실제 코드 작성과 구현 작업 수행.
-- **리뷰(insane-review + AGY Gemini 3.8 Flash high):** 결과를 독립적으로 검토. 두 리뷰어는 서로의 결과를 참조하지 않고 각각 독립 리뷰한다.
-- **Sonnet 리뷰 제한(2026-09-09 사용자 정정):** Sonnet 리뷰 요청은 일회성이었다. 앞으로 리뷰용 Sonnet 서브에이전트는 호출하지 않는다. 리뷰는 Codex native insane-review와 Gemini3.8Flashhigh만 사용한다. Sonnet의 기존 계획 역할과는 구분한다.
-- **리뷰 설정(2026-09-08 사용자 지정):** Phase 4부터 insane-review는 `--model pro --require-model "GPT-6"`로 실행한다. 실제 모델명과 Pro 추론 단계 검증 실패 시 중단하며 다른 모델로 자동 대체하지 않는다. 정밀 리뷰에는 `--force-answer-after`를 사용하지 않는다. 브라우저 로그인·GPT-6 Pro 접근 가능 여부는 실제 실행 전에 확인한다.
-- **현재 리뷰 실행(2026-09-09 사용자 지정):** Codex에 설치된 `insane-review-codex` 플러그인을 우선 사용한다. 확인된 설치본은 `/Users/admin/.codex/plugins/cache/gptaku-codex/insane-review-codex/0.6.8`; 먼저 `skills/insane-review/SKILL.md`를 읽고 `bin/pack_and_ask.py --ensure-env`로 확인한다. 패킹·첨부·회수는 해당 native engine을 사용한다. 현 UI 호환 보조 코드는 표시 중인 메뉴의 실제 선택 상태를 검증하는 범위로 한정하고, 설치 파일을 임의 변경하지 않는다. 전송 후 timeout은 동일 대화의 `--harvest`로 회수하며 중복 전송하지 않는다. 정밀 리뷰의 타임아웃에서도 조기 답변을 강제하지 않는다. 이전 Claude plugin0.6.2 wrapper는 현재 기본 경로가 아니다.
-- **사용자 승인 fallback(2026-09-08):** Pro 사용 불가 시 insane-review의 **매우 높음**으로 계속한다. UI의 선택된 `최신` 모델과 `매우 높음` 추론을 모두 확인하고, UI가 숫자 모델 버전을 노출하지 않으면 임의로 GPT-6라고 기록하지 않는다. Sol 서브에이전트 리뷰로 바꾸는 것이 아니며 Gemini 독립 리뷰는 유지한다.
-
-- **프로젝트 기본 동작:** 각 리뷰는 저장소 ChatGPT 프로젝트 안의 새 채팅에서 진행한다. **2026-09-09 사용자 명시 예외:** 프로젝트가 열리지 않으면 새 프로젝트 또는 일반 새 채팅(`--no-project`)으로 진행할 수 있다. 실패한 이전 실행의 전송 여부를 확인해 중복 리뷰를 방지하고, 실제 모델·추론단계·첨부 검증은 그대로 유지한다.
-- **리뷰 범위/빈도(2026-09-09 사용자 지시):** 너무 좁은 범위로 자주 리뷰하지 않는다. 회수된 지적들을 먼저 통합 수정하고 전체 테스트를 통과한 뒤 Phase 전체 흐름과 경계를 묶어 리뷰한다. 대용량 첨부의 전체 검토가 불가능하면 불완전한 검토를 GO로 기록하지 않는다.
-
-## 작업 파이프라인 (각 Phase/작업 단위마다)
+각 작업 단위(Phase/슬라이스)는 다음 순서로 진행한다.
 
 ```text
-1. 계획 수립   (Opus 4.8) — 명세 근거로 구현 계획서 작성
-2. 계획 리뷰   (insane-review + AGY, 2중 독립) — 계획의 계약 준수/누락/리스크 검토 → Opus가 반영
-3. 구현        (Codex Luna max) — 확정된 계획대로 구현
-4. 검증        (Opus 4.8) — 게이트(py_compile/pytest/독립 스모크) 직접 실행·재현
-5. 2중 리뷰    (insane-review + AGY, 2중 독립) — 구현 결과 리뷰 → Opus가 판정(불일치 시 타이브레이크)
-6. 커밋/푸시   (Opus 4.8) — 두 리뷰어 GO + 검증 일치 시에만 커밋/푸시
+1. 계획      — 설계서 근거로 범위와 영향받는 불변식·계약 테스트를 명시
+2. 계약 테스트 — 새 불변식/동작의 테스트를 구현보다 먼저 작성 (릴리스 블로커는 pytest -m contract)
+3. 구현
+4. 게이트    — pytest(전체), ruff, mypy, 프로젝션/계약 린트, 앱 스모크를 직접 실행해 결과 확인
+5. 자체 리뷰  — diff를 설계서 불변식 표에 대조. 별도 컨텍스트(서브에이전트 또는 code-review 스킬)로 한 번 더 읽기 전용 검토
+6. 커밋/푸시  — 게이트 통과와 자체 리뷰 반영 후에만
 ```
 
-리뷰어가 엇갈리면 Opus가 직접 코드로 재현해 판정한다. 리뷰 지적으로 재수정이 필요하면 3~5를 반복한다.
+- **자기 편향 보완:** 자체 리뷰의 한계는 계약 테스트를 먼저 쓰는 것으로 보완한다. human-only 승격 불가, 에이전트 도구 0개, 소유 구분, 인용 정합성 같은 불변식은 반드시 테스트로 고정한다.
+- **보안 경계 변경:** Human-Proof, Agent Isolation, 프롬프트 조립, 자격증명 경로를 바꾸는 변경은 구현 전 계획 단계에서 독립 읽기 전용 검토를 한 번 받는다.
+- **반복 지적 규율:** 같은 컴포넌트에서 지적이 3건 이상 반복되면 모양별 땜질을 멈추고 구조를 바꾼다.
+- **외부 독립 리뷰:** 릴리스 후보 단계(R5 이후)에서 필요 여부를 사용자에게 다시 묻는다.
+- **결과 보고:** 테스트·검증은 실제 실행 결과로만 보고한다. 실패는 숨기지 않고, 기준선 실패와 새 실패를 구분한다.
+- 의미 있는 변경은 지정된 브랜치에 커밋·푸시한다. PR은 사용자가 요청할 때만 만든다.
 
 ## 핵심 불변식 (Release-blocking)
 
-- MCP 검색 표면은 **read-only** (v1.2).
-- `SOURCE / AI / USER` 소유 구분 유지. AI 출력은 SOURCE로 재라벨 금지, USER 콘텐츠는 자동으로 덮어쓰지 않음.
-- 정규화(normalization)는 요약이 아니다. `Partial`은 절대 조용히 `Ready`가 되지 않는다.
-- `Material Usage.Verified = true` / `Exam.Scope Confirmed = true` 는 **human-only** — AI/자동화가 승격 불가.
-- 신선도(freshness) 검증은 엔진이 수행하며, stale enrichment는 factual evidence에서 제외한다.
-- `get_source_chunk` 은 사전 발급된 context capability의 allowlist 안 locator만 허용.
-- 공개(anyone-with-link) 공유를 검색 편의를 위해 사용하지 않는다.
+설계서 §2의 I1~I9. 요지:
+
+- **I1** 검색 표면은 read-only. Retrieval Service는 읽기 전용 연산만 가지며 선택 MCP 어댑터가 켜져도 같은 서비스만 노출한다.
+- **I2** `SOURCE / AI / USER` 소유 구분 유지. AI 출력은 SOURCE로 재라벨 금지, USER 콘텐츠는 자동으로 덮어쓰지 않음.
+- **I3** 정규화(normalization)는 요약이 아니다. `Partial`은 절대 조용히 `Ready`가 되지 않는다.
+- **I4** `Material Usage.Verified = true` / `Exam.Scope Confirmed = true` 등 human-only 행위는 **Human-Proof**(UI 세션 + Shell 네이티브 확인 + `shell_secret` HMAC + 대상 재검증) 없이는 AI/자동화가 승격할 수 없다.
+- **I5** 신선도(freshness) 검증은 엔진이 수행하며, stale enrichment는 factual evidence에서 제외한다. AI 산출물은 `source_version / source_hash / processor_version` 지문을 필수로 가진다.
+- **I6** 인용은 **이번 턴에 Core가 프롬프트에 넣은 evidence**에 한한다(출처 정합성). 이는 접근 통제가 아니며 내용이 근거에 뒷받침된다는 보증도 아니다. UI는 "검증됨" 라벨을 쓰지 않고 원문 청크를 바로 보여 준다.
+- **I7** 공개(anyone-with-link) 공유를 검색 편의를 위해 사용하지 않는다.
+- **I8** 에이전트는 **도구를 갖지 않는다.** 입력은 Core가 조립한 프롬프트, 출력은 텍스트뿐이다. CLI 자동 로드(훅·플러그인·메모리)·슬래시/`@파일` 확장·세션 영속은 요건과 매 실행 단언으로 차단한다.
+- **I9** 비밀정보(Canvas 토큰, UI 세션 토큰, `shell_secret`)는 에이전트 환경·로그·프롬프트·번들에 존재하지 않는다. 프롬프트·응답 본문은 로그에 남기지 않는다.
+
+위협 모델의 한계: 같은 OS 사용자 권한의 악성 프로세스는 방어 대상이 아니다. 구독 제공자로 전송되는 데이터는 사용자가 확인한 컨텍스트 칩 목록으로 한정된다.
 
 ## 저장소 레이아웃
 
 ```text
-contracts/        model-neutral Behavior Contract (study-behavior.md)
-clients/          Claude Skills / ChatGPT Instructions 프로젝션
-src/uls/          Python 코어 (domain, retrieval, mcp, adapters, state, ephemeral, ...)
-deployment/       macOS launchd / Windows Task Scheduler / remote-mcp
-scripts/          Behavior Contract 해시/드리프트 린트
+src/syllva/       Python 코어 (domain, retrieval, state, ingestion, normalization, enrichment, intake, adapters, mcp[선택], settings[UI 출발점], ...)
+contracts/        v1.2 Behavior Contract (v4에서 프롬프트 템플릿으로 전면 재작성 예정)
+clients/          v1.2 외부 클라이언트 프로젝션 (v4에서 폐기 예정)
+deployment/       v1.2 launchd / Task Scheduler / remote-mcp (v2에서 재정의 예정)
+scripts/          Behavior Contract 해시/드리프트 린트 (v4 전환 시 대체)
 tests/            unit / contract / integration / e2e / fixtures
+docs/plans/       전환 계획과 과거 설계 기록 (desktop-app-v2.md가 현행)
 ```
+
+Tauri 셸 디렉터리(`shell/`)는 R2에서 추가된다.
 
 ## 개발 워크플로
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ".[dev,mcp,web,pdf,drive,notion,github,keyring]"
 
 pytest -m contract        # 모델 독립 계약 테스트 (릴리스 블로커)
 pytest -m unit
+pytest                    # 전체
 ruff check src tests
 mypy
 
-python scripts/project_behavior_contract.py --print   # 정규 Behavior Contract 버전/해시
-python scripts/lint_behavior_projection.py            # 프로젝션 드리프트 검사 (CI)
+syllva --help                                          # CLI (uls는 별칭)
+python scripts/project_behavior_contract.py --print   # v1.2 Behavior Contract 버전/해시 (v4 전환 전까지)
+python scripts/lint_behavior_projection.py            # 프로젝션 드리프트 검사
 ```
 
-## 구현 순서 (frozen)
+기준선(2026-11-02, R1a 직후, Linux): 전체 3533 passed / 10 failed(`tests/unit/test_knu_lms_sync.py`의 키체인 의존 테스트) / 5 skipped. ruff 지적 다수, mypy 134 errors. 이 기준선과 비교해 **새로 생긴 실패**를 판단한다.
 
-`Spike C0 → Spike M0 → VS0 → VS0-B (cross-client) → Spike G (Goodnotes)`
+## 구현 순서 (로드맵)
 
-이후 Phase 1(Core Hardening) → Phase 8(Desktop Automation & Remote MCP)까지 명세서 §42–§49 순서.
+`R0 설계 개정` → `R1a 이름 변경(완료)` → `R1b 로컬 저장소·Retrieval Service 재구성` → `R1c 로컬 intake 워커` → `R2 UI·Tauri 셸·Human-Proof 스파이크` → `R3 Canvas·과제` → `R4 AI 패널(도구 없는 에이전트·적합성 시험)` → `R5 요약·시험 대비` → `R6 설치본·모바일 접속`
+
+R0 완료: 설계서·구현 명세서 동결, 이 파일 갱신. 상세는 `docs/plans/desktop-app-v2.md` §8.
 
 ## 규칙
 
-- 코어 모듈(`domain/ ingestion/ normalization/ enrichment/ retrieval/ state/ ephemeral/`)은 클라이언트 SDK나 OS 스케줄러에 의존하지 않는다.
-- Retrieval Engine은 MCP 서버 없이도 테스트에서 직접 호출 가능해야 한다.
-- 비밀정보(credential/token)는 커밋, Skills/Instructions, 로그에 절대 포함하지 않는다.
-- 프로즌 계약을 위반하는 변경은 명세 개정(revision)을 요구한다.
+- 코어 모듈(`domain/ ingestion/ normalization/ enrichment/ retrieval/ state/ ephemeral/`)은 클라이언트 SDK, UI, 셸, OS 스케줄러에 의존하지 않는다.
+- Retrieval Engine은 MCP 서버나 에이전트 없이도 테스트에서 직접 호출 가능해야 한다.
+- 에이전트 CLI는 `build_agent_launch()` 외의 경로로 실행하지 않는다(C-09).
+- 비밀정보(credential/token)는 커밋, 프롬프트, 로그, 번들에 절대 포함하지 않는다.
+- 사용자 UI에 표시하는 AI/SOURCE/USER 텍스트는 text로만 렌더링하고, 원시 HTML을 허용하지 않는다(C-18).
+- 프로즌 계약을 위반하는 변경은 설계서 개정(revision)을 요구한다. 임의로 설계서를 수정하지 않는다.
+- `RESEARCH/` 접근·추가, 실제 provider 호출을 하는 테스트, 요청 없는 전역 설정 변경은 금지.

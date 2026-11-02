@@ -7,10 +7,10 @@ from dataclasses import replace
 
 import pytest
 
-from uls.adapters.github.api import GitHubAPIReader, repository_name, repository_path
-from uls.domain.academic import ActivityResultMetadata
-from uls.domain.errors import InvalidSubmissionRefError, SourcePartialError, SourceUnavailableError
-from uls.retrieval.github import activity_code_context
+from syllva.adapters.github.api import GitHubAPIReader, repository_name, repository_path
+from syllva.domain.academic import ActivityResultMetadata
+from syllva.domain.errors import InvalidSubmissionRefError, SourcePartialError, SourceUnavailableError
+from syllva.retrieval.github import activity_code_context
 
 pytestmark = pytest.mark.contract
 COMMIT, TREE = 'a' * 40, 'b' * 40

@@ -11,7 +11,7 @@ Syllva는 명시적 설정과 process environment credential을 사용합니다.
 3. provider ID, relation, parent, permission을 검증할 수 없으면 fail closed합니다.
 4. 편하다는 이유만으로 worker와 read-only MCP가 같은 credential을 공유하지 않습니다.
 
-`config.example.yaml` 또는 `uls init`이 만든 파일에서 시작하세요.
+`config.example.yaml` 또는 `syllva init`이 만든 파일에서 시작하세요.
 
 ## Credential 경계
 
@@ -95,7 +95,7 @@ Material을 반환하기 전에 Course relation이 선택한 Courses source와 �
 transcript evidence만으로 계속 동작하면서 Material Usage가 unavailable임을
 표시하며, 누락된 source를 검증된 빈 DB로 간주하지 않습니다. Exam과
 Activity는 별도 semester mapping이 생길 때까지 unavailable입니다.
-`uls doctor --live`도 이 모드에서는 선택한 학기의 Course를 probe합니다.
+`syllva doctor --live`도 이 모드에서는 선택한 학기의 Course를 probe합니다.
 
 기존 v1.2 경로로 돌아가려면 `notion_lane: legacy_global`과 빈
 `semester`를 사용합니다.
@@ -109,9 +109,9 @@ Activity는 별도 semester mapping이 생길 때까지 unavailable입니다.
 중요한 설정 변경 후:
 
 ```bash
-uls doctor
-uls status
-uls behavior lint
+syllva doctor
+syllva status
+syllva behavior lint
 ```
 
-필요한 credential을 준비했고 read-only live provider probe를 의도적으로 실행할 때만 `uls doctor --live`를 사용하세요. probe 성공만으로 최종 AI client 검증이 끝나는 것은 아닙니다.
+필요한 credential을 준비했고 read-only live provider probe를 의도적으로 실행할 때만 `syllva doctor --live`를 사용하세요. probe 성공만으로 최종 AI client 검증이 끝나는 것은 아닙니다.

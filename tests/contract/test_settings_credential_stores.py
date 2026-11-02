@@ -4,9 +4,9 @@ import hashlib
 
 import pytest
 
-from uls.config._secure_file import is_reserved_secret_locator, temporary_secret_name
-from uls.settings.credential_roles import ROLES
-from uls.settings.credential_stores import CredentialStores, FakeKeyring
+from syllva.config._secure_file import is_reserved_secret_locator, temporary_secret_name
+from syllva.settings.credential_roles import ROLES
+from syllva.settings.credential_stores import CredentialStores, FakeKeyring
 
 pytestmark = pytest.mark.contract
 

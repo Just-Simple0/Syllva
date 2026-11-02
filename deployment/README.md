@@ -15,9 +15,9 @@ pip install -e '.[dev,mcp,drive,notion,pdf]'
 Then run:
 
 ```bash
-uls --config /absolute/path/config.yaml init
-uls --config /absolute/path/config.yaml doctor
-uls behavior lint
+syllva --config /absolute/path/config.yaml init
+syllva --config /absolute/path/config.yaml doctor
+syllva behavior lint
 ```
 
 `init` creates only missing local files. Configure the exact course, Notion, Drive, and optional GitHub identities you actually intend to use. Relative config paths resolve against the config file.
@@ -38,20 +38,20 @@ Use separate Notion/Drive credentials for read-only MCP and worker mutation wher
 
 ## Source registrations
 
-`uls init` creates an empty explicit source-registry path when configured. The metadata-only source registry associates a source with a configured course/location; it is not a place to paste source bodies or credentials.
+`syllva init` creates an empty explicit source-registry path when configured. The metadata-only source registry associates a source with a configured course/location; it is not a place to paste source bodies or credentials.
 
 The current beta also has a separate semester-intake preview. See [Operator: Semester Intake and Notion](../docs/operator-guide/intake-and-notion.md). Do not mix preview data-source identities with the legacy read-only retrieval registry or assume automatic fallback between them.
 
 ## Worker commands
 
 ```bash
-uls --config /absolute/path/config.yaml sync --max-jobs 20
-uls --config /absolute/path/config.yaml process --max-jobs 20
-uls --config /absolute/path/config.yaml run --max-jobs 20
-uls --config /absolute/path/config.yaml status
-uls --config /absolute/path/config.yaml jobs --limit 20
-uls --config /absolute/path/config.yaml retry JOB_ID
-uls --config /absolute/path/config.yaml reprocess ENTITY_ID
+syllva --config /absolute/path/config.yaml sync --max-jobs 20
+syllva --config /absolute/path/config.yaml process --max-jobs 20
+syllva --config /absolute/path/config.yaml run --max-jobs 20
+syllva --config /absolute/path/config.yaml status
+syllva --config /absolute/path/config.yaml jobs --limit 20
+syllva --config /absolute/path/config.yaml retry JOB_ID
+syllva --config /absolute/path/config.yaml reprocess ENTITY_ID
 ```
 
 - `sync` discovers/registers/projects work.
@@ -67,7 +67,7 @@ Templates:
 - `macos/com.syllva.uls.plist`
 - `windows/uls-task.xml`
 
-Edit absolute paths and run `uls run` manually before registering either scheduler. A scheduled process may not inherit your interactive shell environment; arrange credential access explicitly through private OS/service mechanisms.
+Edit absolute paths and run `syllva run` manually before registering either scheduler. A scheduled process may not inherit your interactive shell environment; arrange credential access explicitly through private OS/service mechanisms.
 
 On macOS, validate the edited plist with `plutil -lint` before registering it. On Windows, inspect the imported Task Scheduler configuration and Last Run Result. The scheduler contains no business logic; Syllva still enforces the local process lock.
 
@@ -97,11 +97,11 @@ Keep optional LMS scheduling paused until the separate LMS credential/connection
 
 ## MCP profiles
 
-`uls mcp local` serves stdio and reserves stdout for MCP protocol messages. It uses the same retrieval policies as the configured server composition.
+`syllva mcp local` serves stdio and reserves stdout for MCP protocol messages. It uses the same retrieval policies as the configured server composition.
 
 See [Client packages](../clients/README.md) and [Operator: MCP Clients](../docs/operator-guide/mcp-clients.md).
 
-For development-only remote operation, see [remote-mcp/README.md](remote-mcp/README.md). `uls mcp status` reports configuration/durable status; it does not prove that a remote bridge is reachable. Read-only live probes and end-user client E2E are separate validation steps.
+For development-only remote operation, see [remote-mcp/README.md](remote-mcp/README.md). `syllva mcp status` reports configuration/durable status; it does not prove that a remote bridge is reachable. Read-only live probes and end-user client E2E are separate validation steps.
 
 ## Backups and recovery
 
@@ -114,7 +114,7 @@ To restore:
 1. stop schedulers and MCP processes;
 2. preserve the current state as a separate recovery copy;
 3. restore the selected config/state together;
-4. run `uls status` and `uls doctor`;
+4. run `syllva status` and `syllva doctor`;
 5. perform a bounded source/context smoke check;
 6. reconcile Drive/Notion against restored local provenance before reenabling automation.
 

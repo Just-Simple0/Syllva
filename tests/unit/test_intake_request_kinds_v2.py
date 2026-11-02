@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from uls.intake.models import RequestInput
-from uls.intake.requests import validate_request_input
+from syllva.intake.models import RequestInput
+from syllva.intake.requests import validate_request_input
 
 pytestmark = pytest.mark.unit
 

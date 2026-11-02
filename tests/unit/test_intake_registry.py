@@ -8,10 +8,10 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
 import pytest
 
-from uls.adapters.drive.worker import DRIVE_FOLDER_MIME, DriveMetadata, InMemoryDriveWorker
-from uls.config.intake import ResolvedCourseFolders, ResolvedSemesterWorkspace
-from uls.domain.errors import SourceUnavailableError
-from uls.intake.registry import StaticLayoutReconcileRequired, validate_registered_drive_layout
+from syllva.adapters.drive.worker import DRIVE_FOLDER_MIME, DriveMetadata, InMemoryDriveWorker
+from syllva.config.intake import ResolvedCourseFolders, ResolvedSemesterWorkspace
+from syllva.domain.errors import SourceUnavailableError
+from syllva.intake.registry import StaticLayoutReconcileRequired, validate_registered_drive_layout
 
 pytestmark = pytest.mark.unit
 
@@ -230,7 +230,7 @@ def test_folder_in_shared_drive_is_rejected() -> None:
     shared = dataclasses.replace(_folder("course-1", ("semester-1",)), drive_id="shared-drive-xyz")
     files.append(shared)
     port = InMemoryDriveWorker(files)
-    from uls.domain.errors import PolicyDeniedError
+    from syllva.domain.errors import PolicyDeniedError
 
     with pytest.raises(PolicyDeniedError, match="shared drive"):
         validate_registered_drive_layout(port, [_workspace()])

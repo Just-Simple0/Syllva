@@ -21,15 +21,15 @@ from phase4 import (
     transcript_derivative,
 )
 
-from uls.adapters.drive.binding import SourceBindingRecord, ValidatedSourceBindingResolver
-from uls.config.schema import RetrievalCfg, UlsConfig
-from uls.domain.enums import DerivativeStatus
-from uls.domain.errors import LocatorNotAllowedError, SourceUnavailableError
-from uls.domain.source_ref import SourceFingerprint, SourceRef
-from uls.ephemeral.memory import MemoryEphemeralStore
-from uls.normalization.activity import normalize_activity_instructions
-from uls.retrieval.engine import RetrievalEngine
-from uls.retrieval.schemas import context_package_to_dict
+from syllva.adapters.drive.binding import SourceBindingRecord, ValidatedSourceBindingResolver
+from syllva.config.schema import RetrievalCfg, SyllvaConfig
+from syllva.domain.enums import DerivativeStatus
+from syllva.domain.errors import LocatorNotAllowedError, SourceUnavailableError
+from syllva.domain.source_ref import SourceFingerprint, SourceRef
+from syllva.ephemeral.memory import MemoryEphemeralStore
+from syllva.normalization.activity import normalize_activity_instructions
+from syllva.retrieval.engine import RetrievalEngine
+from syllva.retrieval.schemas import context_package_to_dict
 
 
 def _material_conflict() -> str:
@@ -92,7 +92,7 @@ def _engine(*, record=None, activity_value=None, derivative=None, config=None, m
         drive,
         NoV2State(),
         MemoryEphemeralStore(),
-        config or UlsConfig(),
+        config or SyllvaConfig(),
         source_binding_resolver=ValidatedSourceBindingResolver(drive),
     )
     return engine, reader, drive
@@ -599,7 +599,7 @@ def test_partial_derivative_keeps_official_priority_but_discloses_incomplete_cov
 
 
 def test_budget_truncation_survives_with_official_constraint_metadata() -> None:
-    config = UlsConfig(
+    config = SyllvaConfig(
         retrieval=RetrievalCfg(
             max_evidence_items=1,
             max_chars_per_item=8,

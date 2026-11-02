@@ -6,11 +6,11 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
-from uls.domain.source_ref import SourceRef
-from uls.normalization.schemas import NormalizedTranscript, TimestampMark
-from uls.normalization.transcript import normalize_transcript
-from uls.normalization.validators import parse_transcript_derivative, validate_normalized_transcript
-from uls.retrieval.chunking import timestamp_chunks
+from syllva.domain.source_ref import SourceRef
+from syllva.normalization.schemas import NormalizedTranscript, TimestampMark
+from syllva.normalization.transcript import normalize_transcript
+from syllva.normalization.validators import parse_transcript_derivative, validate_normalized_transcript
+from syllva.retrieval.chunking import timestamp_chunks
 
 
 def _normalize(raw: str) -> NormalizedTranscript:

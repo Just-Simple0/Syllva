@@ -8,9 +8,9 @@ import pytest
 import yaml
 from _settings_support import FETCH, PRIVATE_SENTINEL, make_harness, reviewed_apply
 
-from uls.settings import config_service
-from uls.settings.config_service import SettingsServiceError
-from uls.settings.status import NOT_CHECKED, PARTIAL, READY, setup_steps
+from syllva.settings import config_service
+from syllva.settings.config_service import SettingsServiceError
+from syllva.settings.status import NOT_CHECKED, PARTIAL, READY, setup_steps
 
 pytestmark = pytest.mark.contract
 

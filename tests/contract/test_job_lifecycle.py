@@ -1,9 +1,9 @@
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
-from uls.domain.enums import JobStatus
-from uls.orchestration.retry import DEFAULT_MAX_ATTEMPTS, ErrorClass
-from uls.state.sqlite import SQLiteStateStore
+from syllva.domain.enums import JobStatus
+from syllva.orchestration.retry import DEFAULT_MAX_ATTEMPTS, ErrorClass
+from syllva.state.sqlite import SQLiteStateStore
 
 
 COURSE_KEY = "2026-1_COMP319-002"

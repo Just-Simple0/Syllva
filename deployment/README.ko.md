@@ -15,9 +15,9 @@ pip install -e '.[dev,mcp,drive,notion,pdf]'
 다음 실행:
 
 ```bash
-uls --config /absolute/path/config.yaml init
-uls --config /absolute/path/config.yaml doctor
-uls behavior lint
+syllva --config /absolute/path/config.yaml init
+syllva --config /absolute/path/config.yaml doctor
+syllva behavior lint
 ```
 
 `init`은 없는 local file만 만듭니다. 실제로 사용할 정확한 course, Notion, Drive, optional GitHub identity를 구성하세요. 상대 config path는 config file 기준으로 해석합니다.
@@ -38,20 +38,20 @@ provider workflow가 다른 권한을 요구한다면 read-only MCP와 worker mu
 
 ## Source registration
 
-설정된 경우 `uls init`은 빈 explicit source-registry 경로를 만듭니다. metadata-only source registry는 source를 설정된 course/location과 연결하며 source 본문이나 credential을 붙여 넣는 곳이 아닙니다.
+설정된 경우 `syllva init`은 빈 explicit source-registry 경로를 만듭니다. metadata-only source registry는 source를 설정된 course/location과 연결하며 source 본문이나 credential을 붙여 넣는 곳이 아닙니다.
 
 현재 beta에는 별도 semester-intake preview도 있습니다. [운영자: 학기 Intake와 Notion](../docs/operator-guide/intake-and-notion.ko.md)을 참고하세요. preview data-source identity와 legacy read-only retrieval registry를 섞거나 두 lane 사이의 자동 fallback을 가정하지 마세요.
 
 ## Worker 명령
 
 ```bash
-uls --config /absolute/path/config.yaml sync --max-jobs 20
-uls --config /absolute/path/config.yaml process --max-jobs 20
-uls --config /absolute/path/config.yaml run --max-jobs 20
-uls --config /absolute/path/config.yaml status
-uls --config /absolute/path/config.yaml jobs --limit 20
-uls --config /absolute/path/config.yaml retry JOB_ID
-uls --config /absolute/path/config.yaml reprocess ENTITY_ID
+syllva --config /absolute/path/config.yaml sync --max-jobs 20
+syllva --config /absolute/path/config.yaml process --max-jobs 20
+syllva --config /absolute/path/config.yaml run --max-jobs 20
+syllva --config /absolute/path/config.yaml status
+syllva --config /absolute/path/config.yaml jobs --limit 20
+syllva --config /absolute/path/config.yaml retry JOB_ID
+syllva --config /absolute/path/config.yaml reprocess ENTITY_ID
 ```
 
 - `sync`: work 발견/register/project.
@@ -67,7 +67,7 @@ template:
 - `macos/com.syllva.uls.plist`
 - `windows/uls-task.xml`
 
-절대 경로를 수정하고 scheduler 등록 전 `uls run`을 수동 검증하세요. scheduled process가 interactive shell environment를 상속하지 않을 수 있으므로 private OS/service mechanism을 통해 credential 접근을 명시적으로 구성해야 합니다.
+절대 경로를 수정하고 scheduler 등록 전 `syllva run`을 수동 검증하세요. scheduled process가 interactive shell environment를 상속하지 않을 수 있으므로 private OS/service mechanism을 통해 credential 접근을 명시적으로 구성해야 합니다.
 
 macOS에서는 수정한 plist를 `plutil -lint`로 검증한 뒤 등록합니다. Windows에서는 import된 Task Scheduler 설정과 Last Run Result를 확인합니다. scheduler에는 business logic이 없으며 Syllva가 local process lock을 계속 강제합니다.
 
@@ -95,11 +95,11 @@ PowerShell `Register-ScheduledTask` 자격증명 입력 흐름)로 수행하세�
 
 ## MCP profile
 
-`uls mcp local`은 stdio로 제공되고 stdout을 MCP protocol message용으로 예약합니다. 설정된 server composition과 동일한 retrieval policy를 사용합니다.
+`syllva mcp local`은 stdio로 제공되고 stdout을 MCP protocol message용으로 예약합니다. 설정된 server composition과 동일한 retrieval policy를 사용합니다.
 
 [클라이언트 패키지](../clients/README.ko.md)와 [운영자: MCP 클라이언트](../docs/operator-guide/mcp-clients.ko.md)를 참고하세요.
 
-development-only remote 운영은 [remote-mcp/README.ko.md](remote-mcp/README.ko.md)를 참고하세요. `uls mcp status`는 config/durable status를 보고하지만 remote bridge가 실제 reachable하다는 증거는 아닙니다. read-only live probe와 최종 client E2E는 별도 검증입니다.
+development-only remote 운영은 [remote-mcp/README.ko.md](remote-mcp/README.ko.md)를 참고하세요. `syllva mcp status`는 config/durable status를 보고하지만 remote bridge가 실제 reachable하다는 증거는 아닙니다. read-only live probe와 최종 client E2E는 별도 검증입니다.
 
 ## 백업과 복구
 
@@ -112,7 +112,7 @@ credential은 OS secret storage에 별도 보관하며 Syllva backup archive에 
 1. scheduler와 MCP process 중지;
 2. 현재 상태를 별도 recovery copy로 보존;
 3. 선택한 config/state를 함께 복원;
-4. `uls status`, `uls doctor` 실행;
+4. `syllva status`, `syllva doctor` 실행;
 5. bounded source/context smoke check 수행;
 6. 자동화 재활성화 전 복원된 local provenance와 Drive/Notion을 reconcile.
 

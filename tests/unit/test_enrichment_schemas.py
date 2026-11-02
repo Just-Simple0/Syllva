@@ -7,11 +7,11 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
-from uls.adapters.llm.structured import LLMEnrichmentResult
-from uls.domain.enums import Explicitness
-from uls.domain.models import PageLocator, TimeLocator
-from uls.domain.source_ref import SourceFingerprint
-from uls.enrichment.schemas import (
+from syllva.adapters.llm.structured import LLMEnrichmentResult
+from syllva.domain.enums import Explicitness
+from syllva.domain.models import PageLocator, TimeLocator
+from syllva.domain.source_ref import SourceFingerprint
+from syllva.enrichment.schemas import (
     EnrichmentRecord,
     EnrichmentSignal,
     EvidenceLocator,

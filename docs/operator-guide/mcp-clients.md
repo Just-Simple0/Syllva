@@ -9,7 +9,7 @@ Syllva's MCP server is a read-only academic retrieval boundary. Client setup mus
 Use an absolute executable and config path:
 
 ```bash
-codex mcp add uls -- /ABSOLUTE/PATH/uls-venv/bin/uls \
+codex mcp add uls -- /ABSOLUTE/PATH/uls-venv/bin/syllva \
   --config /ABSOLUTE/PATH/config.yaml mcp local
 ```
 
@@ -17,7 +17,7 @@ Equivalent TOML:
 
 ```toml
 [mcp_servers.uls]
-command = "/ABSOLUTE/PATH/uls-venv/bin/uls"
+command = "/ABSOLUTE/PATH/uls-venv/bin/syllva"
 args = ["--config", "/ABSOLUTE/PATH/config.yaml", "mcp", "local"]
 ```
 
@@ -31,7 +31,7 @@ A representative client configuration is:
 {
   "mcpServers": {
     "uls": {
-      "command": "/ABSOLUTE/PATH/uls-venv/bin/uls",
+      "command": "/ABSOLUTE/PATH/uls-venv/bin/syllva",
       "args": ["--config", "/ABSOLUTE/PATH/config.yaml", "mcp", "local"]
     }
   }
@@ -50,7 +50,7 @@ See `deployment/remote-mcp/README.md` for the checked-in remote development boun
 
 Use the read-only MCP credential boundary documented in [Configuration](configuration.md). Do not launch the MCP server with worker write credentials as a shortcut.
 
-`uls mcp local` reserves stdout for MCP protocol messages. Operational logs should not corrupt stdio protocol output.
+`syllva mcp local` reserves stdout for MCP protocol messages. Operational logs should not corrupt stdio protocol output.
 
 ## Validation
 

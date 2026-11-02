@@ -7,10 +7,10 @@
 ## 설정과 진단
 
 ```text
-uls init
-uls doctor
-uls status
-uls behavior lint
+syllva init
+syllva doctor
+syllva status
+syllva behavior lint
 ```
 
 - `init` — 없는 로컬 config/state scaffold 생성.
@@ -21,12 +21,12 @@ uls behavior lint
 ## Worker
 
 ```text
-uls sync [--max-jobs N]
-uls process [--max-jobs N]
-uls run [--max-jobs N]
-uls jobs [--limit N]
-uls retry <job-id>
-uls reprocess <entity-id>
+syllva sync [--max-jobs N]
+syllva process [--max-jobs N]
+syllva run [--max-jobs N]
+syllva jobs [--limit N]
+syllva retry <job-id>
+syllva reprocess <entity-id>
 ```
 
 - `sync` — full queue 처리 없이 work 발견/register/project.
@@ -41,9 +41,9 @@ worker mutation은 local single-active-worker lock을 공유합니다.
 ## MCP
 
 ```text
-uls mcp local
-uls mcp remote
-uls mcp status
+syllva mcp local
+syllva mcp remote
+syllva mcp status
 ```
 
 - `local` — stdio MCP server; stdout은 protocol output.
@@ -55,8 +55,8 @@ uls mcp status
 저장소 예시는 다음 형태를 자주 사용합니다.
 
 ```bash
-uls --config /ABSOLUTE/PATH/config.yaml doctor
-uls --config /ABSOLUTE/PATH/config.yaml mcp local
+syllva --config /ABSOLUTE/PATH/config.yaml doctor
+syllva --config /ABSOLUTE/PATH/config.yaml mcp local
 ```
 
 client/scheduler 등록에서는 launch process working directory에 의존하지 않도록 절대 경로를 사용하세요.

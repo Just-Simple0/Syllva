@@ -13,7 +13,7 @@ from tests.integration.test_intake_worker_classification_pb2a import COURSE
 from tests.integration.test_intake_worker_preview import _pdf_bytes, _system
 from tests.unit.test_canvas_attachments import FakeFiles
 
-from uls.intake.canvas_attachments import AttachmentCandidate, CanvasAttachmentFetcher
+from syllva.intake.canvas_attachments import AttachmentCandidate, CanvasAttachmentFetcher
 
 pytestmark = pytest.mark.integration
 
@@ -24,7 +24,7 @@ CANVAS_COURSE = 67535
 @pytest.fixture(autouse=True)
 def _no_promotion(monkeypatch):
     # AUTO execution is P-B2b's subject; here only download -> bind -> discover -> classify.
-    from uls.intake.worker import IntakeWorker
+    from syllva.intake.worker import IntakeWorker
 
     monkeypatch.setattr(IntakeWorker, "_promote_ready_plans", lambda self: None)
 

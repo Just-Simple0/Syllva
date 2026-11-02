@@ -14,10 +14,10 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures")
 
 from phase4 import phase4_applier_kwargs, phase4_proposal, ready_phase4
 
-from uls.adapters.notion.base import HumanApprovalApplier, QueueState, upsert_proposal
-from uls.adapters.notion.guarded import GuardedNotionWriter
-from uls.domain.approval_identity import canonical_action_json, derive_proposal_id
-from uls.domain.errors import PolicyViolation
+from syllva.adapters.notion.base import HumanApprovalApplier, QueueState, upsert_proposal
+from syllva.adapters.notion.guarded import GuardedNotionWriter
+from syllva.domain.approval_identity import canonical_action_json, derive_proposal_id
+from syllva.domain.errors import PolicyViolation
 
 
 def _approved() -> tuple[object, object, dict, HumanApprovalApplier]:

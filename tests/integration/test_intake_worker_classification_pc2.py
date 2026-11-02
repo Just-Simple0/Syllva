@@ -14,13 +14,13 @@ from tests.integration.test_intake_worker_classification_pb1 import (
 )
 from tests.integration.test_intake_worker_preview import _system
 
-from uls.adapters.llm.typesafe_choice import (
+from syllva.adapters.llm.typesafe_choice import (
     ChoiceAnswer,
     ChoiceResult,
     ClassifierError,
     RequestTooLarge,
 )
-from uls.intake.classification import s2
+from syllva.intake.classification import s2
 
 pytestmark = pytest.mark.integration
 
@@ -201,7 +201,7 @@ def test_cache_hit_costs_no_call_and_no_budget(tmp_path: Path) -> None:
 
 
 def s2_origin():
-    from uls.intake.classification.taxonomy import Origin
+    from syllva.intake.classification.taxonomy import Origin
 
     return Origin.PROFESSOR_SOURCE
 
@@ -240,7 +240,7 @@ def test_human_decided_item_is_not_reclassified_by_the_model(tmp_path: Path) -> 
 
 
 def test_a_user_authored_transcript_origin_is_never_sent(tmp_path: Path) -> None:
-    from uls.intake.classification.taxonomy import Origin
+    from syllva.intake.classification.taxonomy import Origin
 
     client = FakeClient()
     cm, system, worker = _setup(tmp_path, client)
@@ -281,7 +281,7 @@ def test_waiting_deferred_items_keep_their_calls_across_semesters(tmp_path: Path
 
 
 def test_cached_answer_is_revalidated(tmp_path: Path) -> None:
-    from uls.intake.worker import IntakeWorker
+    from syllva.intake.worker import IntakeWorker
 
     good = {"choice": "LECTURE_SLIDES", "confidence": 0.9, "probabilities": _probabilities("LECTURE_SLIDES", 0.85)}
     assert IntakeWorker._s2_cached_answer(good) is not None

@@ -1,11 +1,11 @@
 import pytest
 
-from uls.study_notes.config import StudyNoteConfig
-from uls.study_notes.core import StudyNoteSubmissionCore
-from uls.study_notes.handler import StudyNoteHandler
-from uls.study_notes.identity import CONFIRMED_LECTURE, PROVISIONAL_SELECTED, TRANSCRIPT_ONLY
-from uls.study_notes.store import DifferentPayloadReplayError, StudyNoteStore
-from uls.study_notes.validation import validate_draft_structure
+from syllva.study_notes.config import StudyNoteConfig
+from syllva.study_notes.core import StudyNoteSubmissionCore
+from syllva.study_notes.handler import StudyNoteHandler
+from syllva.study_notes.identity import CONFIRMED_LECTURE, PROVISIONAL_SELECTED, TRANSCRIPT_ONLY
+from syllva.study_notes.store import DifferentPayloadReplayError, StudyNoteStore
+from syllva.study_notes.validation import validate_draft_structure
 
 
 @pytest.mark.parametrize(

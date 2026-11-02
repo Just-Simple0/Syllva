@@ -15,18 +15,18 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 from no_v2_state import NoV2State
 from phase4 import material_derivative, ready_phase4
 
-from uls.config.schema import RetrievalCfg, UlsConfig
-from uls.domain.errors import (
+from syllva.config.schema import RetrievalCfg, SyllvaConfig
+from syllva.domain.errors import (
     LocatorNotAllowedError,
     LocatorStaleError,
     SourceUnavailableError,
 )
-from uls.domain.models import PageLocator, TimeLocator
-from uls.domain.source_ref import SourceFingerprint, SourceRef
-from uls.ephemeral.memory import MemoryEphemeralStore
-from uls.retrieval.capabilities import CapabilityManager
-from uls.retrieval.engine import RetrievalEngine
-from uls.retrieval.schemas import CapabilityBinding
+from syllva.domain.models import PageLocator, TimeLocator
+from syllva.domain.source_ref import SourceFingerprint, SourceRef
+from syllva.ephemeral.memory import MemoryEphemeralStore
+from syllva.retrieval.capabilities import CapabilityManager
+from syllva.retrieval.engine import RetrievalEngine
+from syllva.retrieval.schemas import CapabilityBinding
 
 
 def _expanded_material_snapshot(reader) -> dict[str, object]:
@@ -48,7 +48,7 @@ def test_usage_material_snapshot_never_bypasses_current_material_lookup(mutation
         drive,
         NoV2State(),
         MemoryEphemeralStore(),
-        UlsConfig(),
+        SyllvaConfig(),
         source_binding_resolver=resolver,
     )
     package = engine.get_session_context("COMP319-S05")
@@ -81,7 +81,7 @@ def test_expanded_material_snapshot_without_current_material_is_excluded() -> No
         drive,
         NoV2State(),
         MemoryEphemeralStore(),
-        UlsConfig(),
+        SyllvaConfig(),
         source_binding_resolver=resolver,
     )
 
@@ -96,7 +96,7 @@ def test_expanded_material_snapshot_without_current_material_is_excluded() -> No
 
 def test_provisional_reporting_uses_retained_bindings_after_budget_replacement() -> None:
     reader, _, drive, resolver = ready_phase4()
-    config = UlsConfig(
+    config = SyllvaConfig(
         retrieval=RetrievalCfg(
             max_evidence_items=12,
             max_chars_per_item=4,
@@ -143,7 +143,7 @@ def test_provisional_and_verified_overlapping_bases_are_reported_independently()
             "Verified": True,
         }
     )
-    config = UlsConfig(
+    config = SyllvaConfig(
         retrieval=RetrievalCfg(
             max_evidence_items=12,
             max_chars_per_item=4,
@@ -185,7 +185,7 @@ def test_followup_rejects_source_advance_after_selected_binding_is_authorized() 
         drive,
         NoV2State(),
         MemoryEphemeralStore(),
-        UlsConfig(),
+        SyllvaConfig(),
         source_binding_resolver=resolver,
     )
     package = engine.get_session_context("COMP319-S05")
@@ -219,7 +219,7 @@ def test_non_ready_material_status_is_not_factual_initially_or_on_followup(statu
         drive,
         NoV2State(),
         MemoryEphemeralStore(),
-        UlsConfig(),
+        SyllvaConfig(),
         source_binding_resolver=resolver,
     )
 
@@ -241,7 +241,7 @@ def test_non_ready_material_status_is_not_factual_initially_or_on_followup(statu
         ready_drive,
         NoV2State(),
         MemoryEphemeralStore(),
-        UlsConfig(),
+        SyllvaConfig(),
         source_binding_resolver=ready_resolver,
     )
     ready_package = ready_engine.get_session_context("COMP319-S05")
@@ -262,7 +262,7 @@ def test_partial_material_status_keeps_partial_warning_and_valid_pages() -> None
         drive,
         NoV2State(),
         MemoryEphemeralStore(),
-        UlsConfig(),
+        SyllvaConfig(),
         source_binding_resolver=resolver,
     )
 

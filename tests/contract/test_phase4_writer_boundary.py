@@ -11,10 +11,10 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures")
 from fake_notion import FakeNotionWriter
 from phase4 import phase4_proposal, ready_phase4
 
-from uls.adapters.notion.base import ApprovalReader, upsert_proposal
-from uls.adapters.notion.guarded import GuardedNotionWriter
-from uls.domain.enums import AutomationActor
-from uls.domain.errors import PolicyViolation
+from syllva.adapters.notion.base import ApprovalReader, upsert_proposal
+from syllva.adapters.notion.guarded import GuardedNotionWriter
+from syllva.domain.enums import AutomationActor
+from syllva.domain.errors import PolicyViolation
 
 
 @pytest.mark.parametrize("field", ["Name", "ID"])
@@ -85,7 +85,7 @@ def test_reader_capability_cannot_mutate_queue_semantics():
 
 @pytest.mark.parametrize("response", ["object", "none"])
 def test_queue_create_without_authoritative_visibility_is_not_success(response):
-    from uls.domain.errors import ProviderUnavailableError
+    from syllva.domain.errors import ProviderUnavailableError
     reader, backend, _, _ = ready_phase4()
     original = backend.create_entity
     def invisible_create(*args, **kwargs):
@@ -115,7 +115,7 @@ def test_post_create_tampered_queue_is_not_success():
 
 @pytest.mark.parametrize("duplicate", [False, True])
 def test_system_terminal_transition_rechecks_physical_identity(duplicate):
-    from uls.adapters.notion.base import mark_proposal_superseded
+    from syllva.adapters.notion.base import mark_proposal_superseded
     reader, backend, _, _ = ready_phase4()
     row = upsert_proposal(backend, phase4_proposal(reader))
     row["State"] = "APPROVED"
@@ -163,7 +163,7 @@ def test_guarded_queue_create_validates_canonical_identity_before_backend():
 def test_applier_rejects_noncanonical_current_usage_or_type(change):
     from phase4 import phase4_applier_kwargs
 
-    from uls.adapters.notion.base import HumanApprovalApplier, QueueState
+    from syllva.adapters.notion.base import HumanApprovalApplier, QueueState
     reader, backend, drive, resolver = ready_phase4()
     row = upsert_proposal(backend, phase4_proposal(reader))
     row["State"] = "APPROVED"

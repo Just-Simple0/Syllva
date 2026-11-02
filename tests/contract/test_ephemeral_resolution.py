@@ -3,9 +3,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
 import pytest
 
-from uls.domain.errors import InvalidCandidateError, ResolutionExpiredError
-from uls.ephemeral.memory import MemoryEphemeralStore
-from uls.ephemeral.models import ResolutionCandidate
+from syllva.domain.errors import InvalidCandidateError, ResolutionExpiredError
+from syllva.ephemeral.memory import MemoryEphemeralStore
+from syllva.ephemeral.models import ResolutionCandidate
 
 
 def test_candidate_from_another_resolution_is_rejected() -> None:

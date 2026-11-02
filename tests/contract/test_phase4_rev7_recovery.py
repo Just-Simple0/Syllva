@@ -7,8 +7,8 @@ from tests.contract.test_phase4_rev6_recovery import (
     _restore_old_target,
 )
 
-from uls.adapters.notion.base import QueueState
-from uls.domain.errors import ProviderUnavailableError, ProviderWriteNotAppliedError
+from syllva.adapters.notion.base import QueueState
+from syllva.domain.errors import ProviderUnavailableError, ProviderWriteNotAppliedError
 
 
 @pytest.mark.parametrize("operation", ["create_usage", "update_range"])

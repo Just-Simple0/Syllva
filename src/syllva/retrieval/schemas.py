@@ -1,0 +1,234 @@
+"""Model-independent retrieval value objects and serialization helpers."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Literal
+
+from syllva.domain.models import ContextPackage, EvidenceItem
+from syllva.domain.page_range import PageRange
+from syllva.ephemeral.models import ResolutionCandidate, ResolvedEntity
+
+ResolutionStatus = Literal["resolved", "ambiguous"]
+
+
+@dataclass(frozen=True)
+class ResolutionResult:
+    """The one result shape returned by ``resolve_entity``."""
+
+    status: ResolutionStatus
+    entity: ResolvedEntity | None = None
+    resolution_id: str | None = None
+    candidates: tuple[ResolutionCandidate, ...] = field(default_factory=tuple)
+    expires_at: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.status not in {"resolved", "ambiguous"}:
+            raise ValueError("resolution status must be resolved or ambiguous")
+        if self.status == "resolved" and self.entity is None:
+            raise ValueError("resolved result requires an entity")
+        if self.status == "ambiguous" and (
+            not self.resolution_id or not self.candidates
+        ):
+            raise ValueError("ambiguous result requires a resolution handle and candidates")
+        object.__setattr__(self, "candidates", tuple(self.candidates))
+
+    @property
+    def entity_id(self) -> str | None:
+        return self.entity.entity_id if self.entity is not None else None
+
+    @property
+    def entity_type(self) -> str | None:
+        return self.entity.entity_type if self.entity is not None else None
+
+    def as_dict(self) -> dict[str, Any]:
+        if self.status == "resolved":
+            assert self.entity is not None
+            return {
+                "status": self.status,
+                "entity": {
+                    "type": self.entity.entity_type,
+                    "id": self.entity.entity_id,
+                    "name": self.entity.label,
+                },
+            }
+        return {
+            "status": self.status,
+            "resolution_id": self.resolution_id,
+            "expires_at": self.expires_at,
+            "candidates": [
+                {
+                    "candidate_id": candidate.candidate_id,
+                    "entity_type": candidate.entity_type,
+                    "entity_id": candidate.entity_id,
+                    "label": candidate.label,
+                    "reason": candidate.reason,
+                }
+                for candidate in self.candidates
+            ],
+        }
+
+    def __getitem__(self, key: str) -> Any:
+        return self.as_dict()[key]
+
+
+@dataclass(frozen=True)
+class RetrievalBudget:
+    max_evidence_items: int = 12
+    max_chars_per_item: int = 4000
+    max_total_chars: int = 24000
+    max_followup_chunks: int = 8
+
+    def __post_init__(self) -> None:
+        for name in (
+            "max_evidence_items",
+            "max_chars_per_item",
+            "max_total_chars",
+            "max_followup_chunks",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+
+
+@dataclass(frozen=True)
+class CapabilityBinding:
+    """Role/source binding kept beside the Phase 1 locator capability."""
+
+    entity_id: str
+    locator: Any
+    source_hash: str
+    source_version: int
+    source_class: str
+    source_ref: Any = None
+    session_id: str | None = None
+    material_id: str | None = None
+    relation_required: bool = False
+    provisional: bool = False
+    usage_id: str | None = None
+    # Phase4 identity is appended so the existing positional construction
+    # order remains source compatible for earlier retrieval callers.
+    usage_role: str | None = None
+    material_type: str | None = None
+    course_relation_page_id: str | None = None
+    course_key: str | None = None
+    usage_range: PageRange | None = None
+    # Phase 5 parent snapshot is additive to the Phase4 leaf basis.  ``None``
+    # means no parent context; an empty tuple means an explicitly empty
+    # relation and is therefore meaningful.
+    parent_entity_id: str | None = None
+    parent_entity_type: str | None = None
+    parent_course_relation_page_id: str | None = None
+    parent_course_key: str | None = None
+    parent_scope_confirmed: bool | None = None
+    parent_included_session_ids: tuple[str, ...] | None = None
+    parent_related_session_ids: tuple[str, ...] | None = None
+    parent_related_material_ids: tuple[str, ...] | None = None
+    parent_path_leaf: str | None = None
+    activity_instructions_source_url: str | None = None
+    activity_normalized_instructions_url: str | None = None
+    activity_binding_identity: tuple[str, str] | None = None
+    # P-D: the immutable assignment policy mode this capability was issued under, and the
+    # document Kind it was issued for.  A binding without them is default-mode (fail closed).
+    assignment_opt_in: bool = False
+    doc_kind: str | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.assignment_opt_in) is not bool:
+            raise ValueError("assignment_opt_in must be a boolean")
+        for name in (
+            "parent_included_session_ids",
+            "parent_related_session_ids",
+            "parent_related_material_ids",
+        ):
+            values = getattr(self, name)
+            if values is not None:
+                normalized = tuple(values)
+                if any(not isinstance(value, str) or not value.strip() for value in normalized):
+                    raise ValueError(f"{name} must contain non-empty strings")
+                if len(set(normalized)) != len(normalized):
+                    raise ValueError(f"{name} contains duplicate IDs")
+                object.__setattr__(self, name, normalized)
+        if self.parent_scope_confirmed is not None and type(self.parent_scope_confirmed) is not bool:
+            raise TypeError("parent_scope_confirmed must be a boolean or None")
+        if self.activity_binding_identity is not None and (
+            not isinstance(self.activity_binding_identity, tuple)
+            or len(self.activity_binding_identity) != 2
+            or any(not isinstance(value, str) or not value.strip() for value in self.activity_binding_identity)
+        ):
+            raise ValueError("activity_binding_identity must be a provider/file pair")
+
+    @property
+    def locator_range(self) -> Any:
+        return self.locator
+
+
+def _value(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return value.value
+    if hasattr(value, "as_dict") and callable(value.as_dict):
+        return value.as_dict()
+    if hasattr(value, "__dict__") and not isinstance(value, type):
+        return {key: _value(item) for key, item in vars(value).items()}
+    if isinstance(value, Mapping):
+        return {str(key): _value(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_value(item) for item in value]
+    return value
+
+
+def evidence_item_to_dict(item: EvidenceItem) -> dict[str, Any]:
+    result = {
+        "source_class": item.source_class,
+        "entity_id": item.entity_id,
+        "locator": str(item.locator),
+        "fingerprint": {
+            "source_version": item.fingerprint.source_version,
+            "source_hash": item.fingerprint.source_hash,
+        },
+        "authority": _value(item.authority),
+        "content": item.content,
+        "provenance": _value(item.provenance),
+        "freshness": _value(item.freshness),
+        **({"provisional": True} if getattr(item, "provisional", False) else {}),
+        "usage_policy": getattr(item, "usage_policy", "NORMAL"),
+        "assignment_decision": getattr(item, "assignment_decision", "NO"),
+    }
+    constraint = getattr(item, "constraint_metadata", None)
+    if constraint is not None:
+        result["constraint_metadata"] = _value(constraint)
+    return result
+
+
+def context_package_to_dict(package: ContextPackage) -> dict[str, Any]:
+    return {
+        "protocol_version": package.protocol_version,
+        "context_id": package.context_id,
+        "entity": _value(package.entity),
+        "scope": _value(package.scope),
+        "sources": [evidence_item_to_dict(item) for item in package.sources],
+        "professor_signals": [_value(item) for item in package.professor_signals],
+        "user_context": [_value(item) for item in package.user_context],
+        "warnings": [_value(item) for item in package.warnings],
+    }
+
+
+# ``SourceChunk`` is an intentionally descriptive alias.  EvidenceItem is
+# still the canonical public domain type used in ContextPackage.sources.
+SourceChunk = EvidenceItem
+
+
+__all__ = [
+    "CapabilityBinding",
+    "ContextPackage",
+    "EvidenceItem",
+    "ResolutionCandidate",
+    "ResolutionResult",
+    "ResolvedEntity",
+    "RetrievalBudget",
+    "SourceChunk",
+    "context_package_to_dict",
+    "evidence_item_to_dict",
+]

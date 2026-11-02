@@ -9,12 +9,12 @@ from pathlib import Path
 import pytest
 from tests.contract._settings_support import write_config
 
-from uls.settings.config_service import ConfigStore, SettingsServiceError
-from uls.settings.credential_roles import ROLES
-from uls.settings.credential_service import CredentialService
-from uls.settings.credential_stores import CredentialStores, FakeKeyring
-from uls.settings.journal import JournalStore, SimulatedCrash
-from uls.settings.provider_checks import FakeProviderTransport, ProviderChecks
+from syllva.settings.config_service import ConfigStore, SettingsServiceError
+from syllva.settings.credential_roles import ROLES
+from syllva.settings.credential_service import CredentialService
+from syllva.settings.credential_stores import CredentialStores, FakeKeyring
+from syllva.settings.journal import JournalStore, SimulatedCrash
+from syllva.settings.provider_checks import FakeProviderTransport, ProviderChecks
 
 pytestmark = pytest.mark.contract
 
@@ -43,7 +43,7 @@ def crash(point):
 def _configure_notion_sources(service, sources):
     import yaml
 
-    from uls.config.mutation import atomic_replace_config
+    from syllva.config.mutation import atomic_replace_config
 
     raw = service.config.load().raw
     raw["credentials"] = {name: {"source": source} for name, source in sources.items()}
@@ -64,7 +64,7 @@ def _notion_peer_effect_snapshot(service, roles):
 
 
 def _inject_synthetic_eacces(monkeypatch, target):
-    import uls.config._secure_file as secure_file
+    import syllva.config._secure_file as secure_file
 
     real_open = secure_file.os.open
     parent = target.parent.stat()
@@ -116,7 +116,7 @@ def _credential_card(service, role_slug):
 def _configure_google_path(service, role, path_value, *, legacy=False):
     import yaml
 
-    from uls.config.mutation import atomic_replace_config
+    from syllva.config.mutation import atomic_replace_config
 
     raw = service.config.load().raw
     raw.pop(f"google_{role.purpose}_credentials_path", None)
@@ -155,7 +155,7 @@ def test_cards_distinguish_absent_and_present_environment_credentials_without_di
 def test_cards_report_external_google_file_without_path_or_contents(tmp_path):
     import yaml
 
-    from uls.config.mutation import atomic_replace_config
+    from syllva.config.mutation import atomic_replace_config
 
     s = service(tmp_path / "external-google-file", environ={})
     external_path = tmp_path / "external-google-file" / "user-managed.json"
@@ -244,7 +244,7 @@ def test_google_environment_path_remains_environment_origin_when_it_names_manage
 
 
 def test_canonical_source_classification_does_not_relax_symlink_read_guard(tmp_path):
-    from uls.config.errors import ConfigurationError
+    from syllva.config.errors import ConfigurationError
 
     s = service(tmp_path, environ={})
     role = ROLES["google-mcp"]
@@ -338,7 +338,7 @@ def test_two_workspaces_reservation_blocks_until_exact_recovery(tmp_path):
     with pytest.raises(SimulatedCrash):
         a.save(role, b"new-token", a.config.load().generation, fault_hook=crash("after_credential_promote_recorded"))
     b = service(tmp_path / "b", backend=a.stores.backend, root=a.stores.root)
-    from uls.settings.journal import OperationInProgress
+    from syllva.settings.journal import OperationInProgress
     with pytest.raises(OperationInProgress):
         b.save(role, b"third-token", b.config.load().generation)
     [pending] = a.journal.unresolved()
@@ -352,7 +352,7 @@ def test_two_workspaces_reservation_blocks_until_exact_recovery(tmp_path):
 def test_google_forget_refuses_other_effective_env_binding_and_external_detach(tmp_path):
     import json
 
-    from uls.config.mutation import atomic_replace_config
+    from syllva.config.mutation import atomic_replace_config
     s = service(tmp_path); role = ROLES["google-mcp"]
     value = {"type": "service_account", "client_email": "mcp@example.com", "private_key": "fake-key",
              "private_key_id": "mcp-key", "project_id": "fake", "token_uri": "https://oauth2.googleapis.com/token"}
@@ -375,7 +375,7 @@ def test_google_forget_refuses_other_effective_env_binding_and_external_detach(t
 
 
 def test_v3_config_history_remains_readable_but_v3_credential_record_refused(tmp_path):
-    from uls.settings.journal import validate_record
+    from syllva.settings.journal import validate_record
     s = service(tmp_path)
     generation = s.config.load().generation
     operation_id = s.journal.create_config_operation(binding=s.config.binding(), original_generation=generation,
@@ -414,8 +414,8 @@ def test_notion_save_checks_undeclared_canonical_managed_peer(tmp_path):
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX EACCES injection targets the secure-file open boundary")
 def test_notion_save_fails_closed_when_canonical_peer_read_is_eacces(tmp_path, monkeypatch):
-    from uls.config._secure_file import read_secure_file
-    from uls.config.errors import ConfigurationError
+    from syllva.config._secure_file import read_secure_file
+    from syllva.config.errors import ConfigurationError
 
     s = service(tmp_path / "notion-peer-eacces", environ={})
     mcp, worker = ROLES["notion-mcp"], ROLES["notion-worker"]
@@ -477,7 +477,7 @@ def test_notion_save_checks_current_workspace_environment_peer(tmp_path):
 def test_configured_missing_notion_peer_fails_closed(tmp_path, source):
     import yaml
 
-    from uls.config.mutation import atomic_replace_config
+    from syllva.config.mutation import atomic_replace_config
 
     s = service(tmp_path, environ={})
     raw = s.config.load().raw
@@ -553,7 +553,7 @@ def test_concurrent_cross_workspace_same_notion_value_cannot_fill_both_purposes(
     from concurrent.futures import ThreadPoolExecutor
     from threading import Barrier
 
-    from uls.settings.journal import OperationInProgress
+    from syllva.settings.journal import OperationInProgress
 
     root = tmp_path / "shared-per-user-secrets"
     backend = FakeKeyring()
@@ -600,7 +600,7 @@ def test_concurrent_cross_workspace_same_google_identity_cannot_fill_both_purpos
     from concurrent.futures import ThreadPoolExecutor
     from threading import Barrier
 
-    from uls.settings.journal import OperationInProgress
+    from syllva.settings.journal import OperationInProgress
 
     root = tmp_path / "shared-per-user-secrets"
     backend = FakeKeyring()
@@ -649,7 +649,7 @@ def _replace_cross_workspace_together(targets, values):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Barrier
 
-    from uls.settings.journal import OperationInProgress
+    from syllva.settings.journal import OperationInProgress
 
     barrier = Barrier(2)
 
@@ -794,7 +794,7 @@ def test_google_save_fails_closed_on_configured_unsafe_external_peer_without_cha
 
 
 def test_abandoned_enrollment_releases_peer_for_same_credential_registration(tmp_path):
-    from uls.settings.journal import OperationInProgress
+    from syllva.settings.journal import OperationInProgress
 
     root = tmp_path / "shared-per-user-secrets"
     backend = FakeKeyring()

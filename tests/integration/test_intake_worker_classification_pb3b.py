@@ -8,9 +8,9 @@ from pathlib import Path
 import pytest
 from tests.integration.test_intake_worker_preview import _details_request, _system
 
-from uls.intake.identity import derive_request_key, derive_request_revision, sha256_hex
-from uls.intake.requests import RequestType, build_request_generation
-from uls.intake.worker import IntakeReconcileRequired
+from syllva.intake.identity import derive_request_key, derive_request_revision, sha256_hex
+from syllva.intake.requests import RequestType, build_request_generation
+from syllva.intake.worker import IntakeReconcileRequired
 
 pytestmark = pytest.mark.integration
 

@@ -13,11 +13,11 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures")
 
 from phase4 import material_derivative, ready_phase4
 
-from uls.adapters.drive.binding import SourceBindingRecord
-from uls.config.schema import RetrievalCfg, UlsConfig
-from uls.domain.errors import SourcePartialError, SourceUnavailableError
-from uls.domain.source_ref import SourceFingerprint, SourceRef
-from uls.proposal.material_usage import MaterialUsageProposalProducer
+from syllva.adapters.drive.binding import SourceBindingRecord
+from syllva.config.schema import RetrievalCfg, SyllvaConfig
+from syllva.domain.errors import SourcePartialError, SourceUnavailableError
+from syllva.domain.source_ref import SourceFingerprint, SourceRef
+from syllva.proposal.material_usage import MaterialUsageProposalProducer
 
 
 def _two_material_phase4():
@@ -51,7 +51,7 @@ def _producer(reader, writer, drive, resolver, proposer, **limits):
         writer,
         proposer,
         source_binding_resolver=resolver,
-        config=UlsConfig(),
+        config=SyllvaConfig(),
         **limits,
     )
 
@@ -325,7 +325,7 @@ def test_model_page_bounds_are_strict_and_never_create_usage(start_page, end_pag
 
 def test_retrieval_budgets_are_producer_defaults_when_not_overridden() -> None:
     reader, writer, drive, resolver = _two_material_phase4()
-    config = UlsConfig(
+    config = SyllvaConfig(
         retrieval=RetrievalCfg(
             max_candidate_entities=1,
             max_candidate_chunks=2,

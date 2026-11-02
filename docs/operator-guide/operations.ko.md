@@ -7,20 +7,20 @@
 다음부터 시작합니다.
 
 ```bash
-uls doctor
-uls status
-uls jobs --limit 20
+syllva doctor
+syllva status
+syllva jobs --limit 20
 ```
 
 그 다음 의도적으로 bounded work를 실행합니다.
 
 ```bash
-uls sync --max-jobs 20
-uls process --max-jobs 20
-uls run --max-jobs 20
+syllva sync --max-jobs 20
+syllva process --max-jobs 20
+syllva run --max-jobs 20
 ```
 
-`uls retry <job-id>`는 실패 원인을 이해한 뒤 사용하세요. `uls reprocess <entity-id>`는 명시적 운영자 동작이며 불확실한 외부 상태를 숨기는 용도로 사용하지 않습니다.
+`syllva retry <job-id>`는 실패 원인을 이해한 뒤 사용하세요. `syllva reprocess <entity-id>`는 명시적 운영자 동작이며 불확실한 외부 상태를 숨기는 용도로 사용하지 않습니다.
 
 ## Single active worker
 
@@ -35,7 +35,7 @@ worker mutation 명령은 local single-active-worker lock을 공유합니다. �
 - `deployment/macos/com.syllva.uls.plist`
 - `deployment/windows/uls-task.xml`
 
-절대 경로를 수정하고 scheduler 등록 전 수동 `uls run` 동작을 검증하세요. scheduled process는 interactive shell environment를 자동 상속하지 않을 수 있으므로 credential 공급을 private OS/service mechanism으로 명시적으로 처리해야 합니다.
+절대 경로를 수정하고 scheduler 등록 전 수동 `syllva run` 동작을 검증하세요. scheduled process는 interactive shell environment를 자동 상속하지 않을 수 있으므로 credential 공급을 private OS/service mechanism으로 명시적으로 처리해야 합니다.
 
 선택적 LMS schedule은 별도 gate 통과 전 활성화하지 않습니다.
 
@@ -54,7 +54,7 @@ WAL write가 활성화된 상태에서 main SQLite file만 복사하는 것을 �
 1. worker scheduler와 MCP process를 중지합니다.
 2. 현재 상태를 별도 recovery copy로 보존합니다.
 3. 선택한 config/state를 함께 복원합니다.
-4. `uls status`, `uls doctor`를 실행합니다.
+4. `syllva status`, `syllva doctor`를 실행합니다.
 5. 제한된 source/context smoke check를 수행합니다.
 6. 자동화 활성화 전 복원된 local provenance와 Drive/Notion 상태를 reconcile합니다.
 

@@ -12,9 +12,9 @@ from tests.integration.test_intake_worker_preview import (
     _system,
 )
 
-from uls.domain.errors import SourceUnavailableError
-from uls.intake.classification import FILE_KINDS_V2
-from uls.intake.worker import INTAKE_MATERIAL_OPERATION
+from syllva.domain.errors import SourceUnavailableError
+from syllva.intake.classification import FILE_KINDS_V2
+from syllva.intake.worker import INTAKE_MATERIAL_OPERATION
 
 pytestmark = pytest.mark.integration
 
@@ -81,7 +81,7 @@ def test_human_v2_material_kind_is_preserved_through_claim_and_dispatch(tmp_path
         assert worker.backfill_material_ai_kind() == {"scanned": 0, "updated": 0}
         assert notion.data_sources["synthetic-materials"][0].get("AI Kind") is None
         # plan §9 P-B (r2 R3): a HUMAN v2-Kind Material is a v2 product for the retrieval gate too
-        from uls.state.reader import ReadOnlyState
+        from syllva.state.reader import ReadOnlyState
 
         assert ReadOnlyState(system["state"].db_path).is_v2_material(material["ID"]) is True
 
@@ -213,6 +213,6 @@ def test_a_legacy_material_pdf_is_not_a_v2_product(tmp_path: Path) -> None:
                                           "Material Role": "Lecture Slides", "Submitted": True})
         worker.run_once()
         (material,) = notion.data_sources["synthetic-materials"]
-        from uls.state.reader import ReadOnlyState
+        from syllva.state.reader import ReadOnlyState
 
         assert ReadOnlyState(system["state"].db_path).is_v2_material(material["ID"]) is False

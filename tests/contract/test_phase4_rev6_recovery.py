@@ -16,7 +16,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures")
 
 from phase4 import phase4_applier_kwargs, phase4_proposal, ready_phase4
 
-from uls.adapters.notion.base import (
+from syllva.adapters.notion.base import (
     _PHASE4_APPLY_MARKER_PREFIX,
     HumanApprovalApplier,
     QueueState,
@@ -24,9 +24,9 @@ from uls.adapters.notion.base import (
     enforce_write_policy,
     upsert_proposal,
 )
-from uls.domain.enums import AutomationActor
-from uls.domain.errors import PolicyViolation
-from uls.domain.page_range import PageRange
+from syllva.domain.enums import AutomationActor
+from syllva.domain.errors import PolicyViolation
+from syllva.domain.page_range import PageRange
 
 
 def _approved_phase4(operation: str):
@@ -431,7 +431,7 @@ def test_marker_appearing_during_preflight_is_not_claimed_by_current_arm(
         nonlocal appeared
         rows = real_usage(session_id)
         if not appeared:
-            from uls.domain.approval_identity import canonical_semantics_from_queue
+            from syllva.domain.approval_identity import canonical_semantics_from_queue
 
             row = writer.queue[proposal["Proposal ID"]]
             target_patch = (
@@ -509,7 +509,7 @@ def test_malformed_reserved_marker_fails_closed_before_target_write() -> None:
 def test_conflicting_reserved_marker_fails_closed_before_target_write() -> None:
     reader, writer, drive, resolver, proposal = _approved_phase4("create_usage")
     row = writer.queue[proposal["Proposal ID"]]
-    from uls.domain.approval_identity import canonical_semantics_from_queue
+    from syllva.domain.approval_identity import canonical_semantics_from_queue
 
     row["Last Error"] = _phase4_apply_marker_text(
         proposal["Proposal ID"],

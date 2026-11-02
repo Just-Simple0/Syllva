@@ -1,4 +1,4 @@
-"""Regression tests for bounded PDF extraction (src/uls/normalization/pdf.py).
+"""Regression tests for bounded PDF extraction (src/syllva/normalization/pdf.py).
 
 There was no prior test coverage for extract_pdf() at all.  These tests
 cover the three review findings:
@@ -23,8 +23,8 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
-from uls.domain.source_ref import SourceRef
-from uls.normalization.pdf import PDFContentStatus, extract_pdf
+from syllva.domain.source_ref import SourceRef
+from syllva.normalization.pdf import PDFContentStatus, extract_pdf
 
 _SOURCE_REF = SourceRef("google_drive", "file-1")
 

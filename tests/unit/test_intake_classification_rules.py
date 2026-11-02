@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from uls.intake.classification import (
+from syllva.intake.classification import (
     FILE_KINDS_V2,
     MATERIAL_TYPE_INITIAL,
     CourseAliasIndex,
@@ -29,12 +29,12 @@ from uls.intake.classification import (
     week_from_filename,
     week_from_module_name,
 )
-from uls.intake.classification.rules import (
+from syllva.intake.classification.rules import (
     CANVAS_ANNOUNCEMENT,
     CANVAS_ASSIGNMENT,
     CANVAS_MODULE_ITEM,
 )
-from uls.intake.classification.taxonomy import XLSX_MAX_ENTRY_BYTES
+from syllva.intake.classification.taxonomy import XLSX_MAX_ENTRY_BYTES
 
 pytestmark = pytest.mark.unit
 

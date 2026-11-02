@@ -3,14 +3,14 @@ from pathlib import Path
 
 import pytest
 
-from uls.cli import main as cli
-from uls.config.errors import ConfigurationError
-from uls.config.schema import UlsConfig
-from uls.runtime import build_study_note_submission_server
+from syllva.cli import main as cli
+from syllva.config.errors import ConfigurationError
+from syllva.config.schema import SyllvaConfig
+from syllva.runtime import build_study_note_submission_server
 
 
 def test_submission_is_separate_and_disabled_by_default():
-    config = UlsConfig()
+    config = SyllvaConfig()
     assert config.mcp.read_only
     assert cli.parser().parse_args(["study-notes", "local"]).mode == "local"
     with pytest.raises(ConfigurationError, match="explicitly true"):
@@ -18,7 +18,7 @@ def test_submission_is_separate_and_disabled_by_default():
 
 
 def test_submission_cli_never_resolves_provider_credentials_and_closes_on_failure(monkeypatch):
-    config = UlsConfig()
+    config = SyllvaConfig()
     config.study_notes.enabled = True
     events = []
 
@@ -35,8 +35,8 @@ def test_submission_cli_never_resolves_provider_credentials_and_closes_on_failur
 
     monkeypatch.setattr(cli, "_config", lambda _: config)
     monkeypatch.setattr(cli, "CredentialResolver", credential_access)
-    monkeypatch.setattr("uls.runtime.build_study_note_submission_server", lambda _: Server())
-    monkeypatch.setattr("uls.mcp.transports.local.run_local", serve)
+    monkeypatch.setattr("syllva.runtime.build_study_note_submission_server", lambda _: Server())
+    monkeypatch.setattr("syllva.mcp.transports.local.run_local", serve)
     args = Namespace(command="study-notes", mode="local", config=Path("unused.yaml"))
     with pytest.raises(RuntimeError, match="transport ended"):
         cli.dispatch(args)
@@ -44,7 +44,7 @@ def test_submission_cli_never_resolves_provider_credentials_and_closes_on_failur
 
 
 def test_submission_status_does_not_claim_client_readiness(monkeypatch):
-    config = UlsConfig()
+    config = SyllvaConfig()
     monkeypatch.setattr(cli, "_config", lambda _: config)
     status = cli.dispatch(Namespace(command="study-notes", mode="status", config=Path("unused.yaml")))
     assert status["enabled"] is False

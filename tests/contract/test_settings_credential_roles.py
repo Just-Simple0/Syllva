@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from uls.config.credentials import (
+from syllva.config.credentials import (
     ALLOWED_SOURCES,
     FILE_BINDINGS,
     KEYRING_BINDINGS,
     CredentialResolver,
 )
-from uls.settings.credential_roles import ROLES, canvas_role, validate_locators
+from syllva.settings.credential_roles import ROLES, canvas_role, validate_locators
 
 pytestmark = pytest.mark.contract
 

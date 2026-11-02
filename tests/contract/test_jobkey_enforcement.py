@@ -3,8 +3,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
 import pytest
 
-from uls.orchestration.jobs import derive_job_key
-from uls.state.sqlite import SQLiteStateStore
+from syllva.orchestration.jobs import derive_job_key
+from syllva.state.sqlite import SQLiteStateStore
 
 
 def _source_job_kwargs() -> dict[str, str]:

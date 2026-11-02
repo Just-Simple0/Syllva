@@ -11,10 +11,10 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures")
 
 from phase4 import phase4_applier_kwargs, phase4_proposal, ready_phase4
 
-from uls.adapters.notion.base import HumanApprovalApplier, QueueState, upsert_proposal
-from uls.adapters.notion.guarded import GuardedNotionWriter
-from uls.domain.errors import PolicyViolation, ProviderUnavailableError
-from uls.domain.page_range import PageRange
+from syllva.adapters.notion.base import HumanApprovalApplier, QueueState, upsert_proposal
+from syllva.adapters.notion.guarded import GuardedNotionWriter
+from syllva.domain.errors import PolicyViolation, ProviderUnavailableError
+from syllva.domain.page_range import PageRange
 
 
 @pytest.mark.parametrize("wrapped", [False, True])
