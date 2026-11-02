@@ -37,6 +37,7 @@ dev = [
     "mypy>=1.9",
     "PyJWT[crypto]>=2.8,<3",
     "cryptography>=42.0",
+    "import-linter>=2.1,<3",
 ]
 
 [project.scripts]
@@ -70,3 +71,75 @@ python_version = "3.11"
 packages = ["syllva"]
 mypy_path = "src"
 strict = true
+
+# v2 import-direction contracts (implementation spec §1.3, §13.5).
+# Only direct imports are checked. `ignore_imports` is a RATCHET: it records the
+# violations that existed when the contracts were introduced (R1b-1). Entries may
+# only be removed; an entry that no longer matches fails the check, and a new
+# violation not listed here fails the check. The lists must be empty by end of R1b.
+# A PR that adds a violation AND the matching ignore entry is not caught by the
+# tool; such additions must be rejected in review.
+# Not yet expressible (packages do not exist): agents -/-> library/state,
+# prompt -/-> state, core layers -/-> ui/agents/shell (spec §1.3). They are added
+# when those packages are created (R2/R4). Rust-side spawn checks land with shell/ (R2).
+[tool.importlinter]
+root_package = "syllva"
+
+[[tool.importlinter.contracts]]
+id = "core-no-outer-or-legacy"
+name = "Core modules do not import outer layers or legacy providers"
+type = "forbidden"
+source_modules = [
+    "syllva.domain", "syllva.ingestion", "syllva.normalization", "syllva.enrichment",
+    "syllva.retrieval", "syllva.state", "syllva.ephemeral",
+]
+forbidden_modules = [
+    "syllva.settings", "syllva.mcp", "syllva.cli", "syllva.study_notes",
+    "syllva.adapters.notion", "syllva.adapters.drive", "syllva.adapters.llm",
+]
+allow_indirect_imports = true
+ignore_imports = [
+    "syllva.ingestion.discovery -> syllva.adapters.drive.worker",
+    "syllva.retrieval.engine -> syllva.adapters.drive.base",
+    "syllva.retrieval.engine -> syllva.adapters.drive.binding",
+    "syllva.state.reader -> syllva.adapters.drive.binding",
+    "syllva.enrichment._common -> syllva.adapters.llm.base",
+    "syllva.enrichment.material -> syllva.adapters.llm.base",
+    "syllva.enrichment.session -> syllva.adapters.llm.base",
+    "syllva.enrichment.writer -> syllva.adapters.llm.base",
+    "syllva.enrichment.writer -> syllva.adapters.notion.base",
+    "syllva.retrieval._compat -> syllva.adapters.notion.base",
+    "syllva.retrieval.engine -> syllva.adapters.notion.base",
+    "syllva.retrieval.resolver -> syllva.adapters.notion.base",
+]
+
+[[tool.importlinter.contracts]]
+id = "lower-layers-no-services"
+name = "Domain, state and ephemeral do not import higher service layers"
+type = "forbidden"
+source_modules = ["syllva.domain", "syllva.state", "syllva.ephemeral"]
+forbidden_modules = ["syllva.intake", "syllva.retrieval"]
+allow_indirect_imports = true
+ignore_imports = [
+    "syllva.state.classification_state -> syllva.intake.classification.calendar",
+    "syllva.state.sqlite -> syllva.intake.identity",
+    "syllva.state.usage_range -> syllva.intake.usage_range",
+]
+
+[[tool.importlinter.contracts]]
+id = "no-external-llm-adapter"
+name = "v2 runtime does not use the external LLM adapter (S2/enrichment paths disabled)"
+type = "forbidden"
+source_modules = [
+    "syllva.intake", "syllva.runtime", "syllva.cli", "syllva.worker", "syllva.settings",
+    "syllva.mcp", "syllva.study_notes", "syllva.proposal", "syllva.orchestration",
+    "syllva.config", "syllva.behavior",
+]
+forbidden_modules = ["syllva.adapters.llm"]
+allow_indirect_imports = true
+ignore_imports = [
+    "syllva.cli.main -> syllva.adapters.llm.typesafe_choice",
+    "syllva.intake.classification.s2 -> syllva.adapters.llm.typesafe_choice",
+    "syllva.intake.worker -> syllva.adapters.llm.typesafe_choice",
+    "syllva.runtime -> syllva.adapters.llm.typesafe_choice",
+]
