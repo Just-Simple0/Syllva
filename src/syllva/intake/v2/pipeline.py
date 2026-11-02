@@ -41,7 +41,7 @@ from pathlib import PurePath
 from typing import Any, BinaryIO, cast
 
 from syllva.domain.errors import PolicyViolation, SyllvaError
-from syllva.ingestion.local import ingest_new, nfc
+from syllva.ingestion.local import IngestError, add_version, ingest_new, nfc
 from syllva.intake.classification.calendar import MatchStatus
 from syllva.intake.classification.pipeline import (
     NOTE_CANVAS_WEEK_CONFLICT,
@@ -334,6 +334,63 @@ class LocalIntake:
         self.writer.transition_intake_state(Actor.UI_USER, candidate_id, "DISMISSED", now=now or _now())
         return self.get(candidate_id)
 
+    def replace(self, material_id: str, stream: BinaryIO, *, display_name: str, mime_type: str | None = None,
+                now: str | None = None) -> Candidate:
+        """The user replaces a material's file with a revision (§11.4); the action is the confirmation.
+
+        Adds a NEW source version (``supersedes`` the current one; the old version is kept), opens a
+        replacement candidate already CONFIRMED onto that material, and leaves processing to the
+        worker. Older locators and AI artifacts become stale by fingerprint (I5) — nothing is
+        rewritten. Refused while earlier work on the material is still pending, for identical bytes,
+        and for bytes of an older version (restoring is an explicit, separate action).
+        """
+
+        self._own_transactions()
+        stamp = now or _now()
+        name = nfc(display_name)
+        if PurePath(name).suffix.lower() not in NORMALIZER_BY_EXTENSION:
+            raise IntakeError("this file type is not supported yet", details={"name": name})
+        target = self.writer.query_one(
+            "SELECT m.id, f.source_id, f.display_name FROM materials m JOIN source_files f ON f.id = m.source_file_id "
+            "WHERE m.material_id = ? AND f.deleted_at IS NULL",
+            (material_id,),
+        )
+        if target is None:
+            raise IntakeError("unknown material", details={"material_id": material_id})
+        if PurePath(str(target["display_name"])).suffix.lower() != PurePath(name).suffix.lower():
+            raise IntakeError("a revision must keep the file type (it is normalized the same way)")
+        busy = self.writer.query_one(
+            "SELECT 1 FROM intake_candidates WHERE material_id = ? AND state IN ('AUTO_CONFIRMED','CONFIRMED','QUEUED','PROCESSING')",
+            (int(target["id"]),),
+        )
+        if busy is not None:
+            raise IntakeError("earlier work on this material is still pending", details={"material_id": material_id})
+        candidate_id = "INT-" + secrets.token_hex(6)
+        try:
+            with self.writer.transaction():
+                version = add_version(
+                    self.writer, self.blobs, str(target["source_id"]),
+                    cast(BinaryIO, _ChunkReader(_bounded(stream, self.config.max_bytes))), now=stamp,
+                )
+                if not version.created:
+                    raise IntakeError("the file is identical to the current version")
+                self.writer.insert(
+                    Owner.CATALOG, Actor.INGESTER, "intake_candidates",
+                    {
+                        "candidate_id": candidate_id, "channel": "USER_DROP", "display_name": name, "mime_type": mime_type,
+                        "size_bytes": version.size_bytes, "source_version_id": version.source_version_id, "state": "RECEIVED",
+                        "replaces_material": int(target["id"]), "created_at": stamp, "updated_at": stamp,
+                    },
+                )
+                self.writer.transition_intake_state(
+                    Actor.UI_USER, candidate_id, "CONFIRMED", values={"material_id": int(target["id"])}, now=stamp
+                )
+        except (_TooLarge, BlobTooLarge):
+            raise IntakeError("the file is too large", details={"max_bytes": self.config.max_bytes}) from None
+        except IngestError as exc:
+            raise IntakeError(str(exc)) from exc
+        return self.get(candidate_id)
+
     def retry(self, candidate_id: str, *, now: str | None = None) -> Candidate:
         """Queue a FAILED/PARTIAL/READY candidate for another processing run."""
 
@@ -356,6 +413,20 @@ class LocalIntake:
         if row is None or row["state"] not in ("AUTO_CONFIRMED", "CONFIRMED", "QUEUED"):
             raise IntakeError("candidate is not ready for processing", details={"candidate_id": candidate_id})
         material_id = str(row["material_id"])
+        newer = self.writer.query_one(
+            "SELECT 1 FROM source_versions v JOIN source_versions mine ON mine.source_file_id = v.source_file_id "
+            "WHERE mine.id = ? AND v.source_version > mine.source_version",
+            (int(row["source_version_id"]),),
+        )
+        if newer is not None:
+            # §11.4 / I5: a run of a superseded version must never decide the material's state
+            with self.writer.transaction():
+                self.writer.transition_intake_state(Actor.INGESTER, candidate_id, "PROCESSING", now=stamp)
+                self.writer.transition_intake_state(
+                    Actor.INGESTER, candidate_id, "FAILED",
+                    values={"reason_code": "SUPERSEDED", "reason_message": "a newer version of this file replaced it"}, now=stamp,
+                )
+            return self.get(candidate_id)
         job_id = self._job_start(row, material_id, stamp)
         with self.writer.transaction():
             self.writer.transition_intake_state(

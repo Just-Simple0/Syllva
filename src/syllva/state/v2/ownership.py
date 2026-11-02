@@ -64,7 +64,7 @@ IMMUTABLE_COLUMNS: dict[str, frozenset[str]] = {
     "courses": frozenset({"course_key"}),
     "sessions": frozenset({"session_id"}),
     "source_files": frozenset({"source_id"}),
-    "intake_candidates": frozenset({"candidate_id", "channel", "source_version_id", "size_bytes"}),
+    "intake_candidates": frozenset({"candidate_id", "channel", "source_version_id", "size_bytes", "replaces_material"}),
 }
 
 # Human-only columns (design §5.5). Only the gate commit path may set them.
@@ -121,7 +121,7 @@ STATUS_TRANSITIONS: dict[str, frozenset[str]] = {
 # read-only intake_state_transitions table and rejects any other change; this copy
 # lets the writer refuse early with a clear error. A contract test keeps them equal.
 INTAKE_TRANSITIONS: dict[str, frozenset[str]] = {
-    "RECEIVED": frozenset({"CLASSIFYING"}),
+    "RECEIVED": frozenset({"CLASSIFYING", "CONFIRMED"}),  # -> CONFIRMED only for a replacement (003)
     "CLASSIFYING": frozenset({"NEEDS_REVIEW", "AUTO_CONFIRMED", "RECEIVED"}),
     "NEEDS_REVIEW": frozenset({"CONFIRMED", "DISMISSED"}),
     "AUTO_CONFIRMED": frozenset({"PROCESSING", "QUEUED"}),
@@ -137,7 +137,7 @@ INTAKE_TRANSITIONS: dict[str, frozenset[str]] = {
 }
 INTAKE_INITIAL_STATES = frozenset({"RECEIVED", "DUPLICATE", "UNSUPPORTED"})
 # The user confirms (NEEDS_REVIEW -> CONFIRMED) and dismisses; everything else is processing.
-INTAKE_USER_TRANSITIONS = frozenset({("NEEDS_REVIEW", "CONFIRMED"), ("NEEDS_REVIEW", "DISMISSED"),
+INTAKE_USER_TRANSITIONS = frozenset({("NEEDS_REVIEW", "CONFIRMED"), ("NEEDS_REVIEW", "DISMISSED"), ("RECEIVED", "CONFIRMED"),
                                      ("DUPLICATE", "DISMISSED"), ("UNSUPPORTED", "DISMISSED")})
 
 
