@@ -11,13 +11,19 @@ Context assembly:
   evidence (design I5), reported as a warning for routing;
 * a PARTIAL derivative is used but flagged (``PARTIAL_SOURCE``) — never presented
   as complete (I3);
-* chunks are bounded by ``RetrievalBudget``; dropping chunks is reported as
-  ``PARTIAL_CONTEXT(used/total)``, never silent (spec §8.8.1). Relevance ranking of
-  chunks is R1b-5; until then chunks are taken in locator order;
+* chunks are bounded by ``RetrievalBudget`` and taken in locator order (relevance
+  ranking is R1b-5). Selection STOPS at the first chunk that does not fit, so the
+  package never has holes, and the rest is reported as
+  ``PARTIAL_CONTEXT(used/total)`` (spec §8.8.1). A single chunk larger than
+  ``max_chars_per_item`` cannot be used until R1b-5 splits chunks into sub-ranges;
+  it is reported per locator as ``OVERSIZE_CHUNK`` (spec errata E14), never silently;
 * every package carries a context capability: the allowlist of exactly the
   locators it contains, bound to the source hash/version that authorized them and
-  to ``caller_scope`` (the UI session). ``get_source_chunk`` only serves a locator
-  that the capability allows AND that is still current (spec §8.6, C-10).
+  to ``caller_scope`` (the UI session), and the service remembers which derivative
+  each material's evidence came from, so ``get_source_chunk`` serves exactly the
+  text that was packaged — only for allowlisted locators that are still current
+  (spec §8.6, C-10). A missing/corrupt blob drops that material with
+  ``BLOB_UNAVAILABLE`` instead of failing the whole package.
 """
 
 from __future__ import annotations
@@ -29,7 +35,7 @@ from datetime import date
 from typing import Any
 
 from syllva.domain.enums import FreshnessStatus, SourceAuthority
-from syllva.domain.errors import PolicyViolation, SyllvaError
+from syllva.domain.errors import PolicyViolation, SourceUnavailableError, SyllvaError
 from syllva.domain.models import (
     ContextPackage,
     EvidenceItem,
@@ -42,13 +48,14 @@ from syllva.domain.provenance import Provenance
 from syllva.domain.source_ref import SourceFingerprint, v2_source_ref
 from syllva.ephemeral.base import EphemeralStore
 from syllva.ephemeral.models import AllowedLocator, ResolvedEntity
-from syllva.library.blobs import BlobStore
+from syllva.library.blobs import BlobError, BlobStore
 from syllva.retrieval.natural import NaturalResolution, NaturalResolver
 from syllva.retrieval.schemas import RetrievalBudget
 from syllva.state.v2.reader import StateReader
 
 PROTOCOL_VERSION = "2.0"
 CHUNKS_SCHEMA = "syllva.chunks.v1"
+CHUNKS_SCHEMA_VERSION = "1"  # derivatives.schema_version understood by this service
 
 _AUTHORITY_BY_KIND: dict[str, SourceAuthority] = {
     "TRANSCRIPT": SourceAuthority.PROFESSOR_TRANSCRIPT,
@@ -102,6 +109,8 @@ class RetrievalService:
         self.context_ttl = context_ttl_seconds
         self.verify_blobs = verify_blobs
         self.resolver = NaturalResolver(reader, ephemeral, today=today, semester_starts=semester_starts)
+        # context_id -> {material_id: chunks derivative id used for that package}
+        self._context_derivatives: dict[str, dict[str, int]] = {}
 
     # -- resolution -------------------------------------------------------------
 
@@ -158,9 +167,15 @@ class RetrievalService:
             raise LocatorNotAuthorized("locator is not in a current context capability", details={"cause": exc.code}) from exc
         if not allowed:
             raise LocatorNotAuthorized("locator is not in a current context capability")
-        chunks, derivative = self._chunks(source)
+        derivative_id = self._context_derivatives.get(context_id, {}).get(source.material_id)
+        if derivative_id is None:
+            raise LocatorNotAuthorized("locator is not in a current context capability")
+        try:
+            chunks, derivative = self._chunks(source, derivative_id)
+        except BlobError as exc:
+            raise SourceUnavailableError("source blob is unavailable", details={"material_id": source.material_id}) from exc
         if derivative is None:
-            raise LocatorNotAuthorized("source has no current derivative")
+            raise LocatorNotAuthorized("the packaged derivative is no longer current")
         wanted = serialize_locator(parsed)
         for chunk in chunks:
             if chunk["locator"] == wanted:
@@ -187,12 +202,16 @@ class RetrievalService:
             int(row["version_id"]), int(row["source_version"]), str(row["source_hash"]),
         )
 
-    def _chunks(self, source: _Source) -> tuple[list[dict[str, Any]], Any]:
-        derivative = self.reader.fetch_one(
+    def _chunks(self, source: _Source, derivative_id: int | None = None) -> tuple[list[dict[str, Any]], Any]:
+        sql = (
             "SELECT id, blob_sha256, completeness, processor_version, created_at FROM derivatives "
-            "WHERE source_version_id = ? AND kind = 'chunks' ORDER BY id DESC LIMIT 1",
-            (source.source_version_id,),
+            "WHERE source_version_id = ? AND kind = 'chunks' AND schema_version = ?"
         )
+        params: tuple[Any, ...] = (source.source_version_id, CHUNKS_SCHEMA_VERSION)
+        if derivative_id is not None:
+            sql += " AND id = ?"
+            params += (derivative_id,)
+        derivative = self.reader.fetch_one(sql + " ORDER BY id DESC LIMIT 1", params)
         if derivative is None:
             return [], None
         payload = json.loads(self.blobs.read_bytes(str(derivative["blob_sha256"]), verify=self.verify_blobs))
@@ -238,40 +257,52 @@ class RetrievalService:
             raise PolicyViolation("caller_scope (the UI session) is required")
         warnings: list[dict[str, Any]] = []
         candidates: list[EvidenceItem] = []
+        used_derivatives: dict[str, int] = {}
         for source in sources:
-            chunks, derivative = self._chunks(source)
+            try:
+                chunks, derivative = self._chunks(source)
+            except BlobError:
+                warnings.append({"code": "BLOB_UNAVAILABLE", "material_id": source.material_id})
+                continue
             if derivative is None:
                 code = "STALE_DERIVATIVE" if self._stale_exists(source) else "NOT_NORMALIZED"
                 warnings.append({"code": code, "material_id": source.material_id})
                 continue
+            items = [self._evidence(source, chunk, derivative) for chunk in chunks]
+            if any(item.locator.entity_id != source.material_id for item in items):
+                # a derivative normalized for another entity is not evidence for this material at all
+                warnings.append({"code": "LOCATOR_ENTITY_MISMATCH", "material_id": source.material_id})
+                continue
             if str(derivative["completeness"]) != "COMPLETE":
                 warnings.append({"code": "PARTIAL_SOURCE", "material_id": source.material_id})
-            for chunk in chunks:
-                locator = parse_locator(str(chunk["locator"]))
-                if getattr(locator, "entity_id", None) != source.material_id:
-                    warnings.append({"code": "LOCATOR_ENTITY_MISMATCH", "material_id": source.material_id})
-                    break
-                candidates.append(self._evidence(source, chunk, derivative))
+            used_derivatives[source.material_id] = int(derivative["id"])
+            candidates.extend(items)
 
         selected: list[EvidenceItem] = []
-        total = 0
+        fitting: list[EvidenceItem] = []
         for item in candidates:
+            if len(item.content) > self.budget.max_chars_per_item:
+                warnings.append({"code": "OVERSIZE_CHUNK", "material_id": item.entity_id, "locator": str(item.locator)})
+            else:
+                fitting.append(item)
+        total = 0
+        for item in fitting:
             size = len(item.content)
-            if (
-                len(selected) >= self.budget.max_evidence_items
-                or size > self.budget.max_chars_per_item
-                or total + size > self.budget.max_total_chars
-            ):
-                continue
+            if len(selected) >= self.budget.max_evidence_items or total + size > self.budget.max_total_chars:
+                break  # stop instead of skipping, so the packaged context has no holes
             selected.append(item)
             total += size
-        if len(selected) < len(candidates):
-            warnings.append({"code": "PARTIAL_CONTEXT", "used": len(selected), "total": len(candidates)})
+        if len(selected) < len(fitting):
+            warnings.append({"code": "PARTIAL_CONTEXT", "used": len(selected), "total": len(fitting)})
 
         allowed = [
             AllowedLocator(item.locator, item.fingerprint.source_hash, item.fingerprint.source_version) for item in selected
         ]
         capability = self.ephemeral.create_context_capability(list(allowed), caller_scope, self.context_ttl)
+        for stale_id in [c for c in self._context_derivatives if self.ephemeral.get_context_capability(c) is None]:
+            del self._context_derivatives[stale_id]
+        packaged = {item.entity_id for item in selected}
+        self._context_derivatives[capability.context_id] = {m: d for m, d in used_derivatives.items() if m in packaged}
         return ContextPackage(
             entity=dict(entity),
             scope={"caller_scope_bound": True, "materials": [s.material_id for s in sources]},

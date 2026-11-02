@@ -94,7 +94,11 @@ def test_material_context_uses_current_version_and_binds_a_capability(lib: Libra
     lib.material("LMS1-M01", TRANSCRIPT)
     package = lib.service().get_material_context("LMS1-M01", caller_scope=SCOPE)
     assert package.protocol_version == "2.0" and package.context_id
-    assert [str(i.locator) for i in package.sources] and all(i.entity_id == "LMS1-M01" for i in package.sources)
+    current = lib.db.connection.execute(
+        "SELECT source_version, source_hash FROM source_versions ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert len(package.sources) == 2 and all(i.entity_id == "LMS1-M01" for i in package.sources)
+    assert {(i.fingerprint.source_version, i.fingerprint.source_hash) for i in package.sources} == {tuple(current)}
     assert all(i.provenance.source_ref.provider == "local" for i in package.sources)
     assert package.warnings == ()
 
@@ -197,3 +201,57 @@ def test_caller_scope_is_required(lib: Library) -> None:
 
     with pytest.raises(PolicyViolation):
         lib.service().get_material_context("LMS1-M01", caller_scope="")
+
+
+def test_oversize_chunk_is_reported_and_context_has_no_holes(lib: Library) -> None:
+    """Spec errata E14: a chunk over max_chars_per_item is reported per locator until R1b-5 splits it."""
+
+    big = "x" * 5000
+    lib.material("LMS1-M01", f"[00:00] a\n[01:00] {big}\n[02:00] c\n")
+    package = lib.service().get_material_context("LMS1-M01", caller_scope=SCOPE)
+    codes = [w["code"] for w in package.warnings]
+    assert "OVERSIZE_CHUNK" in codes
+    oversize = next(w for w in package.warnings if w["code"] == "OVERSIZE_CHUNK")
+    assert oversize["locator"].startswith("LMS1-M01:t00:01:00")
+    assert [str(i.locator).split(":t")[1][:8] for i in package.sources] == ["00:00:00", "00:02:00"]
+
+
+def test_budget_stops_at_the_first_chunk_that_does_not_fit(lib: Library) -> None:
+    lib.material("LMS1-M01", "[00:00] " + "a" * 30 + "\n[01:00] " + "b" * 300 + "\n[02:00] c\n")
+    package = lib.service(budget=RetrievalBudget(max_total_chars=100)).get_material_context("LMS1-M01", caller_scope=SCOPE)
+    assert [str(i.locator).split(":t")[1][:8] for i in package.sources] == ["00:00:00"]  # c is NOT added after the gap
+    assert {"code": "PARTIAL_CONTEXT", "used": 1, "total": 3} in package.warnings
+
+
+def test_served_text_is_the_packaged_text_even_after_renormalization(lib: Library) -> None:
+    lib.material("LMS1-M01", TRANSCRIPT)
+    service = lib.service()
+    package = service.get_material_context("LMS1-M01", caller_scope=SCOPE)
+    first = package.sources[0]
+    version_id = lib.db.connection.execute("SELECT id FROM source_versions").fetchone()[0]
+    normalize_source_version(
+        lib.db.writer(), lib.blobs, version_id, kind="transcript", entity_id="LMS1-M01", course_key="LMS1", processor_version="p2"
+    )
+    served = service.get_source_chunk(package.context_id or "", str(first.locator), caller_scope=SCOPE)
+    assert served.content == first.content and served.provenance.processor_version == "p1"
+
+
+def test_missing_blob_drops_only_that_material(lib: Library) -> None:
+    lib.material("LMS1-M01", TRANSCRIPT)
+    lib.material("LMS1-M02", "[00:00] second\n")
+    sha = lib.db.connection.execute(
+        "SELECT d.blob_sha256 FROM derivatives d JOIN source_versions v ON v.id = d.source_version_id "
+        "JOIN materials m ON m.source_file_id = v.source_file_id WHERE m.material_id = 'LMS1-M02' AND d.kind = 'chunks'"
+    ).fetchone()[0]
+    lib.blobs.delete(sha)
+    package = lib.service().get_session_context("LMS1-S02", caller_scope=SCOPE)
+    assert {i.entity_id for i in package.sources} == {"LMS1-M01"}
+    assert {"code": "BLOB_UNAVAILABLE", "material_id": "LMS1-M02"} in package.warnings
+
+
+def test_derivative_for_another_entity_is_not_evidence(lib: Library) -> None:
+    lib.material("LMS1-M01", TRANSCRIPT, normalize=False)
+    version_id = lib.db.connection.execute("SELECT id FROM source_versions").fetchone()[0]
+    lib.normalize(version_id, "LMS1-M09")  # normalized under the wrong entity id
+    package = lib.service().get_material_context("LMS1-M01", caller_scope=SCOPE)
+    assert package.sources == () and {"code": "LOCATOR_ENTITY_MISMATCH", "material_id": "LMS1-M01"} in package.warnings
