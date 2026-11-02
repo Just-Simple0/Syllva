@@ -40,7 +40,7 @@ import difflib
 import re
 import unicodedata
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from typing import Literal
 
@@ -106,8 +106,10 @@ def title_chapters(title: str) -> set[int]:
     text = norm(title)
     found = {int(a or b) for a, b in _CHAPTER_RE.findall(text)}
     for first, rest in _TITLE_GROUP_RE.findall(text):
-        found.add(int(first))
-        found.update(int(n) for n in re.findall(r"\d+", rest))
+        numbers = [int(first), *(int(n) for n in re.findall(r"\d+", rest))]
+        if len(numbers) == 2 and 1 <= numbers[0] <= 12 and 13 <= numbers[1] <= 31:
+            continue  # "09_17 ..." is a date, not chapters 9 and 17
+        found.update(numbers)
     return found
 
 
@@ -129,6 +131,9 @@ class NaturalResolution:
     candidates: tuple[ResolutionCandidate, ...] = ()
     reason: str | None = None
     course_key: str | None = None  # the single course the query was narrowed to, when known
+    # words the resolver did not use to pick the entity (e.g. a concept inside a session:
+    # "알고리즘2 2강 다익스트라"); the caller may run concept search with them in that scope
+    unused_words: tuple[str, ...] = ()
 
 
 @dataclass
@@ -300,9 +305,10 @@ class NaturalResolver:
                 return NaturalResolution("none", reason="NO_ENTITY_CUE")
 
         if session_hits is not None:
-            return self._finish(
+            result = self._finish(
                 [("session", s.session_id, self._session_label(courses, s), r) for s, r in session_hits], course_key
             )
+            return replace(result, unused_words=tuple(words))
         if course_ids:
             return self._finish(
                 [("course", courses[i].key, courses[i].name, "course name") for i in sorted(course_ids)], course_key
@@ -482,7 +488,9 @@ class NaturalResolver:
     ) -> NaturalResolution:
         if not items:
             return NaturalResolution("none", reason="NO_MATCH", course_key=course_key)
-        if len(items) == 1 and not force_choice:
+        if force_choice and len(items) < 2:
+            raise ValueError("force_choice needs at least two candidates")
+        if len(items) == 1:
             entity_type, entity_id, label, reason = items[0]
             return NaturalResolution(
                 "resolved", entity=ResolvedEntity(entity_type, entity_id, label, reason=reason), course_key=course_key

@@ -43,6 +43,6 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python -m pip install -e ".[dev,pdf]"
-      - run: python -m pytest -q -ra tests/contract/v2 tests/unit/test_v2_library_blobs.py tests/unit/test_v2_library_paths.py tests/unit/test_v2_state_migrate.py
+      - run: python -m pytest -q -ra tests/contract/v2 tests/unit/test_v2_library_blobs.py tests/unit/test_v2_library_paths.py tests/unit/test_v2_state_migrate.py tests/unit/test_v2_resolver_cues.py
       - run: lint-imports
       - run: python scripts/check_invariants.py
