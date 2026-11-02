@@ -238,11 +238,11 @@ def test_a_course_that_cannot_form_ids_sends_the_file_to_review_and_the_worker_g
     v2_db.connection.execute(
         "INSERT INTO courses(course_key, name, code, semester, created_at) VALUES ('2026-2_cs-101', 'x', NULL, '2026-2', ?)", (NOW,)
     )
-    bad = _drop(intake, make_pdf_bytes(["Lec text"]), "Lec.1 intro.pdf", course_hint="2026-2_cs-101")
+    bad = _drop(intake, make_pdf_bytes(["Lec text"]), "Lec.1 intro.pdf", course_hint="2026-2_cs-101", mime_type="application/pdf")
     good = _drop(intake, TRANSCRIPT.encode(), "b.txt")
     intake.run_pending(now=NOW)
     first = intake.get(bad.candidate_id)
-    assert first.state == "NEEDS_REVIEW" and "COURSE_CODE_INVALID" in (first.suggestion or {})["blockers"]
+    assert first.state == "NEEDS_REVIEW" and (first.suggestion or {})["blockers"] == ["COURSE_CODE_INVALID"]
     assert intake.get(good.candidate_id).state == "NEEDS_REVIEW"
 
 
@@ -309,3 +309,37 @@ def test_conflict_clauses_do_not_bypass_the_state_machine(intake: LocalIntake, v
             (c.candidate_id,),
         )
     assert intake.get(c.candidate_id).state == "RECEIVED"
+
+
+def test_exhausted_id_space_on_the_automatic_path_goes_to_review(intake: LocalIntake, v2_db: Database) -> None:
+    pytest.importorskip("pypdf")
+    conn = v2_db.connection
+    for n in range(1, 100):
+        conn.execute("INSERT INTO source_files(source_id, provider, display_name, origin, created_at) VALUES (?, 'local', 'f', 'USER_DROP', ?)",
+                     (f"SRC-pad{n}", NOW))
+        conn.execute("INSERT INTO materials(material_id, course_id, source_file_id, kind, role, created_at) "
+                     "VALUES (?, 1, last_insert_rowid(), 'LECTURE_SLIDES', 'PRIMARY', ?)", (f"NET-M{n:02d}", NOW))
+    bad = _drop(intake, make_pdf_bytes(["Lec text"]), "Lec.9 full.pdf", course_hint="NET", mime_type="application/pdf")
+    good = _drop(intake, TRANSCRIPT.encode(), "b.txt")
+    intake.run_pending(now=NOW)
+    first = intake.get(bad.candidate_id)
+    assert first.state == "NEEDS_REVIEW" and (first.suggestion or {})["blockers"] == ["ID_SPACE_EXHAUSTED"]
+    assert first.material_id is None
+    assert intake.get(good.candidate_id).state == "NEEDS_REVIEW"
+
+
+def test_any_refusal_during_automatic_confirmation_rolls_back_to_review(intake: LocalIntake, v2_db: Database,
+                                                                       monkeypatch: pytest.MonkeyPatch) -> None:
+    """Structural guarantee: after CLASSIFYING the candidate always ends in AUTO_CONFIRMED or NEEDS_REVIEW."""
+
+    pytest.importorskip("pypdf")
+    original = intake._create_material
+
+    def half_then_refuse(*args, **kwargs):  # type: ignore[no-untyped-def]
+        original(*args, **kwargs)  # the material row is written ...
+        raise IntakeError("some future allocation rule says no")  # ... then refused
+
+    monkeypatch.setattr(intake, "_create_material", half_then_refuse)
+    c = intake.classify(_drop(intake, make_pdf_bytes(["Lec text"]), "Lec.2 x.pdf", course_hint="NET", mime_type="application/pdf").candidate_id, now=NOW)
+    assert c.state == "NEEDS_REVIEW" and (c.suggestion or {})["blockers"] == ["INTAKE_INVALID"]
+    assert v2_db.connection.execute("SELECT count(*) FROM materials").fetchone()[0] == 0  # rolled back

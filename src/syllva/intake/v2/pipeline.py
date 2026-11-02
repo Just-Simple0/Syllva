@@ -68,6 +68,10 @@ class IntakeError(SyllvaError):
     code = "INTAKE_INVALID"
 
 
+class IdSpaceExhausted(IntakeError):
+    code = "ID_SPACE_EXHAUSTED"
+
+
 @dataclass(frozen=True)
 class IntakeConfig:
     max_bytes: int = 200 * 1024 * 1024
@@ -227,19 +231,31 @@ class LocalIntake:
             outcome = None
             suggestion = {"blockers": ["CLASSIFY_ERROR"], "error": f"{type(exc).__name__}: {exc}"[:500],
                           **({"course_hint": hint} if hint else {})}
+        # Structure (review of PR #46, third finding of one class): once CLASSIFYING is committed the
+        # candidate ALWAYS ends in AUTO_CONFIRMED or NEEDS_REVIEW. The automatic confirmation is its
+        # own transaction; if anything in it refuses (id space, course, a future allocation rule) it
+        # rolls back completely and the file goes to the user with that refusal as the blocker.
+        # Only invariant breaches and database errors propagate (recover() then requeues).
+        if outcome is not None and not suggestion["blockers"]:
+            assert outcome.kind is not None and outcome.course_key is not None
+            payload = json.dumps(suggestion, ensure_ascii=False, sort_keys=True, default=str)
+            try:
+                with self.writer.transaction():
+                    material = self._create_material(Actor.INGESTER, candidate_id, outcome.course_key, outcome.kind.value, None, stamp)
+                    self.writer.transition_intake_state(
+                        Actor.INGESTER, candidate_id, "AUTO_CONFIRMED",
+                        values={"suggestion_json": payload, "material_id": material}, now=stamp,
+                    )
+                return self.get(candidate_id)
+            except PolicyViolation:
+                raise
+            except SyllvaError as exc:
+                suggestion["blockers"] = [exc.code if _REASON_CODE.fullmatch(exc.code) else "AUTO_CONFIRM_REFUSED"]
+                suggestion["error"] = str(exc)[:500]
         payload = json.dumps(suggestion, ensure_ascii=False, sort_keys=True, default=str)
-        with self.writer.transaction():
-            if suggestion["blockers"] or outcome is None:
-                self.writer.transition_intake_state(
-                    Actor.INGESTER, candidate_id, "NEEDS_REVIEW", values={"suggestion_json": payload}, now=stamp
-                )
-            else:
-                assert outcome.kind is not None and outcome.course_key is not None
-                material = self._create_material(Actor.INGESTER, candidate_id, outcome.course_key, outcome.kind.value, None, stamp)
-                self.writer.transition_intake_state(
-                    Actor.INGESTER, candidate_id, "AUTO_CONFIRMED",
-                    values={"suggestion_json": payload, "material_id": material}, now=stamp,
-                )
+        self.writer.transition_intake_state(
+            Actor.INGESTER, candidate_id, "NEEDS_REVIEW", values={"suggestion_json": payload}, now=stamp
+        )
         return self.get(candidate_id)
 
     def _auto_blockers(self, outcome: ClassificationOutcome, hint: object = None) -> tuple[str, ...]:
@@ -446,7 +462,7 @@ class LocalIntake:
         used = [int(str(r[0])[len(prefix):]) for r in rows if str(r[0]).startswith(prefix) and str(r[0])[len(prefix):].isdigit()]
         number = max(used, default=0) + 1
         if number > _MAX_SEQUENCE:
-            raise IntakeError("entity id space for this course is exhausted", details={"prefix": prefix})
+            raise IdSpaceExhausted("entity id space for this course is exhausted", details={"prefix": prefix})
         return f"{prefix}{number:02d}", number
 
     def _create_session(self, course_key: str, held_on: str, stamp: str) -> int:
