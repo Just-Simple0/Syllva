@@ -161,3 +161,14 @@ name = "library does not import state (state.v2.database composes library, not t
 type = "forbidden"
 source_modules = ["syllva.library"]
 forbidden_modules = ["syllva.state"]
+
+[[tool.importlinter.contracts]]
+id = "v2-retrieval-clean"
+name = "v2 retrieval modules do not depend on legacy providers or the v1.2 engine (no exceptions)"
+type = "forbidden"
+source_modules = ["syllva.retrieval.natural"]
+forbidden_modules = [
+    "syllva.adapters", "syllva.settings", "syllva.mcp", "syllva.cli", "syllva.study_notes", "syllva.intake",
+    "syllva.retrieval.engine", "syllva.retrieval.resolver", "syllva.retrieval._compat",
+]
+allow_indirect_imports = false

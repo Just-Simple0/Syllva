@@ -1,0 +1,92 @@
+# C-14 resolve query fixture (implementation spec §9.3, design §7.2).
+# Catalog modelled on the 2026-2 midterm usage (handoff 2026-10-14): course names
+# with digits and Korean/English aliases, LMS calendar one week ahead of file-name
+# weeks for 알고리즘2, chapter-numbered slides, transcripts and a past exam.
+semester_starts:
+  "2026-2": "2026-09-01"
+catalog:
+  courses:
+    - {key: LMS67535, name: 알고리즘2, code: COMP0217, aliases: ["Algorithms 2", "알고리즘 2"]}
+    - {key: LMS67536, name: 네트워크프로그래밍, aliases: ["네프", "Network Programming"]}
+    - {key: LMS67537, name: 데이타베이스, aliases: ["데이터베이스", "DB"]}
+    # a course whose name is a prefix of another, and a short Latin alias (review of PR #41)
+    - {key: LMS1, name: 알고리즘}
+    - {key: LMS2, name: 운영체제, aliases: ["OS"]}
+    # a course code that contains "ch" followed by digits (review of PR #41)
+    - {key: LMS3, name: 기계설계, code: MECH201}
+  sessions:
+    # 알고리즘2 starts in calendar week 2: session N is calendar week N+1
+    - {id: LMS67535-S01, course: LMS67535, number: 1, held_on: "2026-09-10"}
+    - {id: LMS67535-S02, course: LMS67535, number: 2, held_on: "2026-09-17"}
+    - {id: LMS67535-S03, course: LMS67535, number: 3, held_on: "2026-09-24"}
+    - {id: LMS67536-S01, course: LMS67536, number: 1, held_on: "2026-09-02"}
+    - {id: LMS67536-S02, course: LMS67536, number: 2, held_on: "2026-09-09"}
+    - {id: LMS67536-S03, course: LMS67536, number: 3, held_on: "2026-09-16"}
+    - {id: LMS67536-S04, course: LMS67536, number: 4, held_on: "2026-09-23"}
+    - {id: LMS67537-S01, course: LMS67537, number: 1, held_on: "2026-09-04"}
+    - {id: LMS1-S01, course: LMS1, number: 1, held_on: "2026-09-07"}
+    - {id: LMS1-S02, course: LMS1, number: 2, held_on: "2026-09-14"}
+    - {id: LMS3-S01, course: LMS3, number: 1, held_on: "2026-09-08"}
+  materials:
+    - {id: M-A1, course: LMS67535, title: 알고리즘2_중간고사_기출문제지.pdf, kind: EXAM}
+    - {id: M-N1, course: LMS67536, session: LMS67536-S04, title: Chapter 04_05 TCP 소켓 프로그래밍.pdf, kind: LECTURE_SLIDES}
+    - {id: M-N2, course: LMS67536, title: Chapter 03 UDP.pdf, kind: LECTURE_SLIDES}
+    - {id: M-N3, course: LMS67536, session: LMS67536-S02, title: S02 전사문.txt, kind: TRANSCRIPT}
+queries:
+  # expect: resolved -> entity [type, id]; ambiguous -> candidate ids (set); none
+  - {q: "TCP", expect: resolved, entity: [material, M-N1]}
+  - {q: "Chapter 04", expect: resolved, entity: [material, M-N1]}
+  - {q: "ch4 정리해줘", expect: resolved, entity: [material, M-N1]}
+  - {q: "네트워크프로그래밍 4주차", expect: resolved, entity: [session, LMS67536-S04]}
+  - {q: "Network Programming week 3", expect: resolved, entity: [session, LMS67536-S03]}
+  - {q: "09.17", expect: resolved, entity: [session, LMS67535-S02]}
+  - {q: "9월 17일 강의 정리해줘", expect: resolved, entity: [session, LMS67535-S02]}
+  - {q: "2026-09-04", expect: resolved, entity: [session, LMS67537-S01]}
+  - {q: "알고리즘2 중간고사 기출", expect: resolved, entity: [material, M-A1]}
+  - {q: "기출문제", expect: resolved, entity: [material, M-A1]}
+  - {q: "네프 UDP", expect: resolved, entity: [material, M-N2]}
+  - {q: "S02 전사문", expect: resolved, entity: [material, M-N3]}
+  - {q: "데이터베이스", expect: resolved, entity: [course, LMS67537]}
+  - {q: "algorithms 2", expect: resolved, entity: [course, LMS67535]}
+  - {q: "알고리증2", expect: resolved, entity: [course, LMS67535]}   # one-letter typo
+  - {q: "COMP0217 3강", expect: resolved, entity: [session, LMS67535-S03]}
+  # file-name week vs LMS calendar week disagree: offer both, never pick silently
+  - {q: "알고리즘 2 2주차", expect: ambiguous, candidates: [LMS67535-S01, LMS67535-S02]}
+  - {q: "네프 강의자료", expect: ambiguous, candidates: [M-N1, M-N2]}
+  - {q: "2강", expect: ambiguous, candidates: [LMS67535-S02, LMS67536-S02, LMS1-S02]}
+  - {q: "4주차", expect: ambiguous, candidates: [LMS67536-S04, LMS67535-S03]}
+  # regressions from the PR #41 review: no silent picks
+  - {q: "알고리즘2 네트워크프로그래밍", expect: ambiguous, candidates: [LMS67535, LMS67536]}
+  - {q: "알고리즘2랑 네프 비교", expect: ambiguous, candidates: [LMS67535, LMS67536]}
+  - {q: "COMP0217 네프", expect: ambiguous, candidates: [LMS67535, LMS67536]}
+  - {q: "알고리즘 2강", expect: resolved, entity: [session, LMS1-S02]}
+  - {q: "알고리즘 2주차", expect: ambiguous, candidates: [LMS1-S02, LMS1-S01]}
+  - {q: "알고리즘2 2강", expect: resolved, entity: [session, LMS67535-S02]}
+  - {q: "to see this", expect: none}
+  - {q: "cosine 정리", expect: none}
+  - {q: "mongodb 설치", expect: none}
+  - {q: "DB", expect: resolved, entity: [course, LMS67537]}
+  - {q: "OS 1강", expect: none}
+  - {q: "네프 2번째 강의", expect: resolved, entity: [session, LMS67536-S02]}
+  - {q: "네프 3번째", expect: resolved, entity: [session, LMS67536-S03]}
+  - {q: "네프 2강의 내용", expect: resolved, entity: [session, LMS67536-S02]}
+  - {q: "알고리즘3", expect: none}
+  - {q: "TCP 알고리즘2", expect: none, reason: CONCEPT_QUERY, course: LMS67535}
+  - {q: "알고리즘2 다익스트라 설명해줘", expect: none, reason: CONCEPT_QUERY, course: LMS67535}
+  - {q: "Chapter 03 TCP", expect: ambiguous, candidates: [M-N1, M-N2]}
+  - {q: "", expect: none}
+  - {q: "정리해줘", expect: none}
+  # chapter numbers come only from chapter patterns in titles, never from course names or session ids
+  - {q: "알고리즘2 2장", expect: none}
+  - {q: "네프 2장", expect: none}
+  - {q: "ch5", expect: resolved, entity: [material, M-N1]}
+  - {q: "MECH201", expect: resolved, entity: [course, LMS3]}
+  - {q: "mech201 1강", expect: resolved, entity: [session, LMS3-S01]}
+  - {q: "which 4 네프", expect: none, reason: CONCEPT_QUERY, course: LMS67536}
+  - {q: "branch 3 네프", expect: none, reason: CONCEPT_QUERY, course: LMS67536}
+  - {q: "네프 2강 TCP", expect: ambiguous, candidates: [LMS67536-S02, M-N1]}
+  - {q: "102강", expect: none}
+  - {q: "네프 pdf", expect: none, reason: CONCEPT_QUERY, course: LMS67536}
+  - {q: "양자역학 숙제", expect: none}
+  - {q: "빅오 표기법 설명해줘", expect: none}
+  - {q: "네트워크프로그래밍 9주차", expect: none}

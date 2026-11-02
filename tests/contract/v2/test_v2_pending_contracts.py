@@ -30,7 +30,6 @@ PENDING: dict[str, tuple[str, str, str]] = {
     "C-10": ("test_citation_allowlist.py", "R4", "Run Context and citation validation (§8.5-§8.6)"),
     "C-11": ("test_run_context_lifetime.py", "R4", "Run Context lifetime (§8.6)"),
     "C-13": ("test_no_public_exposure.py", "R2", "0.0.0.0 refusal and remote MCP not loaded; loopback bind active in test_v2_no_public_exposure"),
-    "C-14": ("test_resolve_queries.py", "R1b-4", "NaturalResolver and resolve_queries.yaml (§9.3)"),
     "C-15": ("test_template_manifest.py", "R4", "prompt template manifest (§8.2)"),
     "C-16": ("CI workflow", "R2", "v2 subset runs on Linux/macOS/Windows (ci.yml v2 job); full when all C-xx are active"),
     "C-17": ("test_gate_replay.py", "R2", "gate commit protocol (§6.4); DB trigger half active in test_v2_gate_db_triggers"),
@@ -51,6 +50,7 @@ PENDING: dict[str, tuple[str, str, str]] = {
 ACTIVE: dict[str, str] = {
     "C-03": "test_v2_ownership_matrix.py",
     "C-12": "test_v2_normalization_not_summary.py",
+    "C-14": "test_v2_resolve_queries.py",
 }
 
 
