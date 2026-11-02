@@ -38,7 +38,6 @@ PENDING: dict[str, tuple[str, str, str]] = {
     "C-22": ("test_citation_validation.py", "R4", "citation parser and escaping (§8.4-§8.5)"),
     "C-23": ("test_prompt_assembly.py", "R4", "prompt assembly (§8.2-§8.4)"),
     "C-24": ("test_multiturn_independence.py", "R4", "multi-turn rule (§8.9)"),
-    "C-25": ("test_chunk_strategy.py", "R1b-5", "chunk strategies (§8.8)"),
     "C-26": ("test_disclosure_and_logging.py", "R4", "disclosure assertion and log filter (§13.1, §13.4)"),
 }
 
@@ -51,6 +50,7 @@ ACTIVE: dict[str, str] = {
     "C-14": "test_v2_resolve_queries.py",
     "C-02": "test_v2_retrieval_service.py",
     "C-10": "test_v2_retrieval_service.py",
+    "C-25": "test_v2_chunk_strategy.py",
 }
 
 

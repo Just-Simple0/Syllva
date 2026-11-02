@@ -5,7 +5,8 @@ deterministic normalizers (PDF, transcript), and stores two derivatives:
 
 * ``normalized`` — the canonical Markdown derivative (front matter + body with
   page/timestamp markers);
-* ``chunks`` — JSON list of locator-addressed chunks used by retrieval.
+* ``chunks`` — JSON list of locator-addressed chunks used by retrieval
+  (``normalization.chunks``; schema ``syllva.chunks.v2`` with parts, errata E14).
 
 Completeness follows the normalizer result exactly (design §2 I3): only a
 ``ready`` result is ``COMPLETE``; ``partial`` and ``needs_review`` are stored as
@@ -32,17 +33,16 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
-from syllva.domain.models import serialize_locator
 from syllva.domain.source_ref import v2_source_ref
 from syllva.library.blobs import BlobStore
+from syllva.normalization.chunks import DEFAULT_MAX_CHARS, Chunk, pdf_chunks, transcript_chunks
 from syllva.normalization.pdf import extract_pdf
 from syllva.normalization.transcript import normalize_transcript
-from syllva.retrieval.chunking import DerivativeChunk, page_chunks, timestamp_chunks
 from syllva.state.v2.ownership import Actor, Owner
 from syllva.state.v2.writer import StateWriter
 
 SourceKind = Literal["pdf", "transcript"]
-CHUNKS_SCHEMA = "syllva.chunks.v1"
+CHUNKS_SCHEMA = "syllva.chunks.v2"  # v2: rows carry part/parts (errata E14)
 _STATUS = {"ready": "READY", "partial": "PARTIAL", "needs_review": "NEEDS_REVIEW", "failed": "FAILED"}
 
 
@@ -64,16 +64,8 @@ def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
-def chunks_payload(chunks: Sequence[DerivativeChunk]) -> bytes:
-    rows = [
-        {
-            "locator": serialize_locator(chunk.locator),
-            "content": chunk.content,
-            "start_offset": chunk.start_offset,
-            "end_offset": chunk.end_offset,
-        }
-        for chunk in chunks
-    ]
+def chunks_payload(chunks: Sequence[Chunk]) -> bytes:
+    rows = [chunk.as_row() for chunk in chunks]
     return json.dumps({"schema": CHUNKS_SCHEMA, "chunks": rows}, ensure_ascii=False, sort_keys=True).encode("utf-8")
 
 
@@ -111,7 +103,8 @@ def normalize_source_version(
     entity_id: str,
     course_key: str,
     processor_version: str,
-    schema_version: str = "1",
+    schema_version: str = "2",
+    max_chunk_chars: int = DEFAULT_MAX_CHARS,
     now: str | None = None,
 ) -> NormalizeResult:
     row = writer.query_one(
@@ -143,12 +136,7 @@ def normalize_source_version(
         derivative_status = pdf.derivative_status
         reason = pdf.reason
         markdown = pdf.to_markdown()
-        chunks = []
-        if derivative_status != "failed":
-            try:
-                chunks = page_chunks(markdown, entity_id=entity_id)
-            except ValueError:
-                chunks = []  # no validated page index: nothing citable
+        chunks = pdf_chunks(pdf, entity_id, max_chars=max_chunk_chars) if derivative_status != "failed" else []
     elif kind == "transcript":
         try:
             transcript = normalize_transcript(raw, **common)  # type: ignore[arg-type]
@@ -156,7 +144,7 @@ def normalize_source_version(
             return NormalizeResult("FAILED", None, None, None, 0, "TRANSCRIPT_NOT_UTF8")
         derivative_status = str(transcript.front_matter.status)
         markdown = transcript.to_markdown()
-        chunks = timestamp_chunks(transcript, entity_id=entity_id)
+        chunks = transcript_chunks(transcript, entity_id, max_chars=max_chunk_chars)
     else:  # pragma: no cover - Literal guards this
         raise NormalizeError(f"unsupported kind {kind!r}")
 
@@ -165,8 +153,9 @@ def normalize_source_version(
         return NormalizeResult(status, None, None, None, 0, reason)
     if not any(_has_text(chunk.content) for chunk in chunks):
         if derivative_status in ("ready", "partial") and kind == "pdf":
-            # Text was extracted but no validated page index could be built (spec errata E12,
-            # e.g. a "Page N" footer line). Distinct code so R1b-5 can find and reprocess these.
+            # Text was extracted but cannot be attributed to pages (multi-page PDF without
+            # per-page text). Chunks come from per-page text since R1b-5 (errata E12 resolved),
+            # so a "Page N" footer line no longer lands here.
             return NormalizeResult("NEEDS_REVIEW", None, None, None, 0, "NO_PAGE_INDEX")
         # Nothing citable was extracted (marker-only pages carry no SOURCE text) (e.g. unreadable or image-only PDF): store no
         # derivative rather than an empty PARTIAL one; a person has to look at it.

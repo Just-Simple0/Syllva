@@ -97,7 +97,7 @@ def _normalize(v2_db: Database, blobs: BlobStore, version_id: int, kind: str, pr
 def _chunks(v2_db: Database, blobs: BlobStore, derivative_id: int) -> list[dict[str, object]]:
     sha = v2_db.connection.execute("SELECT blob_sha256 FROM derivatives WHERE id = ?", (derivative_id,)).fetchone()[0]
     payload = json.loads(blobs.read_bytes(sha))
-    assert payload["schema"] == "syllva.chunks.v1"
+    assert payload["schema"] == "syllva.chunks.v2"
     return list(payload["chunks"])
 
 
@@ -215,13 +215,17 @@ def test_unknown_version(v2_db: Database, blobs: BlobStore) -> None:
         _normalize(v2_db, blobs, 999, "transcript")
 
 
-def test_page_footer_pdf_is_flagged_for_reprocessing_not_as_textless(v2_db: Database, blobs: BlobStore) -> None:
-    """Spec errata E12: text is there, the legacy page index is not; the reason says so."""
+def test_page_footer_pdf_is_chunked_per_page(v2_db: Database, blobs: BlobStore) -> None:
+    """Spec errata E12 (resolved in R1b-5): a "Page N" body line is text, not a page marker."""
 
     pytest.importorskip("pypdf")
-    ingested = _ingest(v2_db, blobs, make_pdf_bytes(["Intro to TCP\nPage 1", "Flow control\nPage 2"]))
+    ingested = _ingest(v2_db, blobs, make_pdf_bytes(["Intro to TCP\nPage 1", "Flow control\nsee page one\nPage 2"]))
     result = _normalize(v2_db, blobs, ingested.source_version_id, "pdf")
-    assert (result.status, result.reason, result.completeness) == ("NEEDS_REVIEW", "NO_PAGE_INDEX", None)
+    assert (result.status, result.completeness, result.chunk_count) == ("READY", "COMPLETE", 2)
+    assert result.chunks_derivative_id is not None
+    rows = _chunks(v2_db, blobs, result.chunks_derivative_id)
+    assert [r["locator"] for r in rows] == ["LMS1-S01:p1", "LMS1-S01:p2"]
+    assert "Intro to TCP" in str(rows[0]["content"]) and "Flow control" in str(rows[1]["content"])
 
 
 def test_invisible_only_transcript_is_not_evidence(v2_db: Database, blobs: BlobStore) -> None:

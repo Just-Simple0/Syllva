@@ -203,17 +203,30 @@ def test_caller_scope_is_required(lib: Library) -> None:
         lib.service().get_material_context("LMS1-M01", caller_scope="")
 
 
-def test_oversize_chunk_is_reported_and_context_has_no_holes(lib: Library) -> None:
-    """Spec errata E14: a chunk over max_chars_per_item is reported per locator until R1b-5 splits it."""
+def test_long_segment_is_split_into_parts_of_one_locator(lib: Library) -> None:
+    """Spec errata E14 (resolved in R1b-5): the normalizer splits, the service never drops."""
 
     big = "x" * 5000
     lib.material("LMS1-M01", f"[00:00] a\n[01:00] {big}\n[02:00] c\n")
-    package = lib.service().get_material_context("LMS1-M01", caller_scope=SCOPE)
-    codes = [w["code"] for w in package.warnings]
-    assert "OVERSIZE_CHUNK" in codes
-    oversize = next(w for w in package.warnings if w["code"] == "OVERSIZE_CHUNK")
-    assert oversize["locator"].startswith("LMS1-M01:t00:01:00")
+    service = lib.service()
+    package = service.get_material_context("LMS1-M01", caller_scope=SCOPE)
+    assert not [w for w in package.warnings if w["code"] == "OVERSIZE_CHUNK"]
+    pieces = [(str(i.locator).split(":t")[1][:8], i.part, i.parts) for i in package.sources]
+    assert pieces == [("00:00:00", 1, 1), ("00:01:00", 1, 2), ("00:01:00", 2, 2), ("00:02:00", 1, 1)]
+    assert all(len(i.content) <= 4000 for i in package.sources)
+    second = package.sources[2]
+    served = service.get_source_chunk(package.context_id or "", str(second.locator), caller_scope=SCOPE, part=2)
+    assert served.content == second.content and served.part == 2
+
+
+def test_chunk_over_a_smaller_budget_is_reported_and_context_has_no_holes(lib: Library) -> None:
+    big = "x" * 1500
+    lib.material("LMS1-M01", f"[00:00] a\n[01:00] {big}\n[02:00] c\n")
+    package = lib.service(budget=RetrievalBudget(max_chars_per_item=1000)).get_material_context("LMS1-M01", caller_scope=SCOPE)
+    oversize = [w for w in package.warnings if w["code"] == "OVERSIZE_CHUNK"]
+    assert len(oversize) == 1 and oversize[0]["locator"].startswith("LMS1-M01:t00:01:00")
     assert [str(i.locator).split(":t")[1][:8] for i in package.sources] == ["00:00:00", "00:02:00"]
+    assert {"code": "PARTIAL_CONTEXT", "used": 2, "total": 3} in package.warnings
 
 
 def test_budget_stops_at_the_first_chunk_that_does_not_fit(lib: Library) -> None:

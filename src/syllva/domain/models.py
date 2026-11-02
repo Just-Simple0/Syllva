@@ -268,8 +268,14 @@ class EvidenceItem:
     freshness: FreshnessStatus | str
     source_ref: SourceRef | None = None
     constraint_metadata: ActivityConstraintMetadata | None = None
+    # v2: a locator's text may be split into parts to respect the per-item budget
+    # (spec errata E14). Citing any part still cites the same page/time range.
+    part: int = 1
+    parts: int = 1
 
     def __post_init__(self) -> None:
+        if not (1 <= self.part <= self.parts):
+            raise ValueError("part must be between 1 and parts")
         if isinstance(self.locator, str):
             object.__setattr__(self, "locator", parse_locator(self.locator))
         if isinstance(self.authority, str):
