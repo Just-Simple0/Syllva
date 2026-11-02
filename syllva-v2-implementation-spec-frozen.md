@@ -1100,3 +1100,18 @@ PR: `agents/`(§7), `prompt/`(§8), 적합성 스파이크(실제 Claude Code), 
 10. **enrichment·S2의 AI 경로**(§1.1, §11.2): v2에서 비활성. R5에서 `agents/`+`prompt/` 경로로 흡수할지(칩·전송 고지·매 실행 단언 적용) 결정.
 11. **R4 확인 항목 묶음**: A9 시스템 지시 전달 방식, 제로폭 공백 이스케이프의 실효성, 훅 이벤트가 스트림에 나오는 CLI 버전 범위, 관리형 설정 경로.
 12. (해결) rev 2 재검토 조건 N1–N5 반영 후 동결.
+
+---
+
+## 17. 정오표 (Errata, 동결 후 기록)
+
+동결 이후 구현 중 발견된 명세 내부 불일치와 그 해소. 설계서 불변식을 바꾸지 않는 범위만 여기에 기록하며, 각 항목은 해당 PR 리뷰를 거친다.
+
+| # | PR | 위치 | 내용 | 해소 |
+|---|---|---|---|---|
+| E1 | R1b-2 | §3.7 `materials.processing_status` | DDL은 `QUEUED`를 썼으나 §4.4는 "기존 `ProcessingStatus` 유지"라 하고 실제 열거형은 `PENDING/PROCESSING/READY/PARTIAL/NEEDS_REVIEW/FAILED`다 | 기존 열거형 값을 따른다(§4.4 우선). 상태 전이표는 `state/v2/ownership.py::STATUS_TRANSITIONS` |
+| E2 | R1b-2 | §3.4 마이그레이션 경로 | `state/migrations/001_v2_initial.sql` | v1.2 저장소와 공존하는 R1b 동안 `state/v2/migrations/`에 둔다. v1.2 저장소 삭제(R1b-6) 시 경로 정리 |
+| E3 | R1b-2 | §3.7 `checkpoints` | v1.2는 `(provider, scope)` 키 | provider 식별자 제거 원칙에 따라 `scope` 단일 키(예: `canvas:<course>`) |
+| E4 | R1b-2 | §3.7 추가 방어 | 명세에 없던 트리거 | 같은 불변식을 DB 수준에서 거드는 가산적 추가: 게이트 로그·사용 기록 append-only, `ai_artifacts` 불변, 채택 출처 불변, `derivatives` PARTIAL→COMPLETE 금지, `materials` PARTIAL→READY 금지, 게이트 없는 승격 시 `GATE_REQUIRED` |
+| E5 | R1b-2 | §5.1 행렬 | 학업 개체(courses, sessions, materials, …)와 처리 기록(jobs, …)의 소유자가 S/A/U 행렬에 없었다 | `CATALOG`(INGESTER·UI_USER 쓰기, 에이전트 출력 불가)와 `SYSTEM`(INGESTER) 소유자를 명시. 사람 전용 열은 어느 쪽에서도 쓸 수 없음 |
+| E6 | R1b-2 | §2.4 DB 락 | "`orchestration/locks.py` 프리미티브 재사용" | 그 모듈은 `O_EXCL` 락 파일 + PID 기반 stale 복구다. 명세가 요구한 OS 수준 배타 락을 위해 `library/dblock.py`(`fcntl.flock`/`msvcrt.locking`, 프로세스 종료 시 커널이 해제, 비상속 fd)를 새로 둔다 |
