@@ -151,6 +151,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path, default=Path("config.yaml"), help="Local Settings config file (setup)")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("version", help="print the version")
+    core = sub.add_parser("core", help="run the Core process (started by the desktop Shell)")
+    mode = core.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--stdio", action="store_true", help="speak the Shell protocol on stdin/stdout (spec §2)")
+    mode.add_argument("--headless", action="store_true", help="development only: no Shell, no Human-Proof (§6.7)")
     setup = sub.add_parser("setup", help="open the Local Settings web interface (the R2 UI server's starting point)")
     setup.add_argument("--no-browser", action="store_true", help="print the one-time local URL instead of opening a browser")
 
@@ -200,6 +204,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "setup":
         return _setup(args)
+    if args.command == "core":
+        from syllva.core.stdio import main_stdio, run_headless
+
+        return main_stdio() if args.stdio else run_headless()
     try:
         with open_database(layout(args.data_dir)) as db:
             return int(args.handler(db, args))
