@@ -25,6 +25,8 @@ from pathlib import Path
 from typing import Any
 
 ENV_ALLOWLIST = ("PATH", "HOME", "USERPROFILE", "LANG", "SYSTEMROOT")
+NO_PROXY = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+KEYCHAIN = {"darwin": "keyring.backends.macOS.Keyring", "win32": "keyring.backends.Windows.WinVaultKeyring"}
 PLATFORM = {"darwin": "darwin", "win32": "win32"}.get(sys.platform, "linux")
 
 
@@ -60,9 +62,9 @@ def main(exe: str) -> int:
         for name, item in result.get("checks", {}).items():
             print(f"     {name}: {item.get('detail')}")
         check(report.returncode == 0 and result.get("ok") is True, "self-check")
-        if PLATFORM in ("darwin", "win32"):  # Linux CI has no Secret Service; there the fail backend is expected
+        if PLATFORM in KEYCHAIN:  # Linux CI has no Secret Service; there the fail backend is expected
             backend = str(result["checks"]["keyring"]["detail"])
-            check(backend.split(".")[-2:] != ["fail", "Keyring"], f"platform keychain backend ({backend})")
+            check(backend == KEYCHAIN[PLATFORM], f"platform keychain backend ({backend})")
 
         secret = secrets.token_bytes(32)
         proc = subprocess.Popen([exe, "core", "--stdio"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,

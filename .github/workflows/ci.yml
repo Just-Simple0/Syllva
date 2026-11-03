@@ -72,7 +72,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libsoup-3.0-dev librsvg2-dev libgtk-3-dev
       - run: rustup component add clippy
       - run: cargo test -p syllva-shell-proto
-      - run: cargo test -p syllva-shell  # fake-Core start/watchdog tests (a short Python script plays the Core)
+      - run: cargo test -p syllva-shell  # fake-Core start/watchdog tests (a short Python script plays the Core: needs python3/python on the runner)
       - run: cargo clippy -p syllva-shell-proto -p syllva-shell --all-targets -- -D warnings
       - run: cargo build -p syllva-shell
 

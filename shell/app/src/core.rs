@@ -62,6 +62,12 @@ pub fn core_command() -> Result<Command, String> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        // the sidecar is a console program (stdio is the protocol); never show its console window
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
     Ok(command)
 }
 
