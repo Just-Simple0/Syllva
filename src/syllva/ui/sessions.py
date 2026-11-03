@@ -48,6 +48,7 @@ class SessionStore:
     def issue_bootstrap(self, window_label: str) -> str:
         token = secrets.token_urlsafe(32)
         with self._lock:
+            self._prune()
             for key, (window, _) in list(self._bootstrap.items()):
                 if window == window_label:
                     del self._bootstrap[key]  # one outstanding token per window
@@ -58,6 +59,7 @@ class SessionStore:
         if not isinstance(token, str) or not token:
             return None
         with self._lock:
+            self._prune()
             entry = self._bootstrap.pop(_key(token), None)  # consumed whatever happens next
             if entry is None:
                 return None
@@ -98,6 +100,19 @@ class SessionStore:
     def logout(self, session_id: str) -> None:
         with self._lock:
             self._drop(_key(session_id))
+
+    def _prune(self) -> None:
+        """Forget expired tokens and idle sessions (caller holds the lock)."""
+
+        now = time.monotonic()
+        for key in [k for k, (_, deadline) in self._bootstrap.items() if now > deadline]:
+            del self._bootstrap[key]
+        for key in [k for k, s in self._sessions.items() if now - s.last_used > IDLE_TTL_S]:
+            self._drop(key)
+
+    def counts(self) -> tuple[int, int]:
+        with self._lock:
+            return len(self._bootstrap), len(self._sessions)
 
     def _drop(self, key: bytes) -> None:
         session = self._sessions.pop(key, None)

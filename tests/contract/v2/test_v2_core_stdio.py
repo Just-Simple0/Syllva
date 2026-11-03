@@ -204,3 +204,46 @@ def test_ping_silence_ends_the_core(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(stdio, "PING_TIMEOUT_S", 0.2)
     assert stdio._loop(SilentChannel(), sessions=None) == stdio.EXIT_SHELL_GONE  # type: ignore[arg-type]
+
+
+# --- review of PR #49 -------------------------------------------------------------
+
+
+def test_a_closed_protocol_pipe_is_a_lost_shell_not_a_crash(sim: ShellSim) -> None:
+    sim.hello()
+    assert sim.proc.stdout is not None
+    sim.proc.stdout.close()  # the Shell stops reading
+    for seq in range(50):
+        try:
+            sim.send({"t": "ping", "seq": seq})
+        except (BrokenPipeError, OSError):
+            break
+    assert sim.wait() == 5
+    assert b"Traceback" not in sim.stderr and b"Fatal Python error" not in sim.stderr
+
+
+def test_boolean_versions_are_not_protocol_v1(tmp_path: Path) -> None:
+    shell = ShellSim(tmp_path / "data", secret=SENTINEL)
+    try:
+        shell.send_raw(
+            b'{"v":true,"t":"hello","secret_b64":"' + _b64(SENTINEL).encode() + b'","shell_version":"x","platform":"linux"}\n'
+        )
+        assert shell.wait() == 2
+    finally:
+        shell.stop()
+
+
+def test_hex_form_of_the_secret_is_not_leaked_either(sim: ShellSim, tmp_path: Path) -> None:
+    sim.hello()
+    sim.stop()
+    logs = b"".join(p.read_bytes() for p in (tmp_path / "data").rglob("*.jsonl"))
+    for hay in (sim.stderr, b"".join(sim.raw_stdout), logs):
+        assert SENTINEL.hex().encode() not in hay
+
+
+def test_mcp_is_not_loaded_at_runtime() -> None:
+    import subprocess
+
+    code = "import sys, syllva.core.stdio, syllva.ui.http; print(any(m.startswith('syllva.mcp') for m in sys.modules))"
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout.strip()
+    assert out == "False"

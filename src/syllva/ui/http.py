@@ -151,10 +151,7 @@ def create_app(sessions: SessionStore, *, port: int, allowed_origins: Iterable[s
         return FileResponse(STATIC / "index.html", media_type="text/html; charset=utf-8")
 
     async def session_create(request: Request) -> Response:
-        try:
-            body = await _json_body(request, frozenset({"bootstrap"}))
-        except _BodyTooLarge:
-            return _error(413, "BODY_TOO_LARGE")
+        body = await _json_body(request, frozenset({"bootstrap"}))
         if body is None:
             return _error(400, "BAD_REQUEST")
         session = sessions.exchange(body["bootstrap"])
@@ -186,6 +183,9 @@ def create_app(sessions: SessionStore, *, port: int, allowed_origins: Iterable[s
     async def not_found(request: Request, exc: Exception) -> Response:
         return _error(404, "NOT_FOUND")
 
+    async def too_large(request: Request, exc: Exception) -> Response:
+        return _error(413, "BODY_TOO_LARGE")  # any route that reads past the limit (chunked bodies too)
+
     app = Starlette(
         debug=False,
         routes=[
@@ -197,7 +197,7 @@ def create_app(sessions: SessionStore, *, port: int, allowed_origins: Iterable[s
             Route("/api/session", session_delete, methods=["DELETE"]),
             Mount("/static", StaticFiles(directory=STATIC), name="static"),
         ],
-        exception_handlers={404: not_found},
+        exception_handlers={404: not_found, _BodyTooLarge: too_large},
     )
     return Boundary(app, port=port, allowed_origins=allowed_origins)
 

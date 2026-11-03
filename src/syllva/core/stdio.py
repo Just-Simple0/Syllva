@@ -56,6 +56,10 @@ class ProtocolViolation(Exception):
     pass
 
 
+class ShellGone(Exception):
+    """The Shell's end of the protocol pipe is closed."""
+
+
 def bind_loopback(host: str = LOOPBACK_HOST) -> socket.socket:
     """C-13: the UI server binds exactly 127.0.0.1 on an OS-assigned port."""
 
@@ -85,7 +89,7 @@ class Hello:
 
 
 def parse_hello(message: dict[str, Any]) -> Hello:
-    if message.get("t") != "hello" or message.get("v") != PROTOCOL_VERSION:
+    if message.get("t") != "hello" or type(message.get("v")) is not int or message.get("v") != PROTOCOL_VERSION:
         raise ProtocolViolation("expected hello v1")
     try:
         secret = Secret(_b64decode(message.get("secret_b64", "")))
@@ -108,7 +112,10 @@ class Channel:
     def send(self, message: dict[str, Any]) -> None:
         data = json.dumps({"v": PROTOCOL_VERSION, **message}, ensure_ascii=False, separators=(",", ":")).encode() + b"\n"
         with self._lock:
-            os.write(self._out, data)
+            try:
+                os.write(self._out, data)
+            except OSError as exc:  # BrokenPipe / EPIPE: the Shell is gone (§2.4)
+                raise ShellGone from exc
         log_event("PROTO_OUT", t=message.get("t"), size=len(data))
 
     def read(self) -> dict[str, Any] | None:
@@ -140,7 +147,18 @@ def _isolate_stdout() -> int:
     """Return a private fd for the protocol and point fd 1 (and sys.stdout) at stderr."""
 
     protocol_fd = os.dup(1)
-    os.dup2(2, 1)
+    try:
+        os.dup2(2, 1)
+    except OSError:  # no usable stderr (e.g. a GUI parent on Windows): discard stray writes instead
+        null = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(null, 1)
+        os.close(null)
+    if hasattr(os, "set_inheritable"):
+        os.set_inheritable(protocol_fd, False)  # never handed to child processes (§2.4)
+    if sys.platform == "win32":  # pragma: no cover - binary mode so no CRLF enters the JSONL stream
+        import msvcrt
+
+        msvcrt.setmode(protocol_fd, os.O_BINARY)
     sys.stdout = sys.stderr
     return protocol_fd
 
@@ -223,9 +241,18 @@ def main_stdio() -> int:
     ``run_stdio`` before this point, so ``os._exit`` loses nothing.
     """
 
-    code = run_stdio()
-    sys.stderr.flush()
-    os._exit(code)
+    code = EXIT_SHELL_GONE
+    try:
+        code = run_stdio()
+    except ShellGone:
+        log_event("CORE_SHELL_GONE")
+    except BaseException as exc:  # noqa: BLE001 - never die through interpreter finalization (no abort, no core dump)
+        log_event("CORE_CRASH", error=type(exc).__name__)
+        code = EXIT_PROTOCOL if isinstance(exc, ProtocolViolation) else 1
+    try:
+        sys.stderr.flush()
+    finally:
+        os._exit(code)
 
 
 def run_headless() -> int:
@@ -289,13 +316,13 @@ def _loop(channel: Channel, sessions: Any) -> int:
             log_event("CORE_PROTOCOL_VIOLATION")
             return EXIT_PROTOCOL
         kind = item["t"]
-        if item.get("v") != PROTOCOL_VERSION or kind == "hello":
+        if type(item.get("v")) is not int or item.get("v") != PROTOCOL_VERSION or kind == "hello":
             log_event("CORE_PROTOCOL_VIOLATION", t=kind)
             return EXIT_PROTOCOL
         if kind == "ping":
             last_ping = time.monotonic()
             seq = item.get("seq")
-            channel.send({"t": "pong", "seq": seq if isinstance(seq, int) else None})
+            channel.send({"t": "pong", "seq": seq if type(seq) is int else None})
         elif kind == "shutdown":
             channel.send({"t": "bye"})
             return EXIT_OK

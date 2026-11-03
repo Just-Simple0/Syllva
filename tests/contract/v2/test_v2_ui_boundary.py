@@ -149,3 +149,25 @@ def test_session_body_rejects_extra_keys_and_large_bodies(client: TestClient, st
     assert client.post("/api/session", json={"bootstrap": token, "x": 1}, headers={"Origin": ORIGIN}).status_code == 400
     big = "a" * 70000
     assert client.post("/api/session", content=big, headers={"Origin": ORIGIN, "Content-Type": "application/json"}).status_code == 413
+
+
+def test_expired_tokens_and_idle_sessions_are_pruned(store: SessionStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    from syllva.ui import sessions
+
+    for n in range(50):
+        store.issue_bootstrap(f"w{n}")
+    session = store.exchange(store.issue_bootstrap("main"))
+    assert session is not None
+    real = sessions.time.monotonic
+    monkeypatch.setattr(sessions.time, "monotonic", lambda: real() + 8 * 3600 + 61)
+    store.issue_bootstrap("fresh")
+    assert store.counts() == (1, 0)
+
+
+def test_oversized_chunked_bodies_are_refused(client: TestClient, store: SessionStore) -> None:
+    def chunks():  # type: ignore[no-untyped-def]
+        for _ in range(10):
+            yield b"x" * 8000
+
+    response = client.post("/api/session", content=chunks(), headers={"Origin": ORIGIN, "Content-Type": "application/json"})
+    assert response.status_code == 413

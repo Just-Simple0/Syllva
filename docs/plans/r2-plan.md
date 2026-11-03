@@ -295,7 +295,7 @@ GUI가 없는 이 환경에서는 컴파일과 단위 테스트까지만 할 수
   - `syllva://` host는 고정값 `app`이다.
   - 리다이렉트는 따르지 않는다.
   - `Origin`·`Sec-Fetch-*`·`Cookie`는 받은 그대로 전달하고 새로 만들지 않는다.
-  - Core가 허용하는 앱 origin 문자열(`syllva://localhost` / `http://syllva.localhost`)은 `hello.platform`에서 정하고, Shell이 붙인 헤더로 정하지 않는다.
+  - Core가 허용하는 앱 origin 문자열(host 고정값 `app`: darwin/linux `syllva://app`, win32 `http(s)://syllva.app` — Tauri의 Windows 매핑은 R2-0에서 확인; E26)은 `hello.platform`에서 정하고, Shell이 붙인 헤더로 정하지 않는다.
   - 커스텀 프로토콜 처리기는 요청 본문을 버퍼링하므로 업로드 크기 상한을 Shell에서도 적용한다. R2-3의 "multipart 스트리밍"은 "Core는 스트리밍, Shell은 상한 적용 버퍼"로 바꾼다.
 - **C (R2-0)**: GUI가 없어 런타임 확인(앱 origin 한정 IPC, 쿠키·fragment 보존)은 R2 끝 수동 시연에서 처음 나온다. 스파이크에 두 항목을 더한다.
   - (i) 커스텀 프로토콜로 스트리밍 응답(R4의 SSE)이 되는지. 안 되면 R4는 루프백 `connect-src`가 필요하므로 지금 결정한다.
