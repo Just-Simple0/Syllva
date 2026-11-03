@@ -27,6 +27,10 @@ def _key(value: str) -> bytes:
     return hashlib.sha256(value.encode("utf-8")).digest()
 
 
+class WrongWindow(Exception):
+    """A valid session presented from a different Shell window (§6.4-2, errata E29)."""
+
+
 @dataclass
 class Session:
     session_id: str
@@ -55,7 +59,9 @@ class SessionStore:
             self._bootstrap[_key(token)] = (window_label, time.monotonic() + BOOTSTRAP_TTL_S)
         return token
 
-    def exchange(self, token: str) -> Session | None:
+    def exchange(self, token: str, window_label: str | None = None) -> Session | None:
+        """Consume ``token``; with ``window_label`` (relay mode) the token's window must match."""
+
         if not isinstance(token, str) or not token:
             return None
         with self._lock:
@@ -64,7 +70,7 @@ class SessionStore:
             if entry is None:
                 return None
             window, deadline = entry
-            if time.monotonic() > deadline:
+            if time.monotonic() > deadline or (window_label is not None and window != window_label):
                 return None
             old = self._by_window.pop(window, None)
             if old is not None:
@@ -75,7 +81,9 @@ class SessionStore:
             self._by_window[window] = key
             return session
 
-    def lookup(self, session_id: str | None) -> Session | None:
+    def lookup(self, session_id: str | None, window_label: str | None = None) -> Session | None:
+        """The live session, refreshed; raises WrongWindow (without refreshing) on a window mismatch."""
+
         if not session_id:
             return None
         key = _key(session_id)
@@ -87,6 +95,8 @@ class SessionStore:
             if now - session.last_used > IDLE_TTL_S:
                 self._drop(key)
                 return None
+            if window_label is not None and session.window_label != window_label:
+                raise WrongWindow
             session.last_used = now
             return session
 
@@ -96,6 +106,16 @@ class SessionStore:
         with self._lock:
             session = self._sessions.get(_key(session_id))
             return session is not None and time.monotonic() - session.last_used <= IDLE_TTL_S
+
+    def end_window(self, window_label: str) -> bool:
+        """The Shell closed this window (stdio ``session.end``): its session ends now, not after 8 h idle."""
+
+        with self._lock:
+            key = self._by_window.get(window_label)
+            if key is None:
+                return False
+            self._drop(key)
+            return True
 
     def logout(self, session_id: str) -> None:
         with self._lock:

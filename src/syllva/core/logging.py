@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 REDACT = re.compile(
-    r"secret|token|password|cookie|authorization|prompt|response|body|bootstrap|mac|nonce|sid|csrf|session|path",
+    r"secret|token|password|cookie|authorization|prompt|response|body|bootstrap|mac|nonce|sid|csrf|session|path|relay",
     re.IGNORECASE,
 )
 MAX_VALUE = 200

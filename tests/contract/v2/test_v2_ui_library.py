@@ -23,7 +23,7 @@ from syllva.ui.sessions import SessionStore
 
 pytestmark = pytest.mark.contract
 
-PORT, ORIGIN = 49152, "syllva://app"
+PORT, ORIGIN = 49152, "syllva://localhost"
 
 
 @pytest.fixture

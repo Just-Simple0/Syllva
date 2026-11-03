@@ -1,0 +1,17 @@
+[
+ {
+  "key_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+  "label": "main",
+  "mac_hex": "5f0fb98b1a6a70f56d241bded55e5fe6c9362e622b20479654a243983165ddfc"
+ },
+ {
+  "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "label": "notes",
+  "mac_hex": "74539b1695cfc365c8c70baf8163f46da1bf67f119b97e5fb5f37732dbee6454"
+ },
+ {
+  "key_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "label": "w-1",
+  "mac_hex": "51fb996bcab2fcdfdbf972c485bf29898bbccf09f7154a23223bd96245c34143"
+ }
+]

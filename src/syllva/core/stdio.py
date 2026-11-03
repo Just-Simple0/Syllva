@@ -44,11 +44,12 @@ WINDOW_LABEL = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 
 EXIT_OK, EXIT_PROTOCOL, EXIT_DB_LOCKED, EXIT_MIGRATION, EXIT_SHELL_GONE = 0, 2, 3, 4, 5
 
-# Origins the relayed webview presents (design rev 5, errata E25; finalized by the R2-0 spike).
+# Origins the relayed webview presents (design rev 5, errata E25/E29): Tauri 2 serves a custom
+# scheme as ``<scheme>://localhost`` on macOS/Linux and ``http://<scheme>.localhost`` on Windows.
 APP_ORIGINS: dict[str, tuple[str, ...]] = {
-    "darwin": ("syllva://app",),
-    "linux": ("syllva://app",),
-    "win32": ("http://syllva.app", "https://syllva.app"),
+    "darwin": ("syllva://localhost",),
+    "linux": ("syllva://localhost",),
+    "win32": ("http://syllva.localhost",),
 }
 
 
@@ -231,7 +232,10 @@ def run_stdio(stdin: BinaryIO | None = None) -> int:
     library = LibraryApi(db, blobs, intake, kick=worker.kick, upload_limit=IntakeConfig().max_bytes)
     sock = bind_loopback()
     port = int(sock.getsockname()[1])
-    app = create_app(sessions, port=port, allowed_origins=APP_ORIGINS[hello.platform], gate=gate, library=library)
+    from syllva.ui.relay import RelayVerifier
+
+    app = create_app(sessions, port=port, allowed_origins=APP_ORIGINS[hello.platform], gate=gate, library=library,
+                     relay=RelayVerifier(hello.secret))
     server = _UiServer(app, sock)
     server.start()
     worker.start()
@@ -361,6 +365,12 @@ def _loop(channel: Channel, sessions: Any, gate: Any = None) -> int:
         elif kind == "shutdown":
             channel.send({"t": "bye"})
             return EXIT_OK
+        elif kind == "session.end":
+            label = item.get("window_label")
+            if not isinstance(label, str) or not WINDOW_LABEL.fullmatch(label):
+                channel.send({"t": "error", "code": "BAD_WINDOW_LABEL", "message": "invalid window label"})
+                continue
+            channel.send({"t": "session.ended", "window_label": label, "ended": bool(sessions.end_window(label))})
         elif kind == "session.bootstrap":
             label = item.get("window_label")
             if not isinstance(label, str) or not WINDOW_LABEL.fullmatch(label):

@@ -9,7 +9,7 @@ const { JSDOM } = require("jsdom");
 const STATIC = process.argv[2];
 const PAYLOADS = JSON.parse(process.argv[3]);
 const html = fs.readFileSync(path.join(STATIC, "index.html"), "utf8").replace(/<script[^>]*><\/script>/g, "");
-const dom = new JSDOM(html, { url: "http://syllva.app/bootstrap#token123", runScripts: "outside-only", pretendToBeVisual: true });
+const dom = new JSDOM(html, { url: "http://syllva.localhost/bootstrap#token123", runScripts: "outside-only", pretendToBeVisual: true });
 const { window } = dom;
 window.__xss = [];
 window.alert = () => window.__xss.push("alert");

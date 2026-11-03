@@ -306,3 +306,102 @@ GUI가 없는 이 환경에서는 컴파일과 단위 테스트까지만 할 수
   - capability 허용 목록은 정확한 식별자로 테스트 fixture에 고정한다. 대상은 `core:window:allow-minimize|maximize|unmaximize|close|start-dragging`이다.
   - 다이얼로그는 남은 시간 카운트다운을 보여 주고 0이 되면 자동으로 닫는다.
   - E25에 "변경 요청 Origin 필수"를 명시한다.
+
+## 7. R2-0 실측 결과와 중계 인증 (보완안 — 구현 전 독립 검토 대상)
+
+### 7.1 실측 (2026-11-03, Linux WebKitGTK 2.52, Xvfb, Tauri 2 커스텀 프로토콜 `syllva://localhost`)
+
+| 항목 | 결과 |
+|---|---|
+| `syllva://localhost/bootstrap#token` 로드, 정적 파일 중계 | 됨 |
+| fragment 보존(앱이 토큰을 읽어 `POST /api/session`) | 됨 |
+| 웹뷰 요청의 `Origin` / `Sec-Fetch-Site` | **보내지 않음**(모든 요청에서 없음) |
+| `Set-Cookie` 후 다음 요청의 `Cookie` | **보내지 않음** |
+| IPC(`window.__TAURI__`)·네이티브 다이얼로그 | GUI 조작 없이는 미확인 → 수동 시연 |
+
+따라서 웹뷰가 보내는 헤더만으로는 R2-1의 Origin 필수 검사와 쿠키 세션을 쓸 수 없다. 조건 C의 대안을 택한다. macOS/Windows에서는 수동 시연으로 같은 항목을 기록한다.
+
+### 7.2 보완안: Shell 중계가 창 신원과 세션을 붙인다
+
+1. **중계 인증 헤더**
+   - Shell은 커스텀 프로토콜 처리기의 호출 웹뷰 label(`ctx.webview_label()`, Rust가 얻는 값)로 다음 두 헤더를 모든 중계 요청에 붙인다.
+     - `X-Syllva-Window: <label>`
+     - `X-Syllva-Relay: base64url(HMAC-SHA256(shell_secret, "syllva-relay-v1" ‖ 0x00 ‖ len32(label) ‖ label))`
+   - 웹뷰가 같은 이름의 헤더를 보내면 지우고 다시 쓴다.
+2. **Core(stdio 모드)의 검증**
+   - 모든 요청(GET 포함, `/healthz` 제외)에 유효한 중계 헤더를 요구한다. 없거나 틀리면 403이다.
+   - 결과적으로 Core 루프백 HTTP는 중계만 쓸 수 있다. 같은 머신의 다른 브라우저 페이지와 비-Shell 클라이언트는 차단된다(§10.1 "헤더 검사는 보조"보다 강함).
+   - Origin 필수 검사는 stdio 모드에서 이 중계 검사로 대체한다. `Sec-Fetch-Site`는 있으면 기존 규칙대로 검사한다. 헤드리스 모드는 지금처럼 루프백 Origin을 쓴다.
+3. **세션 쿠키는 Shell 메모리에 둔다**
+   - 중계는 Core 응답의 `syllva_sid` `Set-Cookie`를 **웹뷰에 전달하지 않는다**. 대신 창 label별 쿠키 보관소에 저장하고, 그 창의 이후 요청에 `Cookie`로 붙인다.
+   - 결과적으로 세션 id는 웹뷰(XSS)에 닿지 않는다(강화). CSRF 토큰은 지금처럼 응답 본문으로 JS 메모리에 두고 계속 요구한다(심층 방어).
+4. **창 결속**
+   - Core는 세션의 `window_label`과 요청의 `X-Syllva-Window`가 같은지 매 요청 검사한다.
+   - 따라서 다른 창의 세션을 쓸 수 없다(§6.4-2 강화, 조건 C가 언급한 강화).
+   - bootstrap 교환도 토큰의 창과 요청 창이 같아야 한다.
+5. **로그**: 중계 로그는 조건 A 그대로(메서드·경로·상태·크기)다. 중계 MAC과 쿠키 값은 기록하지 않는다.
+
+**정오표**: E25를 갱신한다. 설계 §5.1(a)의 "same-origin 검사"는 "중계 인증(창 label에 결속된 shell_secret MAC)"으로 구현하며, 보증은 더 강하다. 설계서 개정이 필요한지는 검토 의견을 따른다.
+
+### 7.3 검토 반영 (보완안 검토 REQUEST_CHANGES 필수 R1–R7) 및 사용자 결정 (2026-11-03)
+
+**사용자 결정**
+- 중계 인증은 정오표(E25)로 진행하고 설계서는 바꾸지 않는다. 조건 B의 쿠키 부분 변경을 승인했다.
+- R4 답변 스트리밍은 중계 안의 짧은 폴링으로 한다. SSE를 쓰지 않고 루프백 `connect-src`도 열지 않는다. 기록은 E29.
+
+**R1 — 조건 B 개정**
+- Origin·`Sec-Fetch-*`는 받은 그대로 전달한다.
+- **Cookie는 웹뷰에서 오는 값을 절대 전달하지 않는다.** 대신 창 label별 보관소에서 만들어 붙인다.
+- **`Set-Cookie`는 웹뷰로 절대 전달하지 않는다.**
+- `X-Syllva-Window`·`X-Syllva-Relay`는 중계가 만들어 붙인다.
+- 웹뷰 헤더는 허용 목록 방식이다. 허용 목록에 `cookie`·`x-syllva-window`·`x-syllva-relay`가 없다는 것 자체가 차단 장치이며, 테스트로 고정한다.
+
+**R2 — E26과 §3 위협표 개정**
+- stdio 모드에서는 `/healthz`를 뺀 **모든 요청에 중계 인증이 필수**다.
+- Origin은 **있으면** 허용된 앱 origin과 일치해야 한다(§10.1 원문으로 복귀). WebView2는 `Origin: http://syllva.localhost`를 보낼 수 있다.
+- `Sec-Fetch-Site` 규칙과 Host 정확 일치는 그대로다.
+
+**R3 — 모드 두 개, 대체 경로 없음**
+- `create_app`은 `hello.secret`이 있을 때만 중계 검증기를 받는다.
+- stdio 모드: 쿠키·CSRF·Origin이 모두 맞아도 중계 헤더가 없거나 틀리면 403이다.
+- 헤드리스 모드: `X-Syllva-*`를 완전히 무시한다. 창 결속에 쓰지 않으며, 변경 요청의 Origin 필수 규칙(E26)을 유지한다.
+- 헤더 검증 규칙:
+  - 각 헤더는 정확히 한 번 나와야 한다.
+  - label은 `WINDOW_LABEL` 형식이어야 한다.
+  - 비교는 `hmac.compare_digest`로 한다.
+  - 실패는 코드로만 기록한다.
+
+**R4 — 정화 패턴**
+- 정화 패턴에 `relay`를 추가한다.
+- 중계 MAC은 `UI_DENIED` 필드와 Shell 로그 어디에도 남지 않는다.
+
+**R5 — 보관소(jar) 의미**
+- 메모리에만 둔다.
+- 키는 *요청*의 `ctx` label이다.
+- `syllva_sid`만 저장하고, 삭제(`Max-Age=0`)를 반영한다. `Domain`/`Path`는 무시한다.
+- 창이 닫히면 항목을 지우고 Core에 `DELETE /api/session`을 보낸다.
+- Core가 끝나거나 다시 시작하면 보관소 전체를 지운다.
+- 오래된 sid로 401을 받으면 Shell은 `session.bootstrap`으로 새 토큰을 받아 그 창을 다시 로드한다.
+
+**R6 — bootstrap 결속**
+- 토큰의 label ≠ `X-Syllva-Window`이면 `POST /api/session`은 403이다. 이때도 토큰은 소비된다.
+- 모든 라우트는 label이 맞지 않으면 403 `WRONG_WINDOW`이다. 이 검사는 유휴 시계를 건드리기 전에 한다.
+
+**R7 — 테스트 벡터**
+- `tests/fixtures/relay_mac_vectors.json`(도메인 `syllva-relay-v1\0`, `len32(label)‖label`)을 Python과 Rust가 함께 쓴다.
+
+**구현 메모**
+- 순수 부분을 `shell/proto`로 옮긴다: `relay_mac`, 요청 헤더 정리, 응답 흡수, `Jar`. 3개 OS에서 테스트한다.
+- C-19 정적 검사로 확인할 것:
+  - uri-scheme 처리기가 `ctx.webview_label()`을 쓴다.
+  - `gate.rs`도 같은 label 공간(창 label)을 쓴다.
+- 수동 시연에 남는 항목(§4): 앱 origin 한정 IPC, label 공간 일치. Core의 정합성은 더 이상 웹뷰가 무엇을 보내는지에 의존하지 않는다.
+
+### 7.4 R2-4 검토 반영 (PR #52)
+
+- **F1 — Core 종료 처리**: Shell은 프로토콜 위반이나 Core 종료를 감지하면 Core를 끝내고 앱도 끝낸다. 정상 종료와는 구분한다. 감시는 `ready` 이후에만 켜진다: 시작 중 거부(`DB_LOCKED` 등)는 종료 대신 거부 다이얼로그로 보고한다(재검토 지적).
+- **F2 — 창 닫힘과 세션 정리**: 창이 닫히면 보관소 항목을 지우고 stdio `session.end`로 Core 세션을 즉시 끝낸다. Core 재시작 경로는 없다. Core가 끝나면 앱도 끝나므로 보관소도 함께 사라진다. §7.3 R5의 "Core 재시작 시 보관소 전체 삭제"는 이것으로 충족된다.
+- **F3 — 정오표 기록**: `SYSTEMROOT` 허용과 Core stderr 폐기를 E30에 기록했다.
+- **수동 시연 추가 확인 항목**(macOS/Windows):
+  - WKWebView가 커스텀 스킴에서 `Origin: null`을 보내는지. 보내면 변경 요청이 `BAD_ORIGIN`이 되므로 E29 Origin 규칙을 재검토한다.
+  - Core CSP에 `connect-src ipc:`가 없어 Tauri IPC가 postMessage로 대체될 때 콘솔 경고가 나는지.

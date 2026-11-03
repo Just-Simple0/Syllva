@@ -105,3 +105,15 @@ def wait_port_closed(port: int, timeout: float = 5.0) -> bool:
                 return True
         time.sleep(0.05)
     return False
+
+
+def relay_headers(secret: bytes, label: str = "main") -> dict[str, str]:
+    """What the Shell relay attaches to every request of window ``label`` (errata E29)."""
+
+    import base64 as _b64
+    import hashlib as _hashlib
+    import hmac as _hmac
+
+    raw = label.encode()
+    tag = _hmac.new(secret, b"syllva-relay-v1\x00" + len(raw).to_bytes(4, "big") + raw, _hashlib.sha256).digest()
+    return {"X-Syllva-Window": label, "X-Syllva-Relay": _b64.urlsafe_b64encode(tag).decode().rstrip("=")}

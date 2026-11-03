@@ -17,7 +17,7 @@ import httpx
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from support.shell_sim import ShellSim, wait_port_closed
+from support.shell_sim import ShellSim, relay_headers, wait_port_closed
 
 pytestmark = pytest.mark.contract
 
@@ -128,7 +128,7 @@ def test_the_secret_never_leaves_the_core(sim: ShellSim, tmp_path: Path) -> None
     bodies = [
         httpx.get(base + "/healthz", headers=host).content,
         httpx.get(base + "/bootstrap", headers=host).content,
-        httpx.post(base + "/api/session", json={"bootstrap": "x"}, headers={**host, "Origin": "syllva://app"}).content,
+        httpx.post(base + "/api/session", json={"bootstrap": "x"}, headers={**host, "Origin": "syllva://localhost"}).content,
     ]
     sim.send({"t": "nonsense", "secret_b64": _b64(SENTINEL)})  # echo bait
     sim.recv()
@@ -264,7 +264,9 @@ def test_uploaded_file_is_processed_by_the_cores_worker(tmp_path: Path) -> None:
     try:
         ready = shell.hello()
         base = f"http://127.0.0.1:{ready['port']}"
-        headers = {"Host": f"127.0.0.1:{ready['port']}", "Origin": "syllva://app"}
+        headers = {"Host": f"127.0.0.1:{ready['port']}", **relay_headers(SENTINEL)}
+        with httpx.Client(base_url=base) as plain:
+            assert plain.get("/api/library/items", headers={"Host": headers["Host"]}).status_code == 403  # relay only
         with httpx.Client(base_url=base, headers=headers) as http:
             csrf = http.post("/api/session", json={"bootstrap": ready["bootstrap"]}).json()["csrf"]
             http.headers["X-Syllva-CSRF"] = csrf
@@ -284,3 +286,16 @@ def test_uploaded_file_is_processed_by_the_cores_worker(tmp_path: Path) -> None:
             assert status == "READY"
     finally:
         shell.stop()
+
+
+def test_session_end_from_the_shell_ends_that_windows_session(sim: ShellSim) -> None:
+    ready = sim.hello()
+    base, host = f"http://127.0.0.1:{ready['port']}", {"Host": f"127.0.0.1:{ready['port']}", **relay_headers(SENTINEL)}
+    with httpx.Client(base_url=base, headers=host) as http:
+        assert http.post("/api/session", json={"bootstrap": ready["bootstrap"]}).status_code == 200
+        assert http.get("/api/session").status_code == 200
+        sim.send({"t": "session.end", "window_label": "main"})
+        assert sim.recv() == {"t": "session.ended", "v": 1, "window_label": "main", "ended": True}
+        assert http.get("/api/session").status_code == 401
+    sim.send({"t": "session.end", "window_label": "Bad!"})
+    assert sim.recv()["code"] == "BAD_WINDOW_LABEL"

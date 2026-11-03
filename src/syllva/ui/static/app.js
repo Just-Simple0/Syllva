@@ -129,8 +129,12 @@ async function verify(material) {
   }
   // The shell shows the Core-made summary in a native dialog; the webview passes only the nonce.
   const result = await tauri.core.invoke("confirm_gate", { nonceId: begun.data.nonce_id });
-  show(result && result.status === "COMMITTED" ? "검증됨으로 표시했습니다." : "표시하지 않았습니다.");
+  const committed = Boolean(result && result.status === "COMMITTED");
+  show(committed ? "검증됨으로 표시했습니다." : "표시하지 않았습니다.");
   await refresh();
+  if (committed) {
+    await openMaterial(Object.assign({}, material, { verified: true }));
+  }
 }
 
 async function openMaterial(material) {

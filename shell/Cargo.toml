@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = ["proto", "app"]
+# app builds against the platform webview SDK (webkit2gtk on Linux, WebView2 on Windows, WKWebView on macOS).
+
+[workspace.package]
+edition = "2021"
+license = "UNLICENSED"
+version = "0.1.0"
