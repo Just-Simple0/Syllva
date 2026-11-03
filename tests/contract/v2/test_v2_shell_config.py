@@ -66,7 +66,7 @@ def test_window_identity_comes_from_tauri_on_both_paths() -> None:
 def test_navigation_is_limited_to_the_app_origin() -> None:
     assert ".on_navigation(relay::allowed_navigation)" in _src("main.rs")
     relay = _src("relay.rs")
-    assert '("syllva", Some("localhost")) => true' in relay and "_ => false" in relay
+    assert '(scheme == "syllva" && host == Some("localhost"))' in relay and "cfg!(windows) && matches!" in relay
 
 
 def test_relay_never_passes_cookies_or_relay_headers_between_webview_and_core() -> None:
