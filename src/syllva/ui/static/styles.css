@@ -1,1 +1,6 @@
-body { font-family: system-ui, sans-serif; margin: 0; padding: 2rem; color: #1f2328; background: #fff; }
+body { font-family: system-ui, sans-serif; margin: 0; padding: 1.5rem; color: #1f2328; background: #fff; }
+section { margin-bottom: 1.5rem; }
+ul { list-style: none; padding: 0; }
+li { padding: 0.25rem 0; border-bottom: 1px solid #eee; }
+pre { white-space: pre-wrap; word-break: break-word; background: #f6f8fa; padding: 0.5rem; }
+small { color: #57606a; }

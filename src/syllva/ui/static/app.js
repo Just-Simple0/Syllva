@@ -1,27 +1,191 @@
-// Syllva v2 UI bootstrap (implementation spec §10.2, design §5.4a).
-// Rules: text only via textContent, no HTML sinks, no eval, no web storage; the CSRF token lives in memory only.
+// Syllva v2 UI (implementation spec §10, design §5.4a).
+// Rules: every AI/SOURCE/USER string is inserted with textContent; elements are created with
+// createElement only; no HTML sinks, no eval, no web storage; the CSRF token lives in memory only.
 "use strict";
 
 const state = { csrf: null, window: null };
 
+function el(tag, text, attrs) {
+  const node = document.createElement(tag);
+  if (text !== undefined && text !== null) {
+    node.textContent = String(text);
+  }
+  for (const [name, value] of Object.entries(attrs || {})) {
+    node.setAttribute(name, String(value));
+  }
+  return node;
+}
+
+function clear(node) {
+  while (node.firstChild) {
+    node.removeChild(node.firstChild);
+  }
+}
+
 function show(text) {
-  const status = document.getElementById("status");
-  status.textContent = text;
+  document.getElementById("status").textContent = text;
+}
+
+async function api(method, path, body, extraHeaders) {
+  const headers = Object.assign({}, extraHeaders || {});
+  if (method !== "GET") {
+    headers["X-Syllva-CSRF"] = state.csrf || "";
+  }
+  let payload;
+  if (body instanceof Blob || body instanceof ArrayBuffer) {
+    payload = body;
+  } else if (body !== undefined) {
+    headers["Content-Type"] = "application/json";
+    payload = JSON.stringify(body);
+  }
+  const response = await fetch(path, { method, headers, body: payload, credentials: "same-origin" });
+  const data = await response.json();
+  return { ok: response.ok, status: response.status, data };
 }
 
 async function exchange(token) {
-  const response = await fetch("/api/session", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ bootstrap: token }),
-    credentials: "same-origin",
-  });
-  if (!response.ok) {
+  const result = await api("POST", "/api/session", { bootstrap: token });
+  if (!result.ok) {
     throw new Error("session refused");
   }
-  const body = await response.json();
-  state.csrf = body.csrf;
-  state.window = body.window_label;
+  state.csrf = result.data.csrf;
+  state.window = result.data.window_label;
+}
+
+function renderReview(candidates) {
+  const list = document.getElementById("review-list");
+  clear(list);
+  for (const c of candidates) {
+    const item = el("li");
+    item.appendChild(el("span", c.name));
+    item.appendChild(el("small", " " + c.state + (c.reason ? " · " + c.reason : "")));
+    if (Array.isArray(c.blockers) && c.blockers.length) {
+      item.appendChild(el("small", " (" + c.blockers.join(", ") + ")"));
+    }
+    if (c.state === "NEEDS_REVIEW") {
+      const form = el("form");
+      const course = el("input", null, { type: "text", placeholder: "과목 키" });
+      course.value = c.suggested_course_key || "";
+      const kind = el("input", null, { type: "text", placeholder: "종류" });
+      kind.value = c.suggested_kind || "";
+      const held = el("input", null, { type: "text", placeholder: "새 세션 날짜 YYYY-MM-DD(선택)" });
+      form.appendChild(course);
+      form.appendChild(kind);
+      form.appendChild(held);
+      form.appendChild(el("button", "확인", { type: "submit" }));
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const body = { course_key: course.value, kind: kind.value };
+        if (held.value) {
+          body.new_session_held_on = held.value;
+        }
+        const result = await api("POST", "/api/library/" + encodeURIComponent(c.candidate_id) + "/classify", body);
+        show(result.ok ? "확인했습니다." : "확인할 수 없습니다: " + (result.data.message || result.data.error));
+        await refresh();
+      });
+      item.appendChild(form);
+    }
+    if (c.state === "NEEDS_REVIEW" || c.state === "DUPLICATE" || c.state === "UNSUPPORTED") {
+      const dismiss = el("button", "무시", { type: "button" });
+      dismiss.addEventListener("click", async () => {
+        await api("POST", "/api/library/" + encodeURIComponent(c.candidate_id) + "/dismiss");
+        await refresh();
+      });
+      item.appendChild(dismiss);
+    }
+    list.appendChild(item);
+  }
+}
+
+function renderLibrary(items) {
+  const list = document.getElementById("library-list");
+  clear(list);
+  for (const m of items) {
+    const item = el("li");
+    const open = el("button", m.title, { type: "button", "data-material": m.material_id });
+    open.addEventListener("click", () => openMaterial(m));
+    item.appendChild(open);
+    item.appendChild(el("small", " " + m.material_id + " · " + m.course_name + " · " + m.kind + " · " + m.processing_status +
+      (m.verified ? " · 검증됨" : "")));
+    list.appendChild(item);
+  }
+}
+
+async function verify(material) {
+  const begun = await api("POST", "/api/gate/begin",
+    { action: "VERIFY_MATERIAL", target_id: material.material_id, params: { material_id: material.material_id } });
+  if (!begun.ok) {
+    show("확인을 시작할 수 없습니다: " + begun.data.error);
+    return;
+  }
+  const tauri = window.__TAURI__;
+  if (!tauri || !tauri.core || typeof tauri.core.invoke !== "function") {
+    show("검증 표시는 데스크탑 앱의 확인 창에서만 할 수 있습니다.");
+    return;
+  }
+  // The shell shows the Core-made summary in a native dialog; the webview passes only the nonce.
+  const result = await tauri.core.invoke("confirm_gate", { nonceId: begun.data.nonce_id });
+  show(result && result.status === "COMMITTED" ? "검증됨으로 표시했습니다." : "표시하지 않았습니다.");
+  await refresh();
+}
+
+async function openMaterial(material) {
+  const section = document.getElementById("material-section");
+  section.hidden = false;
+  document.getElementById("material-title").textContent = material.title;
+  document.getElementById("material-meta").textContent =
+    material.material_id + " · " + material.course_name + " · " + material.processing_status;
+  const actions = document.getElementById("material-actions");
+  clear(actions);
+  if (!material.verified) {
+    const button = el("button", "검증됨으로 표시", { type: "button" });
+    button.addEventListener("click", () => verify(material));
+    actions.appendChild(button);
+  }
+  const list = document.getElementById("evidence-list");
+  clear(list);
+  const result = await api("GET", "/api/library/" + encodeURIComponent(material.material_id) + "/context");
+  if (!result.ok) {
+    list.appendChild(el("li", "원문을 불러올 수 없습니다."));
+    return;
+  }
+  for (const warning of result.data.warnings || []) {
+    list.appendChild(el("li", "알림: " + warning.code));
+  }
+  for (const item of result.data.evidence || []) {
+    const entry = el("li");
+    entry.appendChild(el("small", item.locator + (item.parts > 1 ? " (" + item.part + "/" + item.parts + ")" : "")));
+    entry.appendChild(el("pre", item.text));
+    list.appendChild(entry);
+  }
+}
+
+async function refresh() {
+  const [library, review] = await Promise.all([api("GET", "/api/library/items"), api("GET", "/api/intake/candidates")]);
+  if (library.ok) {
+    renderLibrary(library.data.items || []);
+  }
+  if (review.ok) {
+    renderReview(review.data.candidates || []);
+  }
+}
+
+function bindUpload() {
+  const form = document.getElementById("upload-form");
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const input = document.getElementById("upload-file");
+    const file = input.files && input.files[0];
+    if (!file) {
+      return;
+    }
+    const course = document.getElementById("upload-course").value;
+    const query = course ? "?course=" + encodeURIComponent(course) : "";
+    const result = await api("POST", "/api/library/upload" + query, file,
+      { "X-Syllva-Filename": encodeURIComponent(file.name), "Content-Type": "application/octet-stream" });
+    show(result.ok ? "추가했습니다: " + result.data.state : "추가할 수 없습니다: " + result.data.error);
+    await refresh();
+  });
 }
 
 async function start() {
@@ -36,8 +200,14 @@ async function start() {
       return;
     }
   }
-  const check = await fetch("/api/session", { credentials: "same-origin" });
-  show(check.ok ? "준비됨" : "세션이 없습니다. 앱을 다시 시작하세요.");
+  const check = await api("GET", "/api/session");
+  if (!check.ok) {
+    show("세션이 없습니다. 앱을 다시 시작하세요.");
+    return;
+  }
+  show("준비됨");
+  bindUpload();
+  await refresh();
 }
 
 window.addEventListener("DOMContentLoaded", start);

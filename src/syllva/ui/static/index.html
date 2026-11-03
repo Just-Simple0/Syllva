@@ -8,6 +8,15 @@
   <script src="/static/app.js" defer></script>
 </head>
 <body>
-  <main id="app"><p id="status">연결하는 중…</p></main>
+  <header><h1>Syllva</h1><p id="status">연결하는 중…</p></header>
+  <main id="app">
+    <section id="upload-section"><h2>자료 추가</h2>
+      <form id="upload-form"><input id="upload-file" type="file"><input id="upload-course" type="text" placeholder="과목 키(선택)">
+        <button type="submit">추가</button></form></section>
+    <section id="review-section"><h2>확인 필요</h2><ul id="review-list"></ul></section>
+    <section id="library-section"><h2>라이브러리</h2><ul id="library-list"></ul></section>
+    <section id="material-section" hidden><h2 id="material-title"></h2><p id="material-meta"></p>
+      <div id="material-actions"></div><ul id="evidence-list"></ul></section>
+  </main>
 </body>
 </html>

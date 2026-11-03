@@ -350,3 +350,29 @@ def test_steps_refuse_to_run_inside_a_callers_transaction(intake: LocalIntake) -
     with intake.writer.transaction(), pytest.raises(RuntimeError, match="own their transactions"):
         intake.classify(c.candidate_id, now=NOW)
     assert intake.get(c.candidate_id).state == "RECEIVED"
+
+
+def test_intake_steps_wait_for_another_threads_transaction(intake: LocalIntake, v2_db: Database) -> None:
+    """The nesting guard counts only the calling thread's own transaction (review of PR #50 class)."""
+
+    import threading
+
+    c = _drop(intake, TRANSCRIPT.encode(), "t.txt")
+    held, release, result = threading.Event(), threading.Event(), {}
+
+    def hold() -> None:
+        with intake.writer.transaction():
+            held.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    held.wait(5)
+    worker = threading.Thread(target=lambda: result.update(state=intake.classify(c.candidate_id, now=NOW).state))
+    worker.start()
+    worker.join(0.3)
+    assert worker.is_alive()
+    release.set()
+    holder.join()
+    worker.join(5)
+    assert result["state"] == "NEEDS_REVIEW"
