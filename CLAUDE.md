@@ -62,10 +62,11 @@
 ## 저장소 레이아웃
 
 ```text
-src/syllva/       Python 코어 (domain, retrieval, state, ingestion, normalization, enrichment, intake, adapters, mcp[선택], settings[UI 출발점], ...)
+src/syllva/       Python 코어 (domain, library, state/v2, ingestion, normalization, retrieval[service], intake/v2, cli, settings[UI 출발점], mcp·adapters/github[선택], ...)
+                  v1.2 Notion/Drive 어댑터·엔진·SQLite 저장소·워커·runtime은 R1c에서 삭제(정오표 E19)
 contracts/        v1.2 Behavior Contract (v4에서 프롬프트 템플릿으로 전면 재작성 예정)
 clients/          v1.2 외부 클라이언트 프로젝션 (v4에서 폐기 예정)
-deployment/       v1.2 launchd / Task Scheduler / remote-mcp (v2에서 재정의 예정)
+deployment/       v1.2 launchd / Task Scheduler / remote-mcp (삭제된 v1.2 명령을 가리킴, R6에서 재정의)
 scripts/          Behavior Contract 해시/드리프트 린트 (v4 전환 시 대체)
 tests/            unit / contract / integration / e2e / fixtures
 docs/plans/       전환 계획과 과거 설계 기록 (desktop-app-v2.md가 현행)
@@ -87,12 +88,12 @@ mypy
 lint-imports                                          # v2 import 방향 계약 (점감 예외, pyproject [tool.importlinter])
 python scripts/check_invariants.py                    # v2 정적 불변식 (점감 기준선 scripts/invariants_baseline.json)
 
-syllva --help                                          # CLI (uls는 별칭)
+syllva --help                                          # v2 CLI: course/intake/context/setup (uls는 별칭, R2 앱 전까지의 조작 경로)
 python scripts/project_behavior_contract.py --print   # v1.2 Behavior Contract 버전/해시 (v4 전환 전까지)
 python scripts/lint_behavior_projection.py            # 프로젝션 드리프트 검사
 ```
 
-기준선(2026-11-02, R1a 직후, Linux): 전체 3533 passed / 10 failed(`tests/unit/test_knu_lms_sync.py`의 키체인 의존 테스트) / 5 skipped. ruff 지적 다수, mypy 134 errors. 이 기준선과 비교해 **새로 생긴 실패**를 판단한다.
+기준선(2026-11-03, R1c 삭제 PR 직후, Linux): 전체 1796 passed / 10 failed(`tests/unit/test_knu_lms_sync.py`의 키체인 의존 테스트) / 25 skipped. ruff 102건(레거시 파일), mypy 115 errors. import-linter 예외 0, 정적 불변식 기준선은 원격 MCP(`mcp/transports/oauth.py`, R6 보류) 15건뿐. 이 기준선과 비교해 **새로 생긴 실패**를 판단한다.
 
 ## 구현 순서 (로드맵)
 

@@ -22,7 +22,9 @@ from syllva.ephemeral.models import AllowedLocator
 
 from .authority import SUPPORTED_MATERIAL_SOURCE_CLASSES
 from .schemas import CapabilityBinding
-from .scope import VALID_USAGE_ROLES
+
+# usage roles a material capability may carry (was retrieval.scope, removed with the v1.2 engine in R1c)
+VALID_USAGE_ROLES = frozenset({"Primary", "Supporting", "Reference"})
 
 BindingValidator = Callable[[CapabilityBinding], Any]
 

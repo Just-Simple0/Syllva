@@ -76,7 +76,8 @@ strict = true
 # Only direct imports are checked. `ignore_imports` is a RATCHET: it records the
 # violations that existed when the contracts were introduced (R1b-1). Entries may
 # only be removed; an entry that no longer matches fails the check, and a new
-# violation not listed here fails the check. The lists must be empty by end of R1b.
+# violation not listed here fails the check. All lists are empty since the R1c deletion (errata E19/E22);
+# test_v2_legacy_removed.py fails if an ignore_imports list reappears.
 # A PR that adds a violation AND the matching ignore entry is not caught by the
 # tool; such additions must be rejected in review.
 # Not yet expressible (packages do not exist): agents -/-> library/state,
@@ -91,27 +92,13 @@ name = "Core modules do not import outer layers or legacy providers"
 type = "forbidden"
 source_modules = [
     "syllva.domain", "syllva.ingestion", "syllva.normalization", "syllva.enrichment",
-    "syllva.retrieval", "syllva.state", "syllva.ephemeral", "syllva.library",
+    "syllva.retrieval", "syllva.state", "syllva.ephemeral", "syllva.library"
 ]
 forbidden_modules = [
-    "syllva.settings", "syllva.mcp", "syllva.cli", "syllva.study_notes",
-    "syllva.adapters.notion", "syllva.adapters.drive", "syllva.adapters.llm",
+    "syllva.settings", "syllva.mcp", "syllva.cli",
+    "syllva.adapters.llm"
 ]
 allow_indirect_imports = true
-ignore_imports = [
-    "syllva.ingestion.discovery -> syllva.adapters.drive.worker",
-    "syllva.retrieval.engine -> syllva.adapters.drive.base",
-    "syllva.retrieval.engine -> syllva.adapters.drive.binding",
-    "syllva.state.reader -> syllva.adapters.drive.binding",
-    "syllva.enrichment._common -> syllva.adapters.llm.base",
-    "syllva.enrichment.material -> syllva.adapters.llm.base",
-    "syllva.enrichment.session -> syllva.adapters.llm.base",
-    "syllva.enrichment.writer -> syllva.adapters.llm.base",
-    "syllva.enrichment.writer -> syllva.adapters.notion.base",
-    "syllva.retrieval._compat -> syllva.adapters.notion.base",
-    "syllva.retrieval.engine -> syllva.adapters.notion.base",
-    "syllva.retrieval.resolver -> syllva.adapters.notion.base",
-]
 
 [[tool.importlinter.contracts]]
 id = "lower-layers-no-services"
@@ -120,29 +107,18 @@ type = "forbidden"
 source_modules = ["syllva.domain", "syllva.state", "syllva.ephemeral"]
 forbidden_modules = ["syllva.intake", "syllva.retrieval"]
 allow_indirect_imports = true
-ignore_imports = [
-    "syllva.state.classification_state -> syllva.intake.classification.calendar",
-    "syllva.state.sqlite -> syllva.intake.identity",
-    "syllva.state.usage_range -> syllva.intake.usage_range",
-]
 
 [[tool.importlinter.contracts]]
 id = "no-external-llm-adapter"
 name = "v2 runtime does not use the external LLM adapter (S2/enrichment paths disabled)"
 type = "forbidden"
 source_modules = [
-    "syllva.intake", "syllva.runtime", "syllva.cli", "syllva.worker", "syllva.settings",
-    "syllva.mcp", "syllva.study_notes", "syllva.proposal", "syllva.orchestration",
-    "syllva.config", "syllva.behavior",
+    "syllva.intake", "syllva.cli", "syllva.settings",
+    "syllva.mcp", "syllva.orchestration",
+    "syllva.config", "syllva.behavior"
 ]
 forbidden_modules = ["syllva.adapters.llm"]
 allow_indirect_imports = true
-ignore_imports = [
-    "syllva.cli.main -> syllva.adapters.llm.typesafe_choice",
-    "syllva.intake.classification.s2 -> syllva.adapters.llm.typesafe_choice",
-    "syllva.intake.worker -> syllva.adapters.llm.typesafe_choice",
-    "syllva.runtime -> syllva.adapters.llm.typesafe_choice",
-]
 
 [[tool.importlinter.contracts]]
 id = "v2-storage-clean"
@@ -151,8 +127,8 @@ type = "forbidden"
 source_modules = ["syllva.state.v2", "syllva.library"]
 forbidden_modules = [
     "syllva.adapters", "syllva.intake", "syllva.retrieval", "syllva.settings", "syllva.mcp",
-    "syllva.cli", "syllva.study_notes", "syllva.runtime", "syllva.worker", "syllva.enrichment",
-    "syllva.ingestion", "syllva.normalization", "syllva.proposal", "syllva.orchestration",
+    "syllva.cli", "syllva.enrichment",
+    "syllva.ingestion", "syllva.normalization", "syllva.orchestration"
 ]
 
 [[tool.importlinter.contracts]]
@@ -170,16 +146,14 @@ source_modules = [
     "syllva.state.v2", "syllva.library",
     "syllva.ingestion.local", "syllva.normalization.local", "syllva.normalization.chunks",
     "syllva.retrieval.natural", "syllva.retrieval.ranking", "syllva.retrieval.service",
-    "syllva.domain.source_ref",
+    "syllva.domain.source_ref"
 ]
 forbidden_modules = [
-    "syllva.adapters.notion", "syllva.adapters.drive", "syllva.study_notes", "syllva.domain.approval_identity",
-    "syllva.retrieval.engine", "syllva.retrieval.resolver", "syllva.retrieval._compat", "syllva.retrieval.chunking",
-    "syllva.state.sqlite", "syllva.state.reader", "syllva.state.base", "syllva.state.models",
-    "syllva.state.classification_state", "syllva.state.usage_range", "syllva.proposal",
-    "syllva.enrichment.writer", "syllva.adapters.llm", "syllva.config.google_oauth",
+    "syllva.retrieval.chunking",
+    "syllva.state.base", "syllva.state.models",
+    "syllva.adapters.llm", "syllva.config.google_oauth",
     # outer layers: v2 core composes upward, never imports them
-    "syllva.intake", "syllva.settings", "syllva.cli", "syllva.mcp", "syllva.runtime", "syllva.worker",
+    "syllva.intake", "syllva.settings", "syllva.cli", "syllva.mcp"
 ]
 allow_indirect_imports = false
 
@@ -189,13 +163,12 @@ name = "v2 intake reuses only the pure classifier, never the legacy worker or pr
 type = "forbidden"
 source_modules = ["syllva.intake.v2"]
 forbidden_modules = [
-    "syllva.intake.worker", "syllva.intake.composition", "syllva.intake.coordinator", "syllva.intake.registry",
-    "syllva.intake.planner", "syllva.intake.requests", "syllva.intake.attestation", "syllva.intake.usage_range",
-    "syllva.intake.study_note_composition", "syllva.intake.canvas_attachments", "syllva.intake.canvas_observer",
-    "syllva.intake.canvas_composition", "syllva.intake.classification.s2",
-    "syllva.adapters", "syllva.study_notes", "syllva.settings", "syllva.mcp", "syllva.cli", "syllva.proposal",
-    "syllva.retrieval.engine", "syllva.retrieval.chunking", "syllva.state.sqlite", "syllva.state.reader",
-    "syllva.domain.approval_identity", "syllva.enrichment",
+
+
+
+    "syllva.adapters", "syllva.settings", "syllva.mcp", "syllva.cli",
+    "syllva.retrieval.chunking",
+    "syllva.enrichment"
 ]
 allow_indirect_imports = false
 
@@ -205,9 +178,9 @@ name = "v2 retrieval modules do not depend on legacy providers or the v1.2 engin
 type = "forbidden"
 source_modules = ["syllva.retrieval.natural", "syllva.retrieval.ranking", "syllva.retrieval.service"]
 forbidden_modules = [
-    "syllva.adapters", "syllva.settings", "syllva.mcp", "syllva.cli", "syllva.study_notes", "syllva.intake",
-    "syllva.retrieval.engine", "syllva.retrieval.resolver", "syllva.retrieval._compat",
+    "syllva.adapters", "syllva.settings", "syllva.mcp", "syllva.cli", "syllva.intake",
+
     # C-02: the retrieval path never reaches the write side
-    "syllva.state.v2.writer", "syllva.state.v2.database",
+    "syllva.state.v2.writer", "syllva.state.v2.database"
 ]
 allow_indirect_imports = false

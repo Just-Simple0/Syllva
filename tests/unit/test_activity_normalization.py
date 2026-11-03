@@ -1,13 +1,8 @@
 from __future__ import annotations
 
-import pathlib
-import sys
-
 import pytest
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures"))
-
-from phase4 import COURSE_KEY
+COURSE_KEY = "2026-1_COMP319-002"  # value of the removed v1.2 Phase4 fixture (R1c)
 
 from syllva.domain.enums import DerivativeStatus
 from syllva.domain.errors import SourcePartialError

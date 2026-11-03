@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from syllva.cli.main import doctor, status
 from syllva.config.google_oauth import config_file_is_private
 
 from .canvas_service import validated_canvas_profile, validated_canvas_registry
@@ -22,8 +21,10 @@ _PLACEHOLDER = re.compile(r"^(\.\.\.|<.*>|changeme|todo)?$", re.IGNORECASE)
 def settings_overview(store: ConfigStore, journal: JournalStore) -> dict[str, Any]:
     loaded = store.load()
     config = loaded.config
-    runtime_status = status(config)
-    doctor_status = doctor(config, live=False, include_credentials=False)
+    # The v1.2 worker runtime and its doctor() were removed in R1c (errata E19); the v2 Core
+    # reports its own health over the stdio protocol in R2. Until then nothing is claimed healthy.
+    runtime_status: dict[str, Any] = {"status": "unavailable"}
+    doctor_status: dict[str, Any] = {"status": "unavailable", "checks": {}}
     steps = setup_steps(config)
     binding = store.binding()
     pending = []

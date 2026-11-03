@@ -1,1 +1,0 @@
-"""ULS adapters · notion package."""
