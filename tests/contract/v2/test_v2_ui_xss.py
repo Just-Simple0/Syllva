@@ -40,7 +40,7 @@ def _run() -> dict[str, object]:
         if os.environ.get("CI"):
             pytest.fail("C-18 must run in CI: node and tests/ui/node_modules (npm ci --prefix tests/ui) are required")
         pytest.skip("node + jsdom not installed (npm ci --prefix tests/ui)")
-    out = subprocess.run([node, str(HARNESS), str(STATIC), json.dumps(PAYLOADS)], capture_output=True, text=True, timeout=60, check=False)
+    out = subprocess.run([node, str(HARNESS), str(STATIC), json.dumps(PAYLOADS)], capture_output=True, text=True, encoding="utf-8", timeout=60, check=False)
     assert out.returncode == 0, out.stderr
     result: dict[str, object] = json.loads(out.stdout)
     return result
