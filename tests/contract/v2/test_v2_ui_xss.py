@@ -67,6 +67,8 @@ def test_hostile_strings_are_visible_as_text() -> None:
         assert payload in text
     assert "연결됨: " + PAYLOADS[1] + " (" + PAYLOADS[5] + ")" in text  # Canvas settings rendered as text (R3-1)
     assert PAYLOADS[0] + " · " + PAYLOADS[1] + " · " + PAYLOADS[2] in text  # discovered Canvas courses
+    assert PAYLOADS[4] + " · " + PAYLOADS[0] in text  # activities (R3-2)
+    assert "동기화할 수 없습니다: " + PAYLOADS[6] in text  # sync status
 
 
 def test_the_bootstrap_token_is_removed_from_the_address() -> None:

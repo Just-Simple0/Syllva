@@ -277,7 +277,7 @@ def test_windows_backend_is_the_credential_vault(monkeypatch: pytest.MonkeyPatch
 def test_the_token_is_revealed_only_for_canvas_reads_and_the_keychain_write() -> None:
     src = Path(__file__).resolve().parents[3] / "src"
     callers = sorted(p.relative_to(src).as_posix() for p in src.rglob("*.py") if ".reveal_token()" in p.read_text(encoding="utf-8"))
-    assert callers == ["syllva/canvas/credential.py", "syllva/ui/canvas.py"]
+    assert callers == ["syllva/canvas/credential.py", "syllva/canvas/sync.py", "syllva/ui/canvas.py"]
 
 
 def test_a_different_origin_is_refused_before_the_token_is_sent(v2_db: Database) -> None:

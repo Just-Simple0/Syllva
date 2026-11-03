@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Protocol
 
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
@@ -48,10 +48,17 @@ async def _object(request: Request, keys: set[str]) -> dict[str, Any] | None:
     return value if isinstance(value, dict) and set(value) == keys else None
 
 
+class Sync(Protocol):
+    def start(self) -> bool: ...
+
+    def status(self) -> dict[str, Any]: ...
+
+
 class CanvasApi:
-    def __init__(self, credentials: CanvasCredentials, client: CanvasClient) -> None:
+    def __init__(self, credentials: CanvasCredentials, client: CanvasClient, sync: Sync | None = None) -> None:
         self.credentials = credentials
         self.client = client
+        self.sync = sync
 
     def routes(self, current: Current, mutation_ok: Callable[[Request, Any], bool]) -> list[Route]:
         def guarded(handler: Callable[..., Any], *, mutate: bool) -> Callable[[Request], Any]:
@@ -77,6 +84,9 @@ class CanvasApi:
             Route("/api/settings/canvas/file-hosts", guarded(self.file_hosts, mutate=True), methods=["PUT"]),
             Route("/api/canvas/courses", guarded(self.courses, mutate=False), methods=["GET"]),
             Route("/api/canvas/courses/{canvas_course_id}", guarded(self.link, mutate=True), methods=["PUT"]),
+            Route("/api/canvas/sync", guarded(self.start_sync, mutate=True), methods=["POST"]),
+            Route("/api/canvas/status", guarded(self.sync_status, mutate=False), methods=["GET"]),
+            Route("/api/activities", guarded(self.activities, mutate=False), methods=["GET"]),
         ]
 
     async def show(self, request: Request) -> Response:
@@ -131,6 +141,39 @@ class CanvasApi:
             return self.credentials.status()
 
         return JSONResponse(await run_in_threadpool(work))
+
+
+    # -- sync and activities (R3-2) --------------------------------------------------------
+
+    async def start_sync(self, request: Request) -> Response:
+        if self.sync is None:
+            return _error(409, "SYNC_UNAVAILABLE")
+        status = await run_in_threadpool(self.credentials.status)
+        if not status.get("connected"):
+            return _error(409, "TOKEN_NOT_SET")
+        if not await run_in_threadpool(self.sync.start):
+            return _error(409, "SYNC_RUNNING")
+        return JSONResponse({"started": True}, status_code=202)
+
+    async def sync_status(self, request: Request) -> Response:
+        if self.sync is None:
+            return JSONResponse({"running": False, "error": None, "courses": []})
+        return JSONResponse(await run_in_threadpool(self.sync.status))
+
+    def _activities(self) -> list[dict[str, Any]]:
+        rows = self.credentials.query(
+            "SELECT a.activity_id, a.title, a.due_at, a.submission_status, a.origin, c.course_key, c.name AS course_name, "
+            "COALESCE(i.active, 1) AS canvas_active FROM activities a JOIN courses c ON c.id = a.course_id "
+            "LEFT JOIN canvas_courses k ON k.course_id = a.course_id "
+            "LEFT JOIN canvas_items i ON i.kind = 'ASSIGNMENT' AND i.resource_id = a.canvas_assignment_id "
+            "AND i.canvas_course_id = k.canvas_course_id "
+            "ORDER BY a.due_at IS NULL, a.due_at, a.activity_id")
+        return [{"activity_id": r["activity_id"], "title": r["title"], "due_at": r["due_at"],
+                 "submission_status": r["submission_status"], "origin": r["origin"], "course_key": r["course_key"],
+                 "course_name": r["course_name"], "canvas_active": bool(r["canvas_active"])} for r in rows]
+
+    async def activities(self, request: Request) -> Response:
+        return JSONResponse({"activities": await run_in_threadpool(self._activities)})
 
 
 __all__ = ["TOKEN_BODY_LIMIT", "TOKEN_PATH", "CanvasApi"]

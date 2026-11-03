@@ -15,12 +15,14 @@ from conftest import NOW, blob, seed_catalog
 from syllva.domain.errors import PolicyViolation
 from syllva.state.v2.database import Database
 from syllva.state.v2.ownership import (
+    ACTOR_COLUMNS,
     ALLOWED,
     HUMAN_ONLY_COLUMNS,
     TABLE_OWNERS,
     UNWRITABLE_TABLES,
     Actor,
     Owner,
+    may_write,
 )
 
 pytestmark = pytest.mark.contract
@@ -32,8 +34,11 @@ MATRIX = [(table, owner, actor) for table, owner in sorted(TABLE_OWNERS.items())
 def test_insert_permission_matrix(v2_db: Database, table: str, owner: Owner, actor: Actor) -> None:
     writer = v2_db.writer()
     columns = {row[0] for row in v2_db.connection.execute("SELECT name FROM pragma_table_info(?)", (table,))}
-    probe = {next(iter(sorted(columns - set(HUMAN_ONLY_COLUMNS.get(table, ()))))): None}
-    if actor in ALLOWED[owner]:
+    probe: dict[str, object] = {next(iter(sorted(columns - set(HUMAN_ONLY_COLUMNS.get(table, ()))))): None}
+    if (actor, table) == (Actor.CANVAS_COLLECTOR, "activities"):
+        probe["origin"] = "CANVAS"  # the collector's only kind of activity (tested on its own below)
+    rule = ACTOR_COLUMNS.get((actor, table))
+    if may_write(table, actor) and (rule is None or set(probe) <= rule[0]):
         # authorized: the call reaches SQLite (which may reject the incomplete row, not the policy)
         try:
             writer.insert(owner, actor, table, probe)
@@ -71,7 +76,7 @@ def test_gate_and_migration_tables_are_not_writable(v2_db: Database, table: str)
 def test_human_only_columns_rejected_for_every_actor(v2_db: Database, table: str, columns: frozenset[str]) -> None:
     owner = TABLE_OWNERS[table]
     pk = next(r[1] for r in v2_db.connection.execute("SELECT * FROM pragma_table_info(?)", (table,)) if r[5] == 1)
-    for actor in ALLOWED[owner]:
+    for actor in [a for a in ALLOWED[owner] if may_write(table, a)]:
         for column in columns:
             with pytest.raises(PolicyViolation, match="human-only"):
                 v2_db.writer().insert(owner, actor, table, {column: 1})
@@ -142,7 +147,7 @@ def test_unknown_tables_and_columns_are_rejected_before_sql(v2_db: Database) -> 
 )
 def test_writer_refuses_identifier_updates(v2_db: Database, table: str, key: dict[str, object], column: str, value: object) -> None:
     seed_catalog(v2_db.connection)
-    for actor in ALLOWED[TABLE_OWNERS[table]]:
+    for actor in [a for a in ALLOWED[TABLE_OWNERS[table]] if may_write(table, a)]:
         with pytest.raises(PolicyViolation, match="immutable"):
             v2_db.writer().update(TABLE_OWNERS[table], actor, table, key, {column: value})
 
@@ -246,7 +251,7 @@ def _profile(db: Database) -> None:
 
 
 def test_settings_writers_are_exactly_the_user_the_startup_cleanup_and_migrations() -> None:
-    assert ALLOWED[Owner.SETTINGS] == frozenset({Actor.UI_USER, Actor.INGESTER, Actor.SYSTEM_MIGRATION})
+    assert ALLOWED[Owner.SETTINGS] == frozenset({Actor.UI_USER, Actor.CANVAS_COLLECTOR, Actor.SYSTEM_MIGRATION})
     assert {t for t, o in TABLE_OWNERS.items() if o is Owner.SETTINGS} == {"canvas_profile", "canvas_courses"}
 
 

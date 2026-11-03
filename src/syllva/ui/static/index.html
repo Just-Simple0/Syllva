@@ -22,10 +22,13 @@
       <div id="canvas-connected" hidden>
         <form id="canvas-hosts-form"><input id="canvas-hosts" type="text" placeholder="파일 호스트(쉼표로 구분, 선택)" autocomplete="off">
           <button type="submit">저장</button></form>
+        <button id="canvas-sync" type="button">지금 동기화</button>
+        <ul id="canvas-sync-status"></ul>
         <button id="canvas-load" type="button">Canvas 과목 불러오기</button>
         <button id="canvas-forget" type="button">연결 끊기</button>
         <ul id="canvas-courses"></ul>
         <p>LTI 강의자료는 자동으로 가져오지 않습니다. 필요한 파일은 직접 추가하세요.</p></div></section>
+    <section id="activities-section"><h2>과제</h2><ul id="activity-list"></ul></section>
     <section id="material-section" hidden><h2 id="material-title"></h2><p id="material-meta"></p>
       <div id="material-actions"></div><ul id="evidence-list"></ul></section>
   </main>

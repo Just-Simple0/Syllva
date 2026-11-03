@@ -156,6 +156,7 @@ def test_no_route_returns_or_writes_secrets_or_human_only_state(ui) -> None:  # 
     paths = {getattr(r, "path", "") for r in http.app.app.routes}
     canvas = {p for p in paths if "canvas" in p}
     assert canvas == {"/api/settings/canvas", "/api/settings/canvas/token", "/api/settings/canvas/file-hosts",
-                      "/api/canvas/courses", "/api/canvas/courses/{canvas_course_id}"}
+                      "/api/canvas/courses", "/api/canvas/courses/{canvas_course_id}", "/api/canvas/sync",
+                      "/api/canvas/status"}
     token_route = next(r for r in http.app.app.routes if getattr(r, "path", "") == "/api/settings/canvas/token")
     assert token_route.methods == {"PUT"}  # never readable

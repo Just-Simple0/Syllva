@@ -217,6 +217,7 @@ def run_stdio(stdin: BinaryIO | None = None) -> int:
 
     from syllva.canvas.client import LiveCanvasClient
     from syllva.canvas.credential import CanvasCredentials
+    from syllva.canvas.sync import CanvasSync
     from syllva.core.worker import IntakeWorker
     from syllva.gate.service import GateService
     from syllva.intake.v2 import IntakeConfig, LocalIntake
@@ -236,15 +237,19 @@ def run_stdio(stdin: BinaryIO | None = None) -> int:
     canvas_client = LiveCanvasClient()
     credentials = CanvasCredentials(db.writer(), verify=canvas_client.verify)
     credentials.recover()  # an interrupted token write/forget (R3 plan §6.1); keychain errors only defer it
+    canvas_sync = CanvasSync(db.writer(), credentials, verify=canvas_client.verify)
+    canvas_sync.recover()  # runs interrupted by the last Core stop (R3 plan §6.3)
     sock = bind_loopback()
     port = int(sock.getsockname()[1])
     from syllva.ui.relay import RelayVerifier
 
     app = create_app(sessions, port=port, allowed_origins=APP_ORIGINS[hello.platform], gate=gate, library=library,
-                     relay=RelayVerifier(hello.secret), canvas=CanvasApi(credentials, canvas_client))
+                     relay=RelayVerifier(hello.secret), canvas=CanvasApi(credentials, canvas_client, canvas_sync))
     server = _UiServer(app, sock)
     server.start()
     worker.start()
+    if credentials.status().get("connected") and canvas_sync.due_for_auto():
+        canvas_sync.start()  # once per start-up when the last complete sync is older than six hours
     channel.send({"t": "ready", "port": port, "bootstrap": sessions.issue_bootstrap("main"), "core_version": __version__})
     log_event("CORE_READY", port=port)
     try:
@@ -252,7 +257,8 @@ def run_stdio(stdin: BinaryIO | None = None) -> int:
     finally:
         worker.stop()
         server.stop()
-        if not worker.alive:  # never close the connection under a statement still running in the worker
+        canvas_sync.wait(5)  # a run still going is RUNNING in the DB and becomes INTERRUPTED at the next start
+        if not worker.alive and not canvas_sync.running:  # never close the connection under a running statement
             db.close()
         log_event("CORE_STOP")
 

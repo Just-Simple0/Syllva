@@ -32,6 +32,11 @@ const routes = {
   "GET /api/library/NET-M01/context": evidence,
   "GET /api/settings/canvas": { connected: true, needs_token: false, profile_id: "c" + "0".repeat(32), origin: p(5),
     display_name: p(1), token_set_at: p(2), file_hosts: [p(3)], courses: [] },
+  "GET /api/activities": { activities: PAYLOADS.map((_, i) => ({ activity_id: "NET-A0" + (i % 9 + 1), title: p(i),
+    due_at: p(i + 1), submission_status: p(i + 2), origin: "CANVAS", course_key: p(i + 3), course_name: p(i + 4),
+    canvas_active: i % 2 === 0 })) },
+  "GET /api/canvas/status": { running: false, error: p(6), courses: PAYLOADS.map((_, i) => ({ canvas_course_id: "1",
+    name: p(i), course_key: p(i + 1), last: { status: p(i + 2), reason: p(i + 3), started_at: p(i), finished_at: null } })) },
   "GET /api/canvas/courses": { courses: PAYLOADS.map((_, i) => ({ canvas_course_id: String(100 + i), name: p(i),
     code: p(i + 1), term_name: p(i + 2), linked_course_key: p(i + 3) })) },
 };

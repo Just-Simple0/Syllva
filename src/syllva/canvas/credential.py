@@ -194,6 +194,11 @@ class CanvasCredentials:
             "courses": [dict(c) for c in courses],
         }
 
+    def query(self, sql: str, params: tuple[Any, ...] = ()) -> list[Any]:
+        """A read for the settings/activities views (the writer's read-only query)."""
+
+        return self._writer.query(sql, params)
+
     def token(self) -> CanvasToken:
         """The stored token, for a Canvas read (only when the profile is SET)."""
 
@@ -296,7 +301,7 @@ class CanvasCredentials:
             row = self._profile()
             if row is None or row["token_state"] != "PENDING":
                 return "NONE"
-            if not self._drop(row["profile_id"], Actor.INGESTER):
+            if not self._drop(row["profile_id"], Actor.CANVAS_COLLECTOR):
                 log_event("CANVAS_RECOVERY_DEFERRED")
                 return "KEYCHAIN_DELETE_FAILED"
         log_event("CANVAS_RECOVERED")

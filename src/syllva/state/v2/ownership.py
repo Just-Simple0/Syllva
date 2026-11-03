@@ -23,6 +23,7 @@ class Actor(StrEnum):
     CORE_AGENT_OUTPUT = "CORE_AGENT_OUTPUT"
     UI_USER = "UI_USER"
     SYSTEM_MIGRATION = "SYSTEM_MIGRATION"
+    CANVAS_COLLECTOR = "CANVAS_COLLECTOR"  # the Canvas sync and connection recovery (R3-2); see ACTOR_TABLES
 
 
 TABLE_OWNERS: dict[str, Owner] = {
@@ -49,6 +50,8 @@ TABLE_OWNERS: dict[str, Owner] = {
     "entity_allocations": Owner.SYSTEM,
     "canvas_profile": Owner.SETTINGS,
     "canvas_courses": Owner.SETTINGS,
+    "canvas_items": Owner.SOURCE,  # what Canvas showed (a mirror; no AI output or citation points at it)
+    "canvas_collections": Owner.SYSTEM,
 }
 
 # Tables whose rows may be deleted (through ``StateWriter.delete``): connection settings only.
@@ -65,7 +68,7 @@ IMMUTABLE_COLUMNS: dict[str, frozenset[str]] = {
     "materials": frozenset({"material_id", "source_file_id"}),
     "material_usage": frozenset({"material_id"}),
     "exams": frozenset({"exam_id"}),
-    "activities": frozenset({"activity_id"}),
+    "activities": frozenset({"activity_id", "course_id", "origin", "canvas_assignment_id"}),
     "user_notes": frozenset({"note_id"}),
     "courses": frozenset({"course_key"}),
     "sessions": frozenset({"session_id"}),
@@ -73,6 +76,8 @@ IMMUTABLE_COLUMNS: dict[str, frozenset[str]] = {
     "intake_candidates": frozenset({"candidate_id", "channel", "source_version_id", "size_bytes", "replaces_material"}),
     "canvas_profile": frozenset({"profile_id", "origin", "user_id"}),
     "canvas_courses": frozenset({"canvas_course_id"}),
+    "canvas_items": frozenset({"canvas_course_id", "kind", "resource_id", "first_seen_at"}),
+    "canvas_collections": frozenset({"canvas_course_id", "started_at"}),
 }
 
 # Human-only columns (design §5.5). Only the gate commit path may set them.
@@ -89,17 +94,49 @@ HUMAN_ONLY_COLUMNS: dict[str, frozenset[str]] = {
 #   USER    <- UI_USER (explicit edits, history kept)
 #   CATALOG <- INGESTER, UI_USER
 #   SYSTEM  <- INGESTER
-#   SETTINGS <- UI_USER (the user's own connection), INGESTER (start-up cleanup of an interrupted
-#               PENDING token intent only; R3 plan §6.1)
+#   SETTINGS <- UI_USER (the user's own connection), CANVAS_COLLECTOR (start-up cleanup of an
+#               interrupted PENDING token intent only; R3 plan §6.1)
+#   CANVAS_COLLECTOR is further limited by ACTOR_TABLES / ACTOR_COLUMNS (R3 plan §6.2).
 #   SYSTEM_MIGRATION may write every owner (still not human-only columns or gate tables).
 ALLOWED: dict[Owner, frozenset[Actor]] = {
-    Owner.SOURCE: frozenset({Actor.INGESTER, Actor.SYSTEM_MIGRATION}),
+    Owner.SOURCE: frozenset({Actor.INGESTER, Actor.CANVAS_COLLECTOR, Actor.SYSTEM_MIGRATION}),
     Owner.AI: frozenset({Actor.CORE_AGENT_OUTPUT, Actor.SYSTEM_MIGRATION}),
     Owner.USER: frozenset({Actor.UI_USER, Actor.SYSTEM_MIGRATION}),
-    Owner.CATALOG: frozenset({Actor.INGESTER, Actor.UI_USER, Actor.SYSTEM_MIGRATION}),
-    Owner.SYSTEM: frozenset({Actor.INGESTER, Actor.SYSTEM_MIGRATION}),
-    Owner.SETTINGS: frozenset({Actor.UI_USER, Actor.INGESTER, Actor.SYSTEM_MIGRATION}),
+    Owner.CATALOG: frozenset({Actor.INGESTER, Actor.UI_USER, Actor.CANVAS_COLLECTOR, Actor.SYSTEM_MIGRATION}),
+    Owner.SYSTEM: frozenset({Actor.INGESTER, Actor.CANVAS_COLLECTOR, Actor.SYSTEM_MIGRATION}),
+    Owner.SETTINGS: frozenset({Actor.UI_USER, Actor.CANVAS_COLLECTOR, Actor.SYSTEM_MIGRATION}),
 }
+
+# An actor limited to some tables (whatever the owner matrix allows).
+ACTOR_TABLES: dict[Actor, frozenset[str]] = {
+    Actor.CANVAS_COLLECTOR: frozenset({"canvas_items", "canvas_collections", "activities",
+                                       "canvas_profile", "canvas_courses"}),
+}
+# A table only some actors may write (whatever the owner matrix allows).
+TABLE_WRITERS: dict[str, frozenset[Actor]] = {
+    "canvas_items": frozenset({Actor.CANVAS_COLLECTOR, Actor.SYSTEM_MIGRATION}),
+    "canvas_collections": frozenset({Actor.CANVAS_COLLECTOR, Actor.SYSTEM_MIGRATION}),
+}
+# Columns an actor may set on a table: (insert, update). The collector's activity updates
+# are further limited to origin='CANVAS' rows by StateWriter (R3 plan §6.2).
+ACTOR_COLUMNS: dict[tuple[Actor, str], tuple[frozenset[str], frozenset[str]]] = {
+    (Actor.CANVAS_COLLECTOR, "activities"): (
+        frozenset({"activity_id", "course_id", "title", "due_at", "created_at", "origin", "canvas_assignment_id",
+                   "canvas_updated_at", "updated_at"}),
+        frozenset({"title", "due_at", "canvas_updated_at", "updated_at"}),
+    ),
+    (Actor.CANVAS_COLLECTOR, "canvas_profile"): (frozenset(), frozenset({"token_state", "token_set_at"})),
+}
+
+
+def may_write(table: str, actor: Actor) -> bool:
+    """The owner matrix narrowed by ACTOR_TABLES and TABLE_WRITERS."""
+
+    if actor not in ALLOWED[owner_of(table)]:
+        return False
+    if actor in ACTOR_TABLES and table not in ACTOR_TABLES[actor]:
+        return False
+    return table not in TABLE_WRITERS or actor in TABLE_WRITERS[table]
 
 # SOURCE and AI rows are never rewritten: AI output is never relabelled and
 # source content changes arrive as new source_versions (design §4.4).
@@ -107,6 +144,9 @@ INSERT_ONLY_OWNERS = frozenset({Owner.SOURCE, Owner.AI})
 # Bookkeeping columns on SOURCE tables that the ingester may update in place.
 SOURCE_MUTABLE_COLUMNS: dict[str, frozenset[str]] = {
     "source_files": frozenset({"deleted_at", "display_name"}),
+    # the Canvas mirror follows Canvas; identity columns are immutable (IMMUTABLE_COLUMNS)
+    "canvas_items": frozenset({"title", "module_name", "week", "item_type", "due_at", "canvas_updated_at",
+                               "attachment_json", "active", "last_seen_at"}),
 }
 
 
