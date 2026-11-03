@@ -38,3 +38,13 @@ def test_errors_are_codes_on_stderr(tmp_path: Path, capsys: pytest.CaptureFixtur
     code = main(["--data-dir", str(tmp_path / "d"), "intake", "dismiss", "INT-none"])
     captured = capsys.readouterr()
     assert code == 2 and json.loads(captured.err)["error"] == "INTAKE_INVALID" and not captured.out
+
+
+def test_ordinary_failures_are_codes_not_tracebacks(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    data = tmp_path / "d"
+    assert main(["--data-dir", str(data), "course", "add", "NET", "n", "--semester", "2026-2"]) == 0
+    capsys.readouterr()
+    assert main(["--data-dir", str(data), "course", "add", "NET", "n", "--semester", "2026-2"]) == 2
+    assert json.loads(capsys.readouterr().err)["error"] == "CONFLICT"
+    assert main(["--data-dir", str(data), "intake", "add", str(tmp_path / "missing.txt")]) == 2
+    assert json.loads(capsys.readouterr().err)["error"] == "FILE_ERROR"

@@ -149,10 +149,8 @@ source_modules = [
     "syllva.domain.source_ref"
 ]
 forbidden_modules = [
-
     "syllva.retrieval.chunking",
     "syllva.state.base", "syllva.state.models",
-
     "syllva.adapters.llm", "syllva.config.google_oauth",
     # outer layers: v2 core composes upward, never imports them
     "syllva.intake", "syllva.settings", "syllva.cli", "syllva.mcp"
@@ -166,7 +164,6 @@ type = "forbidden"
 source_modules = ["syllva.intake.v2"]
 forbidden_modules = [
 
-    "syllva.intake.planner", "syllva.intake.requests",
 
 
     "syllva.adapters", "syllva.settings", "syllva.mcp", "syllva.cli",

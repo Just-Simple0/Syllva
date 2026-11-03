@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -31,9 +32,10 @@ from syllva.domain.errors import SyllvaError
 from syllva.ephemeral.memory import MemoryEphemeralStore
 from syllva.intake.v2 import LocalIntake
 from syllva.library.blobs import BlobStore
+from syllva.library.dblock import DatabaseLocked
 from syllva.library.paths import layout
 from syllva.retrieval.service import RetrievalService
-from syllva.state.v2.database import Database, open_database
+from syllva.state.v2.database import Database, DatabaseCorrupt, open_database
 from syllva.state.v2.ownership import Actor, Owner
 
 CLI_SCOPE = "cli"  # caller scope for capabilities issued to this process
@@ -86,7 +88,7 @@ def _intake_add(db: Database, args: argparse.Namespace) -> int:
 def _intake_list(db: Database, args: argparse.Namespace) -> int:
     intake = _intake(db)
     sql = "SELECT candidate_id FROM intake_candidates" + (" WHERE state = ?" if args.state else "") + " ORDER BY id"
-    for row in db.writer().query(sql, (args.state,) if args.state else ()):
+    for row in db.reader().fetch_all(sql, (args.state,) if args.state else ()):
         _emit(_candidate(intake.get(str(row["candidate_id"]))))
     return 0
 
@@ -202,8 +204,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         with open_database(layout(args.data_dir)) as db:
             return int(args.handler(db, args))
     except SyllvaError as exc:
-        sys.stderr.write(json.dumps({"error": exc.code, "message": str(exc)}, ensure_ascii=False) + "\n")
-        return 2
+        return _fail(getattr(exc, "code", "SYLLVA_ERROR"), str(exc))
+    except (DatabaseLocked, DatabaseCorrupt) as exc:
+        return _fail(type(exc).__name__.upper(), "the library is in use by another process or damaged")
+    except sqlite3.IntegrityError as exc:
+        return _fail("CONFLICT", str(exc).split(":")[0])
+    except OSError as exc:
+        return _fail("FILE_ERROR", exc.strerror or type(exc).__name__)
+
+
+def _fail(code: str, message: str) -> int:
+    sys.stderr.write(json.dumps({"error": code, "message": message}, ensure_ascii=False) + "\n")
+    return 2
 
 
 if __name__ == "__main__":  # pragma: no cover

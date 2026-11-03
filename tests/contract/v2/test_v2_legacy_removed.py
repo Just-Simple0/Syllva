@@ -19,7 +19,12 @@ REMOVED = [
     "state/sqlite.py", "state/reader.py", "state/usage_range.py", "state/classification_state.py",
     "intake/worker.py", "intake/composition.py", "intake/coordinator.py", "intake/registry.py",
     "intake/classification/s2.py", "adapters/llm/typesafe_choice.py", "enrichment/writer.py",
-    "runtime.py", "worker.py",
+    "runtime.py", "worker.py", "cli/credential_set.py", "ingestion/discovery.py",
+    "retrieval/scope.py", "retrieval/additional.py", "retrieval/provenance.py",
+    "enrichment/_common.py", "enrichment/material.py", "enrichment/session.py",
+    "intake/attestation.py", "intake/planner.py", "intake/requests.py", "intake/usage_range.py",
+    "intake/study_note_composition.py", "intake/canvas_observer.py", "intake/canvas_attachments.py",
+    "intake/canvas_composition.py",
 ]
 
 
