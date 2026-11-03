@@ -286,3 +286,23 @@ GUI가 없는 이 환경에서는 컴파일과 단위 테스트까지만 할 수
 - E24: 액션 연기.
 - E25: 커스텀 프로토콜 로드.
 - R2-1 구현 PR에서 추가할 것: 정화 패턴 확장, 변경 요청 Origin 필수, SUPERSEDED 위치.
+
+## 6. 재검토 승인 조건 (rev 2 APPROVE, 각 PR에 반영)
+
+- **A (R2-4)**: 중계는 비밀 경로에 있다(Set-Cookie, `X-Syllva-CSRF`, 업로드 본문). 중계 로그는 메서드·경로(쿼리·fragment 제거)·상태·크기만 남기고 헤더·본문은 남기지 않는다. `shell/proto` 로그 포매터 단위 테스트로 고정한다.
+- **B (R2-0 → E25, R2-4)**: 중계의 전달 규칙을 고정한다.
+  - 대상은 `ready`의 `port`, 주소는 `127.0.0.1`만이다.
+  - `syllva://` host는 고정값 `app`이다.
+  - 리다이렉트는 따르지 않는다.
+  - `Origin`·`Sec-Fetch-*`·`Cookie`는 받은 그대로 전달하고 새로 만들지 않는다.
+  - Core가 허용하는 앱 origin 문자열(`syllva://localhost` / `http://syllva.localhost`)은 `hello.platform`에서 정하고, Shell이 붙인 헤더로 정하지 않는다.
+  - 커스텀 프로토콜 처리기는 요청 본문을 버퍼링하므로 업로드 크기 상한을 Shell에서도 적용한다. R2-3의 "multipart 스트리밍"은 "Core는 스트리밍, Shell은 상한 적용 버퍼"로 바꾼다.
+- **C (R2-0)**: GUI가 없어 런타임 확인(앱 origin 한정 IPC, 쿠키·fragment 보존)은 R2 끝 수동 시연에서 처음 나온다. 스파이크에 두 항목을 더한다.
+  - (i) 커스텀 프로토콜로 스트리밍 응답(R4의 SSE)이 되는지. 안 되면 R4는 루프백 `connect-src`가 필요하므로 지금 결정한다.
+  - (ii) WKWebView·WebView2에서 `Set-Cookie`가 유지되는지. 유지되지 않으면 대안으로 중계가 세션을 붙인다. 이 경우 Tauri 2 scheme handler가 호출 웹뷰 label을 주므로, 중계가 Rust에서 얻은 창 label을 모든 요청에 붙여 §6.4-2를 강화할 수 있다. 결과는 E25에 기록한다.
+  - 시연에서 IPC 한정이 실패하면 D§12-3에 따라 설계를 다시 개정한다. 쿠키·스트리밍만 실패하면 E25만 바뀐다.
+- **D (R2-2)**: `state.v2`가 `gate`를 import하면 안 된다(`v2-storage-clean`). `commit_gate(record, *, confirmed_at, verify)`의 `verify: Callable[[StateWriter], GateCheck]`는 게이트 서비스가 넘기며, writer의 `BEGIN IMMEDIATE` 안에서 실행된다. 이렇게 재계산과 쓰기를 한 트랜잭션으로 묶는다.
+- **선택**:
+  - capability 허용 목록은 정확한 식별자로 테스트 fixture에 고정한다. 대상은 `core:window:allow-minimize|maximize|unmaximize|close|start-dragging`이다.
+  - 다이얼로그는 남은 시간 카운트다운을 보여 주고 0이 되면 자동으로 닫는다.
+  - E25에 "변경 요청 Origin 필수"를 명시한다.
