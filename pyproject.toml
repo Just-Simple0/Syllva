@@ -38,6 +38,7 @@ dev = [
     "PyJWT[crypto]>=2.8,<3",
     "cryptography>=42.0",
     "import-linter>=2.1,<3",
+    "httpx>=0.27",
 ]
 
 [project.scripts]
@@ -71,6 +72,11 @@ python_version = "3.11"
 packages = ["syllva"]
 mypy_path = "src"
 strict = true
+
+[[tool.mypy.overrides]]
+# optional "web" extra; absent from tool-isolated mypy environments
+module = ["starlette.*", "uvicorn.*", "httpx.*"]
+ignore_missing_imports = true
 
 # v2 import-direction contracts (implementation spec §1.3, §13.5).
 # Only direct imports are checked. `ignore_imports` is a RATCHET: it records the
@@ -169,6 +175,28 @@ forbidden_modules = [
     "syllva.adapters", "syllva.settings", "syllva.mcp", "syllva.cli",
     "syllva.retrieval.chunking",
     "syllva.enrichment"
+]
+allow_indirect_imports = false
+
+[[tool.importlinter.contracts]]
+id = "ui-core-boundary"
+name = "Core layers never import the Core process (syllva.core) or the UI server (syllva.ui)"
+type = "forbidden"
+source_modules = [
+    "syllva.domain", "syllva.state", "syllva.library", "syllva.ingestion", "syllva.normalization",
+    "syllva.retrieval", "syllva.ephemeral", "syllva.intake",
+]
+forbidden_modules = ["syllva.core", "syllva.ui"]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+id = "v2-app-clean"
+name = "The v2 Core process and UI server use only v2 modules (no settings/mcp/cli/legacy)"
+type = "forbidden"
+source_modules = ["syllva.core", "syllva.ui"]
+forbidden_modules = [
+    "syllva.settings", "syllva.mcp", "syllva.cli", "syllva.adapters", "syllva.retrieval.chunking",
+    "syllva.state.base", "syllva.state.models", "syllva.config", "syllva.orchestration",
 ]
 allow_indirect_imports = false
 

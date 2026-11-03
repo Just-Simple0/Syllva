@@ -27,13 +27,12 @@ PENDING: dict[str, tuple[str, str, str]] = {
     "C-08": ("test_agent_cwd.py", "R4", "agent cwd creation (§3.1, §7.1)"),
     "C-09": ("test_single_spawn_path.py", "R4", "launcher and Rust-side check; Python static part (any spawn outside agents/launcher.py) active in test_v2_static_invariants"),
     "C-11": ("test_run_context_lifetime.py", "R4", "Run Context lifetime (§8.6)"),
-    "C-13": ("test_no_public_exposure.py", "R2", "0.0.0.0 refusal and remote MCP not loaded; loopback bind active in test_v2_no_public_exposure"),
     "C-15": ("test_template_manifest.py", "R4", "prompt template manifest (§8.2)"),
     "C-16": ("CI workflow", "R2", "v2 subset runs on Linux/macOS/Windows (ci.yml v2 job); full when all C-xx are active"),
     "C-17": ("test_gate_replay.py", "R2", "gate commit protocol (§6.4); DB trigger half active in test_v2_gate_db_triggers"),
     "C-18": ("test_ui_xss_and_csp.py", "R2", "v2 UI DOM rendering; static sink check active in test_v2_static_invariants"),
     "C-19": ("test_gate_summary_binding.py", "R2", "gate summary binding and Tauri capability check (§6.3, §13.6)"),
-    "C-20": ("test_secret_and_lifecycle.py", "R2", "Core stdio protocol and shell_secret (§2); DB lock half active in test_v2_reader_and_lock"),
+    "C-20": ("test_secret_and_lifecycle.py", "R4", "agent-child half (pipes/env of agent processes, needs the R4 spawn path); Core stdio + secret half active in test_v2_core_stdio, DB lock half in test_v2_reader_and_lock"),
     "C-21": ("test_adapter_conformance.py", "R4", "fake_agent_cli harness and per-run assertion (§7.4, §14.2)"),
     "C-22": ("test_citation_validation.py", "R4", "citation parser and escaping (§8.4-§8.5)"),
     "C-23": ("test_prompt_assembly.py", "R4", "prompt assembly (§8.2-§8.4)"),
@@ -51,6 +50,7 @@ ACTIVE: dict[str, str] = {
     "C-02": "test_v2_retrieval_service.py",
     "C-10": "test_v2_retrieval_service.py",
     "C-25": "test_v2_chunk_strategy.py",
+    "C-13": "test_v2_core_stdio.py",
 }
 
 
