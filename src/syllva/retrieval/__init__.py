@@ -1,6 +1,9 @@
-"""Model-independent retrieval policy and context assembly."""
+"""Retrieval: the v2 read-only service (``retrieval.service``) and its building blocks.
 
-from .engine import RetrievalEngine
+The v1.2 ``RetrievalEngine`` and its Notion/Drive readers were removed in R1c
+(spec errata E13/E19); use ``syllva.retrieval.service.RetrievalService``.
+"""
+
 from .schemas import (
     CapabilityBinding,
     ContextPackage,
@@ -8,7 +11,6 @@ from .schemas import (
     ResolutionResult,
     RetrievalBudget,
 )
-from .scope import usage_app_id
 
 __all__ = [
     "CapabilityBinding",
@@ -16,6 +18,4 @@ __all__ = [
     "EvidenceItem",
     "ResolutionResult",
     "RetrievalBudget",
-    "RetrievalEngine",
-    "usage_app_id",
 ]

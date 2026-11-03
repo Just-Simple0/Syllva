@@ -331,6 +331,7 @@ class LocalIntake:
         return self.get(candidate_id)
 
     def dismiss(self, candidate_id: str, *, now: str | None = None) -> Candidate:
+        self.get(candidate_id)  # unknown ids are an intake error, not a policy denial
         self.writer.transition_intake_state(Actor.UI_USER, candidate_id, "DISMISSED", now=now or _now())
         return self.get(candidate_id)
 
@@ -398,6 +399,7 @@ class LocalIntake:
     def retry(self, candidate_id: str, *, now: str | None = None) -> Candidate:
         """Queue a FAILED/PARTIAL/READY candidate for another processing run."""
 
+        self.get(candidate_id)
         self.writer.transition_intake_state(Actor.INGESTER, candidate_id, "QUEUED", now=now or _now())
         return self.get(candidate_id)
 

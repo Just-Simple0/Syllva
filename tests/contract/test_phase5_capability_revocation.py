@@ -1,18 +1,12 @@
 from __future__ import annotations
 
-import pathlib
-import sys
-
 import pytest
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "fixtures"))
-
-from phase4 import (
-    ACTIVITY_NORMALIZED_POINTER,
-    ACTIVITY_SOURCE_POINTER,
-    COURSE_KEY,
-    COURSE_PAGE_ID,
-)
+# constants of the removed v1.2 Phase4 fixtures (R1c); only their values matter here
+ACTIVITY_SOURCE_POINTER = "https://drive.google.com/file/d/activity-source-01/view"
+ACTIVITY_NORMALIZED_POINTER = "https://drive.google.com/file/d/activity-normalized-01/view"
+COURSE_KEY = "2026-1_COMP319-002"
+COURSE_PAGE_ID = "course-page-1"
 
 from syllva.domain.errors import LocatorNotAllowedError
 from syllva.domain.models import PageLocator

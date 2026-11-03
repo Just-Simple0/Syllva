@@ -1,628 +1,210 @@
-"""ULS CLI: safe status, explicit worker commands and read-only MCP startup."""
+"""``syllva`` command line (v2).
+
+The v1.2 commands (Notion/Drive worker, sync, MCP server launcher, settings
+launcher) were removed with the legacy runtime in R1c (spec errata E19). Until
+the desktop app (R2) exists, this CLI drives the v2 Core directly so the local
+pipeline can be used and inspected:
+
+    syllva course add NET "컴퓨터네트워크" --semester 2026-2 --alias 네트워크
+    syllva intake add lecture.pdf --course NET
+    syllva intake list
+    syllva intake confirm INT-… --course NET --kind TRANSCRIPT --new-session 2026-09-08
+    syllva intake run
+    syllva context NET-M01 --query "handshake"
+
+Output is JSON (one object per line) so it can be piped. The data directory
+follows ``SYLLVA_DATA_DIR`` or the OS default (spec §3.1).
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
+from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import yaml  # type: ignore[import-untyped]
-
-from syllva.behavior import asset_root, lint_behavior
-from syllva.config.credentials import (
-    ALLOWED_SOURCES,
-    GOOGLE_CREDENTIAL_PATH_NAMES,
-    CredentialResolver,
-)
-from syllva.config.errors import ConfigurationError
-from syllva.config.mutation import ConfigFileLock
+from syllva import __version__
 from syllva.domain.errors import SyllvaError
-from syllva.domain.ids import parse_course_key
-from syllva.runtime import build_retrieval, require_mcp_credentials, state_path
+from syllva.ephemeral.memory import MemoryEphemeralStore
+from syllva.intake.v2 import LocalIntake
+from syllva.library.blobs import BlobStore
+from syllva.library.paths import layout
+from syllva.retrieval.service import RetrievalService
+from syllva.state.v2.database import Database, open_database
+from syllva.state.v2.ownership import Actor, Owner
+
+CLI_SCOPE = "cli"  # caller scope for capabilities issued to this process
 
 
-def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(prog='syllva', description='Syllva (University Learning System protocol 1.2)')
-    result.add_argument('--config', type=Path, default=Path('config.yaml'))
-    commands = result.add_subparsers(dest='command', required=True)
-    commands.add_parser('init', help='Create missing config, state and source registrations')
-    setup_parser = commands.add_parser('setup', help='Open the local Settings web interface')
-    setup_parser.add_argument(
-        '--no-browser', action='store_true',
-        help='Print the one-time local URL instead of opening a browser',
-    )
-    doctor_parser = commands.add_parser('doctor', help='Check configuration and credential readiness')
-    doctor_parser.add_argument('--live', action='store_true', help='Perform read-only provider checks')
-    for name in ('sync', 'process', 'run'):
-        commands.add_parser(name).add_argument('--max-jobs', type=int, default=100)
-    commands.add_parser('status')
-    commands.add_parser('jobs').add_argument('--limit', type=int, default=100)
-    commands.add_parser('retry').add_argument('job_id')
-    commands.add_parser('reprocess').add_argument('entity_id')
-    commands.add_parser('mcp').add_argument('mode', choices=('local', 'remote', 'status'))
-    commands.add_parser('study-notes', help='Separate AI draft submission service').add_argument(
-        'mode', choices=('local', 'status'))
-    commands.add_parser('behavior').add_argument('action', choices=('lint',))
-    credential_parser = commands.add_parser('credential', help='Manage stored credentials')
-    credential_sub = credential_parser.add_subparsers(dest='credential_action', required=True)
-    credential_set_parser = credential_sub.add_parser(
-        'set', help='Interactively register a credential value (never accepted as a CLI argument)')
-    credential_set_parser.add_argument('name', help='Credential name (see syllva doctor for the list)')
-    credential_set_parser.add_argument('--overwrite', action='store_true',
-                                       help='Skip the confirmation prompt when a value already exists')
-    return result
+def _emit(value: Any) -> None:
+    sys.stdout.write(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str) + "\n")
 
 
-def _config(path: Path) -> Any:
-    from syllva.config.loader import load_config_unvalidated
-    from syllva.config.validation import validate_config
-    config = load_config_unvalidated(path)
-    for obj, name in ((config.system, 'workspace_dir'), (config.behavior_contract, 'path'),
-                      (config.remote_mcp, 'tls_certfile'), (config.remote_mcp, 'tls_keyfile')):
-        value = getattr(obj, name)
-        if value:
-            candidate = Path(value).expanduser()
-            setattr(obj, name, str((path.resolve().parent / candidate).resolve()
-                                  if not candidate.is_absolute() else candidate))
-    for name in ('google_worker_credentials_path', 'google_mcp_credentials_path'):
-        value = getattr(config, name, None)
-        if value:
-            candidate = Path(value).expanduser()
-            setattr(config, name, str((path.resolve().parent / candidate).resolve()
-                                  if not candidate.is_absolute() else candidate))
-    errors = validate_config(config)
-    if errors:
-        raise ConfigurationError(errors)
-    return config
+def _now() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
-def initialize(path: Path) -> dict[str, Any]:
-    from syllva.state.sqlite import SQLiteStateStore
-    with ConfigFileLock(path):
-        if not path.exists():
-            template = yaml.safe_load((asset_root() / 'config.example.yaml').read_text(encoding='utf-8'))
-            template['behavior_contract']['path'] = str(asset_root() / 'contracts/study-behavior.md')
-            path.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            try:
-                payload = yaml.safe_dump(template, allow_unicode=True, sort_keys=False).encode('utf-8')
-                os.write(fd, payload)
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-    config = _config(path)
-    workspace = state_path(config).parent
-    workspace.mkdir(parents=True, exist_ok=True)
-    with SQLiteStateStore(state_path(config)):
-        pass
-    source_path = workspace / 'sources.json'
-    if not source_path.exists():
-        with source_path.open('x', encoding='utf-8') as handle:
-            handle.write('[]\n')
-    return {'status': 'initialized', 'config': str(path.resolve()),
-            'next': 'Configure provider IDs, credentials and source registrations; run syllva doctor.'}
+def _intake(db: Database) -> LocalIntake:
+    return LocalIntake(db.writer(), BlobStore(db.layout.blobs_dir, db.layout.tmp_dir))
 
 
-def status(config: Any) -> dict[str, Any]:
-    from syllva.state.reader import ReadOnlyState
-    path = state_path(config)
-    if not path.exists():
-        return {'status': 'not_initialized',
-                'readiness_funnel': _readiness_funnel({}),
-                'worker_enabled': config.worker.enabled}
-    state = ReadOnlyState(path)
-    counts = {row[0]: row[1] for row in state._rows('SELECT status, COUNT(*) FROM jobs GROUP BY status')}
-    return {'status': 'ok' if state.health() else 'unhealthy', 'jobs': counts,
-            'readiness_funnel': _readiness_funnel(counts, state=state),
-            'worker_enabled': config.worker.enabled, 'remote_enabled': config.remote_mcp.enabled,
-            'remote_running': 'unknown; use authenticated /health',
-            'availability': 'Primary PC must be awake and online'}
-
-
-def _readiness_funnel(job_counts: dict[str, int], *, state: Any = None) -> dict[str, Any]:
-    """Compute a readiness funnel from state store evidence and job status counts.
-
-    Each stage reports only what durable provenance evidence can actually prove.
-    Labels are deliberately conservative to avoid overclaiming readiness.
-
-    Stage semantics:
-    - source_archival: confirmed durable source registration and version record
-      (source_files joined with current source_versions). Job status alone is
-      insufficient because a job can be created or marked PARTIAL/READY without
-      durable source bytes having been received and hashed.
-    - text_extraction: confirmed normalization completion evidenced by a
-      durable processing record with valid output derivative reference linked
-      to a matching source_file and READY normalization job (excluding
-      enrichment operations like enrich_session and enrich_material).
-    - retrieval_credentials: always 'not_checked_here' — credential presence
-      is reported by 'syllva doctor', not by the job-count-based status command.
-    - ai_client: always 'not_proven' — requires a human to confirm through
-      actual use; cannot be proven programmatically.
-    """
-    has_archival = False
-    has_extraction = False
-    if state is not None:
-        try:
-            from syllva.state.reader import parse_derivative_ref
-
-            archival_rows = state._rows("""
-                SELECT COUNT(*) AS count
-                FROM source_files sf
-                JOIN source_versions sv ON sv.source_file_id = sf.source_file_id
-                  AND sv.source_hash = sf.current_hash
-            """)
-            has_archival = archival_rows[0]['count'] > 0
-
-            norm_rows = state._rows("""
-                SELECT pr.output_ref_json
-                FROM source_files sf
-                JOIN jobs j ON j.source_file_id = sf.source_file_id
-                JOIN processing_records pr ON pr.job_id = j.id
-                WHERE j.source_hash = sf.current_hash
-                  AND pr.operation = j.operation
-                  AND pr.operation NOT IN ('enrich_session', 'enrich_material')
-                  AND pr.input_hash = sf.current_hash
-                  AND j.status = 'READY'
-                  AND pr.status = 'READY'
-                  AND pr.output_ref_json IS NOT NULL
-            """)
-            for row in norm_rows:
-                try:
-                    parse_derivative_ref(row['output_ref_json'])
-                    has_extraction = True
-                    break
-                except (ValueError, TypeError):
-                    pass
-        except Exception:
-            pass
-
-    total = sum(job_counts.values())
-    pending_or_active = job_counts.get('PENDING', 0) + job_counts.get('PROCESSING', 0)
-
-    if has_archival:
-        source_archival = 'done'
-    elif total == 0 or pending_or_active > 0:
-        source_archival = 'not_started'
-    else:
-        source_archival = 'not_proven'
-
-    if has_extraction:
-        text_extraction = 'done'
-    elif total == 0 or pending_or_active > 0:
-        text_extraction = 'not_started'
-    else:
-        text_extraction = 'not_proven'
+def _candidate(c: Any) -> dict[str, Any]:
     return {
-        'source_archival': source_archival,
-        'text_extraction': text_extraction,
-        'retrieval_credentials': 'not_checked_here',
-        'retrieval_credentials_note': 'run syllva doctor to check credential readiness',
-        'ai_client': 'not_proven',
-        'ai_client_note': 'requires human confirmation through actual AI client use',
+        "candidate_id": c.candidate_id, "state": c.state, "name": c.display_name, "reason": c.reason_code,
+        "material_id": c.material_id, "duplicate_of": c.duplicate_of,
+        "blockers": (c.suggestion or {}).get("blockers"), "suggested_kind": (c.suggestion or {}).get("suggested_kind"),
     }
 
 
-def _live_retrieval_probe_course_key(config: Any) -> str:
-    if not config.courses:
-        raise ConfigurationError('live retrieval probe requires a configured Course')
-    if config.retrieval.notion_lane != 'semester_workspace':
-        course_key = config.courses[0].course_key
-        if not isinstance(course_key, str) or not course_key:
-            raise ConfigurationError('live retrieval probe requires a valid Course Key')
-        return course_key
-    for course in config.courses:
-        course_key = getattr(course, 'course_key', None)
-        if not isinstance(course_key, str) or not course_key:
-            continue
-        try:
-            parsed = parse_course_key(course_key)
-        except SyllvaError:
-            continue
-        if parsed.semester == config.retrieval.semester:
-            return course_key
-    raise ConfigurationError('selected retrieval semester has no configured Course')
+def _course_add(db: Database, args: argparse.Namespace) -> int:
+    writer = db.writer()
+    with writer.transaction():
+        course_id = writer.insert(
+            Owner.CATALOG, Actor.UI_USER, "courses",
+            {"course_key": args.key, "name": args.name, "code": args.code or args.key, "semester": args.semester, "created_at": _now()},
+        )
+        for alias in args.alias or ():
+            writer.insert(Owner.CATALOG, Actor.UI_USER, "course_aliases", {"course_id": course_id, "alias_nfc": alias})
+    _emit({"course_key": args.key})
+    return 0
 
 
-def doctor(
-    config: Any, *, live: bool = False, include_credentials: bool = True,
-) -> dict[str, Any]:
-    if not include_credentials:
-        local_checks: dict[str, Any] = {
-            'behavior_contract': not lint_behavior(Path(config.behavior_contract.path)),
-            'state': status(config)['status'] == 'ok',
-        }
-        try:
-            from syllva.mcp.server import ReadOnlyMCP
-            ReadOnlyMCP(None).sdk_server()
-            local_checks['mcp_startable'] = True
-        except ImportError:
-            local_checks['mcp_startable'] = False
-        return {
-            'status': 'ok' if all(local_checks.values()) else 'needs_configuration',
-            'checks': local_checks,
-            'optional_checks': {},
-            'client_e2e': 'not_proven_by_doctor',
-            'credential_readiness': 'not_checked',
-        }
-    # doctor() is a composition root (see docs/plans/credential-resolver.md):
-    # it builds one CredentialResolver from config.credentials and calls
-    # diagnose() exactly once, over every known credential name. Every
-    # check below, including the separation check and the --live provider
-    # calls, slices values out of that same DiagnosticResolution via
-    # select()/require() instead of diagnosing or resolving again.
-    diagnose_names = frozenset(ALLOWED_SOURCES)
-    remote_credential_names = {
-        'REMOTE_MCP_SECRET', 'REMOTE_MCP_EXPIRES_AT', 'REMOTE_MCP_GOOGLE_CLIENT_SECRET'
-    }
-    if not config.remote_mcp.enabled:
-        diagnose_names = diagnose_names - remote_credential_names
-    elif config.remote_mcp.auth_mode in {'oidc', 'mcp_oauth'}:
-        diagnose_names = diagnose_names - {'REMOTE_MCP_SECRET', 'REMOTE_MCP_EXPIRES_AT'}
-        if config.remote_mcp.auth_mode == 'oidc':
-            diagnose_names = diagnose_names - {'REMOTE_MCP_GOOGLE_CLIENT_SECRET'}
-    else:
-        diagnose_names = diagnose_names - {'REMOTE_MCP_GOOGLE_CLIENT_SECRET'}
-    resolver = CredentialResolver(config.credentials, path_overrides=getattr(config, 'google_path_overrides', {}))
-    diagnostic = resolver.diagnose(diagnose_names)
+def _intake_add(db: Database, args: argparse.Namespace) -> int:
+    intake = _intake(db)
+    path = Path(args.file)
+    with path.open("rb") as handle:
+        candidate = intake.receive(handle, display_name=path.name, mime_type=args.mime, course_hint=args.course)
+    if candidate.state == "RECEIVED":
+        candidate = intake.classify(candidate.candidate_id)
+    _emit(_candidate(candidate))
+    return 0
 
-    def _ready(key: str) -> bool:
-        result = diagnostic.results.get(key)
-        if result is None or result.status != 'ready':
-            return False
-        if key in GOOGLE_CREDENTIAL_PATH_NAMES:
-            return diagnostic.get_google_payload(key) is not None
-        if key.endswith('_FILE'):
-            return Path(diagnostic._ready_values[key]).expanduser().is_file()
-        return True
 
-    checks: dict[str, Any] = {'behavior_contract': not lint_behavior(Path(config.behavior_contract.path)),
-                              'state': status(config)['status'] == 'ok'}
-    optional_checks: dict[str, Any] = {}
-    # The intake worker's Google/Notion write credentials are only relevant
-    # when the worker is actually enabled; requiring them for a read-only,
-    # MCP-search-only deployment would fail an otherwise complete minimal
-    # configuration (contradicting docs/operator-guide/installation.md,
-    # which promises doctor reports only the credentials a selected feature
-    # actually needs).
-    worker_credential_keys = ('GOOGLE_WORKER_CREDENTIALS_FILE', 'NOTION_WORKER_TOKEN')
-    if config.worker.enabled:
-        for key in worker_credential_keys:
-            checks[key] = _ready(key)
-    else:
-        for key in worker_credential_keys:
-            optional_checks[key] = _ready(key)
-    # The read-only MCP search surface is the system's core deliverable and
-    # is required regardless of whether the intake worker is enabled.
-    for key in ('GOOGLE_MCP_CREDENTIALS_FILE', 'NOTION_MCP_TOKEN'):
-        checks[key] = _ready(key)
-    # GitHub is an optional supplemental source: GitHubAPIReader accepts an
-    # empty token and simply serves no GitHub content, so a missing token
-    # must never fail an otherwise complete minimal configuration.
-    optional_checks['GITHUB_READ_TOKEN'] = _ready('GITHUB_READ_TOKEN')
+def _intake_list(db: Database, args: argparse.Namespace) -> int:
+    intake = _intake(db)
+    sql = "SELECT candidate_id FROM intake_candidates" + (" WHERE state = ?" if args.state else "") + " ORDER BY id"
+    for row in db.writer().query(sql, (args.state,) if args.state else ()):
+        _emit(_candidate(intake.get(str(row["candidate_id"]))))
+    return 0
+
+
+def _intake_confirm(db: Database, args: argparse.Namespace) -> int:
+    candidate = _intake(db).confirm(
+        args.candidate, course_key=args.course, kind=args.kind, session_id=args.session, new_session_held_on=args.new_session
+    )
+    _emit(_candidate(candidate))
+    return 0
+
+
+def _intake_simple(action: str):  # type: ignore[no-untyped-def]
+    def run(db: Database, args: argparse.Namespace) -> int:
+        _emit(_candidate(getattr(_intake(db), action)(args.candidate)))
+        return 0
+
+    return run
+
+
+def _intake_run(db: Database, args: argparse.Namespace) -> int:
+    intake = _intake(db)
+    recovered = intake.recover()
+    done = intake.run_pending()
+    _emit({"recovered": recovered, "processed": [_candidate(c) for c in done]})
+    return 0
+
+
+def _context(db: Database, args: argparse.Namespace) -> int:
+    service = RetrievalService(db.reader(), BlobStore(db.layout.blobs_dir, db.layout.tmp_dir), MemoryEphemeralStore())
+    package = service.get_material_context(args.material, caller_scope=CLI_SCOPE, query=args.query)
+    _emit({
+        "material_id": args.material,
+        "warnings": list(package.warnings),
+        "evidence": [{"locator": str(i.locator), "part": i.part, "parts": i.parts, "text": i.content} for i in package.sources],
+    })
+    return 0
+
+
+def _setup(args: argparse.Namespace) -> int:
+    from syllva.settings.launcher import preflight, run_setup
+
+    refusal = preflight()
+    if refusal is not None:
+        sys.stderr.write(refusal.message + "\n")
+        _emit({"status": "failed", "code": refusal.code})
+        return 1
+    if not args.config.is_file():
+        sys.stderr.write(json.dumps({"error": "CONFIGURATION_INVALID", "message": "config file not found"}) + "\n")
+        return 2
+    result = run_setup(args.config, open_browser=not args.no_browser)
+    if result is not None:
+        _emit(result)
+    return 1 if isinstance(result, dict) and result.get("status") in {"failed", "unhealthy"} else 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="syllva", description="Syllva v2 Core (local library and intake).")
+    parser.add_argument("--data-dir", type=Path, help="data directory (default: SYLLVA_DATA_DIR or the OS location)")
+    parser.add_argument("--config", type=Path, default=Path("config.yaml"), help="Local Settings config file (setup)")
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("version", help="print the version")
+    setup = sub.add_parser("setup", help="open the Local Settings web interface (the R2 UI server's starting point)")
+    setup.add_argument("--no-browser", action="store_true", help="print the one-time local URL instead of opening a browser")
+
+    course = sub.add_parser("course", help="courses").add_subparsers(dest="action", required=True)
+    add = course.add_parser("add", help="add a course")
+    add.add_argument("key")
+    add.add_argument("name")
+    add.add_argument("--semester", required=True)
+    add.add_argument("--code", help="entity id prefix (default: the key)")
+    add.add_argument("--alias", action="append")
+    add.set_defaults(handler=_course_add)
+
+    intake = sub.add_parser("intake", help="add files and review them").add_subparsers(dest="action", required=True)
+    i_add = intake.add_parser("add", help="add a file (it is stored and classified)")
+    i_add.add_argument("file")
+    i_add.add_argument("--course", help="course this file belongs to")
+    i_add.add_argument("--mime")
+    i_add.set_defaults(handler=_intake_add)
+    i_list = intake.add_parser("list", help="list candidates")
+    i_list.add_argument("--state")
+    i_list.set_defaults(handler=_intake_list)
+    confirm = intake.add_parser("confirm", help="confirm a candidate waiting for review")
+    confirm.add_argument("candidate")
+    confirm.add_argument("--course", required=True)
+    confirm.add_argument("--kind", required=True)
+    group = confirm.add_mutually_exclusive_group()
+    group.add_argument("--session", help="existing session id")
+    group.add_argument("--new-session", metavar="YYYY-MM-DD", help="create a new session held on this date")
+    confirm.set_defaults(handler=_intake_confirm)
+    for name in ("dismiss", "retry"):
+        p = intake.add_parser(name)
+        p.add_argument("candidate")
+        p.set_defaults(handler=_intake_simple(name))
+    intake.add_parser("run", help="recover, classify and process what is pending").set_defaults(handler=_intake_run)
+
+    context = sub.add_parser("context", help="show the evidence package of a material")
+    context.add_argument("material")
+    context.add_argument("--query")
+    context.set_defaults(handler=_context)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.command == "version":
+        _emit({"version": __version__})
+        return 0
+    if args.command == "setup":
+        return _setup(args)
     try:
-        opt_separation: dict[str, str] = {}
-        for w_key in ('NOTION_WORKER_TOKEN', 'GOOGLE_WORKER_CREDENTIALS_FILE'):
-            res = diagnostic.results.get(w_key)
-            if res is not None and res.status != 'error':
-                opt_separation[w_key] = ''
-        separation_snapshot = diagnostic.select(
-            required=frozenset({'GOOGLE_MCP_CREDENTIALS_FILE', 'NOTION_MCP_TOKEN'}),
-            optional=opt_separation,
-        )
-        require_mcp_credentials(separation_snapshot)
-        checks['credential_separation'] = True
-    except ConfigurationError:
-        checks['credential_separation'] = False
-    try:
-        from syllva.mcp.server import ReadOnlyMCP
-        ReadOnlyMCP(None).sdk_server()
-        checks['mcp_startable'] = True
-    except ImportError:
-        checks['mcp_startable'] = False
-    if config.remote_mcp.enabled:
-        try:
-            from syllva.mcp.transports.remote import validate_remote_profile
-            validate_remote_profile(config)
-            tls_ok = (
-                config.remote_mcp.edge_mode == 'cloudflare_tunnel'
-                or all(Path(p).is_file() for p in (config.remote_mcp.tls_certfile, config.remote_mcp.tls_keyfile))
-            )
-            if not tls_ok:
-                checks['remote_profile'] = False
-            elif config.remote_mcp.auth_mode == 'mcp_oauth':
-                from syllva.mcp.transports.oauth import (
-                    GOOGLE_ISSUER,
-                    canonical_public_identity,
-                    validate_oauth_state_boundary,
-                )
-                from syllva.mcp.transports.oidc import JwksKeyManager
-                oauth = config.remote_mcp.oauth
-                identity = canonical_public_identity(config.remote_mcp.public_url)
-                secret_ok = _ready('REMOTE_MCP_GOOGLE_CLIENT_SECRET')
-                state_dir = Path(config.system.workspace_dir).expanduser()
-                db_path = state_dir / 'remote-oauth.sqlite3'
-                try:
-                    validate_oauth_state_boundary(db_path)
-                    state_ok = True
-                except ConfigurationError:
-                    state_ok = False
-                oauth_ok = bool(
-                    identity.resource_uri
-                    and oauth.google_client_id
-                    and oauth.authorized_email
-                    and secret_ok
-                    and state_ok
-                )
-                if live and oauth_ok:
-                    try:
-                        JwksKeyManager(GOOGLE_ISSUER).live_check_sync()
-                    except (ConfigurationError, OSError, ValueError):
-                        oauth_ok = False
-                checks['remote_profile'] = oauth_ok
-            elif config.remote_mcp.auth_mode == 'oidc':
-                oidc = config.remote_mcp.oidc
-                oidc_ok = bool(oidc.issuer and oidc.audience and (oidc.authorized_subject or oidc.authorized_email))
-                if live and oidc_ok:
-                    from syllva.mcp.transports.oidc import JwksKeyManager
-                    try:
-                        JwksKeyManager(oidc.issuer, oidc.jwks_uri).live_check_sync()
-                    except (ConfigurationError, OSError, ValueError):
-                        oidc_ok = False
-                checks['remote_profile'] = oidc_ok
-            elif config.remote_mcp.auth_mode == 'bearer':
-                from syllva.mcp.transports.remote import BearerCredential
-                remote_snapshot = diagnostic.select(
-                    required=frozenset(),
-                    optional={'REMOTE_MCP_SECRET': '', 'REMOTE_MCP_EXPIRES_AT': '0'},
-                )
-                BearerCredential(remote_snapshot['REMOTE_MCP_SECRET'],
-                                 float(remote_snapshot['REMOTE_MCP_EXPIRES_AT'])).validate()
-                checks['remote_profile'] = True
-            else:  # oauth_or_bearer
-                from syllva.mcp.transports.remote import BearerCredential
-                remote_snapshot = diagnostic.select(
-                    required=frozenset(),
-                    optional={'REMOTE_MCP_SECRET': '', 'REMOTE_MCP_EXPIRES_AT': '0'},
-                )
-                # rev3 plan section 3.1 state machine: a lane that is not
-                # configured at all is simply absent from the requirement;
-                # a lane that *is* configured (a Bearer secret is present,
-                # or oidc.issuer is set) must be fully valid, and at least
-                # one lane must end up configured-and-valid. "any lane
-                # valid" (the previous `bearer_ok or oidc_ok`) let an
-                # invalid configured lane hide behind a valid unrelated
-                # one, which could diverge from the runtime dispatch path.
-                bearer_configured = bool(remote_snapshot['REMOTE_MCP_SECRET'])
-                bearer_valid = False
-                if bearer_configured:
-                    try:
-                        BearerCredential(remote_snapshot['REMOTE_MCP_SECRET'],
-                                         float(remote_snapshot['REMOTE_MCP_EXPIRES_AT'])).validate()
-                        bearer_valid = True
-                    except (ConfigurationError, ValueError):
-                        bearer_valid = False
-                oidc = config.remote_mcp.oidc
-                oidc_configured = bool(oidc.issuer)
-                oidc_valid = False
-                if oidc_configured:
-                    oidc_valid = bool(oidc.audience and (oidc.authorized_subject or oidc.authorized_email))
-                    if live and oidc_valid:
-                        from syllva.mcp.transports.oidc import JwksKeyManager
-                        try:
-                            JwksKeyManager(oidc.issuer, oidc.jwks_uri).live_check_sync()
-                        except (ConfigurationError, OSError, ValueError):
-                            oidc_valid = False
-                configured_lanes_valid = [
-                    valid for configured, valid in
-                    ((bearer_configured, bearer_valid), (oidc_configured, oidc_valid))
-                    if configured
-                ]
-                checks['remote_profile'] = bool(configured_lanes_valid) and all(configured_lanes_valid)
-        except (SyllvaError, ValueError):
-            checks['remote_profile'] = False
-    else:
-        optional_checks['remote_profile'] = 'not_configured'
-    if live:
-        try:
-            from syllva.runtime import google_service
-            live_snapshot = diagnostic.select(
-                required=frozenset({'GOOGLE_MCP_CREDENTIALS_FILE', 'NOTION_MCP_TOKEN'}),
-                optional={'GITHUB_READ_TOKEN': ''},
-            )
-            engine = build_retrieval(config, live_snapshot)
-            checks['live_notion_read'] = (
-                engine.notion_reader.get_course_by_alias(
-                    _live_retrieval_probe_course_key(config)
-                )
-                is not None
-            )
-            live_mcp = live_snapshot.get_google_payload('GOOGLE_MCP_CREDENTIALS_FILE')
-            if live_mcp is None:
-                raise ConfigurationError('GOOGLE_MCP_CREDENTIALS_FILE payload is missing')
-            service = google_service(live_mcp, read_only=True, oauth_client=getattr(config, 'google_oauth', None))
-            root = service.files().get(fileId=config.google_drive.university_root_id, fields='id,trashed').execute()
-            checks['live_drive_read'] = root.get('id') == config.google_drive.university_root_id and root.get('trashed') is False
-        except Exception:  # noqa: BLE001 - health checks report booleans, never provider payloads
-            checks['live_provider_read'] = False
-    return {'status': 'ok' if all(checks.values()) else 'needs_configuration',
-            'checks': checks, 'optional_checks': optional_checks,
-            'client_e2e': 'not_proven_by_doctor'}
-
-
-def dispatch(args: argparse.Namespace) -> Any:
-    if args.command == 'init':
-        return initialize(args.config)
-    if args.command == 'setup':
-        from syllva.settings.launcher import preflight, run_setup
-        refusal = preflight()
-        if refusal is not None:
-            print(refusal.message, file=sys.stderr)
-            return {'status': 'failed', 'code': refusal.code}
-        if not args.config.is_file():
-            raise ConfigurationError('Run syllva init before opening Local Settings')
-        return run_setup(args.config, open_browser=not args.no_browser)
-    if args.command == 'behavior':
-        problems = lint_behavior()
-        return {'status': 'failed' if problems else 'ok', 'problems': problems}
-    config = _config(args.config)
-    if args.command == 'study-notes':
-        if args.mode == 'status':
-            return {'enabled': config.study_notes.enabled,
-                    'service': 'uls_submit', 'transport': 'local_stdio',
-                    'client_e2e': 'not_proven', 'search_read_only': True}
-        from syllva.mcp.transports.local import run_local
-        from syllva.runtime import build_study_note_submission_server
-
-        server = build_study_note_submission_server(config)
-        try:
-            run_local(server)
-        finally:
-            server.close()
-        return None
-    if args.command == 'status':
-        return status(config)
-    if args.command == 'doctor':
-        return doctor(config, live=args.live)
-    if args.command in {'sync', 'process', 'run'}:
-        if not config.worker.enabled:
-            return {'status': 'disabled', 'processed': 0}
-        from syllva.adapters.llm.typesafe_choice import resolve_typesafe_key
-        from syllva.worker import build_worker
-
-        resolver = CredentialResolver(config.credentials, path_overrides=getattr(config, 'google_path_overrides', {}))
-        credentials = resolver.resolve(
-            required=frozenset({'GOOGLE_WORKER_CREDENTIALS_FILE', 'NOTION_WORKER_TOKEN'})
-        )
-        classifier_key = resolve_typesafe_key(config.credentials, resolver)
-        worker = (
-            build_worker(config, credentials, classifier_key=classifier_key)
-            if classifier_key else build_worker(config, credentials)
-        )
-        try:
-            return worker.runner.run_once(sync=args.command != 'process', process=args.command != 'sync',
-                                           max_jobs=args.max_jobs)
-        finally:
-            close = getattr(worker, 'close', None)
-            if callable(close):
-                close()
-            else:
-                worker.state.close()
-    if args.command in {'jobs', 'retry', 'reprocess'}:
-        from syllva.state.sqlite import SQLiteStateStore
-        if not state_path(config).is_file():
-            raise ConfigurationError('Run syllva init before job commands')
-        with SQLiteStateStore(state_path(config)) as state:
-            if args.command == 'jobs':
-                return {'status': 'ok', 'jobs': [
-                    {name: getattr(job, name) for name in ('id', 'operation', 'status', 'target_entity_id', 'attempt_count', 'error_class')}
-                    for job in state.list_jobs(limit=args.limit)]}
-            if not state.acquire_local_worker_lock():
-                return {'status': 'already_running'}
-            try:
-                if args.command == 'retry':
-                    job = state.get_job(args.job_id)
-                    if job is None:
-                        raise ValueError('Unknown job ID')
-                    updated = state.requeue_job(job.id, job.error_class or 'PERMANENT')
-                else:
-                    from syllva.ingestion.transcript_ingest import TRANSCRIPT_INGEST_OPERATION
-                    jobs = [job for job in state.list_jobs(entity_id=args.entity_id, limit=1000)
-                            if job.operation == TRANSCRIPT_INGEST_OPERATION]
-                    if not jobs:
-                        raise ValueError('No supported ingestion job for this entity')
-                    updated = state.request_reprocess(jobs[0].id)
-                return {'status': 'queued', 'job_id': updated.id}
-            finally:
-                state.release_local_worker_lock()
-    if args.command == 'credential':
-        from syllva.cli.credential_set import CredentialSetError, _remediation_for
-        from syllva.cli.credential_set import run as run_credential_set
-        if args.credential_action != 'set':
-            raise ValueError('Unsupported credential action')
-        try:
-            return run_credential_set(config=config, config_path=args.config,
-                                      name=args.name, overwrite=args.overwrite)
-        except KeyboardInterrupt:
-            print('Aborted.', file=sys.stderr)
-            raise SystemExit(130) from None
-        except CredentialSetError as exc:
-            code = exc.args[0] if exc.args else 'credential_set_failed'
-            return {'status': 'failed',
-                   'error': {'code': code, 'message': _remediation_for(code)}}
-    if args.command == 'mcp':
-        if args.mode == 'status':
-            return status(config)
-        optional_creds = {'GITHUB_READ_TOKEN': '', 'NOTION_WORKER_TOKEN': '', 'GOOGLE_WORKER_CREDENTIALS_FILE': ''}
-        required_creds = {'GOOGLE_MCP_CREDENTIALS_FILE', 'NOTION_MCP_TOKEN'}
-        if args.mode == 'remote' and config.remote_mcp.auth_mode in {'bearer', 'oauth_or_bearer'}:
-            # auth_mode == 'oidc' must resolve zero REMOTE_MCP_SECRET /
-            # REMOTE_MCP_EXPIRES_AT credentials (rev3 plan section 5.1):
-            # the OIDC-only lane never consults CredentialResolver for
-            # them, so they must not even enter this resolve() call's
-            # input set.
-            optional_creds['REMOTE_MCP_SECRET'] = ''
-            optional_creds['REMOTE_MCP_EXPIRES_AT'] = '0'
-        if args.mode == 'remote' and config.remote_mcp.auth_mode == 'mcp_oauth':
-            required_creds.add('REMOTE_MCP_GOOGLE_CLIENT_SECRET')
-        credentials = CredentialResolver(config.credentials, path_overrides=getattr(config, 'google_path_overrides', {})).resolve(
-            required=frozenset(required_creds),
-            optional=optional_creds,
-        )
-        from syllva.mcp.server import ReadOnlyMCP
-        registry = ReadOnlyMCP(build_retrieval(config, credentials))
-        if args.mode == 'local':
-            from syllva.mcp.transports.local import run_local
-            run_local(registry)
-        else:
-            from syllva.mcp.transports.remote import BearerCredential, run_remote
-            credential: BearerCredential | None = None
-            verifier = None
-            if config.remote_mcp.auth_mode in ('bearer', 'oauth_or_bearer') and credentials.get('REMOTE_MCP_SECRET'):
-                credential = BearerCredential(credentials['REMOTE_MCP_SECRET'],
-                                               float(credentials['REMOTE_MCP_EXPIRES_AT']))
-            if config.remote_mcp.auth_mode in ('oidc', 'oauth_or_bearer'):
-                oidc = config.remote_mcp.oidc
-                if oidc.issuer:
-                    from syllva.mcp.transports.oidc import JwksKeyManager, OidcTokenVerifier
-                    km = JwksKeyManager(oidc.issuer, oidc.jwks_uri)
-                    verifier = OidcTokenVerifier(
-                        issuer=oidc.issuer,
-                        audience=oidc.audience,
-                        authorized_subject=oidc.authorized_subject,
-                        authorized_email=oidc.authorized_email,
-                        leeway_seconds=oidc.leeway_seconds,
-                        key_manager=km,
-                    )
-            if config.remote_mcp.auth_mode == 'mcp_oauth':
-                run_remote(
-                    registry,
-                    config,
-                    credential=None,
-                    oidc_verifier=None,
-                    google_client_secret=credentials['REMOTE_MCP_GOOGLE_CLIENT_SECRET'],
-                )
-            else:
-                run_remote(registry, config, credential=credential, oidc_verifier=verifier)
-        return None
-    raise ValueError('Unsupported command')
-
-
-def main(argv: list[str] | None = None) -> int:
-    args = parser().parse_args(argv)
-    try:
-        result = dispatch(args)
-        if result is not None:
-            print(json.dumps(result, ensure_ascii=False))
-        return 1 if result and result.get('status') in {'failed', 'unhealthy', 'needs_configuration', 'not_initialized'} else 0
-    except Exception as exc:  # noqa: BLE001 - CLI must not print provider payloads or raw tracebacks
-        error = {'error': {'code': getattr(exc, 'code', 'CONFIGURATION_INVALID'),
-                           'message': 'ULS could not complete this command; check configuration and dependencies.'}}
-        print(json.dumps(error), file=sys.stderr)
+        with open_database(layout(args.data_dir)) as db:
+            return int(args.handler(db, args))
+    except SyllvaError as exc:
+        sys.stderr.write(json.dumps({"error": exc.code, "message": str(exc)}, ensure_ascii=False) + "\n")
         return 2
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())

@@ -3,14 +3,15 @@ from __future__ import annotations
 
 import base64
 import hashlib
-from dataclasses import replace
 
 import pytest
 
 from syllva.adapters.github.api import GitHubAPIReader, repository_name, repository_path
-from syllva.domain.academic import ActivityResultMetadata
-from syllva.domain.errors import InvalidSubmissionRefError, SourcePartialError, SourceUnavailableError
-from syllva.retrieval.github import activity_code_context
+from syllva.domain.errors import (
+    InvalidSubmissionRefError,
+    SourcePartialError,
+    SourceUnavailableError,
+)
 
 pytestmark = pytest.mark.contract
 COMMIT, TREE = 'a' * 40, 'b' * 40
@@ -93,50 +94,5 @@ def test_blob_integrity_and_size_limit():
         reader.read_file(ref, 'src/solve.py')
 
 
-def test_activity_result_is_bounded_and_official_instructions_survive():
-    from test_get_activity_context import _engine
-    reader, _, _ = api()
-    engine, _, _ = _engine()
-    original = engine._get_activity_record('COMP319-A01')
-    activity = replace(original, result=ActivityResultMetadata('GitHub', COMMIT, 'student/project', repository_path='src'))
-    engine._get_activity_record = lambda _: activity
-    engine.github_reader = reader
-    package = engine.get_activity_context('COMP319-A01')
-    result = package.scope['result_source']
-    assert package.sources[0].source_class == 'official_activity'
-    assert result['commit_sha'] == COMMIT
-    assert result['files'][0]['content'] == CONTENT.decode()
-    assert result['files'][0]['line_start'] == 1
-    assert COMMIT in result['files'][0]['web_url']
-    assert len(result['files'][0]['content']) + sum(len(i.content) for i in package.sources) <= engine.budget.max_total_chars
-    bounded = activity_code_context(activity, reader, query=None, max_files=1,
-                                    max_chars_per_file=10, max_total_chars=5)
-    assert len(bounded['files'][0]['content']) == 5
-    assert bounded['truncated']
-    # Code paths cannot be presented as an invented get_source_chunk locator.
-    assert not any('solve.py' in str(b.locator) for b in engine.capabilities.bindings_for(package.context_id))
-
-
-def test_activity_invalid_ref_is_visible_without_hiding_official_constraints():
-    from test_get_activity_context import _engine
-    engine, _, _ = _engine()
-    package = engine.get_activity_context('COMP319-A01')
-    assert package.scope['result_source']['status'] == 'unavailable'
-    assert package.scope['result_source']['error'] == 'INVALID_SUBMISSION_REF'
-    assert package.sources[0].source_class == 'official_activity'
-
-
-def test_activity_repository_change_during_read_is_rejected():
-    from test_get_activity_context import _engine
-    reader, _, _ = api()
-    engine, _, _ = _engine()
-    original = engine._get_activity_record('COMP319-A01')
-    first = replace(original, result=ActivityResultMetadata('GitHub', COMMIT, 'student/project'))
-    calls = [0]
-    def current(_):
-        calls[0] += 1
-        return first if calls[0] == 1 else replace(first, result=ActivityResultMetadata('GitHub', COMMIT, 'student/other'))
-    engine._get_activity_record = current
-    engine.github_reader = reader
-    with pytest.raises(SourceUnavailableError):
-        engine.get_activity_context('COMP319-A01')
+# The Activity-integration tests ran over the v1.2 RetrievalEngine, removed in R1c (errata E19).
+# They return with the Activity operations of the v2 RetrievalService in R3 (errata E13).

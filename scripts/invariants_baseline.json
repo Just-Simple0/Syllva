@@ -2,8 +2,7 @@
   "_comment": "Ratchet for scripts/check_invariants.py. Counts may only decrease. Empty by end of R1b where the spec requires.",
   "rules": {
     "write-sql-outside-state": {
-      "src/syllva/mcp/transports/oauth.py": 15,
-      "src/syllva/study_notes/store.py": 26
+      "src/syllva/mcp/transports/oauth.py": 15
     }
   }
 }
