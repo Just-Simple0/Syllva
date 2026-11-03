@@ -32,10 +32,10 @@ from __future__ import annotations
 
 import functools
 import json
-import threading
 import re
 import secrets
 import sqlite3
+import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -503,7 +503,6 @@ class LocalIntake:
             self._job_finish(job_id, final, reason, stamp)
         return self.get(candidate_id)
 
-    @_serialized
     def run_pending(self, *, now: str | None = None) -> list[Candidate]:
         """One pass: classify what was received, process what was confirmed or queued."""
 

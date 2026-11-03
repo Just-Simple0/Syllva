@@ -140,8 +140,9 @@ class LibraryApi:
 
     def _candidates(self) -> list[dict[str, Any]]:
         rows = self.db.reader().fetch_all(
-            "SELECT candidate_id FROM intake_candidates WHERE state IN ('RECEIVED','CLASSIFYING','NEEDS_REVIEW','DUPLICATE',"
-            "'UNSUPPORTED','FAILED','PARTIAL') ORDER BY id"
+            "SELECT c.candidate_id FROM intake_candidates c LEFT JOIN source_versions v ON v.id = c.source_version_id "
+            "LEFT JOIN source_files f ON f.id = v.source_file_id WHERE c.state IN ('RECEIVED','CLASSIFYING','NEEDS_REVIEW',"
+            "'DUPLICATE','UNSUPPORTED','FAILED','PARTIAL') AND f.deleted_at IS NULL ORDER BY c.id"
         )
         return [_candidate(self.intake.get(str(r["candidate_id"]))) for r in rows]
 

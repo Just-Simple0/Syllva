@@ -225,6 +225,7 @@ def run_stdio(stdin: BinaryIO | None = None) -> int:
     sessions = SessionStore()
     gate = GateService(db.writer(), sessions.alive, secret=hello.secret, shell_version=hello.shell_version)
     blobs = BlobStore(db.layout.blobs_dir, db.layout.tmp_dir)
+    blobs.clean_tmp()  # leftovers of an interrupted upload (spec §3.1: tmp/ is cleaned at start)
     intake = LocalIntake(db.writer(), blobs)
     worker = IntakeWorker(intake)
     library = LibraryApi(db, blobs, intake, kick=worker.kick, upload_limit=IntakeConfig().max_bytes)
