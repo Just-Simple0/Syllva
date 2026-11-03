@@ -209,3 +209,4 @@ R1c 삭제 PR(정오표 E19)에서 대응 코드와 함께 지웠다. `폐기`�
 - `tests/unit/test_v2_resolver_cues.py`
 - `tests/unit/test_v2_state_migrate.py`
 - `tests/unit/test_v2_cli.py`
+- `tests/unit/test_v2_core_selfcheck.py`

@@ -405,3 +405,19 @@ GUI가 없는 이 환경에서는 컴파일과 단위 테스트까지만 할 수
 - **수동 시연 추가 확인 항목**(macOS/Windows):
   - WKWebView가 커스텀 스킴에서 `Origin: null`을 보내는지. 보내면 변경 요청이 `BAD_ORIGIN`이 되므로 E29 Origin 규칙을 재검토한다.
   - Core CSP에 `connect-src ipc:`가 없어 Tauri IPC가 postMessage로 대체될 때 콘솔 경고가 나는지.
+
+### 7.5 R2-5 번들 스파이크 결과 (정오표 E31)
+
+- **번들 구성**: Core는 PyInstaller onedir로 만든다. Linux 크기는 57 MB이며, 큰 항목은 libpython 31 MB와 cryptography 14 MB다. cryptography는 Linux keyring(SecretStorage)이 의존한다. PIL은 제외했다.
+- **스모크 시험**: `--self-check`과 stdio 왕복을 3 OS CI의 `bundle` 작업에서 실행한다. Linux CI에는 Secret Service가 없어 keyring이 `fail` 백엔드로 잡히며, 이는 정상이다. macOS/Windows에서는 실제 키체인 백엔드를 요구한다.
+- **Shell의 Core 위치**: 기본은 실행 파일 옆 `syllva-core/`다. `SYLLVA_CORE_BIN`은 디버그 빌드에서만 읽는다.
+- **시작·감시 자동 시험**: 가짜 Core(Python 스크립트)로 다섯 가지를 확인한다(`cargo test -p syllva-shell`).
+  - 시작 중 거부(`DB_LOCKED`)는 반환되고 앱을 끝내지 않는다.
+  - 응답 없이 종료하면 `start`가 즉시 실패한다.
+  - 실행 중 종료는 앱을 끝낸다.
+  - 프로토콜 위반은 Core를 죽이고 앱을 끝낸다.
+  - 정상 종료(shutdown)는 Core 상실로 처리하지 않는다.
+- **`ready` 직후 사망 경쟁 해소**: 이전 구현은 `ready` 직후 Core가 죽으면 감시가 켜지기 전에 읽기 스레드가 끝나 앱이 죽은 Core와 함께 남을 수 있었다. 상태 기계 STARTING/LOST_EARLY/RUNNING/STOPPING의 CAS로 이 경쟁을 없앴다.
+- **사용자 결정 대기**:
+  - 서명·공증. Apple Developer ID와 Windows 코드 서명 인증서가 필요하다.
+  - onedir를 앱 번들에 싣는 최종 배치. R6에서 확정한다.

@@ -10,11 +10,11 @@ use serde_json::{json, Map, Value};
 use std::io::{BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use syllva_shell_proto::{env::core_env, frame, secret::ShellSecret};
+use syllva_shell_proto::{env::core_env, frame, secret::ShellSecret, sidecar};
 
 pub const PLATFORM: &str = if cfg!(target_os = "macos") {
     "darwin"
@@ -25,17 +25,35 @@ pub const PLATFORM: &str = if cfg!(target_os = "macos") {
 };
 const REPLY_TIMEOUT: Duration = Duration::from_secs(90);
 
+// Life of the Core as the reader thread sees it (review of PR #52: a refusal at hello must reach the dialog,
+// and a Core that dies right after `ready` must still end the app).
+const STARTING: u8 = 0;
+const LOST_EARLY: u8 = 1; // stdout ended or broke before `start` accepted `ready`: `start` reports it
+const RUNNING: u8 = 2; // from here on a lost Core is fatal (`on_lost`)
+const STOPPING: u8 = 3; // the app is quitting: a closed stdout is expected
+
+/// Called once when a running Core exits or breaks the protocol (after the Core was killed).
+pub type OnLost = Box<dyn Fn(&'static str) + Send + 'static>;
+
+/// What the app does when the Core is lost: nothing is left to relay to, so it ends (its session jar dies with it).
+pub fn exit_app(why: &'static str) {
+    eprintln!("syllva: the Core stopped ({why})");
+    std::process::exit(2);
+}
+
 pub struct Core {
     stdin: Arc<Mutex<ChildStdin>>,
     replies: Mutex<Receiver<Map<String, Value>>>,
     child: Arc<Mutex<Child>>,
-    stopping: Arc<AtomicBool>,
+    state: Arc<AtomicU8>,
     pub port: u16,
 }
 
-fn core_command() -> Command {
-    // Development: SYLLVA_CORE_BIN points at the `syllva` executable; the bundled sidecar replaces this (R2-5).
-    let program = std::env::var("SYLLVA_CORE_BIN").unwrap_or_else(|_| "syllva".into());
+/// The Core launch: the bundled sidecar (or, in debug builds, `SYLLVA_CORE_BIN`) with the allowlisted environment.
+pub fn core_command() -> Result<Command, String> {
+    let exe = std::env::current_exe().ok();
+    let program = sidecar::core_program(std::env::var("SYLLVA_CORE_BIN").ok(), cfg!(debug_assertions), exe.as_deref())
+        .ok_or("cannot locate the Core")?;
     let mut command = Command::new(program);
     command
         .args(["core", "--stdio"])
@@ -44,7 +62,13 @@ fn core_command() -> Command {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    command
+    #[cfg(windows)]
+    {
+        // the sidecar is a console program (stdio is the protocol); never show its console window
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    Ok(command)
 }
 
 fn write_message(stdin: &Mutex<ChildStdin>, message: Map<String, Value>) -> Result<(), String> {
@@ -63,18 +87,20 @@ fn object(value: Value) -> Map<String, Value> {
 impl Core {
     /// Spawn the Core, send `hello`, wait for `ready`. Returns the Core and the first bootstrap token.
     pub fn start(secret: &ShellSecret) -> Result<(Core, String), String> {
-        let mut child = core_command().spawn().map_err(|e| format!("cannot start the Core: {}", e.kind()))?;
+        Core::start_with(core_command()?, secret, Box::new(exit_app))
+    }
+
+    /// `start` with an explicit launch command and lost-Core handler (tests drive a fake Core this way).
+    pub fn start_with(mut command: Command, secret: &ShellSecret, on_lost: OnLost) -> Result<(Core, String), String> {
+        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = command.spawn().map_err(|e| format!("cannot start the Core: {}", e.kind()))?;
         let stdin = Arc::new(Mutex::new(child.stdin.take().ok_or("no stdin")?));
         let stdout = child.stdout.take().ok_or("no stdout")?;
         let mut stderr = child.stderr.take().ok_or("no stderr")?;
         let child = Arc::new(Mutex::new(child));
         let watched = Arc::clone(&child);
-        let stopping = Arc::new(AtomicBool::new(false));
-        let watch_stop = Arc::clone(&stopping);
-        // Armed only once `ready` arrived: before that, a refusal at hello (DB_LOCKED, …) is reported by `start`'s
-        // caller with a dialog, so the reader just ends and lets `start` see the error frame (review of 732c8c1).
-        let armed = Arc::new(AtomicBool::new(false));
-        let watch_armed = Arc::clone(&armed);
+        let state = Arc::new(AtomicU8::new(STARTING));
+        let watch_state = Arc::clone(&state);
         thread::spawn(move || {
             let mut sink = [0u8; 4096];
             while matches!(stderr.read(&mut sink), Ok(n) if n > 0) {} // drained, never forwarded (I9)
@@ -90,35 +116,50 @@ impl Core {
                             return;
                         }
                     }
-                    Err(_) if watch_stop.load(Ordering::SeqCst) => return, // the app is quitting: expected
-                    Err(_) if !watch_armed.load(Ordering::SeqCst) => return, // still starting: `start` reports it
                     Err(error) => {
-                        // A protocol violation stops the Core (plan rev 2, item 8); a Core that exited or broke the
-                        // protocol leaves nothing to relay to, so the app ends too (its session jar dies with it).
+                        // A protocol violation stops the Core (plan rev 2, item 8).
                         if let Ok(mut child) = watched.lock() {
                             let _ = child.kill();
                         }
-                        eprintln!("syllva: the Core stopped ({})", if error == frame::FrameError::Closed { "exited" } else { "protocol violation" });
-                        std::process::exit(2);
+                        // still starting: `start` sees the dropped channel (or the error frame) and reports it
+                        if watch_state.compare_exchange(STARTING, LOST_EARLY, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                            return;
+                        }
+                        if watch_state.load(Ordering::SeqCst) == RUNNING {
+                            on_lost(if error == frame::FrameError::Closed { "exited" } else { "protocol violation" });
+                        }
+                        return; // STOPPING: the app is quitting
                     }
                 }
             }
         });
-        write_message(
-            &stdin,
-            object(json!({"t": "hello", "secret_b64": secret.hello_value(), "shell_version": env!("CARGO_PKG_VERSION"), "platform": PLATFORM})),
-        )?;
-        let ready = rx.recv_timeout(Duration::from_secs(60)).map_err(|_| "the Core did not answer hello")?;
-        if ready.get("t").and_then(Value::as_str) != Some("ready") {
-            let code = ready.get("code").and_then(Value::as_str).unwrap_or("UNKNOWN").to_string();
-            if let Ok(mut child) = child.lock() {
-                let _ = child.kill();
+        let hello = object(json!({
+            "t": "hello", "secret_b64": secret.hello_value(), "shell_version": env!("CARGO_PKG_VERSION"), "platform": PLATFORM,
+        }));
+        let accepted = write_message(&stdin, hello).and_then(|()| {
+            let ready = rx.recv_timeout(Duration::from_secs(60)).map_err(|_| "the Core did not answer hello".to_string())?;
+            if ready.get("t").and_then(Value::as_str) != Some("ready") {
+                let code = ready.get("code").and_then(Value::as_str).unwrap_or("UNKNOWN");
+                return Err(format!("the Core refused to start: {code}"));
             }
-            return Err(format!("the Core refused to start: {code}"));
-        }
-        let port = ready.get("port").and_then(Value::as_u64).filter(|p| *p > 0 && *p < 65536).ok_or("bad port")? as u16;
-        let bootstrap = ready.get("bootstrap").and_then(Value::as_str).ok_or("no bootstrap")?.to_string();
-        armed.store(true, Ordering::SeqCst);
+            let port = ready.get("port").and_then(Value::as_u64).filter(|p| *p > 0 && *p < 65536).ok_or("bad port")?;
+            let bootstrap = ready.get("bootstrap").and_then(Value::as_str).ok_or("no bootstrap")?.to_string();
+            // fails if the Core sent `ready` and then died before we accepted it
+            state.compare_exchange(STARTING, RUNNING, Ordering::SeqCst, Ordering::SeqCst)
+                .map_err(|_| "the Core stopped while starting".to_string())?;
+            Ok((port as u16, bootstrap))
+        });
+        let (port, bootstrap) = match accepted {
+            Ok(started) => started,
+            Err(message) => {
+                state.store(STOPPING, Ordering::SeqCst); // a failed start is reported here, never through on_lost
+                if let Ok(mut child) = child.lock() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                return Err(message);
+            }
+        };
         let pinger = Arc::clone(&stdin);
         thread::spawn(move || {
             let mut seq: u64 = 0;
@@ -130,7 +171,7 @@ impl Core {
                 }
             }
         });
-        Ok((Core { stdin, replies: Mutex::new(rx), child, stopping, port }, bootstrap))
+        Ok((Core { stdin, replies: Mutex::new(rx), child, state, port }, bootstrap))
     }
 
     /// One request, one reply (requests are serialized by the replies lock).
@@ -145,7 +186,7 @@ impl Core {
     }
 
     pub fn shutdown(&self) {
-        self.stopping.store(true, Ordering::SeqCst);
+        self.state.store(STOPPING, Ordering::SeqCst);
         let _ = write_message(&self.stdin, object(json!({"t": "shutdown", "grace_ms": 3000})));
         if let Ok(mut child) = self.child.lock() {
             for _ in 0..50 {
@@ -156,5 +197,77 @@ impl Core {
             }
             let _ = child.kill();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! A fake Core (a short Python script) drives the start and watchdog paths (review of PR #52).
+
+    use super::*;
+    use std::sync::mpsc::Sender;
+
+    fn python() -> Command {
+        let program = std::env::var("PYTHON").unwrap_or_else(|_| if cfg!(windows) { "python".into() } else { "python3".into() });
+        Command::new(program)
+    }
+
+    fn fake(script: &str) -> Command {
+        let mut command = python();
+        command.args(["-c", &format!("import sys, time\nsys.stdin.readline()\n{script}")]);
+        command
+    }
+
+    const READY: &str = "sys.stdout.write('{\"v\":1,\"t\":\"ready\",\"port\":4242,\"bootstrap\":\"b\"}\\n'); sys.stdout.flush()";
+
+    fn lost_channel() -> (OnLost, Receiver<&'static str>) {
+        let (tx, rx): (Sender<&'static str>, Receiver<&'static str>) = channel();
+        let tx = Mutex::new(tx);
+        (Box::new(move |why| { let _ = tx.lock().map(|t| t.send(why)); }), rx)
+    }
+
+    #[test]
+    fn a_refusal_at_hello_is_returned_not_fatal() {
+        let (on_lost, lost) = lost_channel();
+        let script = "sys.stdout.write('{\"v\":1,\"t\":\"error\",\"code\":\"DB_LOCKED\"}\\n'); sys.stdout.flush(); sys.exit(3)";
+        let error = Core::start_with(fake(script), &ShellSecret::generate(), on_lost).err().expect("refused");
+        assert_eq!(error, "the Core refused to start: DB_LOCKED");
+        assert!(lost.recv_timeout(Duration::from_millis(500)).is_err());
+    }
+
+    #[test]
+    fn a_core_that_exits_before_answering_is_reported_by_start() {
+        let (on_lost, lost) = lost_channel();
+        let error = Core::start_with(fake("sys.exit(1)"), &ShellSecret::generate(), on_lost).err().expect("failed");
+        assert_eq!(error, "the Core did not answer hello"); // channel dropped: no 60 s wait
+        assert!(lost.recv_timeout(Duration::from_millis(500)).is_err());
+    }
+
+    #[test]
+    fn a_running_core_that_exits_is_fatal() {
+        let (on_lost, lost) = lost_channel();
+        let started = Core::start_with(fake(&format!("{READY}\ntime.sleep(1)")), &ShellSecret::generate(), on_lost);
+        let (core, bootstrap) = started.expect("ready");
+        assert_eq!((core.port, bootstrap.as_str()), (4242, "b"));
+        assert_eq!(lost.recv_timeout(Duration::from_secs(10)), Ok("exited"));
+    }
+
+    #[test]
+    fn a_protocol_violation_kills_the_core_and_is_fatal() {
+        let (on_lost, lost) = lost_channel();
+        let script = format!("{READY}\ntime.sleep(0.3)\nsys.stdout.write('not json\\n'); sys.stdout.flush()\ntime.sleep(60)");
+        let (core, _) = Core::start_with(fake(&script), &ShellSecret::generate(), on_lost).expect("ready");
+        assert_eq!(lost.recv_timeout(Duration::from_secs(10)), Ok("protocol violation"));
+        let mut child = core.child.lock().unwrap();
+        assert!(child.wait().is_ok()); // killed, not left sleeping for 60 s
+    }
+
+    #[test]
+    fn shutdown_is_not_a_lost_core() {
+        let (on_lost, lost) = lost_channel();
+        let script = format!("{READY}\nsys.stdin.readline()");
+        let (core, _) = Core::start_with(fake(&script), &ShellSecret::generate(), on_lost).expect("ready");
+        core.shutdown();
+        assert!(lost.recv_timeout(Duration::from_millis(800)).is_err());
     }
 }
