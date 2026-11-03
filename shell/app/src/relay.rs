@@ -76,9 +76,7 @@ pub fn handle(port: u16, key: &[u8; 32], label: &str, jar: &Mutex<Jar>, request:
 
 /// Navigation stays on the app origin (R2 plan item 5); anything else is refused.
 pub fn allowed_navigation(url: &tauri::Url) -> bool {
-    match (url.scheme(), url.host_str()) {
-        ("syllva", Some("localhost")) => true,
-        ("http" | "https", Some("syllva.localhost")) => cfg!(windows),
-        _ => false,
-    }
+    let (scheme, host) = (url.scheme(), url.host_str());
+    (scheme == "syllva" && host == Some("localhost"))
+        || (cfg!(windows) && matches!(scheme, "http" | "https") && host == Some("syllva.localhost"))
 }
