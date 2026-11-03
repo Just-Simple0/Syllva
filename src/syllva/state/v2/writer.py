@@ -247,11 +247,26 @@ class StateWriter:
         Plain INSERT/UPDATE only (errata E9). Must be the outermost transaction.
         """
 
-        if self._depth or self._connection.in_transaction:
-            raise PolicyViolation("commit_gate must not run inside another transaction")
         if action != "VERIFY_MATERIAL" or target_kind != "material":
             raise PolicyViolation("gate action not wired yet (errata E24)", details={"action": action})
+        with self._lock:  # waits for another thread's transaction; then _depth > 0 means same-thread nesting
+            if self._depth or self._connection.in_transaction:
+                raise PolicyViolation("commit_gate must not run inside another transaction")
+            return self._commit_gate_locked(
+                action, target_kind, target_id, request_hash, nonce_id, confirmed_at, shell_version, verify
+            )
 
+    def _commit_gate_locked(
+        self,
+        action: str,
+        target_kind: str,
+        target_id: str,
+        request_hash: str,
+        nonce_id: str,
+        confirmed_at: str,
+        shell_version: str,
+        verify: Callable[[StateWriter], str | None],
+    ) -> str | None:
         class _Refused(Exception):
             def __init__(self, reason: str) -> None:
                 self.reason = reason

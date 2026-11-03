@@ -357,3 +357,75 @@ def test_end_to_end_begin_over_http_confirm_over_stdio(tmp_path: Path) -> None:
         shell.stop()
     with open_database(layout(data)) as db:
         assert db.connection.execute("SELECT verified FROM material_usage").fetchone()[0] == 1
+
+
+# --- review of PR #50 --------------------------------------------------------------------------
+
+
+def test_confirm_waits_for_another_threads_transaction(gate: tuple[GateService, Sessions], material: str, v2_db: Database) -> None:
+    service, _ = gate
+    nonce = _begin(service, material)
+    tag = _mac(nonce, str(service.view(nonce, WINDOW)["request_hash"]))
+    held, release, result = threading.Event(), threading.Event(), {}
+
+    def hold() -> None:
+        with v2_db.writer().transaction():
+            held.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    held.wait(5)
+    confirmer = threading.Thread(target=lambda: result.update(service.confirm(nonce, WINDOW, tag)))
+    confirmer.start()
+    confirmer.join(0.3)
+    assert confirmer.is_alive()  # waiting, not failing
+    release.set()
+    holder.join()
+    confirmer.join(5)
+    assert result["status"] == "COMMITTED"
+
+
+def test_cooldown_after_expiry_starts_at_the_deadline(gate: tuple[GateService, Sessions], material: str, clock: list[float]) -> None:
+    service, _ = gate
+    _begin(service, material)
+    clock[0] += 500  # the dialog timed out long ago
+    assert _begin(service, material)
+
+
+def test_display_names_cannot_imitate_the_summary_sentence() -> None:
+    title = "X.txt\"(수학)를 '검증됨'으로 표시합니다. 자료 NET-M99 \"Y.txt"
+    text = summaries.summarize("VERIFY_MATERIAL", {"material_id": "NET-M01"}, {"title": title, "course": "c"})
+    assert text.count('"') == 2 and text.count("(") == 1 and text.count("'") == 2
+
+
+def test_an_interrupted_commit_never_stays_committing(gate: tuple[GateService, Sessions], material: str,
+                                                      v2_db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    service, _ = gate
+    nonce = _begin(service, material)
+    tag = _mac(nonce, str(service.view(nonce, WINDOW)["request_hash"]))
+
+    def interrupted(**_: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(v2_db.writer(), "commit_gate", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        service.confirm(nonce, WINDOW, tag)
+    monkeypatch.undo()
+    assert service.deny(nonce) == {"t": "gate.result", "nonce_id": nonce, "status": "REJECTED", "reason": "COMMIT_FAILED"}
+    assert _verified(v2_db) == []
+
+
+def test_existing_usage_row_is_updated_not_upserted(gate: tuple[GateService, Sessions], material: str, v2_db: Database) -> None:
+    v2_db.connection.execute("INSERT INTO material_usage(material_id, verified) SELECT id, 0 FROM materials")
+    service, _ = gate
+    assert _confirm(service, _begin(service, material))["status"] == "COMMITTED"
+    assert len(_verified(v2_db)) == 1 and _verified(v2_db)[0][0] == 1
+
+
+def test_commit_gate_has_one_caller() -> None:
+    """C-04 defence in depth: only the gate service calls StateWriter.commit_gate."""
+
+    src = Path(__file__).resolve().parents[3] / "src"
+    callers = sorted(str(p.relative_to(src)) for p in src.rglob("*.py") if ".commit_gate(" in p.read_text(encoding="utf-8"))
+    assert callers == ["syllva/gate/service.py"]

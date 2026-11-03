@@ -21,6 +21,8 @@ def label(text: object) -> str:
     value = unicodedata.normalize("NFC", str(text or ""))
     value = re.sub(r"[\r\n\t  ]", " ", value)
     value = "".join(ch for ch in value if not unicodedata.category(ch).startswith("C"))
+    # quotes/brackets would let a display name imitate the sentence around it (review of PR #50)
+    value = re.sub(r"[\"'“”‘’()\[\]{}<>「」『』]", "", value)
     value = re.sub(r"\s+", " ", value).strip()
     return value if len(value) <= MAX_LABEL else value[: MAX_LABEL - 1] + "…"
 

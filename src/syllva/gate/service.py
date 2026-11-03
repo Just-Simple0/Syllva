@@ -170,9 +170,7 @@ class GateService:
             mac_ok = self._secret is not None and presented is not None and mac.verify(
                 self._secret.reveal(), nonce_id, record.request_hash, presented)
             if record.state in TERMINAL:
-                if record.state == "COMMITTED" and mac_ok and record.window_label == window_label:
-                    return self._answer(record)  # idempotent replay (C-17)
-                return self._answer(record)
+                return self._answer(record)  # COMMITTED: idempotent replay (C-17); others stay refused
             if record.window_label != window_label:
                 return self._result(nonce_id, "REJECTED", "WRONG_WINDOW")  # does not end the nonce
             if not self._alive(record.session_id):
@@ -182,6 +180,7 @@ class GateService:
                 self._finish(record, "REJECTED", "BAD_MAC", now)
                 return self._answer(record)
             record.state = "COMMITTING"
+            refusal: str | None = "COMMIT_FAILED"
             try:
                 refusal = self._writer.commit_gate(
                     action=record.action, target_kind="material", target_id=record.target_id,
@@ -189,9 +188,11 @@ class GateService:
                     confirmed_at=datetime.now(UTC).isoformat(timespec="seconds"), shell_version=self._shell_version,
                     verify=lambda w: self._recheck(w, record),
                 )
-            except Exception as exc:  # noqa: BLE001 - nothing was written (the transaction rolled back)
+            except BaseException as exc:
                 log_event("GATE_COMMIT_FAILED", error=type(exc).__name__)
-                self._finish(record, "REJECTED", "COMMIT_FAILED", now)
+                self._finish(record, "REJECTED", "COMMIT_FAILED", now)  # never left in COMMITTING
+                if not isinstance(exc, Exception):
+                    raise
                 return self._answer(record)
             if refusal is None:
                 self._finish(record, "COMMITTED", None, now)
@@ -230,7 +231,7 @@ class GateService:
     def _expire(self, now: float) -> None:
         for nonce_id, record in list(self._records.items()):
             if record.state == "PENDING" and now >= record.deadline:
-                self._finish(record, "EXPIRED", None, now)
+                self._finish(record, "EXPIRED", None, record.deadline)  # cooldown runs from the deadline
             elif record.finished is not None and now - record.finished > KEEP_TERMINAL_S:
                 del self._records[nonce_id]
 
