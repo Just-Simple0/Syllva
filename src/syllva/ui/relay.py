@@ -41,10 +41,14 @@ class RelayVerifier:
         except (binascii.Error, ValueError):
             return False
         with self._lock:
-            expected = self._expected.get(label)
-            if expected is None:
-                expected = self._expected[label] = relay_mac(self._secret.reveal(), label)
-        return hmac.compare_digest(expected, tag)
+            cached = self._expected.get(label)
+        expected = cached if cached is not None else relay_mac(self._secret.reveal(), label)
+        if not hmac.compare_digest(expected, tag):
+            return False
+        if cached is None:
+            with self._lock:  # cache only labels the Shell actually vouched for (bounded by real windows)
+                self._expected[label] = expected
+        return True
 
 
 __all__ = ["RelayVerifier", "relay_mac"]

@@ -396,3 +396,12 @@ GUI가 없는 이 환경에서는 컴파일과 단위 테스트까지만 할 수
   - uri-scheme 처리기가 `ctx.webview_label()`을 쓴다.
   - `gate.rs`도 같은 label 공간(창 label)을 쓴다.
 - 수동 시연에 남는 항목(§4): 앱 origin 한정 IPC, label 공간 일치. Core의 정합성은 더 이상 웹뷰가 무엇을 보내는지에 의존하지 않는다.
+
+### 7.4 R2-4 검토 반영 (PR #52)
+
+- **R1 — Core 종료 처리**: Shell은 프로토콜 위반이나 Core 종료를 감지하면 Core를 끝내고 앱도 끝낸다. 정상 종료와는 구분한다.
+- **R2 — 창 닫힘과 세션 정리**: 창이 닫히면 보관소 항목을 지우고 stdio `session.end`로 Core 세션을 즉시 끝낸다. Core 재시작 경로는 없다. Core가 끝나면 앱도 끝나므로 보관소도 함께 사라진다. §7.3 R5의 "Core 재시작 시 보관소 전체 삭제"는 이것으로 충족된다.
+- **R3 — 정오표 기록**: `SYSTEMROOT` 허용과 Core stderr 폐기를 E30에 기록했다.
+- **수동 시연 추가 확인 항목**(macOS/Windows):
+  - WKWebView가 커스텀 스킴에서 `Origin: null`을 보내는지. 보내면 변경 요청이 `BAD_ORIGIN`이 되므로 E29 Origin 규칙을 재검토한다.
+  - Core CSP에 `connect-src ipc:`가 없어 Tauri IPC가 postMessage로 대체될 때 콘솔 경고가 나는지.

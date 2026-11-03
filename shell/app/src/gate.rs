@@ -34,10 +34,14 @@ fn text(view: &Map<String, Value>, key: &str) -> String {
 }
 
 pub fn dialog_text(view: &Map<String, Value>) -> String {
-    let ids: Vec<&str> = view.get("source_ids").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
-    let prefixes: Vec<&str> =
-        view.get("source_hash_prefixes").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
-    let sources: Vec<String> = ids.iter().zip(prefixes.iter()).map(|(id, p)| format!("{id} (sha256 {p})")).collect();
+    let clean = |items: Option<&Value>| -> Vec<String> {
+        items
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).map(|s| s.chars().filter(|c| !c.is_control()).take(80).collect()).collect())
+            .unwrap_or_default()
+    };
+    let (ids, prefixes) = (clean(view.get("source_ids")), clean(view.get("source_hash_prefixes")));
+    let sources: Vec<String> = ids.iter().zip(prefixes.iter()).take(10).map(|(id, p)| format!("{id} (sha256 {p})")).collect();
     let seconds = view.get("expires_in_ms").and_then(Value::as_u64).unwrap_or(0) / 1000;
     format!(
         "{}\n\n대상: {}\n원본: {}\n남은 시간: 약 {}초",

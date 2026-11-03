@@ -107,6 +107,16 @@ class SessionStore:
             session = self._sessions.get(_key(session_id))
             return session is not None and time.monotonic() - session.last_used <= IDLE_TTL_S
 
+    def end_window(self, window_label: str) -> bool:
+        """The Shell closed this window (stdio ``session.end``): its session ends now, not after 8 h idle."""
+
+        with self._lock:
+            key = self._by_window.get(window_label)
+            if key is None:
+                return False
+            self._drop(key)
+            return True
+
     def logout(self, session_id: str) -> None:
         with self._lock:
             self._drop(_key(session_id))

@@ -138,3 +138,12 @@ def test_secret_reveal_has_two_callers() -> None:
     src = Path(__file__).resolve().parents[3] / "src"
     callers = sorted(p.relative_to(src).as_posix() for p in src.rglob("*.py") if ".reveal()" in p.read_text(encoding="utf-8"))
     assert callers == ["syllva/gate/service.py", "syllva/ui/relay.py"]
+
+
+def test_only_vouched_labels_are_cached() -> None:
+    verifier = RelayVerifier(Secret(SECRET))
+    for n in range(50):
+        assert not verifier.verify(f"w{n}", relay_headers(b"\x00" * 32, f"w{n}")["X-Syllva-Relay"])
+    assert verifier._expected == {}  # unauthenticated callers cannot grow the cache
+    assert verifier.verify("main", relay_headers(SECRET, "main")["X-Syllva-Relay"])
+    assert set(verifier._expected) == {"main"}

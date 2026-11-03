@@ -32,3 +32,11 @@ R2-0 실측(Linux): 웹뷰는 `syllva://` 요청에 Origin/Sec-Fetch/Cookie를 �
 2. 창 label이 일치한다(확인 다이얼로그가 뜬다).
 3. 네이티브 다이얼로그의 내용과 확인/취소 결과.
 4. 앱 밖 링크로 이동할 수 없다.
+5. WKWebView/WebView2가 `Origin`을 보내는지와 그 값(`null`이면 E29 재검토), Tauri IPC가 CSP 때문에 postMessage로 대체되는지(콘솔 경고).
+
+### Linux 시연 직후 DB 조회 (sqlite3)
+
+```
+material_usage: [(1, 1)]                       # (verified, verified_gate_id)
+gate log: [('VERIFY_MATERIAL', 'NET-M01', 64, '0.1.0')]   # (action, target_id, length(request_hash), shell_version)
+```

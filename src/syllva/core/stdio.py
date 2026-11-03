@@ -365,6 +365,12 @@ def _loop(channel: Channel, sessions: Any, gate: Any = None) -> int:
         elif kind == "shutdown":
             channel.send({"t": "bye"})
             return EXIT_OK
+        elif kind == "session.end":
+            label = item.get("window_label")
+            if not isinstance(label, str) or not WINDOW_LABEL.fullmatch(label):
+                channel.send({"t": "error", "code": "BAD_WINDOW_LABEL", "message": "invalid window label"})
+                continue
+            channel.send({"t": "session.ended", "window_label": label, "ended": bool(sessions.end_window(label))})
         elif kind == "session.bootstrap":
             label = item.get("window_label")
             if not isinstance(label, str) or not WINDOW_LABEL.fullmatch(label):

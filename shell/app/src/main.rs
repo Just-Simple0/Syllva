@@ -20,7 +20,8 @@ pub fn bootstrap_url(token: &str) -> String {
     }
 }
 
-/// The Core restarted or the session idled out: get a fresh bootstrap token for this window and reload it.
+/// The window's session idled out (8 h) or was ended: get a fresh bootstrap token for this window and reload it.
+/// (A Core that exits ends the whole app — see core.rs — so there is no Core restart path.)
 fn recover_session(app: &tauri::AppHandle, core: &core::Core, label: &str) {
     let request = json!({"t": "session.bootstrap", "window_label": label});
     let Ok(reply) = core.request(request.as_object().cloned().unwrap_or_default()) else { return };
@@ -46,6 +47,7 @@ fn main() {
     let relay_jar = Arc::clone(&jar);
     let relay_core = Arc::clone(&core);
     let window_jar = Arc::clone(&jar);
+    let window_core = Arc::clone(&core);
     let app = tauri::Builder::default()
         .manage(Arc::clone(&core))
         .manage(Arc::clone(&secret))
@@ -64,7 +66,13 @@ fn main() {
         })
         .on_window_event(move |window, event| {
             if let WindowEvent::Destroyed = event {
-                window_jar.lock().expect("jar lock").forget(window.label()); // the session id dies with the window
+                let label = window.label().to_string();
+                window_jar.lock().expect("jar lock").forget(&label); // the session id dies with the window
+                let core = Arc::clone(&window_core);
+                std::thread::spawn(move || {
+                    // and the Core ends that session now instead of after 8 h idle (plan §7.3 R5)
+                    let _ = core.request(json!({"t": "session.end", "window_label": label}).as_object().cloned().unwrap_or_default());
+                });
             }
         })
         .invoke_handler(tauri::generate_handler![gate::confirm_gate])
