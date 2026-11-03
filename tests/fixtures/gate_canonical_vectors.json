@@ -1,0 +1,43 @@
+[
+ {
+  "input": {
+   "b": 1,
+   "a": [
+    3,
+    2,
+    {
+     "z": true,
+     "y": null
+    }
+   ]
+  },
+  "canonical": "{\"a\":[3,2,{\"y\":null,\"z\":true}],\"b\":1}"
+ },
+ {
+  "input": {
+   "한": "글",
+   "a": "\"quote\"\n"
+  },
+  "canonical": "{\"a\":\"\\\"quote\\\"\\n\",\"한\":\"글\"}"
+ },
+ {
+  "input": {
+   "v": 1,
+   "action": "VERIFY_MATERIAL",
+   "params": {
+    "material_id": "NET-M01"
+   },
+   "target_id": "NET-M01",
+   "summary": "s",
+   "target_fingerprint": "f"
+  },
+  "canonical": "{\"action\":\"VERIFY_MATERIAL\",\"params\":{\"material_id\":\"NET-M01\"},\"summary\":\"s\",\"target_fingerprint\":\"f\",\"target_id\":\"NET-M01\",\"v\":1}"
+ },
+ {
+  "input": {
+   "n": -12,
+   "e": "\u0007"
+  },
+  "canonical": "{\"e\":\"\\u0007\",\"n\":-12}"
+ }
+]

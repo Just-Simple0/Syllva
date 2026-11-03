@@ -20,8 +20,8 @@ DESIGN = Path(__file__).resolve().parents[3] / "syllva-v2-design-frozen.md"
 # id -> (spec §14 file, activating stage, what is still missing)
 PENDING: dict[str, tuple[str, str, str]] = {
     "C-01": ("test_agent_no_tools.py", "R4", "agents/ and build_agent_launch do not exist yet"),
-    "C-04": ("test_gate_auth.py", "R2", "gate/ module and Shell protocol (§6)"),
-    "C-05": ("test_gate_nonce.py", "R2", "gate/ module (§6.3-§6.4)"),
+    "C-04": ("test_gate_auth.py", "R3/R5", "SET_SUBMISSION_STATUS (R3), CONFIRM_EXAM_SCOPE/ADOPT_AI_ARTIFACT (R5) — errata E24; VERIFY_MATERIAL active in test_v2_gate"),
+    "C-05": ("test_gate_nonce.py", "R3/R5", "remaining gate actions (E24); nonce rules for VERIFY_MATERIAL active in test_v2_gate"),
     "C-06": ("test_ai_artifact_fingerprint.py", "R4", "ai_artifacts pipeline (§8.7)"),
     "C-07": ("test_launch_env.py", "R4", "build_agent_launch env allowlist (§7.2)"),
     "C-08": ("test_agent_cwd.py", "R4", "agent cwd creation (§3.1, §7.1)"),
@@ -29,9 +29,9 @@ PENDING: dict[str, tuple[str, str, str]] = {
     "C-11": ("test_run_context_lifetime.py", "R4", "Run Context lifetime (§8.6)"),
     "C-15": ("test_template_manifest.py", "R4", "prompt template manifest (§8.2)"),
     "C-16": ("CI workflow", "R2", "v2 subset runs on Linux/macOS/Windows (ci.yml v2 job); full when all C-xx are active"),
-    "C-17": ("test_gate_replay.py", "R2", "gate commit protocol (§6.4); DB trigger half active in test_v2_gate_db_triggers"),
+    "C-17": ("test_gate_replay.py", "R3/R5", "remaining gate actions (E24); replay/idempotency for VERIFY_MATERIAL active in test_v2_gate, DB trigger half in test_v2_gate_db_triggers"),
     "C-18": ("test_ui_xss_and_csp.py", "R2", "v2 UI DOM rendering; static sink check active in test_v2_static_invariants"),
-    "C-19": ("test_gate_summary_binding.py", "R2", "gate summary binding and Tauri capability check (§6.3, §13.6)"),
+    "C-19": ("test_gate_summary_binding.py", "R2-4", "Tauri capability/config check (Shell); summary binding (begin takes ids only, Core-made summary) active in test_v2_gate"),
     "C-20": ("test_secret_and_lifecycle.py", "R4", "agent-child half (pipes/env of agent processes, needs the R4 spawn path); Core stdio + secret half active in test_v2_core_stdio, DB lock half in test_v2_reader_and_lock"),
     "C-21": ("test_adapter_conformance.py", "R4", "fake_agent_cli harness and per-run assertion (§7.4, §14.2)"),
     "C-22": ("test_citation_validation.py", "R4", "citation parser and escaping (§8.4-§8.5)"),

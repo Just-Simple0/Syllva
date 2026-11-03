@@ -201,6 +201,17 @@ forbidden_modules = [
 allow_indirect_imports = false
 
 [[tool.importlinter.contracts]]
+id = "v2-gate-clean"
+name = "The Human-Proof gate depends only on v2 state, domain and the core log/secret leaves"
+type = "forbidden"
+source_modules = ["syllva.gate"]
+forbidden_modules = [
+    "syllva.ui", "syllva.core.stdio", "syllva.settings", "syllva.cli", "syllva.mcp", "syllva.intake",
+    "syllva.adapters", "syllva.retrieval", "syllva.state.v2.database",
+]
+allow_indirect_imports = false
+
+[[tool.importlinter.contracts]]
 id = "v2-retrieval-clean"
 name = "v2 retrieval modules do not depend on legacy providers or the v1.2 engine (no exceptions)"
 type = "forbidden"

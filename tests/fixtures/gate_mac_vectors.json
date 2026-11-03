@@ -1,0 +1,20 @@
+[
+ {
+  "key_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+  "nonce_id": "00000000000000000000000000000000",
+  "request_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "mac_hex": "3de8856835d8ba2978dacba21da097b94aef01cb98ba9711f6f63f26c4ee8bdd"
+ },
+ {
+  "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "nonce_id": "0123456789abcdef0123456789abcdef",
+  "request_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "mac_hex": "f205594b0c009438785e04c47442109f5826a6089ecfae7c5c897837e6c06d9d"
+ },
+ {
+  "key_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "nonce_id": "deadbeefdeadbeefdeadbeefdeadbeef",
+  "request_hash": "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f",
+  "mac_hex": "81bd10dff1ba85887f5eb8930ddeda395b63a8f5ed0cd7e55c29d79cdb2bc435"
+ }
+]

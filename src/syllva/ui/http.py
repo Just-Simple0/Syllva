@@ -31,6 +31,7 @@ from starlette.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from syllva.core.logging import log_event
+from syllva.gate.service import GateError, GateService
 from syllva.ui.sessions import Session, SessionStore
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -137,7 +138,9 @@ async def _json_body(request: Request, keys: frozenset[str]) -> dict[str, Any] |
     return value
 
 
-def create_app(sessions: SessionStore, *, port: int, allowed_origins: Iterable[str]) -> ASGIApp:
+def create_app(
+    sessions: SessionStore, *, port: int, allowed_origins: Iterable[str], gate: GateService | None = None
+) -> ASGIApp:
     def current(request: Request) -> Session | None:
         return sessions.lookup(request.cookies.get(COOKIE))
 
@@ -180,6 +183,25 @@ def create_app(sessions: SessionStore, *, port: int, allowed_origins: Iterable[s
         response.delete_cookie(COOKIE, path="/")
         return response
 
+    async def gate_begin(request: Request) -> Response:
+        """§6.3 (1): ids and enums only; the answer is a nonce, never the summary or the hash (C-19)."""
+
+        session = current(request)
+        if session is None:
+            return _error(401, "NO_SESSION")
+        if not mutation_ok(request, session):
+            return _error(403, "CSRF")
+        body = await _json_body(request, frozenset({"action", "target_id", "params"}))
+        if body is None or not isinstance(body["action"], str) or not isinstance(body["target_id"], str):
+            return _error(400, "BAD_REQUEST")
+        if gate is None:
+            return _error(409, "GATE_UNAVAILABLE")
+        try:
+            nonce_id = gate.begin(session.session_id, session.window_label, body["action"], body["target_id"], body["params"])
+        except GateError as exc:
+            return _error(exc.status, exc.code)
+        return JSONResponse({"nonce_id": nonce_id})
+
     async def not_found(request: Request, exc: Exception) -> Response:
         return _error(404, "NOT_FOUND")
 
@@ -195,6 +217,7 @@ def create_app(sessions: SessionStore, *, port: int, allowed_origins: Iterable[s
             Route("/api/session", session_create, methods=["POST"]),
             Route("/api/session", session_show, methods=["GET"]),
             Route("/api/session", session_delete, methods=["DELETE"]),
+            Route("/api/gate/begin", gate_begin, methods=["POST"]),
             Mount("/static", StaticFiles(directory=STATIC), name="static"),
         ],
         exception_handlers={404: not_found, _BodyTooLarge: too_large},

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
@@ -224,6 +224,62 @@ class StateWriter:
                 [*extra.values(), candidate_id],
             )
             return old
+
+    def commit_gate(
+        self,
+        *,
+        action: str,
+        target_kind: str,
+        target_id: str,
+        request_hash: str,
+        nonce_id: str,
+        confirmed_at: str,
+        shell_version: str,
+        verify: Callable[[StateWriter], str | None],
+    ) -> str | None:
+        """The only writer of human-only columns (spec §6.6, design §5.1(d)).
+
+        One ``BEGIN IMMEDIATE``: ``verify`` (supplied by the gate service, which owns the
+        summary and fingerprint rules — this module never imports ``gate``) re-reads the
+        target and recomputes the request hash; if it returns a reason nothing is written
+        and the reason is returned. Otherwise the gate log row and the target's human-only
+        columns are written together; the schema triggers check the pairing and single use.
+        Plain INSERT/UPDATE only (errata E9). Must be the outermost transaction.
+        """
+
+        if self._depth or self._connection.in_transaction:
+            raise PolicyViolation("commit_gate must not run inside another transaction")
+        if action != "VERIFY_MATERIAL" or target_kind != "material":
+            raise PolicyViolation("gate action not wired yet (errata E24)", details={"action": action})
+
+        class _Refused(Exception):
+            def __init__(self, reason: str) -> None:
+                self.reason = reason
+
+        try:
+            with self.transaction():
+                reason = verify(self)
+                if reason is not None:
+                    raise _Refused(reason)
+                cursor = self._connection.execute(
+                    "INSERT INTO human_gate_log(action, target_kind, target_id, request_hash, nonce_id, confirmed_at, shell_version) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (action, target_kind, target_id, request_hash, nonce_id, confirmed_at, shell_version),
+                )
+                gate_id = int(cursor.lastrowid or 0)
+                row = self._connection.execute("SELECT id FROM materials WHERE material_id = ?", (target_id,)).fetchone()
+                if row is None:
+                    raise _Refused("TARGET_CHANGED")
+                updated = self._connection.execute(
+                    "UPDATE material_usage SET verified = 1, verified_gate_id = ? WHERE material_id = ?", (gate_id, int(row[0]))
+                ).rowcount
+                if updated == 0:
+                    self._connection.execute(
+                        "INSERT INTO material_usage(material_id, verified, verified_gate_id) VALUES (?, 1, ?)", (int(row[0]), gate_id)
+                    )
+        except _Refused as refused:
+            return refused.reason
+        return None
 
     # -- checks -----------------------------------------------------------------
 

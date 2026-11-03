@@ -214,19 +214,21 @@ def run_stdio(stdin: BinaryIO | None = None) -> int:
         log_event("CORE_MIGRATION_FAILED", error=type(exc).__name__)
         return EXIT_MIGRATION
 
+    from syllva.gate.service import GateService
     from syllva.ui.http import create_app
     from syllva.ui.sessions import SessionStore
 
     sessions = SessionStore()
+    gate = GateService(db.writer(), sessions.alive, secret=hello.secret, shell_version=hello.shell_version)
     sock = bind_loopback()
     port = int(sock.getsockname()[1])
-    app = create_app(sessions, port=port, allowed_origins=APP_ORIGINS[hello.platform])
+    app = create_app(sessions, port=port, allowed_origins=APP_ORIGINS[hello.platform], gate=gate)
     server = _UiServer(app, sock)
     server.start()
     channel.send({"t": "ready", "port": port, "bootstrap": sessions.issue_bootstrap("main"), "core_version": __version__})
     log_event("CORE_READY", port=port)
     try:
-        return _loop(channel, sessions)
+        return _loop(channel, sessions, gate)
     finally:
         server.stop()
         db.close()
@@ -286,7 +288,28 @@ def run_headless() -> int:
         db.close()
 
 
-def _loop(channel: Channel, sessions: Any) -> int:
+NONCE_ID = re.compile(r"[0-9a-f]{32}")
+
+
+def _gate_message(gate: Any, item: dict[str, Any]) -> dict[str, Any]:
+    """gate.get / gate.confirm / gate.deny (§2.3, §6.3); window_label comes from the Shell, never the webview."""
+
+    kind, nonce_id, window = item["t"], item.get("nonce_id"), item.get("window_label")
+    if not isinstance(nonce_id, str) or not NONCE_ID.fullmatch(nonce_id):
+        return {"t": "error", "code": "BAD_NONCE", "message": "invalid nonce id"}
+    if kind == "gate.deny":
+        result: dict[str, Any] = gate.deny(nonce_id)
+        return result
+    if not isinstance(window, str) or not WINDOW_LABEL.fullmatch(window):
+        return {"t": "error", "code": "BAD_WINDOW_LABEL", "message": "invalid window label"}
+    if kind == "gate.get":
+        view: dict[str, Any] = gate.view(nonce_id, window)
+        return view
+    confirmed: dict[str, Any] = gate.confirm(nonce_id, window, item.get("mac_b64"))
+    return confirmed
+
+
+def _loop(channel: Channel, sessions: Any, gate: Any = None) -> int:
     inbox: queue.Queue[dict[str, Any] | None | ProtocolViolation] = queue.Queue()
 
     def reader() -> None:
@@ -332,6 +355,8 @@ def _loop(channel: Channel, sessions: Any) -> int:
                 channel.send({"t": "error", "code": "BAD_WINDOW_LABEL", "message": "invalid window label"})
                 continue
             channel.send({"t": "session.bootstrap_ok", "window_label": label, "bootstrap": sessions.issue_bootstrap(label)})
+        elif kind in ("gate.get", "gate.confirm", "gate.deny") and gate is not None:
+            channel.send(_gate_message(gate, item))
         else:
             channel.send({"t": "error", "code": "UNKNOWN_TYPE", "message": "unknown message type"})
 
