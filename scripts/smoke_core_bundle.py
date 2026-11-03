@@ -41,7 +41,7 @@ def http(port: int, method: str, path: str, headers: dict[str, str], body: Any =
     request = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data, method=method,
                                      headers={**headers, **({"Content-Type": "application/json"} if data else {})})
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with NO_PROXY.open(request, timeout=20) as response:  # loopback only, never through a proxy
             return response.status, json.loads(response.read() or b"{}"), response.headers.get("Set-Cookie", "")
     except urllib.error.HTTPError as error:
         return error.code, json.loads(error.read() or b"{}"), ""
