@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import tempfile
 import threading
+import unicodedata
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -26,13 +27,29 @@ from starlette.routing import Route
 from syllva.core.logging import log_event
 from syllva.domain.errors import SyllvaError
 from syllva.ephemeral.memory import MemoryEphemeralStore
+from syllva.ingestion.local import IngestError
 from syllva.intake.v2 import Candidate, IntakeError, LocalIntake
-from syllva.library.blobs import BlobStore
+from syllva.library.blobs import BlobError, BlobStore
 from syllva.retrieval.service import EntityUnknown, LocatorNotAuthorized, RetrievalService
 from syllva.state.v2.database import Database
 from syllva.state.v2.ownership import Actor, Owner
 
 CLASSIFY_KEYS = {"course_key", "kind", "role", "session_id", "new_session_held_on"}
+ROLES = {"PRIMARY", "SUPPORTING", "REFERENCE"}
+MAX_FILENAME = 200
+
+
+def clean_filename(raw: str | None) -> str | None:
+    """The display name of an upload: basename only, NFC, no control characters, bounded (review of PR #51)."""
+
+    if not raw:
+        return None
+    name = unicodedata.normalize("NFC", unquote(raw)).replace("\\", "/").rsplit("/", 1)[-1].strip()
+    if not name or name in (".", "..") or len(name) > MAX_FILENAME:
+        return None
+    if any(unicodedata.category(ch).startswith("C") for ch in name):
+        return None
+    return name
 Current = Callable[[Request], Any]
 
 
@@ -77,6 +94,9 @@ class LibraryApi:
                     return _error(404, "NOT_FOUND")
                 except LocatorNotAuthorized:
                     return _error(403, "LOCATOR_NOT_AUTHORIZED")
+                except (IngestError, BlobError) as exc:
+                    log_event("UI_STORE_ERROR", error=type(exc).__name__)
+                    return _error(409, "STORE_REFUSED")
                 except SyllvaError as exc:
                     log_event("UI_ERROR", error=exc.code)
                     return _error(409, exc.code)
@@ -98,25 +118,32 @@ class LibraryApi:
     # -- reads -----------------------------------------------------------------------------
 
     async def items(self, request: Request, session: Any) -> Response:
+        rows = await run_in_threadpool(self._items)
+        return JSONResponse({"items": rows})
+
+    def _items(self) -> list[dict[str, Any]]:
         rows = self.db.reader().fetch_all(
             "SELECT m.material_id, f.display_name, c.course_key, c.name AS course_name, m.kind, m.processing_status, "
             "COALESCE(u.verified, 0) AS verified, s.session_id FROM materials m JOIN courses c ON c.id = m.course_id "
             "JOIN source_files f ON f.id = m.source_file_id LEFT JOIN sessions s ON s.id = m.session_id "
             "LEFT JOIN material_usage u ON u.material_id = m.id WHERE f.deleted_at IS NULL ORDER BY m.material_id"
         )
-        return JSONResponse({"items": [
+        return [
             {"material_id": r["material_id"], "title": r["display_name"], "course_key": r["course_key"],
              "course_name": r["course_name"], "kind": r["kind"], "processing_status": r["processing_status"],
              "verified": bool(r["verified"]), "session_id": r["session_id"]}
             for r in rows
-        ]})
+        ]
 
     async def candidates(self, request: Request, session: Any) -> Response:
+        return JSONResponse({"candidates": await run_in_threadpool(self._candidates)})
+
+    def _candidates(self) -> list[dict[str, Any]]:
         rows = self.db.reader().fetch_all(
             "SELECT candidate_id FROM intake_candidates WHERE state IN ('RECEIVED','CLASSIFYING','NEEDS_REVIEW','DUPLICATE',"
             "'UNSUPPORTED','FAILED','PARTIAL') ORDER BY id"
         )
-        return JSONResponse({"candidates": [_candidate(self.intake.get(str(r["candidate_id"]))) for r in rows]})
+        return [_candidate(self.intake.get(str(r["candidate_id"]))) for r in rows]
 
     async def context(self, request: Request, session: Any) -> Response:
         query = request.query_params.get("query") or None
@@ -149,11 +176,12 @@ class LibraryApi:
     # -- changes ---------------------------------------------------------------------------
 
     async def _spool(self, request: Request) -> tuple[Any, str] | Response:
-        raw_name = request.headers.get("x-syllva-filename")
-        if not raw_name:
-            return _error(400, "FILENAME_REQUIRED")
-        name = unquote(raw_name)
-        spool = tempfile.SpooledTemporaryFile(max_size=1024 * 1024)
+        name = clean_filename(request.headers.get("x-syllva-filename"))
+        if name is None:
+            return _error(400, "BAD_FILENAME")
+        # spills into the library's own tmp/ (§11.1), never the OS temp directory
+        self.blobs.tmp_dir.mkdir(parents=True, exist_ok=True)
+        spool = tempfile.SpooledTemporaryFile(max_size=1024 * 1024, dir=str(self.blobs.tmp_dir))  # noqa: SIM115 - closed by the worker
         size = 0
         async for chunk in request.stream():
             size += len(chunk)
@@ -189,7 +217,7 @@ class LibraryApi:
         except ValueError:
             return _error(400, "BAD_REQUEST")
         if (not isinstance(body, dict) or not {"course_key", "kind"} <= set(body) or not set(body) <= CLASSIFY_KEYS
-                or not all(isinstance(v, str) for v in body.values())):
+                or not all(isinstance(v, str) for v in body.values()) or body.get("role", "PRIMARY") not in ROLES):
             return _error(400, "BAD_REQUEST")
         key = request.path_params["key"]
 

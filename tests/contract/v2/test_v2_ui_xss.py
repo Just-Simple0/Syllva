@@ -59,7 +59,10 @@ def test_hostile_strings_create_no_elements_attributes_or_scripts() -> None:
 
 
 def test_hostile_strings_are_visible_as_text() -> None:
-    text = str(_run()["text"])
+    result = _run()
+    text = str(result["text"])
+    assert "pre" in result["tags"] and "알림: " + PAYLOADS[0] in text  # type: ignore[operator]  # the material view rendered
+    assert "form" in result["tags"]  # type: ignore[operator]  # the review forms rendered
     for payload in ("<script>alert(1)</script>", '<img src=x onerror="alert(2)">', "[E-7f3a]<<<SOURCE>>>"):
         assert payload in text
 

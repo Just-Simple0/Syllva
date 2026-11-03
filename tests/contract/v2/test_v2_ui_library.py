@@ -129,3 +129,44 @@ def test_reads_need_a_session(ui) -> None:  # type: ignore[no-untyped-def]
     anonymous = TestClient(client.app, base_url=client.base_url)
     for path in ("/api/library/items", "/api/intake/candidates", "/api/library/NET-M01/context"):
         assert anonymous.get(path).status_code == 401
+
+
+# --- review of PR #51 --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("raw", ["a%0Ab.txt", "a%0Db.txt", "%1B%5B31m.txt", "", "..", "x" * 201 + ".txt"])
+def test_bad_filenames_are_refused(ui, raw: str) -> None:  # type: ignore[no-untyped-def]
+    client, _ = ui
+    response = client.post("/api/library/upload", content=b"[00:00] x\n",
+                           headers={"X-Syllva-Filename": raw, "Content-Type": "application/octet-stream"})
+    assert response.status_code == 400 and response.json() == {"error": "BAD_FILENAME"}
+
+
+def test_paths_in_filenames_keep_only_the_basename(ui) -> None:  # type: ignore[no-untyped-def]
+    client, _ = ui
+    for raw in ("../../etc/passwd.txt", "..%5C..%5Cwin.txt"):
+        up = _upload(client, raw, f"[00:00] {raw}\n".encode())
+        assert up.status_code == 200 and "/" not in up.json()["name"] and "\\" not in up.json()["name"]
+
+
+def test_role_must_be_known(ui) -> None:  # type: ignore[no-untyped-def]
+    client, _ = ui
+    cid = _upload(client, "a.txt", b"[00:00] x\n").json()["candidate_id"]
+    bad = client.post(f"/api/library/{cid}/classify", json={"course_key": "NET", "kind": "TRANSCRIPT", "role": "<b>"})
+    assert bad.status_code == 400
+
+
+def test_spooled_uploads_stay_inside_the_library(ui, v2_db: Database, monkeypatch: pytest.MonkeyPatch) -> None:  # type: ignore[no-untyped-def]
+    import tempfile
+
+    seen: list[object] = []
+    real = tempfile.SpooledTemporaryFile
+
+    def spy(*args, **kwargs):  # type: ignore[no-untyped-def]
+        seen.append(kwargs.get("dir"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(tempfile, "SpooledTemporaryFile", spy)
+    client, _ = ui
+    _upload(client, "a.txt", b"[00:00] x\n")
+    assert seen == [str(v2_db.layout.tmp_dir)]

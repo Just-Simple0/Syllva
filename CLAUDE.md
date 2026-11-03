@@ -93,7 +93,7 @@ python scripts/project_behavior_contract.py --print   # v1.2 Behavior Contract �
 python scripts/lint_behavior_projection.py            # 프로젝션 드리프트 검사
 ```
 
-기준선(2026-11-03, R2-3 직후, Linux): 전체 1886 passed / 10 failed(`tests/unit/test_knu_lms_sync.py`의 키체인 의존 테스트) / 23 skipped. C-18 DOM 시험은 `npm ci --prefix tests/ui` 후 실행된다. ruff 102건(레거시 파일), mypy 104 errors. import-linter 예외 0, 정적 불변식 기준선은 원격 MCP(`mcp/transports/oauth.py`, R6 보류) 15건뿐. 이 기준선과 비교해 **새로 생긴 실패**를 판단한다.
+기준선(2026-11-03, R2-3 직후, Linux): 전체 1897 passed / 10 failed(`tests/unit/test_knu_lms_sync.py`의 키체인 의존 테스트) / 23 skipped. C-18 DOM 시험은 `npm ci --prefix tests/ui` 후 실행된다. ruff 102건(레거시 파일), mypy 104 errors. import-linter 예외 0, 정적 불변식 기준선은 원격 MCP(`mcp/transports/oauth.py`, R6 보류) 15건뿐. 이 기준선과 비교해 **새로 생긴 실패**를 판단한다.
 
 ## 구현 순서 (로드맵)
 

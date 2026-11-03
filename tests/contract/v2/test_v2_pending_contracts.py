@@ -50,7 +50,7 @@ ACTIVE: dict[str, str] = {
     "C-10": "test_v2_retrieval_service.py",
     "C-25": "test_v2_chunk_strategy.py",
     "C-13": "test_v2_core_stdio.py",
-    "C-18": "test_v2_ui_xss.py",
+    "C-18": "test_v2_ui_xss.py",  # DOM half; CSP headers in test_v2_ui_boundary.py
 }
 
 

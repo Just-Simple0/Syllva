@@ -241,7 +241,8 @@ def run_stdio(stdin: BinaryIO | None = None) -> int:
     finally:
         worker.stop()
         server.stop()
-        db.close()
+        if not worker.alive:  # never close the connection under a statement still running in the worker
+            db.close()
         log_event("CORE_STOP")
 
 

@@ -11,6 +11,10 @@ function el(tag, text, attrs) {
     node.textContent = String(text);
   }
   for (const [name, value] of Object.entries(attrs || {})) {
+    // only fixed, inert attribute names; never event handlers, URLs or styles
+    if (!/^(type|placeholder|data-[a-z-]+)$/.test(name)) {
+      throw new Error("attribute not allowed: " + name);
+    }
     node.setAttribute(name, String(value));
   }
   return node;

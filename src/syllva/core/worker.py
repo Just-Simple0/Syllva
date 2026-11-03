@@ -33,6 +33,10 @@ class IntakeWorker:
         self._wake.set()
         self._thread.join(timeout=10)
 
+    @property
+    def alive(self) -> bool:
+        return self._thread.is_alive()
+
     def _run(self) -> None:
         try:
             recovered = self._intake.recover()
@@ -47,5 +51,5 @@ class IntakeWorker:
                     log_event("INTAKE_PROCESSED", count=len(done))
             except Exception as exc:  # noqa: BLE001
                 log_event("INTAKE_WORKER_ERROR", error=type(exc).__name__)
-            self._wake.wait(self._idle)
-            self._wake.clear()
+            if self._wake.wait(self._idle):
+                self._wake.clear()  # cleared before the next pass, so a kick during the pass is not lost
