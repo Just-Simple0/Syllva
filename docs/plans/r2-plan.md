@@ -342,3 +342,57 @@ GUI가 없는 이 환경에서는 컴파일과 단위 테스트까지만 할 수
 5. **로그**: 중계 로그는 조건 A 그대로(메서드·경로·상태·크기)다. 중계 MAC과 쿠키 값은 기록하지 않는다.
 
 **정오표**: E25를 갱신한다. 설계 §5.1(a)의 "same-origin 검사"는 "중계 인증(창 label에 결속된 shell_secret MAC)"으로 구현하며, 보증은 더 강하다. 설계서 개정이 필요한지는 검토 의견을 따른다.
+
+### 7.3 검토 반영 (보완안 검토 REQUEST_CHANGES 필수 R1–R7) 및 사용자 결정 (2026-11-03)
+
+**사용자 결정**
+- 중계 인증은 정오표(E25)로 진행하고 설계서는 바꾸지 않는다. 조건 B의 쿠키 부분 변경을 승인했다.
+- R4 답변 스트리밍은 중계 안의 짧은 폴링으로 한다. SSE를 쓰지 않고 루프백 `connect-src`도 열지 않는다. 기록은 E29.
+
+**R1 — 조건 B 개정**
+- Origin·`Sec-Fetch-*`는 받은 그대로 전달한다.
+- **Cookie는 웹뷰에서 오는 값을 절대 전달하지 않는다.** 대신 창 label별 보관소에서 만들어 붙인다.
+- **`Set-Cookie`는 웹뷰로 절대 전달하지 않는다.**
+- `X-Syllva-Window`·`X-Syllva-Relay`는 중계가 만들어 붙인다.
+- 웹뷰 헤더는 허용 목록 방식이다. 허용 목록에 `cookie`·`x-syllva-window`·`x-syllva-relay`가 없다는 것 자체가 차단 장치이며, 테스트로 고정한다.
+
+**R2 — E26과 §3 위협표 개정**
+- stdio 모드에서는 `/healthz`를 뺀 **모든 요청에 중계 인증이 필수**다.
+- Origin은 **있으면** 허용된 앱 origin과 일치해야 한다(§10.1 원문으로 복귀). WebView2는 `Origin: http://syllva.localhost`를 보낼 수 있다.
+- `Sec-Fetch-Site` 규칙과 Host 정확 일치는 그대로다.
+
+**R3 — 모드 두 개, 대체 경로 없음**
+- `create_app`은 `hello.secret`이 있을 때만 중계 검증기를 받는다.
+- stdio 모드: 쿠키·CSRF·Origin이 모두 맞아도 중계 헤더가 없거나 틀리면 403이다.
+- 헤드리스 모드: `X-Syllva-*`를 완전히 무시한다. 창 결속에 쓰지 않으며, 변경 요청의 Origin 필수 규칙(E26)을 유지한다.
+- 헤더 검증 규칙:
+  - 각 헤더는 정확히 한 번 나와야 한다.
+  - label은 `WINDOW_LABEL` 형식이어야 한다.
+  - 비교는 `hmac.compare_digest`로 한다.
+  - 실패는 코드로만 기록한다.
+
+**R4 — 정화 패턴**
+- 정화 패턴에 `relay`를 추가한다.
+- 중계 MAC은 `UI_DENIED` 필드와 Shell 로그 어디에도 남지 않는다.
+
+**R5 — 보관소(jar) 의미**
+- 메모리에만 둔다.
+- 키는 *요청*의 `ctx` label이다.
+- `syllva_sid`만 저장하고, 삭제(`Max-Age=0`)를 반영한다. `Domain`/`Path`는 무시한다.
+- 창이 닫히면 항목을 지우고 Core에 `DELETE /api/session`을 보낸다.
+- Core가 끝나거나 다시 시작하면 보관소 전체를 지운다.
+- 오래된 sid로 401을 받으면 Shell은 `session.bootstrap`으로 새 토큰을 받아 그 창을 다시 로드한다.
+
+**R6 — bootstrap 결속**
+- 토큰의 label ≠ `X-Syllva-Window`이면 `POST /api/session`은 403이다. 이때도 토큰은 소비된다.
+- 모든 라우트는 label이 맞지 않으면 403 `WRONG_WINDOW`이다. 이 검사는 유휴 시계를 건드리기 전에 한다.
+
+**R7 — 테스트 벡터**
+- `tests/fixtures/relay_mac_vectors.json`(도메인 `syllva-relay-v1\0`, `len32(label)‖label`)을 Python과 Rust가 함께 쓴다.
+
+**구현 메모**
+- 순수 부분을 `shell/proto`로 옮긴다: `relay_mac`, 요청 헤더 정리, 응답 흡수, `Jar`. 3개 OS에서 테스트한다.
+- C-19 정적 검사로 확인할 것:
+  - uri-scheme 처리기가 `ctx.webview_label()`을 쓴다.
+  - `gate.rs`도 같은 label 공간(창 label)을 쓴다.
+- 수동 시연에 남는 항목(§4): 앱 origin 한정 IPC, label 공간 일치. Core의 정합성은 더 이상 웹뷰가 무엇을 보내는지에 의존하지 않는다.

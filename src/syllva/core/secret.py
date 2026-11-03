@@ -15,7 +15,7 @@ class Secret:
         self._value = value
 
     def reveal(self) -> bytes:
-        """Only the gate's MAC check calls this."""
+        """Only the gate's MAC check and the relay verifier call this (pinned by a contract test)."""
 
         return self._value
 

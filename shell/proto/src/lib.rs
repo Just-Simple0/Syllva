@@ -8,5 +8,6 @@
 pub mod env;
 pub mod frame;
 pub mod mac;
+pub mod relay;
 pub mod relay_log;
 pub mod secret;

@@ -6,15 +6,27 @@ mod core;
 mod gate;
 mod relay;
 
-use std::sync::Arc;
+use serde_json::{json, Value};
+use std::sync::{Arc, Mutex};
+use syllva_shell_proto::relay::Jar;
 use syllva_shell_proto::secret::ShellSecret;
-use tauri::{RunEvent, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
-fn bootstrap_url(token: &str) -> String {
+pub fn bootstrap_url(token: &str) -> String {
     if cfg!(windows) {
         format!("http://syllva.localhost/bootstrap#{token}")
     } else {
         format!("syllva://localhost/bootstrap#{token}")
+    }
+}
+
+/// The Core restarted or the session idled out: get a fresh bootstrap token for this window and reload it.
+fn recover_session(app: &tauri::AppHandle, core: &core::Core, label: &str) {
+    let request = json!({"t": "session.bootstrap", "window_label": label});
+    let Ok(reply) = core.request(request.as_object().cloned().unwrap_or_default()) else { return };
+    let Some(token) = reply.get("bootstrap").and_then(Value::as_str) else { return };
+    if let (Some(window), Ok(url)) = (app.get_webview_window(label), bootstrap_url(token).parse()) {
+        let _ = window.navigate(url);
     }
 }
 
@@ -29,11 +41,31 @@ fn main() {
     };
     let core = Arc::new(core);
     let port = core.port;
+    let jar: Arc<Mutex<Jar>> = Arc::new(Mutex::new(Jar::default()));
+    let relay_secret = Arc::clone(&secret);
+    let relay_jar = Arc::clone(&jar);
+    let relay_core = Arc::clone(&core);
+    let window_jar = Arc::clone(&jar);
     let app = tauri::Builder::default()
         .manage(Arc::clone(&core))
         .manage(Arc::clone(&secret))
-        .register_asynchronous_uri_scheme_protocol("syllva", move |_ctx, request, responder| {
-            std::thread::spawn(move || responder.respond(relay::handle(port, request)));
+        .register_asynchronous_uri_scheme_protocol("syllva", move |ctx, request, responder| {
+            // the window identity comes from Tauri (the webview that made the request), never from page content
+            let label = ctx.webview_label().to_string();
+            let app = ctx.app_handle().clone();
+            let (secret, jar, core) = (Arc::clone(&relay_secret), Arc::clone(&relay_jar), Arc::clone(&relay_core));
+            std::thread::spawn(move || {
+                let relayed = relay::handle(port, secret.bytes(), &label, &jar, request);
+                responder.respond(relayed.response);
+                if relayed.session_lost {
+                    recover_session(&app, &core, &label);
+                }
+            });
+        })
+        .on_window_event(move |window, event| {
+            if let WindowEvent::Destroyed = event {
+                window_jar.lock().expect("jar lock").forget(window.label()); // the session id dies with the window
+            }
         })
         .invoke_handler(tauri::generate_handler![gate::confirm_gate])
         .setup(move |app| {

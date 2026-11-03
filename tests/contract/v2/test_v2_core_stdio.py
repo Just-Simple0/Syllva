@@ -17,7 +17,7 @@ import httpx
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from support.shell_sim import ShellSim, wait_port_closed
+from support.shell_sim import ShellSim, relay_headers, wait_port_closed
 
 pytestmark = pytest.mark.contract
 
@@ -264,7 +264,9 @@ def test_uploaded_file_is_processed_by_the_cores_worker(tmp_path: Path) -> None:
     try:
         ready = shell.hello()
         base = f"http://127.0.0.1:{ready['port']}"
-        headers = {"Host": f"127.0.0.1:{ready['port']}", "Origin": "syllva://localhost"}
+        headers = {"Host": f"127.0.0.1:{ready['port']}", **relay_headers(SENTINEL)}
+        with httpx.Client(base_url=base) as plain:
+            assert plain.get("/api/library/items", headers={"Host": headers["Host"]}).status_code == 403  # relay only
         with httpx.Client(base_url=base, headers=headers) as http:
             csrf = http.post("/api/session", json={"bootstrap": ready["bootstrap"]}).json()["csrf"]
             http.headers["X-Syllva-CSRF"] = csrf

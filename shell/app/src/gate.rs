@@ -61,7 +61,7 @@ fn valid_nonce(nonce_id: &str) -> bool {
 
 #[tauri::command]
 pub async fn confirm_gate(
-    window: tauri::Window,
+    webview: tauri::Webview,
     core: tauri::State<'_, Arc<Core>>,
     secret: tauri::State<'_, Arc<ShellSecret>>,
     nonce_id: String,
@@ -69,7 +69,8 @@ pub async fn confirm_gate(
     if !valid_nonce(&nonce_id) {
         return Ok(GateResult { status: "REJECTED".into(), reason: Some("BAD_NONCE".into()) });
     }
-    let label = window.label().to_string();
+    // the same label namespace the relay uses (ctx.webview_label()); for the main WebviewWindow they coincide
+    let label = webview.label().to_string();
     let core = Arc::clone(&core);
     let get = object(json!({"t": "gate.get", "nonce_id": nonce_id, "window_label": label}));
     let view = {

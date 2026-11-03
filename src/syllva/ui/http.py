@@ -34,7 +34,8 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from syllva.core.logging import log_event
 from syllva.gate.service import GateError, GateService
 from syllva.ui.library import LibraryApi
-from syllva.ui.sessions import Session, SessionStore
+from syllva.ui.relay import RelayVerifier
+from syllva.ui.sessions import Session, SessionStore, WrongWindow
 
 STATIC = Path(__file__).resolve().parent / "static"
 COOKIE = "syllva_sid"
@@ -63,9 +64,13 @@ def _error(status: int, code: str) -> Response:
 class Boundary:
     """ASGI middleware enforcing the request boundary and the response headers."""
 
-    def __init__(self, app: ASGIApp, *, port: int, allowed_origins: Iterable[str], upload_limit: int = MAX_BODY) -> None:
+    def __init__(
+        self, app: ASGIApp, *, port: int, allowed_origins: Iterable[str], upload_limit: int = MAX_BODY,
+        relay: RelayVerifier | None = None,
+    ) -> None:
         self.app = app
         self.upload_limit = upload_limit
+        self.relay = relay
         self.host = f"127.0.0.1:{port}".encode()
         self.origins = frozenset(o.encode() for o in allowed_origins)
 
@@ -86,6 +91,9 @@ class Boundary:
             log_event("UI_DENIED", route=scope.get("path", "")[:80], reason=denial[1])
             await _error(*denial)(scope, receive, send_with_headers)
             return
+        if self.relay is not None:  # the window the Shell vouched for (relay mode only, errata E29)
+            window = dict(scope.get("headers", [])).get(b"x-syllva-window", b"").decode("ascii", "replace")
+            scope.setdefault("state", {})["syllva_window"] = window
         await self.app(scope, _bounded(receive, self._limit(scope)), send_with_headers)
 
     def _limit(self, scope: Scope) -> int:
@@ -101,9 +109,18 @@ class Boundary:
         site = headers.get(b"sec-fetch-site")
         if site is not None and (len(site) != 1 or site[0] not in (b"same-origin", b"none")):
             return 403, "CROSS_SITE"
-        if scope["method"] not in SAFE_METHODS:
-            origin = headers.get(b"origin", [])
-            if len(origin) != 1 or origin[0] not in self.origins:
+        origin = headers.get(b"origin")
+        if self.relay is not None:
+            # stdio mode: only the Shell relay reaches the Core; Origin, if a webview sends one, must be the app
+            if scope.get("path") != "/healthz":
+                window, tag = headers.get(b"x-syllva-window", []), headers.get(b"x-syllva-relay", [])
+                if len(window) != 1 or len(tag) != 1 or not self.relay.verify(
+                        window[0].decode("ascii", "replace"), tag[0].decode("ascii", "replace")):
+                    return 403, "RELAY_REQUIRED"
+            if origin is not None and (len(origin) != 1 or origin[0] not in self.origins):
+                return 403, "BAD_ORIGIN"
+        elif scope["method"] not in SAFE_METHODS:
+            if origin is None or len(origin) != 1 or origin[0] not in self.origins:
                 return 403, "BAD_ORIGIN"
         length = headers.get(b"content-length")
         if length is not None:
@@ -152,9 +169,13 @@ def create_app(
     allowed_origins: Iterable[str],
     gate: GateService | None = None,
     library: LibraryApi | None = None,
+    relay: RelayVerifier | None = None,
 ) -> ASGIApp:
+    def window_of(request: Request) -> str | None:
+        return request.scope.get("state", {}).get("syllva_window") if relay is not None else None
+
     def current(request: Request) -> Session | None:
-        return sessions.lookup(request.cookies.get(COOKIE))
+        return sessions.lookup(request.cookies.get(COOKIE), window_label=window_of(request))
 
     def mutation_ok(request: Request, session: Session) -> bool:
         return session.csrf_ok(request.headers.get(CSRF_HEADER))
@@ -169,7 +190,7 @@ def create_app(
         body = await _json_body(request, frozenset({"bootstrap"}))
         if body is None:
             return _error(400, "BAD_REQUEST")
-        session = sessions.exchange(body["bootstrap"])
+        session = sessions.exchange(body["bootstrap"], window_label=window_of(request))
         if session is None:
             log_event("UI_SESSION_REFUSED")
             return _error(403, "BOOTSTRAP_INVALID")
@@ -217,6 +238,9 @@ def create_app(
     async def not_found(request: Request, exc: Exception) -> Response:
         return _error(404, "NOT_FOUND")
 
+    async def wrong_window(request: Request, exc: Exception) -> Response:
+        return _error(403, "WRONG_WINDOW")
+
     async def too_large(request: Request, exc: Exception) -> Response:
         return _error(413, "BODY_TOO_LARGE")  # any route that reads past the limit (chunked bodies too)
 
@@ -233,10 +257,10 @@ def create_app(
             *(library.routes(current, mutation_ok) if library is not None else []),
             Mount("/static", StaticFiles(directory=STATIC), name="static"),
         ],
-        exception_handlers={404: not_found, _BodyTooLarge: too_large},
+        exception_handlers={404: not_found, _BodyTooLarge: too_large, WrongWindow: wrong_window},
     )
     return Boundary(app, port=port, allowed_origins=allowed_origins,
-                    upload_limit=library.upload_limit if library is not None else MAX_BODY)
+                    upload_limit=library.upload_limit if library is not None else MAX_BODY, relay=relay)
 
 
 __all__ = ["COOKIE", "CSP", "create_app"]

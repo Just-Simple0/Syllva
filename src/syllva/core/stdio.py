@@ -232,7 +232,10 @@ def run_stdio(stdin: BinaryIO | None = None) -> int:
     library = LibraryApi(db, blobs, intake, kick=worker.kick, upload_limit=IntakeConfig().max_bytes)
     sock = bind_loopback()
     port = int(sock.getsockname()[1])
-    app = create_app(sessions, port=port, allowed_origins=APP_ORIGINS[hello.platform], gate=gate, library=library)
+    from syllva.ui.relay import RelayVerifier
+
+    app = create_app(sessions, port=port, allowed_origins=APP_ORIGINS[hello.platform], gate=gate, library=library,
+                     relay=RelayVerifier(hello.secret))
     server = _UiServer(app, sock)
     server.start()
     worker.start()

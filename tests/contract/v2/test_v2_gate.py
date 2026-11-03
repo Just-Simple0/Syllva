@@ -336,7 +336,11 @@ def test_end_to_end_begin_over_http_confirm_over_stdio(tmp_path: Path) -> None:
     shell = ShellSim(data, secret=SECRET)
     try:
         ready = shell.hello()
-        base, host = f"http://127.0.0.1:{ready['port']}", {"Host": f"127.0.0.1:{ready['port']}", "Origin": "syllva://localhost"}
+        from support.shell_sim import relay_headers
+
+        base, host = f"http://127.0.0.1:{ready['port']}", {"Host": f"127.0.0.1:{ready['port']}", **relay_headers(SECRET)}
+        with httpx.Client(base_url=base) as plain:  # without the relay nothing reaches the gate
+            assert plain.post("/api/gate/begin", json={}, headers={"Host": host["Host"], "Origin": "syllva://localhost"}).status_code == 403
         with httpx.Client(base_url=base, headers=host) as http:
             csrf = http.post("/api/session", json={"bootstrap": ready["bootstrap"]}).json()["csrf"]
             assert http.post("/api/gate/begin", json={"action": "VERIFY_MATERIAL", "target_id": "NET-M01",

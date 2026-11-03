@@ -30,7 +30,6 @@ PENDING: dict[str, tuple[str, str, str]] = {
     "C-15": ("test_template_manifest.py", "R4", "prompt template manifest (§8.2)"),
     "C-16": ("CI workflow", "R2", "v2 subset runs on Linux/macOS/Windows (ci.yml v2 job); full when all C-xx are active"),
     "C-17": ("test_gate_replay.py", "R3/R5", "remaining gate actions (E24); replay/idempotency for VERIFY_MATERIAL active in test_v2_gate, DB trigger half in test_v2_gate_db_triggers"),
-    "C-19": ("test_gate_summary_binding.py", "R2-4", "Tauri capability/config check (Shell); summary binding (begin takes ids only, Core-made summary) active in test_v2_gate"),
     "C-20": ("test_secret_and_lifecycle.py", "R4", "agent-child half (pipes/env of agent processes, needs the R4 spawn path); Core stdio + secret half active in test_v2_core_stdio, DB lock half in test_v2_reader_and_lock"),
     "C-21": ("test_adapter_conformance.py", "R4", "fake_agent_cli harness and per-run assertion (§7.4, §14.2)"),
     "C-22": ("test_citation_validation.py", "R4", "citation parser and escaping (§8.4-§8.5)"),
@@ -50,6 +49,7 @@ ACTIVE: dict[str, str] = {
     "C-10": "test_v2_retrieval_service.py",
     "C-25": "test_v2_chunk_strategy.py",
     "C-13": "test_v2_core_stdio.py",
+    "C-19": "test_v2_shell_config.py",  # summary binding half in test_v2_gate.py
     "C-18": "test_v2_ui_xss.py",  # DOM half; CSP headers in test_v2_ui_boundary.py
 }
 
