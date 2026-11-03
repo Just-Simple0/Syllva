@@ -71,6 +71,10 @@ impl Core {
         let watched = Arc::clone(&child);
         let stopping = Arc::new(AtomicBool::new(false));
         let watch_stop = Arc::clone(&stopping);
+        // Armed only once `ready` arrived: before that, a refusal at hello (DB_LOCKED, …) is reported by `start`'s
+        // caller with a dialog, so the reader just ends and lets `start` see the error frame (review of 732c8c1).
+        let armed = Arc::new(AtomicBool::new(false));
+        let watch_armed = Arc::clone(&armed);
         thread::spawn(move || {
             let mut sink = [0u8; 4096];
             while matches!(stderr.read(&mut sink), Ok(n) if n > 0) {} // drained, never forwarded (I9)
@@ -87,6 +91,7 @@ impl Core {
                         }
                     }
                     Err(_) if watch_stop.load(Ordering::SeqCst) => return, // the app is quitting: expected
+                    Err(_) if !watch_armed.load(Ordering::SeqCst) => return, // still starting: `start` reports it
                     Err(error) => {
                         // A protocol violation stops the Core (plan rev 2, item 8); a Core that exited or broke the
                         // protocol leaves nothing to relay to, so the app ends too (its session jar dies with it).
@@ -113,6 +118,7 @@ impl Core {
         }
         let port = ready.get("port").and_then(Value::as_u64).filter(|p| *p > 0 && *p < 65536).ok_or("bad port")? as u16;
         let bootstrap = ready.get("bootstrap").and_then(Value::as_str).ok_or("no bootstrap")?.to_string();
+        armed.store(true, Ordering::SeqCst);
         let pinger = Arc::clone(&stdin);
         thread::spawn(move || {
             let mut seq: u64 = 0;

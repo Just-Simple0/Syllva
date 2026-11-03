@@ -40,3 +40,8 @@ R2-0 실측(Linux): 웹뷰는 `syllva://` 요청에 Origin/Sec-Fetch/Cookie를 �
 material_usage: [(1, 1)]                       # (verified, verified_gate_id)
 gate log: [('VERIFY_MATERIAL', 'NET-M01', 64, '0.1.0')]   # (action, target_id, length(request_hash), shell_version)
 ```
+
+### Core 감시 확인 (Linux, PR #52 재검토 후)
+
+- 두 번째 실행(같은 `SYLLVA_DATA_DIR`): 앱이 종료되지 않고 "the Core refused to start: DB_LOCKED" 다이얼로그를 띄운다.
+- 실행 중 Core를 강제 종료(`kill -9`): 셸이 `syllva: the Core stopped (exited)`를 남기고 2초 안에 끝난다.
