@@ -155,6 +155,7 @@ def build_parser() -> argparse.ArgumentParser:
     mode = core.add_mutually_exclusive_group(required=True)
     mode.add_argument("--stdio", action="store_true", help="speak the Shell protocol on stdin/stdout (spec §2)")
     mode.add_argument("--headless", action="store_true", help="development only: no Shell, no Human-Proof (§6.7)")
+    mode.add_argument("--self-check", action="store_true", help="check the runtime dependencies of a packaged Core (§13.6)")
     setup = sub.add_parser("setup", help="open the Local Settings web interface (the R2 UI server's starting point)")
     setup.add_argument("--no-browser", action="store_true", help="print the one-time local URL instead of opening a browser")
 
@@ -204,6 +205,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "setup":
         return _setup(args)
+    if args.command == "core" and args.self_check:
+        from syllva.core.selfcheck import self_check
+
+        report = self_check()
+        _emit(report)
+        return 0 if report["ok"] else 1
     if args.command == "core":
         from syllva.core.stdio import main_stdio, run_headless
 

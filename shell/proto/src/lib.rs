@@ -11,3 +11,4 @@ pub mod mac;
 pub mod relay;
 pub mod relay_log;
 pub mod secret;
+pub mod sidecar;

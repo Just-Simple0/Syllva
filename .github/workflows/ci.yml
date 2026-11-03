@@ -51,7 +51,7 @@ jobs:
           node-version: '22'
       - run: npm ci --prefix tests/ui --no-audit --no-fund  # C-18 DOM harness (jsdom), never skipped in CI
       - run: python -m pip install -e ".[dev,pdf,web]"
-      - run: python -m pytest -q -ra tests/contract/v2 tests/unit/test_v2_library_blobs.py tests/unit/test_v2_library_paths.py tests/unit/test_v2_state_migrate.py tests/unit/test_v2_resolver_cues.py tests/unit/test_v2_cli.py
+      - run: python -m pytest -q -ra tests/contract/v2 tests/unit/test_v2_library_blobs.py tests/unit/test_v2_library_paths.py tests/unit/test_v2_state_migrate.py tests/unit/test_v2_resolver_cues.py tests/unit/test_v2_cli.py tests/unit/test_v2_core_selfcheck.py
       - run: lint-imports
       - run: python scripts/check_invariants.py
 
@@ -72,6 +72,28 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libsoup-3.0-dev librsvg2-dev libgtk-3-dev
       - run: rustup component add clippy
       - run: cargo test -p syllva-shell-proto
+      - run: cargo test -p syllva-shell  # fake-Core start/watchdog tests (a short Python script plays the Core)
       - run: cargo clippy -p syllva-shell-proto -p syllva-shell --all-targets -- -D warnings
       - run: cargo build -p syllva-shell
 
+
+  bundle:
+    # R2-5 bundle spike (implementation spec §13.6): the Core as a PyInstaller onedir sidecar,
+    # smoke-tested as the Shell drives it. Signing/notarization is a separate (user) decision.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install ".[pdf,web,keyring,bundle]"
+      - run: pyinstaller --noconfirm --clean --log-level WARN --distpath ../dist --workpath ../build syllva-core.spec
+        working-directory: packaging
+      - if: runner.os != 'Windows'
+        run: python scripts/smoke_core_bundle.py dist/syllva-core/syllva-core
+      - if: runner.os == 'Windows'
+        run: python scripts/smoke_core_bundle.py dist/syllva-core/syllva-core.exe
