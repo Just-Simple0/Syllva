@@ -427,5 +427,5 @@ def test_commit_gate_has_one_caller() -> None:
     """C-04 defence in depth: only the gate service calls StateWriter.commit_gate."""
 
     src = Path(__file__).resolve().parents[3] / "src"
-    callers = sorted(str(p.relative_to(src)) for p in src.rglob("*.py") if ".commit_gate(" in p.read_text(encoding="utf-8"))
+    callers = sorted(p.relative_to(src).as_posix() for p in src.rglob("*.py") if ".commit_gate(" in p.read_text(encoding="utf-8"))
     assert callers == ["syllva/gate/service.py"]
