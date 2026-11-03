@@ -1,4 +1,6 @@
-# R3 계획 — Canvas·과제 (rev 1, 2026-11-03)
+# R3 계획 — Canvas·과제 (rev 2, 2026-11-03)
+
+> rev 2: 독립 계획 검토(REQUEST_CHANGES, 필수 6건)를 §6에 반영했다. **§6이 §2~§4의 해당 문장보다 우선한다.**
 
 근거: 설계서 §2(I1·I2·I4·I9), §4.1, §5.5, §8(자격증명), 구현 명세 §11.2(녹음 달력), §12(Canvas), §10.3(`/api/canvas/...`, `/api/settings/...`), E13(활동 맥락), E20(녹음 달력은 R3), E22(관측기 복원), E24(게이트 액션), 로드맵 R3("Canvas 연결 UI + 과제 관리 + 첨부 로컬 적재, 실제 학기 데이터 확인").
 
@@ -230,3 +232,147 @@ v2에서 비밀은 Canvas 토큰 하나뿐이다(설계 §8). 비밀이 아닌 C
 3. **레거시 스택 삭제 범위**: `mcp/transports/remote.py`(R6 보류)가 `settings/`를 참조하는지 R3-5에서 확인한다. 참조하면 그 부분만 남기거나 함께 보류 처리한다.
 4. **제출 여부(`include[]=submission`)**: 허용목록 확장이 필요하다. 사용자 본인의 제출 정보만 반환되지만, 이번 범위에서는 뺀다.
 5. **동기화 주기**: 앱이 열려 있는 동안만 돈다. 백그라운드 서비스는 R6 설치본 단계다.
+
+## 6. rev 2 — 계획 검토 반영 (규범)
+
+### 6.1 D1 자격증명 (필수 1)
+
+**DB 쪽 의도 행**
+
+- 키체인 API에는 열거가 없으므로 "고아 항목 열거 삭제"는 불가능하다. 대신 DB에 의도 행을 둔다. `canvas_profile`에 `token_state ∈ {PENDING, SET}` 열을 둔다.
+- 저장 순서:
+  1. 메모리 토큰으로 `verify_canvas_user`를 실행한다.
+  2. DB에 `token_state='PENDING'` 행을 커밋한다. 교체이면 기존 행을 PENDING으로 바꾼다.
+  3. 키체인에 쓰고 정확히 다시 읽어 확인한다.
+  4. DB `token_state='SET'`, `token_set_at`을 커밋한다.
+- 실패 처리: 3단계에서 실패하면 키체인 항목과 행을 지운다(교체였다면 연결 해제 상태가 된다).
+- 시작 시 `PENDING` 행이 있으면 해당 키체인 항목과 행을 지우고, 설정 화면에 "토큰 다시 입력 필요"를 표시한다.
+- 잊기 순서: 행을 PENDING으로 바꾼다 → 키체인을 삭제한다 → 행을 삭제한다. 중간에 충돌이 나도 시작 시 정리된다.
+
+**키체인 백엔드 (`config/_keyring_backend.py`의 불변식을 `canvas/credential.py`로 옮긴다)**
+
+- **명시 클래스 생성**: `keyring.get_keyring()`을 쓰지 않는다. `PYTHON_KEYRING_BACKEND`나 `keyringrc.cfg`를 통해 `keyrings.alt` 평문 백엔드로 갈 수 있기 때문이다.
+- macOS 대체 키체인을 차단한다(`backend.keychain = None` 후 재확인).
+- 쓰기 후 정확히 다시 읽는다. 빈 값은 거부한다.
+- Linux `SecretService`는 Core 환경변수 `SYLLVA_DEV_KEYRING=secretservice`일 때만 허용한다. Shell 환경 allowlist에 없으므로 앱에서는 켜지지 않는다.
+
+**I9**
+
+- 토큰 보유자는 `core.secret.Secret`과 같은 `__repr__` 규칙을 따르는 `CanvasToken`이다. `test_secret_reveal_has_two_callers` 고정은 의도적으로 갱신한다.
+- 본문 상한 4 KiB는 `Boundary._limit`이 경로별로 강제한다(업로드 경로와 같은 방식).
+- Canvas 라우트는 예외 메시지를 응답에 넣지 않는다. 키체인 예외는 `KEYCHAIN_*` 고정 코드, `CanvasCheckError`는 그 코드만 쓴다.
+- `canvas_items.attachment_json`과 모든 저장 JSON에서 Canvas `url`·`preview_url`·`verifier`를 제거한다. 다운로드 검증값이 들어 있기 때문이며, 시험으로 단언한다.
+- UI 토큰 입력란은 `autocomplete=off`이고 제출 후 비운다.
+
+### 6.2 D2 스키마 (필수 5)
+
+**마이그레이션은 슬라이스별로 나눈다**
+
+| 파일 | 슬라이스 | 내용 |
+|---|---|---|
+| `004_canvas_profile.sql` | R3-1 | `canvas_profile`, `canvas_courses` |
+| `005_canvas_collect.sql` | R3-2 | `canvas_collections`, `canvas_items`, `activities` 열 추가, `activities_no_delete` |
+| `006_canvas_files_calendar.sql` | R3-3 | `canvas_files`, `recording_calendar` |
+
+**쓰기 권한**
+
+- Writer 열 권한(ownership)에 규칙을 추가한다: `CANVAS_COLLECTOR`는 `origin='CANVAS'` 행의 `activities.{title, due_at, canvas_updated_at, updated_at}`만 UPDATE하고, INSERT는 `submission_status='NOT_SUBMITTED'`로만 한다.
+- `activities_no_delete` 트리거를 둔다. `human_gate_uses`가 문자열로 참조하므로 삭제는 감사 기록을 고아로 만든다.
+
+**수명·한도**
+
+- 완결 수집에서 사라진 과제는 활동 행을 유지하고 `canvas_items.active=0`이 된다. UI에 "Canvas에서 사라짐"을 표시하며, 삭제하지 않는다.
+- 활동 id는 `<CODE>-A<NN>`이다. 과목당 99개를 넘으면 그 과제는 `canvas_items`에만 남고 수집 결과에 `ID_SPACE_EXHAUSTED`를 기록한다. 수집 자체는 COMPLETE이다.
+- 004~006은 마이그레이션 단계에서 적용된다(E7: 실행 중 DDL 금지 authorizer 이전).
+
+### 6.3 D3 수집 (필수 2)
+
+**달력 장벽 우선**
+
+1. 수집 시작 시 **자체 트랜잭션**으로 해당 과목 녹음 달력을 닫고, `canvas_collections` 행(`finished_at` NULL)을 만든다.
+2. COMPLETE일 때만 한 트랜잭션에서 항목·활동을 반영하고 달력을 다시 투영한다.
+3. INCOMPLETE/FAILED이면 collections 행 외에 이번 실행이 쓴 것은 없다. 부분 upsert를 하지 않는다.
+
+- 시작 시 `finished_at IS NULL`인 행은 `FAILED(INTERRUPTED)`이고, 달력은 닫힌 채로 둔다.
+- **주체 확인**(선택 항목 채택): 동기화마다 `users/self`의 `id`가 profile의 `user_id`와 같아야 한다. 다르면 `FAILED(PRINCIPAL_CHANGED)`이고 달력은 닫힌 채로 둔다.
+
+**INCOMPLETE 사유(레거시 `_pages/_collect/_plain/_link_values` 전부)**
+
+`test_v2_canvas_collect.py`가 사유마다 시험한다.
+
+| 사유 | 조건 |
+|---|---|
+| `MALFORMED_BODY` | JSON이 아님, 또는 목록이 아님 |
+| `LINK_MALFORMED` | Link 필드가 비었거나 해석 불가 |
+| `LINK_UNRECOGNIZED` | `rel=next`로 이해되지 않는 next 표기 |
+| `PAGE_SEQUENCE` | next가 `page=n+1`이 아님 |
+| `LAST_WITHOUT_NEXT` | `rel=last`가 현재 쪽보다 뒤인데 next가 없음 |
+| `PAGINATION_SCOPE` | scheme·netloc·path, `page`를 뺀 query가 바뀜 |
+| `FULL_PAGE_PROBE` | 가득 찬 쪽에 next가 없을 때 n+1 탐침 결과가 비어 있지 않음 |
+| `PAGE_LIMIT` / `ITEM_LIMIT` / `TIME_LIMIT` | 상한 초과 |
+| `DUPLICATE_ID` | 같은 id가 두 번 나옴 |
+| `MALFORMED_ITEM` | id·title 형식 오류, 모듈 id가 10진수가 아님 |
+| `MODULE_ITEMS_INCOMPLETE` | `items_count`가 `items` 길이와 다름 → `/modules/{id}/items` 재조회 → 여전히 다름 |
+
+### 6.4 D4 첨부 (필수 3)
+
+**과목 범위 File 재조회**
+
+- 다운로드 전에 `/api/v1/courses/{cid}/files/{fid}`를 다시 읽는다.
+- id·`display_name`·`size`가 목록과 일치해야 한다.
+- 다운로드 URL과 `expected_size`는 이 메타데이터에서만 가져온다. `len(data) == size`를 확인한다.
+- 이 재조회가 "이 파일이 연결된 과목에 속한다"는 증명이다.
+
+**자동 교체**
+
+- 수집기 전용 경로 `LocalIntake.replace_from_source(..., actor=CANVAS_COLLECTOR)`를 쓴다. `Actor.UI_USER`로 상태를 바꾸지 않는다(C-03).
+- **검증된 자료(`material_usage.verified=1`)는 자동 교체하지 않는다.** 새 후보를 `NEEDS_REVIEW`로 두고 차단 사유 `REPLACES_VERIFIED`를 붙인다. 사용자가 확인하면 기존 사용자 교체 경로를 탄다.
+- 검증되지 않은 자료만 자동으로 버전 체인을 만든다.
+- I5: 새 원본 버전에 맞춰 파생물·AI 산출물은 지문 불일치로 stale이 된다.
+
+**`file_hosts` 입력 검증**(선택 항목 채택): IP 리터럴, `localhost`, 점이 없는 이름, 포트 표기는 거부한다. 사용 시점의 공인 IP 확인은 기존대로다.
+
+### 6.5 D6 게이트 (필수 4)
+
+**`begin` 검증**
+
+- `params = {activity_id, status}`이다.
+- `status`가 4값 열거형이 아니면 `400 BAD_REQUEST`다(`summarize`에서 KeyError가 나지 않음).
+- 현재 상태와 같으면 `409 ALREADY_DONE`이다.
+
+**`commit_gate` 일반화의 고정 조건**
+
+- 가장 바깥의 `BEGIN IMMEDIATE`에서 `verify`(액션별 `_recheck`)를 먼저 실행한다.
+- 게이트 로그 INSERT와 대상 UPDATE는 같은 트랜잭션이다. 대상은 일반 UPDATE이며 `rowcount == 0`이면 `TARGET_CHANGED`다(upsert 금지, E9).
+- 새 상태는 **nonce 기록의 params에서만** 가져온다(confirm 메시지에서 받지 않음).
+- 액션↔`target_kind` 표 밖의 조합은 `PolicyViolation`이다.
+
+**활동에 대해 활성화할 시험**
+
+- C-04/05/17.
+- DB 트리거 쪽(`GATE_REQUIRED`/`GATE_REUSED`/`GATE_MISMATCH`).
+
+**다이얼로그 표시(§6.3(3))**
+
+- `gate.view`에 활동 필드를 추가한다: `target_label` = 과제 제목, `due_at`, `current_status` → `new_status`.
+- `source_ids`/`source_hash_prefixes`는 VERIFY_MATERIAL 전용이며, 활동에서는 빈 목록이다.
+- 요약 문장에 마감일을 넣는다(선택 항목 채택). 요약 벡터 픽스처를 확장한다.
+
+### 6.6 정오표 E32와 §15 R3 완료 기준 (필수 6)
+
+E32에 기록할 것:
+
+- §1.1 `config/` 행의 "유지" → R3-5 삭제로 변경한다. 키체인 불변식은 `canvas/credential.py`로 옮긴다.
+- `settings/` 삭제(E23 연장).
+- 처분표 23행의 새 파일 대응.
+- 게이트 라벨·지문 수정.
+- 마이그레이션 분할.
+
+§15 "R3 — Canvas·과제"의 빈 완료 기준은 다음으로 채운다.
+
+- C-04/05/17(활동)이 활성화되고 통과한다.
+- I9 토큰 시험이 통과한다.
+- 수집 완결성·첨부·녹음 달력·활동 맥락 시험이 통과한다.
+- 처분표 R3 행이 모두 새 파일로 대응되거나 폐기된다(근거 포함).
+- 3 OS CI가 그린이다.
+- **사용자의 실제 학기 데이터 확인**: 실제 Canvas 토큰으로 연결 → 동기화 → 과제·첨부·녹음 달력을 확인한다. 사람 확인 항목이다.
