@@ -51,3 +51,5 @@ Thumbs.db
 .vscode/
 *.swp
 tests/ui/node_modules/
+shell/target/
+shell/app/gen/

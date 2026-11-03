@@ -306,3 +306,39 @@ GUI가 없는 이 환경에서는 컴파일과 단위 테스트까지만 할 수
   - capability 허용 목록은 정확한 식별자로 테스트 fixture에 고정한다. 대상은 `core:window:allow-minimize|maximize|unmaximize|close|start-dragging`이다.
   - 다이얼로그는 남은 시간 카운트다운을 보여 주고 0이 되면 자동으로 닫는다.
   - E25에 "변경 요청 Origin 필수"를 명시한다.
+
+## 7. R2-0 실측 결과와 중계 인증 (보완안 — 구현 전 독립 검토 대상)
+
+### 7.1 실측 (2026-11-03, Linux WebKitGTK 2.52, Xvfb, Tauri 2 커스텀 프로토콜 `syllva://localhost`)
+
+| 항목 | 결과 |
+|---|---|
+| `syllva://localhost/bootstrap#token` 로드, 정적 파일 중계 | 됨 |
+| fragment 보존(앱이 토큰을 읽어 `POST /api/session`) | 됨 |
+| 웹뷰 요청의 `Origin` / `Sec-Fetch-Site` | **보내지 않음**(모든 요청에서 없음) |
+| `Set-Cookie` 후 다음 요청의 `Cookie` | **보내지 않음** |
+| IPC(`window.__TAURI__`)·네이티브 다이얼로그 | GUI 조작 없이는 미확인 → 수동 시연 |
+
+따라서 웹뷰가 보내는 헤더만으로는 R2-1의 Origin 필수 검사와 쿠키 세션을 쓸 수 없다. 조건 C의 대안을 택한다. macOS/Windows에서는 수동 시연으로 같은 항목을 기록한다.
+
+### 7.2 보완안: Shell 중계가 창 신원과 세션을 붙인다
+
+1. **중계 인증 헤더**
+   - Shell은 커스텀 프로토콜 처리기의 호출 웹뷰 label(`ctx.webview_label()`, Rust가 얻는 값)로 다음 두 헤더를 모든 중계 요청에 붙인다.
+     - `X-Syllva-Window: <label>`
+     - `X-Syllva-Relay: base64url(HMAC-SHA256(shell_secret, "syllva-relay-v1" ‖ 0x00 ‖ len32(label) ‖ label))`
+   - 웹뷰가 같은 이름의 헤더를 보내면 지우고 다시 쓴다.
+2. **Core(stdio 모드)의 검증**
+   - 모든 요청(GET 포함, `/healthz` 제외)에 유효한 중계 헤더를 요구한다. 없거나 틀리면 403이다.
+   - 결과적으로 Core 루프백 HTTP는 중계만 쓸 수 있다. 같은 머신의 다른 브라우저 페이지와 비-Shell 클라이언트는 차단된다(§10.1 "헤더 검사는 보조"보다 강함).
+   - Origin 필수 검사는 stdio 모드에서 이 중계 검사로 대체한다. `Sec-Fetch-Site`는 있으면 기존 규칙대로 검사한다. 헤드리스 모드는 지금처럼 루프백 Origin을 쓴다.
+3. **세션 쿠키는 Shell 메모리에 둔다**
+   - 중계는 Core 응답의 `syllva_sid` `Set-Cookie`를 **웹뷰에 전달하지 않는다**. 대신 창 label별 쿠키 보관소에 저장하고, 그 창의 이후 요청에 `Cookie`로 붙인다.
+   - 결과적으로 세션 id는 웹뷰(XSS)에 닿지 않는다(강화). CSRF 토큰은 지금처럼 응답 본문으로 JS 메모리에 두고 계속 요구한다(심층 방어).
+4. **창 결속**
+   - Core는 세션의 `window_label`과 요청의 `X-Syllva-Window`가 같은지 매 요청 검사한다.
+   - 따라서 다른 창의 세션을 쓸 수 없다(§6.4-2 강화, 조건 C가 언급한 강화).
+   - bootstrap 교환도 토큰의 창과 요청 창이 같아야 한다.
+5. **로그**: 중계 로그는 조건 A 그대로(메서드·경로·상태·크기)다. 중계 MAC과 쿠키 값은 기록하지 않는다.
+
+**정오표**: E25를 갱신한다. 설계 §5.1(a)의 "same-origin 검사"는 "중계 인증(창 label에 결속된 shell_secret MAC)"으로 구현하며, 보증은 더 강하다. 설계서 개정이 필요한지는 검토 의견을 따른다.

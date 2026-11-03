@@ -128,7 +128,7 @@ def test_the_secret_never_leaves_the_core(sim: ShellSim, tmp_path: Path) -> None
     bodies = [
         httpx.get(base + "/healthz", headers=host).content,
         httpx.get(base + "/bootstrap", headers=host).content,
-        httpx.post(base + "/api/session", json={"bootstrap": "x"}, headers={**host, "Origin": "syllva://app"}).content,
+        httpx.post(base + "/api/session", json={"bootstrap": "x"}, headers={**host, "Origin": "syllva://localhost"}).content,
     ]
     sim.send({"t": "nonsense", "secret_b64": _b64(SENTINEL)})  # echo bait
     sim.recv()
@@ -264,7 +264,7 @@ def test_uploaded_file_is_processed_by_the_cores_worker(tmp_path: Path) -> None:
     try:
         ready = shell.hello()
         base = f"http://127.0.0.1:{ready['port']}"
-        headers = {"Host": f"127.0.0.1:{ready['port']}", "Origin": "syllva://app"}
+        headers = {"Host": f"127.0.0.1:{ready['port']}", "Origin": "syllva://localhost"}
         with httpx.Client(base_url=base, headers=headers) as http:
             csrf = http.post("/api/session", json={"bootstrap": ready["bootstrap"]}).json()["csrf"]
             http.headers["X-Syllva-CSRF"] = csrf

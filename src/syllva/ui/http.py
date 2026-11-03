@@ -1,6 +1,6 @@
 """v2 UI HTTP app (implementation spec §10.1-§10.4, design §5.1(a), §5.4a; errata E25).
 
-The Shell relays the webview's ``syllva://app`` requests to this loopback server
+The Shell relays the webview's ``syllva://localhost`` requests to this loopback server
 (design rev 5). Every request passes one boundary before routing:
 
 * ``Host`` must be exactly ``127.0.0.1:<port>`` (421 otherwise: DNS rebinding);

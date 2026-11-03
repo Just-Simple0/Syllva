@@ -44,11 +44,12 @@ WINDOW_LABEL = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 
 EXIT_OK, EXIT_PROTOCOL, EXIT_DB_LOCKED, EXIT_MIGRATION, EXIT_SHELL_GONE = 0, 2, 3, 4, 5
 
-# Origins the relayed webview presents (design rev 5, errata E25; finalized by the R2-0 spike).
+# Origins the relayed webview presents (design rev 5, errata E25/E29): Tauri 2 serves a custom
+# scheme as ``<scheme>://localhost`` on macOS/Linux and ``http://<scheme>.localhost`` on Windows.
 APP_ORIGINS: dict[str, tuple[str, ...]] = {
-    "darwin": ("syllva://app",),
-    "linux": ("syllva://app",),
-    "win32": ("http://syllva.app", "https://syllva.app"),
+    "darwin": ("syllva://localhost",),
+    "linux": ("syllva://localhost",),
+    "win32": ("http://syllva.localhost",),
 }
 
 

@@ -20,7 +20,7 @@ pytestmark = pytest.mark.contract
 
 PORT = 49152
 HOST = f"127.0.0.1:{PORT}"
-ORIGIN = "syllva://app"
+ORIGIN = "syllva://localhost"
 CSP = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
 
 
