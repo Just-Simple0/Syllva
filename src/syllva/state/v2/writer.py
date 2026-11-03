@@ -31,6 +31,7 @@ from typing import Any
 
 from syllva.domain.errors import PolicyViolation
 from syllva.state.v2.ownership import (
+    ACTOR_COLUMNS,
     ALLOWED,
     DELETABLE_TABLES,
     HUMAN_ONLY_COLUMNS,
@@ -44,6 +45,7 @@ from syllva.state.v2.ownership import (
     Actor,
     Owner,
     can_transition,
+    may_write,
     owner_of,
 )
 
@@ -122,6 +124,8 @@ class StateWriter:
         self._authorize(owner, actor, table, set(values), update=False)
         if table == "materials" and values.get("processing_status", "PENDING") != "PENDING":
             raise PolicyViolation("new materials start as PENDING; use transition_material_status()")
+        if actor is Actor.CANVAS_COLLECTOR and table == "activities" and values.get("origin") != "CANVAS":
+            raise PolicyViolation("the Canvas sync creates only origin='CANVAS' activities")
         if table == "intake_candidates" and "state" in values and values["state"] not in INTAKE_INITIAL_STATES:
             raise PolicyViolation("a new intake candidate starts as RECEIVED, DUPLICATE or UNSUPPORTED")
         columns = list(values)
@@ -155,6 +159,12 @@ class StateWriter:
         if table == "intake_candidates" and "state" in values:
             raise PolicyViolation("use transition_intake_state() for intake state")
         with self.transaction():
+            if actor is Actor.CANVAS_COLLECTOR and table == "activities":
+                (column,) = key
+                row = self._connection.execute(f"SELECT origin FROM activities WHERE {column} = ?",  # validated
+                                               [key[column]]).fetchone()
+                if row is not None and row[0] != "CANVAS":
+                    raise PolicyViolation("the Canvas sync updates only origin='CANVAS' activities")
             if owner is Owner.USER:
                 self._record_user_edits(table, key)
             assignments = ", ".join(f"{c} = ?" for c in values)
@@ -360,7 +370,7 @@ class StateWriter:
             raise PolicyViolation("unknown table", details={"table": table}) from None
         if owner is not table_owner:
             raise PolicyViolation("declared owner does not match the table", details={"table": table, "owner": str(owner)})
-        if actor not in ALLOWED[table_owner]:
+        if actor not in ALLOWED[table_owner] or not may_write(table, actor):
             raise PolicyViolation(
                 "actor may not write this owner",
                 details={"table": table, "owner": str(owner), "actor": str(actor)},
@@ -384,11 +394,16 @@ class StateWriter:
                 "identifiers are immutable after insert",
                 details={"table": table, "columns": sorted(changed & immutable)},
             )
+        rule = ACTOR_COLUMNS.get((actor, table))
+        if rule is not None:
+            permitted = rule[1] if update else rule[0]
+            if not ((changed or set()) if update else columns) <= permitted:
+                raise PolicyViolation("actor may not set these columns", details={"table": table, "actor": str(actor)})
         if update and table_owner in INSERT_ONLY_OWNERS:
             allowed = SOURCE_MUTABLE_COLUMNS.get(table, frozenset())
             if table_owner is Owner.AI or not (changed or set()) <= allowed:
                 raise PolicyViolation("SOURCE/AI rows are insert-only", details={"table": table})
-            if actor is not Actor.INGESTER and actor is not Actor.SYSTEM_MIGRATION:
+            if actor not in (Actor.INGESTER, Actor.CANVAS_COLLECTOR, Actor.SYSTEM_MIGRATION):
                 raise PolicyViolation("actor may not update SOURCE rows", details={"table": table})
 
     def _record_user_edits(self, table: str, key: Mapping[str, Any]) -> None:

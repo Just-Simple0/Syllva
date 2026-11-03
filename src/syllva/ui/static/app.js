@@ -244,7 +244,65 @@ function renderCanvasCourses(courses) {
   }
 }
 
+const SUBMISSION_LABELS = { NOT_SUBMITTED: "제출 안 함", SUBMITTED: "제출함", LATE_SUBMITTED: "늦게 제출함", EXCUSED: "제출 면제" };
+
+function dueLabel(due) {
+  // the server stores local time with its offset; show the date and minutes as stored
+  return due ? "마감 " + String(due).slice(0, 16).replace("T", " ") : "마감 없음";
+}
+
+function renderActivities(activities) {
+  const list = document.getElementById("activity-list");
+  clear(list);
+  for (const a of activities) {
+    const entry = el("li");
+    entry.appendChild(el("span", a.course_name + " · " + a.title));
+    entry.appendChild(el("small", " " + dueLabel(a.due_at) + " · " + (SUBMISSION_LABELS[a.submission_status] || a.submission_status)
+      + (a.origin === "CANVAS" ? " · Canvas" : "") + (a.canvas_active ? "" : " · Canvas에서 사라짐")));
+    list.appendChild(entry);
+  }
+}
+
+function renderSyncStatus(status) {
+  const list = document.getElementById("canvas-sync-status");
+  clear(list);
+  if (status.running) {
+    list.appendChild(el("li", "동기화하는 중…"));
+  }
+  if (status.error) {
+    list.appendChild(el("li", "동기화할 수 없습니다: " + status.error));
+  }
+  for (const course of status.courses || []) {
+    const last = course.last;
+    const text = last ? last.status + (last.reason ? " (" + last.reason + ")" : "") + " · " + (last.finished_at || last.started_at)
+      : "아직 동기화하지 않음";
+    list.appendChild(el("li", course.name + " → " + course.course_key + ": " + text));
+  }
+}
+
+async function loadActivities() {
+  const [activities, status] = await Promise.all([api("GET", "/api/activities"), api("GET", "/api/canvas/status")]);
+  if (activities.ok) {
+    renderActivities(activities.data.activities || []);
+  }
+  if (status.ok) {
+    renderSyncStatus(status.data);
+  }
+  return status.ok && status.data.running;
+}
+
 function bindCanvas() {
+  document.getElementById("canvas-sync").addEventListener("click", async () => {
+    const result = await api("POST", "/api/canvas/sync");
+    if (!result.ok) {
+      show("동기화를 시작할 수 없습니다: " + result.data.error);
+      return;
+    }
+    show("동기화를 시작했습니다.");
+    for (let i = 0; i < 60 && await loadActivities(); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+  });
   document.getElementById("canvas-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const origin = document.getElementById("canvas-origin");
@@ -300,7 +358,7 @@ async function start() {
   show("준비됨");
   bindUpload();
   bindCanvas();
-  await Promise.all([refresh(), loadCanvas()]);
+  await Promise.all([refresh(), loadCanvas(), loadActivities()]);
 }
 
 window.addEventListener("DOMContentLoaded", start);
