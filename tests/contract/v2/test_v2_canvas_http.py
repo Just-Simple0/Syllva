@@ -1,11 +1,11 @@
-"""P-E E3-E5: bounded Canvas file download; the token never leaves the Canvas origin."""
+"""R3-1 (moved from tests/unit/test_canvas_download.py): bounded Canvas download; the token never leaves the Canvas origin (I9)."""
 from __future__ import annotations
 
 import pytest
 
-from syllva.settings.canvas_checks import CanvasCheckError, CanvasResponse, open_canvas_connection
+from syllva.canvas.http import CanvasCheckError, CanvasResponse, open_canvas_connection
 
-pytestmark = pytest.mark.unit
+pytestmark = pytest.mark.contract
 
 ORIGIN = "https://canvas.example.edu"
 STORAGE = "files.storage.example.com"

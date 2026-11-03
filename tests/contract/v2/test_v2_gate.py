@@ -109,7 +109,8 @@ def test_summaries_for_all_four_actions_are_pure_and_sanitised() -> None:
     assert summaries.summarize("CONFIRM_EXAM_SCOPE", {"exam_id": "NET-E01", "material_ids": ["NET-M01", "NET-M02"]},
                                {"course": "네트워크", "exam_title": "중간고사"}) == "네트워크 중간고사(NET-E01)의 범위를 자료 2개로 확정합니다."
     assert summaries.summarize("SET_SUBMISSION_STATUS", {"activity_id": "NET-A02", "status": "SUBMITTED"},
-                               {"activity_title": "HW2"}) == "과제 NET-A02 \"HW2\"의 제출 상태를 '제출함'으로 바꿉니다."
+                               {"activity_title": "HW2", "due_at": "2026-11-10T23:59:00+09:00"}) == (
+        "과제 NET-A02 \"HW2\"(마감 2026-11-10 23:59)의 제출 상태를 '제출함'으로 바꿉니다.")
     assert summaries.summarize("ADOPT_AI_ARTIFACT", {"artifact_id": "A-0031"}, {"kind": "summary"}) == (
         "AI 요약 A-0031을(를) 내 노트로 채택합니다."
     )
@@ -120,7 +121,8 @@ def test_fingerprint_formats_for_all_four_actions() -> None:
     assert fingerprints.verify_material("sha256:ab", 3, "COMPLETE") == "sha256:ab|3|COMPLETE"
     scope = fingerprints.exam_scope([("NET-M02", "sha256:b"), ("NET-M01", "sha256:a")])
     assert scope == hashlib.sha256(b"NET-M01:sha256:a\nNET-M02:sha256:b").hexdigest()
-    assert fingerprints.submission("NET-A02", "NOT_SUBMITTED", NOW) == f"NET-A02|NOT_SUBMITTED|{NOW}"
+    assert fingerprints.submission("NET-A02", "NOT_SUBMITTED", None, "HW|2", NOW) == (
+        '["NET-A02","NOT_SUBMITTED",null,"HW|2","2026-11-02T00:00:00+00:00"]')
     assert fingerprints.adoption("A-0031", "c" * 64) == "A-0031|" + "c" * 64
 
 
@@ -433,3 +435,18 @@ def test_commit_gate_has_one_caller() -> None:
     src = Path(__file__).resolve().parents[3] / "src"
     callers = sorted(p.relative_to(src).as_posix() for p in src.rglob("*.py") if ".commit_gate(" in p.read_text(encoding="utf-8"))
     assert callers == ["syllva/gate/service.py"]
+
+
+# --- R3-1: submission labels match the schema (R3 plan §6.5) ----------------------------------
+
+
+def test_submission_labels_cover_exactly_the_schema_values(v2_db) -> None:  # type: ignore[no-untyped-def]
+    sql = v2_db.connection.execute("SELECT sql FROM sqlite_master WHERE name = 'activities'").fetchone()[0]
+    import re as _re
+
+    schema = set(_re.findall(r"'([A-Z_]+)'", sql.split("CHECK (submission_status IN", 1)[1].split(")", 1)[0]))
+    assert set(summaries.SUBMISSION_LABELS) == schema == {"NOT_SUBMITTED", "SUBMITTED", "LATE_SUBMITTED", "EXCUSED"}
+    for status in schema:
+        text = summaries.summarize("SET_SUBMISSION_STATUS", {"activity_id": "NET-A01", "status": status},
+                                   {"activity_title": "HW", "due_at": None})
+        assert "마감 없음" in text and summaries.SUBMISSION_LABELS[status] in text

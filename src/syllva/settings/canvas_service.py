@@ -18,10 +18,7 @@ from typing import Any, cast
 
 import yaml  # type: ignore[import-untyped]
 
-from syllva.config.errors import ConfigurationError
-from syllva.config.mutation import ConfigFileLock, atomic_replace_config, read_config_bytes
-
-from .canvas_checks import (
+from syllva.canvas.http import (
     CanvasCheckError,
     CanvasDiscoveryGate,
     discover_canvas_courses,
@@ -29,6 +26,9 @@ from .canvas_checks import (
     validate_canvas_origin,
     verify_canvas_user,
 )
+from syllva.config.errors import ConfigurationError
+from syllva.config.mutation import ConfigFileLock, atomic_replace_config, read_config_bytes
+
 from .config_service import LoadedConfig, SettingsServiceError
 from .credential_admission import credential_admission
 from .credential_roles import CredentialRole, canvas_role

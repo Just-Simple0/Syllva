@@ -9,7 +9,7 @@ from typing import Any
 from syllva.config._secure_file import delete_secure_file, read_secure_file, write_secure_file
 from syllva.config.errors import ConfigurationError
 
-from .canvas_checks import CanvasCheckError
+from syllva.canvas.http import CanvasCheckError
 from .credential_stores import CredentialStores
 from .provider_checks import FakeProviderTransport, ProviderChecks
 

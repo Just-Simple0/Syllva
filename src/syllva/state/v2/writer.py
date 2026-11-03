@@ -32,6 +32,7 @@ from typing import Any
 from syllva.domain.errors import PolicyViolation
 from syllva.state.v2.ownership import (
     ALLOWED,
+    DELETABLE_TABLES,
     HUMAN_ONLY_COLUMNS,
     IMMUTABLE_COLUMNS,
     INSERT_ONLY_OWNERS,
@@ -162,6 +163,22 @@ class StateWriter:
                 f"UPDATE {table} SET {assignments} WHERE {conditions}",  # identifiers validated
                 [*values.values(), *key.values()],
             )
+            return int(cursor.rowcount)
+
+    def delete(self, owner: Owner, actor: Actor, table: str, key: Mapping[str, Any]) -> int:
+        """Delete rows of a settings table (``DELETABLE_TABLES``); every other table is append/update only."""
+
+        if table not in DELETABLE_TABLES:
+            raise PolicyViolation("rows of this table are never deleted", details={"table": table})
+        if len(key) != 1:
+            raise PolicyViolation("delete needs exactly one key column")
+        self._authorize(owner, actor, table, set(key), update=True, changed=set())
+        (key_column,) = key
+        if key_column not in self._unique_columns(table):
+            raise PolicyViolation("delete key must be a primary key or UNIQUE column", details={"table": table})
+        with self.transaction():
+            cursor = self._connection.execute(
+                f"DELETE FROM {table} WHERE {key_column} = ?", [key[key_column]])  # identifiers validated
             return int(cursor.rowcount)
 
     def transition_material_status(self, actor: Actor, material_id: str, new_status: str) -> str:

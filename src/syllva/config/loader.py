@@ -418,7 +418,7 @@ def _intake_section(raw: Mapping[str, Any]) -> IntakeCfg:
     if not isinstance(cfg.canvas_origin, str):
         raise ValueError("intake.classification.canvas_origin must be a string")  # noqa: TRY004
     if cfg.canvas_origin:
-        from syllva.settings.canvas_checks import CanvasCheckError, validate_canvas_origin
+        from syllva.canvas.http import CanvasCheckError, validate_canvas_origin
 
         try:
             cfg.canvas_origin = validate_canvas_origin(cfg.canvas_origin).origin
@@ -438,7 +438,7 @@ def _intake_section(raw: Mapping[str, Any]) -> IntakeCfg:
         raise ValueError("intake.classification.canvas_file_hosts must be a list of host names")  # noqa: TRY004
     normalized_hosts: list[str] = []
     for host in hosts:
-        from syllva.settings.canvas_checks import CanvasCheckError, validate_canvas_origin
+        from syllva.canvas.http import CanvasCheckError, validate_canvas_origin
 
         if not isinstance(host, str) or not host or ":" in host or "/" in host:
             raise ValueError("intake.classification.canvas_file_hosts entries must be bare host names")

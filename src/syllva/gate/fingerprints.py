@@ -8,6 +8,7 @@ inside the commit transaction, at confirm (recompute-at-commit, §6.4-4).
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -24,8 +25,13 @@ def exam_scope(materials: Sequence[tuple[str, str]]) -> str:
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
-def submission(activity_id: str, current_status: str, updated_at: str) -> str:
-    return f"{activity_id}|{current_status}|{updated_at}"
+def submission(activity_id: str, current_status: str, current_gate_id: int | None, title: str,
+               due_at: str | None) -> str:
+    """Everything the dialog shows about the activity (R3 plan §6.5): a re-sync that changes the title
+    or due date while a nonce is pending yields TARGET_CHANGED."""
+
+    return json.dumps([activity_id, current_status, current_gate_id, title, due_at], ensure_ascii=False,
+                      separators=(",", ":"))
 
 
 def adoption(artifact_id: str, body_blob_sha256: str) -> str:

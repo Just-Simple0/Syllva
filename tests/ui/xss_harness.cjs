@@ -30,6 +30,10 @@ const routes = {
   "GET /api/library/items": { items },
   "GET /api/intake/candidates": { candidates },
   "GET /api/library/NET-M01/context": evidence,
+  "GET /api/settings/canvas": { connected: true, needs_token: false, profile_id: "c" + "0".repeat(32), origin: p(5),
+    display_name: p(1), token_set_at: p(2), file_hosts: [p(3)], courses: [] },
+  "GET /api/canvas/courses": { courses: PAYLOADS.map((_, i) => ({ canvas_course_id: String(100 + i), name: p(i),
+    code: p(i + 1), term_name: p(i + 2), linked_course_key: p(i + 3) })) },
 };
 window.fetch = async (url, init) => {
   const key = ((init && init.method) || "GET") + " " + String(url).split("?")[0];
@@ -43,6 +47,8 @@ setTimeout(async () => {
   const doc = window.document;
   const open = doc.querySelector('[data-material="NET-M01"]');
   if (open) { open.click(); }
+  const load = doc.getElementById("canvas-load");
+  if (load) { load.click(); }
   await new Promise((r) => setTimeout(r, 50));
   const tags = new Set([...doc.querySelectorAll("*")].map((e) => e.tagName.toLowerCase()));
   const attrs = [];

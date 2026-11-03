@@ -215,10 +215,13 @@ def run_stdio(stdin: BinaryIO | None = None) -> int:
         log_event("CORE_MIGRATION_FAILED", error=type(exc).__name__)
         return EXIT_MIGRATION
 
+    from syllva.canvas.client import LiveCanvasClient
+    from syllva.canvas.credential import CanvasCredentials
     from syllva.core.worker import IntakeWorker
     from syllva.gate.service import GateService
     from syllva.intake.v2 import IntakeConfig, LocalIntake
     from syllva.library.blobs import BlobStore
+    from syllva.ui.canvas import CanvasApi
     from syllva.ui.http import create_app
     from syllva.ui.library import LibraryApi
     from syllva.ui.sessions import SessionStore
@@ -230,12 +233,15 @@ def run_stdio(stdin: BinaryIO | None = None) -> int:
     intake = LocalIntake(db.writer(), blobs)
     worker = IntakeWorker(intake)
     library = LibraryApi(db, blobs, intake, kick=worker.kick, upload_limit=IntakeConfig().max_bytes)
+    canvas_client = LiveCanvasClient()
+    credentials = CanvasCredentials(db.writer(), verify=canvas_client.verify)
+    credentials.recover()  # an interrupted token write/forget (R3 plan §6.1); keychain errors only defer it
     sock = bind_loopback()
     port = int(sock.getsockname()[1])
     from syllva.ui.relay import RelayVerifier
 
     app = create_app(sessions, port=port, allowed_origins=APP_ORIGINS[hello.platform], gate=gate, library=library,
-                     relay=RelayVerifier(hello.secret))
+                     relay=RelayVerifier(hello.secret), canvas=CanvasApi(credentials, canvas_client))
     server = _UiServer(app, sock)
     server.start()
     worker.start()

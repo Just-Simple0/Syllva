@@ -33,6 +33,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from syllva.core.logging import log_event
 from syllva.gate.service import GateError, GateService
+from syllva.ui.canvas import TOKEN_BODY_LIMIT, TOKEN_PATH, CanvasApi
 from syllva.ui.library import LibraryApi
 from syllva.ui.relay import RelayVerifier
 from syllva.ui.sessions import Session, SessionStore, WrongWindow
@@ -97,7 +98,10 @@ class Boundary:
         await self.app(scope, _bounded(receive, self._limit(scope)), send_with_headers)
 
     def _limit(self, scope: Scope) -> int:
-        return self.upload_limit if UPLOAD_PATH.fullmatch(scope.get("path", "")) else MAX_BODY
+        path = scope.get("path", "")
+        if path == TOKEN_PATH:
+            return TOKEN_BODY_LIMIT  # the Canvas token body (R3 plan §6.1)
+        return self.upload_limit if UPLOAD_PATH.fullmatch(path) else MAX_BODY
 
     def _deny(self, scope: Scope) -> tuple[int, str] | None:
         headers: dict[bytes, list[bytes]] = {}
@@ -170,6 +174,7 @@ def create_app(
     gate: GateService | None = None,
     library: LibraryApi | None = None,
     relay: RelayVerifier | None = None,
+    canvas: CanvasApi | None = None,
 ) -> ASGIApp:
     def window_of(request: Request) -> str | None:
         return request.scope.get("state", {}).get("syllva_window") if relay is not None else None
@@ -255,6 +260,7 @@ def create_app(
             Route("/api/session", session_delete, methods=["DELETE"]),
             Route("/api/gate/begin", gate_begin, methods=["POST"]),
             *(library.routes(current, mutation_ok) if library is not None else []),
+            *(canvas.routes(current, mutation_ok) if canvas is not None else []),
             Mount("/static", StaticFiles(directory=STATIC), name="static"),
         ],
         exception_handlers={404: not_found, _BodyTooLarge: too_large, WrongWindow: wrong_window},
