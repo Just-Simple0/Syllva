@@ -220,6 +220,9 @@ class CanvasCredentials:
 
     def connect(self, origin: str, token: CanvasToken) -> dict[str, Any]:
         target = validate_canvas_origin(origin).origin  # CanvasCheckError(DESTINATION_NOT_ALLOWED)
+        existing = self._profile()
+        if existing is not None and existing["origin"] != target:
+            _fail("PROFILE_EXISTS")  # refused before the token is sent anywhere (review of PR #54)
         user = self._verify(target, token.reveal_token())  # CanvasCheckError with a fixed code
         pid = profile_id(target, str(user["user_id"]))
         with self._lock:

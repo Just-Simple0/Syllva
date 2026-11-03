@@ -278,3 +278,17 @@ def test_the_token_is_revealed_only_for_canvas_reads_and_the_keychain_write() ->
     src = Path(__file__).resolve().parents[3] / "src"
     callers = sorted(p.relative_to(src).as_posix() for p in src.rglob("*.py") if ".reveal_token()" in p.read_text(encoding="utf-8"))
     assert callers == ["syllva/canvas/credential.py", "syllva/ui/canvas.py"]
+
+
+def test_a_different_origin_is_refused_before_the_token_is_sent(v2_db: Database) -> None:
+    sent: list[str] = []
+    keychain = MemoryKeychain()
+    creds(v2_db, keychain).connect(ORIGIN, CanvasToken(TOKEN))
+
+    def verify(origin: str, token: str) -> dict[str, str]:
+        sent.append(origin)
+        return {"user_id": "42", "display_name": "Kim"}
+
+    with pytest.raises(CredentialError) as caught:
+        creds(v2_db, keychain, verify=verify).connect("https://other.example.edu", CanvasToken(OTHER))
+    assert caught.value.code == "PROFILE_EXISTS" and sent == []
