@@ -350,3 +350,61 @@ def test_steps_refuse_to_run_inside_a_callers_transaction(intake: LocalIntake) -
     with intake.writer.transaction(), pytest.raises(RuntimeError, match="own their transactions"):
         intake.classify(c.candidate_id, now=NOW)
     assert intake.get(c.candidate_id).state == "RECEIVED"
+
+
+def test_intake_steps_wait_for_another_threads_transaction(intake: LocalIntake, v2_db: Database) -> None:
+    """The nesting guard counts only the calling thread's own transaction (review of PR #50 class)."""
+
+    import threading
+
+    c = _drop(intake, TRANSCRIPT.encode(), "t.txt")
+    held, release, result = threading.Event(), threading.Event(), {}
+
+    def hold() -> None:
+        with intake.writer.transaction():
+            held.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    held.wait(5)
+    worker = threading.Thread(target=lambda: result.update(state=intake.classify(c.candidate_id, now=NOW).state))
+    worker.start()
+    worker.join(0.3)
+    assert worker.is_alive()
+    release.set()
+    holder.join()
+    worker.join(5)
+    assert result["state"] == "NEEDS_REVIEW"
+
+
+def test_two_threads_never_race_one_candidate(intake: LocalIntake) -> None:
+    """Single active worker (spec §11.2): steps are serialized whatever thread calls them (review of PR #51)."""
+
+    import threading
+
+    c = _drop(intake, TRANSCRIPT.encode(), "race.txt")
+    barrier, errors, states = threading.Barrier(4), [], []
+
+    def go() -> None:
+        barrier.wait()
+        try:
+            states.append(intake.classify(c.candidate_id, now=NOW).state)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=go) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == [] and set(states) == {"NEEDS_REVIEW"}
+
+
+def test_material_deleted_before_processing_is_not_processed(intake: LocalIntake, v2_db: Database) -> None:
+    c = intake.classify(_drop(intake, TRANSCRIPT.encode(), "d.txt").candidate_id, now=NOW)
+    intake.confirm(c.candidate_id, course_key="NET", kind="TRANSCRIPT", new_session_held_on="2026-09-01", now=NOW)
+    v2_db.connection.execute("UPDATE source_files SET deleted_at = ?", (NOW,))
+    done = intake.process(c.candidate_id, now=NOW)
+    assert (done.state, done.reason_code) == ("FAILED", "SOURCE_DELETED")
+    assert v2_db.connection.execute("SELECT count(*) FROM derivatives").fetchone()[0] == 0

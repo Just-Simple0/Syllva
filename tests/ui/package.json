@@ -1,0 +1,8 @@
+{
+  "name": "syllva-ui-tests",
+  "private": true,
+  "description": "Test-only dependencies for the C-18 DOM harness (never bundled).",
+  "devDependencies": {
+    "jsdom": "24.1.3"
+  }
+}

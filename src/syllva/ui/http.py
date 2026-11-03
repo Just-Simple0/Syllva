@@ -19,6 +19,7 @@ Debug mode is off and the server keeps no access log of its own beyond
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from syllva.core.logging import log_event
 from syllva.gate.service import GateError, GateService
+from syllva.ui.library import LibraryApi
 from syllva.ui.sessions import Session, SessionStore
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -39,6 +41,7 @@ COOKIE = "syllva_sid"
 CSRF_HEADER = "x-syllva-csrf"
 MAX_BODY = 64 * 1024
 SAFE_METHODS = frozenset({"GET", "HEAD"})
+UPLOAD_PATH = re.compile(r"/api/library/(upload|[A-Za-z0-9-]+/replace)")
 CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; "
     "base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
@@ -60,8 +63,9 @@ def _error(status: int, code: str) -> Response:
 class Boundary:
     """ASGI middleware enforcing the request boundary and the response headers."""
 
-    def __init__(self, app: ASGIApp, *, port: int, allowed_origins: Iterable[str]) -> None:
+    def __init__(self, app: ASGIApp, *, port: int, allowed_origins: Iterable[str], upload_limit: int = MAX_BODY) -> None:
         self.app = app
+        self.upload_limit = upload_limit
         self.host = f"127.0.0.1:{port}".encode()
         self.origins = frozenset(o.encode() for o in allowed_origins)
 
@@ -82,7 +86,10 @@ class Boundary:
             log_event("UI_DENIED", route=scope.get("path", "")[:80], reason=denial[1])
             await _error(*denial)(scope, receive, send_with_headers)
             return
-        await self.app(scope, _bounded(receive), send_with_headers)
+        await self.app(scope, _bounded(receive, self._limit(scope)), send_with_headers)
+
+    def _limit(self, scope: Scope) -> int:
+        return self.upload_limit if UPLOAD_PATH.fullmatch(scope.get("path", "")) else MAX_BODY
 
     def _deny(self, scope: Scope) -> tuple[int, str] | None:
         headers: dict[bytes, list[bytes]] = {}
@@ -101,7 +108,7 @@ class Boundary:
         length = headers.get(b"content-length")
         if length is not None:
             try:
-                if int(length[0]) > MAX_BODY:
+                if int(length[0]) > self._limit(scope):
                     return 413, "BODY_TOO_LARGE"
             except ValueError:
                 return 400, "BAD_LENGTH"
@@ -112,7 +119,7 @@ class _BodyTooLarge(Exception):
     pass
 
 
-def _bounded(receive: Receive) -> Receive:
+def _bounded(receive: Receive, limit: int) -> Receive:
     seen = 0
 
     async def wrapped() -> Message:
@@ -120,7 +127,7 @@ def _bounded(receive: Receive) -> Receive:
         message = await receive()
         if message["type"] == "http.request":
             seen += len(message.get("body", b""))
-            if seen > MAX_BODY:
+            if seen > limit:
                 raise _BodyTooLarge
         return message
 
@@ -139,7 +146,12 @@ async def _json_body(request: Request, keys: frozenset[str]) -> dict[str, Any] |
 
 
 def create_app(
-    sessions: SessionStore, *, port: int, allowed_origins: Iterable[str], gate: GateService | None = None
+    sessions: SessionStore,
+    *,
+    port: int,
+    allowed_origins: Iterable[str],
+    gate: GateService | None = None,
+    library: LibraryApi | None = None,
 ) -> ASGIApp:
     def current(request: Request) -> Session | None:
         return sessions.lookup(request.cookies.get(COOKIE))
@@ -218,11 +230,13 @@ def create_app(
             Route("/api/session", session_show, methods=["GET"]),
             Route("/api/session", session_delete, methods=["DELETE"]),
             Route("/api/gate/begin", gate_begin, methods=["POST"]),
+            *(library.routes(current, mutation_ok) if library is not None else []),
             Mount("/static", StaticFiles(directory=STATIC), name="static"),
         ],
         exception_handlers={404: not_found, _BodyTooLarge: too_large},
     )
-    return Boundary(app, port=port, allowed_origins=allowed_origins)
+    return Boundary(app, port=port, allowed_origins=allowed_origins,
+                    upload_limit=library.upload_limit if library is not None else MAX_BODY)
 
 
 __all__ = ["COOKIE", "CSP", "create_app"]

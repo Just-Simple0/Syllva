@@ -50,3 +50,4 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+tests/ui/node_modules/

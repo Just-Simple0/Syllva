@@ -30,15 +30,17 @@ exclusive OS lock), so no two workers run these steps concurrently.
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 import secrets
 import sqlite3
-from collections.abc import Iterator
+import threading
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import PurePath
-from typing import Any, BinaryIO, cast
+from typing import Any, BinaryIO, TypeVar, cast
 
 from syllva.domain.errors import PolicyViolation, SyllvaError
 from syllva.ingestion.local import IngestError, add_version, ingest_new, nfc
@@ -91,6 +93,18 @@ class Candidate:
     suggestion: dict[str, Any] | None
 
 
+F = TypeVar("F", bound=Callable[..., Any])
+
+
+def _serialized(method: F) -> F:
+    @functools.wraps(method)
+    def wrapper(self: LocalIntake, *args: Any, **kwargs: Any) -> Any:
+        with self._step_lock:
+            return method(self, *args, **kwargs)
+
+    return cast(F, wrapper)
+
+
 class _TooLarge(Exception):
     pass
 
@@ -113,6 +127,10 @@ class LocalIntake:
         self.writer = writer
         self.blobs = blobs
         self.config = config or IntakeConfig()
+        # Single active worker (spec §11.2): every state-changing step of this intake runs under one
+        # re-entrant lock, whichever thread calls it (HTTP handlers, the worker), so two threads
+        # can never race one candidate through the same transition (review of PR #51).
+        self._step_lock = threading.RLock()
 
     # -- queries --------------------------------------------------------------------
 
@@ -139,6 +157,7 @@ class LocalIntake:
 
     # -- RECEIVED ---------------------------------------------------------------------
 
+    @_serialized
     def receive(
         self,
         stream: BinaryIO,
@@ -196,6 +215,7 @@ class LocalIntake:
 
     # -- CLASSIFYING ----------------------------------------------------------------------
 
+    @_serialized
     def classify(self, candidate_id: str, *, now: str | None = None) -> Candidate:
         self._own_transactions()
         stamp = now or _now()
@@ -281,6 +301,7 @@ class LocalIntake:
 
     # -- user decisions ---------------------------------------------------------------------
 
+    @_serialized
     def confirm(
         self,
         candidate_id: str,
@@ -330,11 +351,13 @@ class LocalIntake:
             self.writer.transition_intake_state(Actor.UI_USER, candidate_id, "CONFIRMED", values={"material_id": material}, now=stamp)
         return self.get(candidate_id)
 
+    @_serialized
     def dismiss(self, candidate_id: str, *, now: str | None = None) -> Candidate:
         self.get(candidate_id)  # unknown ids are an intake error, not a policy denial
         self.writer.transition_intake_state(Actor.UI_USER, candidate_id, "DISMISSED", now=now or _now())
         return self.get(candidate_id)
 
+    @_serialized
     def replace(self, material_id: str, stream: BinaryIO, *, display_name: str, mime_type: str | None = None,
                 now: str | None = None) -> Candidate:
         """The user replaces a material's file with a revision (§11.4); the action is the confirmation.
@@ -396,6 +419,7 @@ class LocalIntake:
             raise IntakeError(str(exc)) from exc
         return self.get(candidate_id)
 
+    @_serialized
     def retry(self, candidate_id: str, *, now: str | None = None) -> Candidate:
         """Queue a FAILED/PARTIAL/READY candidate for another processing run."""
 
@@ -405,6 +429,7 @@ class LocalIntake:
 
     # -- PROCESSING -------------------------------------------------------------------------
 
+    @_serialized
     def process(self, candidate_id: str, *, now: str | None = None) -> Candidate:
         self._own_transactions()
         stamp = now or _now()
@@ -418,6 +443,16 @@ class LocalIntake:
         )
         if row is None or row["state"] not in ("AUTO_CONFIRMED", "CONFIRMED", "QUEUED"):
             raise IntakeError("candidate is not ready for processing", details={"candidate_id": candidate_id})
+        deleted = self.writer.query_one(
+            "SELECT 1 FROM source_versions v JOIN source_files f ON f.id = v.source_file_id "
+            "WHERE v.id = ? AND f.deleted_at IS NOT NULL", (int(row["source_version_id"]),))
+        if deleted is not None:  # the user deleted the material meanwhile: nothing to process
+            with self.writer.transaction():
+                self.writer.transition_intake_state(Actor.INGESTER, candidate_id, "PROCESSING", now=stamp)
+                self.writer.transition_intake_state(
+                    Actor.INGESTER, candidate_id, "FAILED",
+                    values={"reason_code": "SOURCE_DELETED", "reason_message": "the material was deleted"}, now=stamp)
+            return self.get(candidate_id)
         material_id = str(row["material_id"])
         newer = self.writer.query_one(
             "SELECT 1 FROM source_versions v JOIN source_versions mine ON mine.source_file_id = v.source_file_id "
@@ -481,6 +516,7 @@ class LocalIntake:
             done.append(self.process(candidate_id, now=now))
         return done
 
+    @_serialized
     def recover(self, *, now: str | None = None) -> int:
         """After a crash: PROCESSING -> QUEUED, CLASSIFYING -> RECEIVED (§11.2)."""
 

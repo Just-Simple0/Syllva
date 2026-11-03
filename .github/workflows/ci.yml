@@ -15,6 +15,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci --prefix tests/ui --no-audit --no-fund  # the full suite includes the C-18 DOM harness
       - run: python -m pip install -e ".[dev,mcp,drive,notion,pdf,web]"
       - run: python -m pytest -q -ra
       - name: Windows secure-file regressions
@@ -42,6 +46,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci --prefix tests/ui --no-audit --no-fund  # C-18 DOM harness (jsdom), never skipped in CI
       - run: python -m pip install -e ".[dev,pdf,web]"
       - run: python -m pytest -q -ra tests/contract/v2 tests/unit/test_v2_library_blobs.py tests/unit/test_v2_library_paths.py tests/unit/test_v2_state_migrate.py tests/unit/test_v2_resolver_cues.py tests/unit/test_v2_cli.py
       - run: lint-imports

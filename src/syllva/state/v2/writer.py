@@ -59,6 +59,7 @@ class StateWriter:
         self._columns: dict[str, frozenset[str]] = {}
         self._lock = threading.RLock()
         self._depth = 0  # transaction nesting; only touched while holding _lock
+        self._owner: int | None = None  # thread that opened the current transaction
 
     # -- transactions ---------------------------------------------------------
 
@@ -76,6 +77,7 @@ class StateWriter:
                 raise RuntimeError("connection has a transaction not opened by StateWriter")
             self._connection.execute("BEGIN IMMEDIATE")
             self._depth = 1
+            self._owner = threading.get_ident()
             try:
                 yield self
             except BaseException:
@@ -85,12 +87,17 @@ class StateWriter:
                 self._connection.execute("COMMIT")
             finally:
                 self._depth = 0
+                self._owner = None
 
     @property
     def in_transaction(self) -> bool:
-        """True while a StateWriter transaction is open on this connection."""
+        """True while the CALLING thread is inside a StateWriter transaction.
 
-        return self._depth > 0 or self._connection.in_transaction
+        Another thread's open transaction does not count: that caller simply waits for the
+        lock (same reasoning as commit_gate, review of PR #50).
+        """
+
+        return self._depth > 0 and self._owner == threading.get_ident()
 
     # -- reads inside the write transaction ------------------------------------
 

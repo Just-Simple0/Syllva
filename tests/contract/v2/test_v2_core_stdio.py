@@ -247,3 +247,40 @@ def test_mcp_is_not_loaded_at_runtime() -> None:
     code = "import sys, syllva.core.stdio, syllva.ui.http; print(any(m.startswith('syllva.mcp') for m in sys.modules))"
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout.strip()
     assert out == "False"
+
+
+def test_uploaded_file_is_processed_by_the_cores_worker(tmp_path: Path) -> None:
+    import time
+    from urllib.parse import quote
+
+    from syllva.library.paths import layout
+    from syllva.state.v2.database import open_database
+
+    data = tmp_path / "data"
+    with open_database(layout(data)) as db:
+        db.connection.execute(
+            "INSERT INTO courses(course_key, name, code, semester, created_at) VALUES ('NET','네트워크','NET','2026-2','2026-11-03')")
+    shell = ShellSim(data, secret=SENTINEL)
+    try:
+        ready = shell.hello()
+        base = f"http://127.0.0.1:{ready['port']}"
+        headers = {"Host": f"127.0.0.1:{ready['port']}", "Origin": "syllva://app"}
+        with httpx.Client(base_url=base, headers=headers) as http:
+            csrf = http.post("/api/session", json={"bootstrap": ready["bootstrap"]}).json()["csrf"]
+            http.headers["X-Syllva-CSRF"] = csrf
+            up = http.post("/api/library/upload", content=b"[00:00] TCP\n", headers={
+                "X-Syllva-Filename": quote("노트.txt"), "Content-Type": "application/octet-stream"}).json()
+            assert up["state"] == "NEEDS_REVIEW"
+            http.post(f"/api/library/{up['candidate_id']}/classify",
+                      json={"course_key": "NET", "kind": "TRANSCRIPT", "new_session_held_on": "2026-09-01"})
+            deadline = time.monotonic() + 20
+            status = None
+            while time.monotonic() < deadline:
+                items = http.get("/api/library/items").json()["items"]
+                status = items[0]["processing_status"] if items else None
+                if status == "READY":
+                    break
+                time.sleep(0.1)
+            assert status == "READY"
+    finally:
+        shell.stop()
