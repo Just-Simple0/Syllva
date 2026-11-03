@@ -1,4 +1,4 @@
-"""Bounded, read-only Canvas API checks behind one public-destination boundary."""
+"""Bounded, read-only Canvas API client behind one public-destination boundary (spec §12; moved from settings in R3-1)."""
 
 from __future__ import annotations
 

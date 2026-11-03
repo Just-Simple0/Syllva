@@ -196,6 +196,90 @@ function bindUpload() {
   });
 }
 
+// --- Canvas settings (R3-1): the token is sent once and never shown again ---------------------
+
+function renderCanvas(status) {
+  const line = document.getElementById("canvas-status");
+  const connected = document.getElementById("canvas-connected");
+  if (status.connected) {
+    line.textContent = "연결됨: " + status.display_name + " (" + status.origin + ")";
+  } else if (status.needs_token) {
+    line.textContent = "토큰을 다시 입력해야 합니다 (이전 연결이 끝나지 않았습니다).";
+  } else {
+    line.textContent = "연결되지 않음";
+  }
+  connected.hidden = !status.connected;
+  if (status.connected) {
+    document.getElementById("canvas-hosts").value = (status.file_hosts || []).join(", ");
+  }
+}
+
+async function loadCanvas() {
+  const result = await api("GET", "/api/settings/canvas");
+  if (result.ok) {
+    renderCanvas(result.data);
+  }
+}
+
+function renderCanvasCourses(courses) {
+  const list = document.getElementById("canvas-courses");
+  clear(list);
+  for (const course of courses) {
+    const entry = el("li");
+    entry.appendChild(el("span", course.name + " · " + course.code + " · " + course.term_name));
+    const form = el("form");
+    const key = el("input", null, { type: "text", placeholder: "과목 키" });
+    key.value = course.linked_course_key || "";
+    form.appendChild(key);
+    form.appendChild(el("button", course.linked_course_key ? "연결 변경" : "연결", { type: "submit" }));
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const value = key.value.trim();
+      const result = await api("PUT", "/api/canvas/courses/" + encodeURIComponent(course.canvas_course_id),
+        { course_key: value === "" ? null : value });
+      show(result.ok ? (value === "" ? "연결을 해제했습니다." : "과목을 연결했습니다.") : "연결할 수 없습니다: " + result.data.error);
+    });
+    entry.appendChild(form);
+    list.appendChild(entry);
+  }
+}
+
+function bindCanvas() {
+  document.getElementById("canvas-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const origin = document.getElementById("canvas-origin");
+    const token = document.getElementById("canvas-token");
+    const result = await api("PUT", "/api/settings/canvas/token", { origin: origin.value.trim(), token: token.value });
+    token.value = "";  // never kept in the page
+    if (result.ok) {
+      renderCanvas(result.data);
+      show("Canvas에 연결했습니다.");
+    } else {
+      show("연결할 수 없습니다: " + result.data.error);
+      await loadCanvas();
+    }
+  });
+  document.getElementById("canvas-hosts-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const hosts = document.getElementById("canvas-hosts").value.split(",").map((h) => h.trim()).filter((h) => h);
+    const result = await api("PUT", "/api/settings/canvas/file-hosts", { hosts });
+    show(result.ok ? "파일 호스트를 저장했습니다." : "저장할 수 없습니다: " + result.data.error);
+  });
+  document.getElementById("canvas-load").addEventListener("click", async () => {
+    const result = await api("GET", "/api/canvas/courses");
+    if (result.ok) {
+      renderCanvasCourses(result.data.courses || []);
+    } else {
+      show("과목을 불러올 수 없습니다: " + result.data.error);
+    }
+  });
+  document.getElementById("canvas-forget").addEventListener("click", async () => {
+    const result = await api("DELETE", "/api/settings/canvas");
+    show(result.ok ? "연결을 끊었습니다." : "연결을 끊을 수 없습니다: " + result.data.error);
+    await loadCanvas();
+  });
+}
+
 async function start() {
   const hash = location.hash;
   // Clear the one-time token from the address bar and history before anything else.
@@ -215,7 +299,8 @@ async function start() {
   }
   show("준비됨");
   bindUpload();
-  await refresh();
+  bindCanvas();
+  await Promise.all([refresh(), loadCanvas()]);
 }
 
 window.addEventListener("DOMContentLoaded", start);

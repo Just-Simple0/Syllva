@@ -11,8 +11,8 @@ from typing import Any, cast
 
 import pytest
 
-from syllva.settings import canvas_checks as checks
-from syllva.settings.canvas_checks import CanvasCheckError, CanvasResponse
+from syllva.canvas import http as checks
+from syllva.canvas.http import CanvasCheckError, CanvasResponse
 
 pytestmark = pytest.mark.contract
 

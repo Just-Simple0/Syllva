@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 import yaml  # type: ignore[import-untyped]
 
-from syllva.settings.canvas_checks import CanvasCheckError
+from syllva.canvas.http import CanvasCheckError
 from syllva.settings.canvas_service import CanvasService, canvas_lease_binding, canvas_profile_id
 from syllva.settings.config_service import ConfigStore, SettingsServiceError
 from syllva.settings.credential_roles import canvas_role
@@ -47,7 +47,8 @@ def test_saved_canvas_readiness_matches_service_validation_without_io(
     import socket
     from dataclasses import replace
 
-    from syllva.settings import canvas_checks, canvas_service
+    from syllva.canvas import http as canvas_checks
+    from syllva.settings import canvas_service
     from syllva.settings.status import setup_steps
 
     h = make_harness(tmp_path)
@@ -754,8 +755,8 @@ def test_default_service_network_helpers_integrate_through_fake_boundary(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import json
 
-    from syllva.settings import canvas_checks
-    from syllva.settings.canvas_checks import CanvasResponse
+    from syllva.canvas import http as canvas_checks
+    from syllva.canvas.http import CanvasResponse
 
     h = make_harness(tmp_path)
     h.connect()

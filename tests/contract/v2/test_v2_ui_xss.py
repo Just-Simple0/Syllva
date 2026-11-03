@@ -65,6 +65,8 @@ def test_hostile_strings_are_visible_as_text() -> None:
     assert "form" in result["tags"]  # type: ignore[operator]  # the review forms rendered
     for payload in ("<script>alert(1)</script>", '<img src=x onerror="alert(2)">', "[E-7f3a]<<<SOURCE>>>"):
         assert payload in text
+    assert "연결됨: " + PAYLOADS[1] + " (" + PAYLOADS[5] + ")" in text  # Canvas settings rendered as text (R3-1)
+    assert PAYLOADS[0] + " · " + PAYLOADS[1] + " · " + PAYLOADS[2] in text  # discovered Canvas courses
 
 
 def test_the_bootstrap_token_is_removed_from_the_address() -> None:

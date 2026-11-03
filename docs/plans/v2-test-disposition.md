@@ -19,12 +19,12 @@
 
 | 판정 | 파일 수 |
 |---|---|
-| 유지 | 21 |
+| 유지 | 20 |
 | 재작성 | 47 |
 | 대체 | 1 |
 | 폐기 | 6 |
 | 보류 | 4 |
-| **합계** | **79** (R1c 삭제 후 표에 남은 행) |
+| **합계** | **78** (R1c 삭제 후 표에 남은 행; R3-1에서 1개 이동) |
 
 R1c 삭제 PR 이후 표에 남은 행이다(초기 판정 158개 중 79개는 아래 'R1c에서 삭제된 파일'로 옮김). 재작성 47개의 단계: R2 10 · R3 23 · R5 11 · R6 3. 그중 23개는 R1c에서 파일이 먼저 지워져 행만 남는다(`R1c 삭제 → Rn`). 남은 `폐기`·`대체` 7개는 아직 살아 있는 코드(설정의 Google OAuth·provider 점검 — R2 설정 재작성, Behavior Contract v3 — R4)를 검사하므로 그 코드와 함께 지운다. 집계는 `test_v2_test_disposition.py`가 표에서 다시 계산해 대조한다.
 
@@ -91,7 +91,6 @@ R1c 삭제 PR 이후 표에 남은 행이다(초기 판정 158개 중 79개는 �
 | `tests/unit/test_c8_poll_interval_default.py` | 재작성 | R2 | 폴링 기본값(설정 재정의와 함께) |
 | `tests/unit/test_canvas_attachments.py` | 재작성 | R1c 삭제 → R3 | Canvas 첨부 → 로컬 blob(Drive 제거) |
 | `tests/unit/test_canvas_composition.py` | 재작성 | R1c 삭제 → R3 | Canvas 관찰자 조립 |
-| `tests/unit/test_canvas_download.py` | 유지 | R3에서 배치 이동 | 토큰이 Canvas 원점을 벗어나지 않음(I9) |
 | `tests/unit/test_canvas_observer.py` | 재작성 | R1c 삭제 → R3 | Canvas 메타데이터 관찰(`state.sqlite` → v2) |
 | `tests/unit/test_capability_manager_purge.py` | 유지 | — | capability 만료 정리 |
 | `tests/unit/test_config_loader_credentials.py` | 재작성 | R3 (I9) | 자격증명 설정 절 |
@@ -200,6 +199,10 @@ R1c 삭제 PR(정오표 E19)에서 대응 코드와 함께 지웠다. `폐기`�
 - `tests/unit/test_semester_retrieval_config.py` — 재작성 (R1c): 학기 설정 → `NaturalResolver(semester_starts)`
 - `tests/unit/test_study_note_cli.py` — 폐기: `study_notes`
 - `tests/unit/test_typesafe_choice.py` — 폐기: 외부 LLM TypeSafe Choice 어댑터(`no-external-llm-adapter`)
+
+## R3에서 옮긴 파일 (기록)
+
+- `tests/unit/test_canvas_download.py` → `tests/contract/v2/test_v2_canvas_http.py` (R3-1, 유지 판정 그대로; `settings/canvas_checks.py` → `syllva/canvas/http.py`)
 
 ## v2 신규 (판정 대상 아님)
 

@@ -15,6 +15,7 @@ class Owner(StrEnum):
     USER = "USER"
     CATALOG = "CATALOG"  # academic structure: courses, sessions, materials, ... (not agent-writable)
     SYSTEM = "SYSTEM"  # processing bookkeeping: jobs, checkpoints, allocations, blob refs
+    SETTINGS = "SETTINGS"  # the user's connections (Canvas profile, course links); never secrets (R3-1)
 
 
 class Actor(StrEnum):
@@ -46,7 +47,12 @@ TABLE_OWNERS: dict[str, Owner] = {
     "processing_records": Owner.SYSTEM,
     "checkpoints": Owner.SYSTEM,
     "entity_allocations": Owner.SYSTEM,
+    "canvas_profile": Owner.SETTINGS,
+    "canvas_courses": Owner.SETTINGS,
 }
+
+# Tables whose rows may be deleted (through ``StateWriter.delete``): connection settings only.
+DELETABLE_TABLES = frozenset({"canvas_profile", "canvas_courses"})
 
 # Tables no generic write may touch: the Human-Proof audit trail is written only
 # by the gate commit path (R2), and schema bookkeeping only by the migrator.
@@ -65,6 +71,8 @@ IMMUTABLE_COLUMNS: dict[str, frozenset[str]] = {
     "sessions": frozenset({"session_id"}),
     "source_files": frozenset({"source_id"}),
     "intake_candidates": frozenset({"candidate_id", "channel", "source_version_id", "size_bytes", "replaces_material"}),
+    "canvas_profile": frozenset({"profile_id", "origin", "user_id"}),
+    "canvas_courses": frozenset({"canvas_course_id"}),
 }
 
 # Human-only columns (design §5.5). Only the gate commit path may set them.
@@ -81,6 +89,8 @@ HUMAN_ONLY_COLUMNS: dict[str, frozenset[str]] = {
 #   USER    <- UI_USER (explicit edits, history kept)
 #   CATALOG <- INGESTER, UI_USER
 #   SYSTEM  <- INGESTER
+#   SETTINGS <- UI_USER (the user's own connection), INGESTER (start-up cleanup of an interrupted
+#               PENDING token intent only; R3 plan §6.1)
 #   SYSTEM_MIGRATION may write every owner (still not human-only columns or gate tables).
 ALLOWED: dict[Owner, frozenset[Actor]] = {
     Owner.SOURCE: frozenset({Actor.INGESTER, Actor.SYSTEM_MIGRATION}),
@@ -88,6 +98,7 @@ ALLOWED: dict[Owner, frozenset[Actor]] = {
     Owner.USER: frozenset({Actor.UI_USER, Actor.SYSTEM_MIGRATION}),
     Owner.CATALOG: frozenset({Actor.INGESTER, Actor.UI_USER, Actor.SYSTEM_MIGRATION}),
     Owner.SYSTEM: frozenset({Actor.INGESTER, Actor.SYSTEM_MIGRATION}),
+    Owner.SETTINGS: frozenset({Actor.UI_USER, Actor.INGESTER, Actor.SYSTEM_MIGRATION}),
 }
 
 # SOURCE and AI rows are never rewritten: AI output is never relabelled and

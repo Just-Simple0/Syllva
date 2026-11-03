@@ -232,3 +232,64 @@ def test_material_source_is_immutable_through_the_writer(v2_db: Database) -> Non
 def test_writer_query_is_read_only(v2_db: Database, sql: str) -> None:
     with pytest.raises(PolicyViolation, match="plain SELECT"):
         v2_db.writer().query(sql)
+
+
+# --- R3-1: the SETTINGS owner and StateWriter.delete (review of PR #54) ------------------------
+
+from syllva.state.v2.ownership import DELETABLE_TABLES, IMMUTABLE_COLUMNS
+
+
+def _profile(db: Database) -> None:
+    db.connection.execute(
+        "INSERT INTO canvas_profile(id, profile_id, origin, user_id, display_name, token_state, created_at) "
+        "VALUES (1, ?, 'https://canvas.example.edu', '42', 'Kim', 'PENDING', ?)", ("c" + "0" * 32, NOW))
+
+
+def test_settings_writers_are_exactly_the_user_the_startup_cleanup_and_migrations() -> None:
+    assert ALLOWED[Owner.SETTINGS] == frozenset({Actor.UI_USER, Actor.INGESTER, Actor.SYSTEM_MIGRATION})
+    assert {t for t, o in TABLE_OWNERS.items() if o is Owner.SETTINGS} == {"canvas_profile", "canvas_courses"}
+
+
+def test_only_settings_rows_are_deletable(v2_db: Database) -> None:
+    assert DELETABLE_TABLES == {"canvas_profile", "canvas_courses"}
+    seed_catalog(v2_db.connection)
+    writer = v2_db.writer()
+    for table, owner, key in [("materials", Owner.CATALOG, {"material_id": "NET-M01"}),
+                              ("human_gate_log", Owner.CATALOG, {"id": 1}),
+                              ("activities", Owner.CATALOG, {"activity_id": "NET-A01"}),
+                              ("source_files", Owner.SOURCE, {"source_id": "x"}),
+                              ("ai_artifacts", Owner.AI, {"artifact_id": "x"})]:
+        with pytest.raises(PolicyViolation, match="never deleted"):
+            writer.delete(owner, Actor.SYSTEM_MIGRATION, table, key)
+
+
+def test_delete_needs_an_allowed_actor_and_a_unique_key(v2_db: Database) -> None:
+    _profile(v2_db)
+    writer = v2_db.writer()
+    with pytest.raises(PolicyViolation):
+        writer.delete(Owner.SETTINGS, Actor.CORE_AGENT_OUTPUT, "canvas_profile", {"profile_id": "c" + "0" * 32})
+    with pytest.raises(PolicyViolation, match="declared owner"):
+        writer.delete(Owner.USER, Actor.UI_USER, "canvas_profile", {"profile_id": "c" + "0" * 32})
+    with pytest.raises(PolicyViolation, match="UNIQUE"):
+        writer.delete(Owner.SETTINGS, Actor.UI_USER, "canvas_profile", {"display_name": "Kim"})
+    with pytest.raises(PolicyViolation, match="exactly one key"):
+        writer.delete(Owner.SETTINGS, Actor.UI_USER, "canvas_profile", {"profile_id": "x", "id": 1})
+    assert writer.delete(Owner.SETTINGS, Actor.UI_USER, "canvas_profile", {"profile_id": "c" + "0" * 32}) == 1
+
+
+def test_agent_output_never_writes_settings(v2_db: Database) -> None:
+    _profile(v2_db)
+    writer = v2_db.writer()
+    with pytest.raises(PolicyViolation):
+        writer.insert(Owner.SETTINGS, Actor.CORE_AGENT_OUTPUT, "canvas_courses", {"canvas_course_id": "1"})
+    with pytest.raises(PolicyViolation):
+        writer.update(Owner.SETTINGS, Actor.CORE_AGENT_OUTPUT, "canvas_profile", {"id": 1}, {"display_name": "x"})
+
+
+@pytest.mark.parametrize(("table", "column"), [("canvas_profile", "profile_id"), ("canvas_profile", "origin"),
+                                               ("canvas_profile", "user_id"), ("canvas_courses", "canvas_course_id")])
+def test_settings_identities_are_immutable(v2_db: Database, table: str, column: str) -> None:
+    assert column in IMMUTABLE_COLUMNS[table]
+    _profile(v2_db)
+    with pytest.raises(PolicyViolation, match="immutable"):
+        v2_db.writer().update(Owner.SETTINGS, Actor.UI_USER, table, {"id": 1}, {column: "1"})
